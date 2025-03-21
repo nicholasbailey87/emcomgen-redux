@@ -3,6 +3,7 @@ Train an RNN decoder to make binary predictions;
 then train an RNN language model to generate sequences
 """
 
+import sys
 
 import contextlib
 from collections import defaultdict
@@ -12,7 +13,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-import models
+import emergentlanguageagents
+import parse_config
 import util
 import data
 import os
@@ -20,7 +22,7 @@ import vis
 import emergence
 
 import pandas as pd
-import io_util
+# import io_util
 
 # Logging
 import logging
@@ -247,6 +249,8 @@ def run(
         Metrics from this run; keys are statistics and values are their average
         values across the batches
     """
+    bce_criterion = nn.BCEWithLogitsLoss()
+    xent_criterion = nn.CrossEntropyLoss()
     training = (split == "train") and not force_no_train
     dataloader = dataloaders[split]
     torch.set_grad_enabled(training)
@@ -299,13 +303,13 @@ def run(
             lis_inp = lis_inp.cuda()
             lis_y = lis_y.cuda()
 
-        if args.listener_only:
-            lis_scores = pair.listener(lis_inp, None)
-        elif args.copy_listener:
-            speaker_emb = pair.speaker(spk_inp, spk_y)
-            lis_scores = pair.listener(lis_inp, speaker_emb)
+        if args.receiver_only:
+            lis_scores = pair.receiver(lis_inp, None)
+        elif args.copy_receiver:
+            sender_emb = pair.sender(spk_inp, spk_y)
+            lis_scores = pair.receiver(lis_inp, sender_emb)
         else:
-            (lang, lang_length), states = pair.speaker(
+            (lang, lang_length), states = pair.sender(
                 spk_inp,
                 spk_y,
                 max_len=args.max_lang_length,
@@ -313,22 +317,22 @@ def run(
                 softmax_temp=this_epoch_softmax_temp,
                 uniform_weight=this_epoch_uniform_weight,
             )
-            lis_scores = pair.listener(lis_inp, lang, lang_length)
+            lis_scores = pair.receiver(lis_inp, lang, lang_length)
 
         # Evaluate loss and accuracy
         if args.reference_game_xent:
-            # Take only 0th listener score + after midpoint. Then do cross
+            # Take only 0th receiver score + after midpoint. Then do cross
             # entropy
             assert lis_scores.shape[1] % 2 == 0
             midp = lis_scores.shape[1] // 2
             lis_scores_xent = torch.cat((lis_scores[:, :1], lis_scores[:, midp:]), 1)
             zeros = torch.zeros(batch_size, dtype=torch.int64, device=lis_scores.device)
-            this_loss = pair.xent_criterion(lis_scores_xent, zeros)
+            this_loss = xent_criterion(lis_scores_xent, zeros)
             lis_pred = lis_scores_xent.argmax(1)
             per_game_acc = (lis_pred == 0).float().cpu().numpy()
             this_acc = per_game_acc.mean()
         else:
-            this_loss = pair.bce_criterion(lis_scores, lis_y)
+            this_loss = bce_criterion(lis_scores, lis_y)
             lis_pred = (lis_scores > 0).float()
             per_game_acc = (lis_pred == lis_y).float().mean(1).cpu().numpy()
             this_acc = per_game_acc.mean()
@@ -355,9 +359,9 @@ def run(
             all_reprs.extend(states.detach().cpu().numpy())
 
         if args.joint_training:
-            # Also train speaker on classification task
-            spk_scores = pair.speaker.classify_from_states(states, lis_inp)
-            spk_loss = pair.bce_criterion(spk_scores, lis_y)
+            # Also train sender on classification task
+            spk_scores = pair.sender.classify_from_states(states, lis_inp)
+            spk_loss = bce_criterion(spk_scores, lis_y)
             spk_pred = (spk_scores > 0).float()
             spk_per_game_acc = (spk_pred == lis_y).float().mean(1).cpu().numpy()
             spk_acc = spk_per_game_acc.mean()
@@ -432,9 +436,9 @@ def run(
             dataloader.dataset,
             epoch,
             split,
-            {"speaker": lang_text},
+            {"sender": lang_text},
             true_lang_text_joined,
-            {"speaker": lis_pred},
+            {"sender": lis_pred},
             exp_dir=os.path.join("exp", args.name),
         )
 
@@ -457,30 +461,64 @@ def clean_language(all_lang_df):
     all_lang_df["lang"] = all_lang_df["lang"].apply(clean_lang)
     all_lang_df["true_lang"] = all_lang_df["true_lang"].apply(clean_true_lang)
 
+class Pair(nn.Module):
+    """
+    Simple wrapper to allow the sender and receiver to be treated as one module.
+    """
+    def __init__(self, sender, receiver):
+        super().__init__()
+        self.sender = sender
+        self.receiver = receiver
+
+class NoArguments(Exception):
+    pass
 
 if __name__ == "__main__":
-    args = io_util.parse_args()
+    # args = io_util.parse_args()
+    # args_dict = vars(args)
+    arguments = sys.argv[1:]
+    if not arguments:
+        raise NoArguments(
+            "Intended usage: `python train.py [path to experiment TOML file]`"
+        )
+    else:
+        config = parse_config(arguments[0])
 
     exp_dir = os.path.join("exp", args.name)
     os.makedirs(exp_dir, exist_ok=True)
     util.save_args(args, exp_dir)
 
     dataloaders = data.loader.load_dataloaders(args)
-    model_config = models.builder.build_models(dataloaders, args)
+    # model_config = models.builder.build_models(dataloaders, args)
     this_game_type = data.util.get_game_type(args)
 
-    run_args = (model_config["pair"], model_config["optimizer"], dataloaders, args)
+    sender_class = getattr(emergentlanguageagents.senders, config['sender']['class'])
+    sender = sender_class(**config['sender']['arguments'])
+
+    receiver_class = getattr(emergentlanguageagents.receivers, config['receiver']['class'])
+    receiver = receiver_class(**config['receiver']['arguments'])
+
+    pair = Pair(sender, receiver)
+
+    if args.cuda:
+        pair = pair.cuda()
+    
+    run_args = (
+        pair,#model_config["pair"],
+        model_config["optimizer"], # TODO: import a library that will build my optimizer based on config
+        dataloaders, args
+    )
 
     all_metrics = []
     metrics = init_metrics()
     for epoch in range(args.epochs):
         # No reset on epoch 0, but reset after epoch 2, epoch 4, etc
         if (
-            args.listener_reset_interval > 0
-            and (epoch % args.listener_reset_interval) == 0
+            args.receiver_reset_interval > 0
+            and (epoch % args.receiver_reset_interval) == 0
         ):
-            logging.info(f"Resetting listener at epoch {epoch}")
-            model_config["pair"].listener.reset_parameters()
+            logging.info(f"Resetting receiver at epoch {epoch}")
+            model_config["pair"].receiver.reset_parameters()
 
         metrics["epoch"] = epoch
 
@@ -551,10 +589,10 @@ if __name__ == "__main__":
 
         all_metrics.append(metrics.copy())
 
-        if args.wandb:
-            import wandb
+        # if args.wandb:
+        #     import wandb
 
-            wandb.log(metrics)
+        #     wandb.log(metrics)
 
         pd.DataFrame(all_metrics).to_csv(
             os.path.join(exp_dir, "metrics.csv"), index=False

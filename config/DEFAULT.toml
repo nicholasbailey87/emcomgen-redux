@@ -1,0 +1,115 @@
+# Default experimental settings, required to reproduce https://github.com/jayelm/emergent-generalization
+
+name = "DEFAULT" # experiment name - should be the same as file name
+dataset = "data/shapeworld" # TODO: move this to [data] args
+cuda = true
+wandb = false
+wandb_project_name = "cc"
+receiver_only = false
+share_feat_model = false
+n_transformer_heads = 8
+n_transformer_layers = 5
+joint_training = false
+joint_training_lambda = 1.0
+copy_receiver = false
+reference_game = false
+reference_game_xent = false
+no_cross_eval = false
+ignore_language = false
+ignore_examples = false
+debug = false
+vis = false
+load_shapeworld_into_memory = false
+
+[optimiser]
+batch_size = 32 # TODO: move this to [data] args
+accumulator_steps = 1
+# TODO: create scheduler class that can handle linear warmup, cosine anneal, reduce LR on plateau, all below
+warm_up_epochs = 0
+straight_epochs = 100 # no warm up or annealing
+annealing_epochs = 0
+lr = 1e-4
+reduce_lr_on_plateau = true
+weight_decay = 0.0 # This makes AdamW the same as Adam
+clip_grad_norm = 100.0
+kl_regularisation = false
+log_interval = 100
+save_interval = 10
+
+[sender]
+class = "EmComGenSender"
+
+[sender.arguments]
+vocabulary = 11
+message_length = 4
+image_encoder = "Conv4"
+prototype = "average"
+gradient_trick = "gumbel"
+layers = 2
+embedding_size = 500
+d_model = 1024
+dropout = 0.1
+temperature = 1.0
+temperature_annealing = 0.0
+uniform_weight = 0.0
+uniform_weight_anneal = 0.0
+eps = 0.0
+eps_anneal = 0.0
+
+[receiver]
+class = "EmComGenReceiver"
+
+[receiver.arguments]
+vocabulary = 11
+image_encoder = "Conv4"
+pretrained_feat_model = false
+layers = 2
+embedding_size = 500
+d_model = 1024
+dropout = 0.1
+temperature = 1.0
+
+[environment] # TODO: rename this [data]
+# TODO: make this appropriate for emcomgen
+class = "emergentlanguagegames.referential.SetRef"
+
+[environment.arguments]
+# TODO: make this appropriate for emcomgen
+percent_novel = 1.0 # TODO: move this to [data] args
+receiver_reset_interval = 0.0
+n_examples = 10  # TODO: move this to [data] args# number of examples seen by agents, including distractors
+
+[shapeworld]
+ref_dataset="data/shapeworld_ref"  # TODO: move this to [data] args
+
+[shapeworld.language]
+vocabulary = 14
+message_length = 7
+
+[shapeworld.environment.arguments]
+n_examples="20"   # TODO: move this to [data] args# number of examples given to teacher/student, divided evenly b/t targets and distractors (must be even!)
+
+[shapeworld.optimisation]
+accumulator_steps="4"
+
+[shapeworld.sender.arguments]
+uniform_weight = 0.1
+
+[birds]
+n_workers = 4 # TODO: move this to [data] args
+ref_dataset = "data/cub" # TODO: move this to [data] args
+
+[birds.language]
+vocabulary = 20
+message_length = 10
+
+[birds.optimisation]
+batch_size = 16
+
+[birds.sender.arguments]
+image_encoder = "PretrainedResNet18"
+pretrained_feat_model = true
+
+[birds.receiver.arguments]
+image_encoder = "PretrainedResNet18"
+pretrained_feat_model = true
