@@ -54,7 +54,12 @@ def convert_lang_to_numeric(lang, lang_length, pad_val=-1, skip_sos_eos=True):
     return lang_i
 
 
-def get_true_lang(batch, dataset, args, join=True):
+def get_true_lang(
+        batch,
+        dataset,
+        # args isn't used in this function, so we commented it out
+        # args,
+        join=True):
     spk_inp, spk_y, lis_inp, lis_y, true_lang, md, idx = batch
     true_lang_text = dataset.to_text(true_lang, join=join)
     return true_lang_text
@@ -85,7 +90,8 @@ def subsample(items, idx):
 def compute_lang_metrics(
     all_lang,
     dataset,
-    args,
+    # args isn't used in this function, so we commented it out
+    # args,
     attrs=None,
     reprs=None,
     attrs_numeric=None,
@@ -213,7 +219,8 @@ def run(
     pair,
     optimizer,
     dataloaders,
-    args,
+    # args,
+    config,
     random_state=None,
     force_no_train=False,
 ):
@@ -270,12 +277,12 @@ def run(
 
     if training:
         optimizer.zero_grad()
-        this_epoch_eps = max(0.0, args.eps - (epoch * args.eps_anneal))
+        this_epoch_eps = max(0.0, config['eps'] - (epoch * config['eps_anneal']))
         this_epoch_uniform_weight = max(
-            0.0, args.uniform_weight - (epoch * args.uniform_weight_anneal)
+            0.0, config['uniform_weight'] - (epoch * config['uniform_weight_anneal'])
         )
         this_epoch_softmax_temp = max(
-            1.0, args.softmax_temp - (epoch * args.softmax_temp_anneal)
+            1.0, config['temperature'] - (epoch * config['softmax_temp_anneal'])
         )
     else:
         this_epoch_eps = 0.0
@@ -297,22 +304,22 @@ def run(
         spk_y = spk_y.float()
         lis_y = lis_y.float()
 
-        if args.cuda:
+        if config['cuda']:
             spk_inp = spk_inp.cuda()
             spk_y = spk_y.cuda()
             lis_inp = lis_inp.cuda()
             lis_y = lis_y.cuda()
 
-        if args.receiver_only:
+        if config['receiver_only']:
             lis_scores = pair.receiver(lis_inp, None)
-        elif args.copy_receiver:
+        elif config['copy_receiver']:
             sender_emb = pair.sender(spk_inp, spk_y)
             lis_scores = pair.receiver(lis_inp, sender_emb)
         else:
             (lang, lang_length), states = pair.sender(
                 spk_inp,
                 spk_y,
-                max_len=args.max_lang_length,
+                max_len=config['sender']['arguments']['message_length'],
                 eps=this_epoch_eps,
                 softmax_temp=this_epoch_softmax_temp,
                 uniform_weight=this_epoch_uniform_weight,
@@ -320,7 +327,7 @@ def run(
             lis_scores = pair.receiver(lis_inp, lang, lang_length)
 
         # Evaluate loss and accuracy
-        if args.reference_game_xent:
+        if config['reference_game_xent']:
             # Take only 0th receiver score + after midpoint. Then do cross
             # entropy
             assert lis_scores.shape[1] % 2 == 0
@@ -338,14 +345,19 @@ def run(
             this_acc = per_game_acc.mean()
 
         # Save language
-        if args.use_lang:
+        if config['use_lang']:
             lang_i = lang.argmax(2)
             lang_text_unjoined = util.to_emergent_text(lang_i)
             lang_text = [" ".join(toks) for toks in lang_text_unjoined]
         else:
             lang_text_unjoined = [["N/A"] for _ in range(batch_size)]
             lang_text = ["N/A" for _ in range(batch_size)]
-        true_lang_text = get_true_lang(batch, dataloader.dataset, args, join=False)
+        true_lang_text = get_true_lang(
+            batch,
+            dataloader.dataset,
+            # commented out argument `args`, see definition above
+            join=False
+        )
         true_lang_text_joined = [" ".join(t) for t in true_lang_text]
 
         # Game difficulty/other metadata indicator
@@ -358,7 +370,7 @@ def run(
             all_attrs.extend(attrs)
             all_reprs.extend(states.detach().cpu().numpy())
 
-        if args.joint_training:
+        if config['joint_training']:
             # Also train sender on classification task
             spk_scores = pair.sender.classify_from_states(states, lis_inp)
             spk_loss = bce_criterion(spk_scores, lis_y)
@@ -366,22 +378,22 @@ def run(
             spk_per_game_acc = (spk_pred == lis_y).float().mean(1).cpu().numpy()
             spk_acc = spk_per_game_acc.mean()
             stats.update(spk_loss=spk_loss, spk_acc=spk_acc)
-            comb_loss = this_loss + args.joint_training_lambda * spk_loss
+            comb_loss = this_loss + config['joint_training_lambda'] * spk_loss
         else:
             comb_loss = this_loss
 
         if training:
             comb_loss.backward()
 
-            if (batch_i + 1) % args.accum_steps == 0:
-                torch.nn.utils.clip_grad_norm_(pair.parameters(), args.clip)
+            if (batch_i + 1) % config['optimiser']['accumulator_steps'] == 0:
+                torch.nn.utils.clip_grad_norm_(pair.parameters(), config['optimiser']['clip_grad_norm'])
                 optimizer.step()
                 optimizer.zero_grad()
                 backpropped = True
             else:
                 backpropped = False
 
-            if batch_i % args.log_interval == 0:
+            if batch_i % config['optimiser']['log_interval'] == 0:
                 log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats)
 
         stats.update(
@@ -389,7 +401,7 @@ def run(
         )
 
     if training and not backpropped:
-        torch.nn.utils.clip_grad_norm_(pair.parameters(), args.clip)
+        torch.nn.utils.clip_grad_norm_(pair.parameters(), config['optimiser']['clip_grad_norm'])
         optimizer.step()
         optimizer.zero_grad()
 
@@ -400,7 +412,7 @@ def run(
         columns=["lang", "true_lang", "acc", "md"],
     )
 
-    if args.use_lang:
+    if config['use_lang']:
         # Compute emergent communication statistics
         # TODO - this should generally be a "meaning preprocess" function
         if dataloader.dataset.name == "cub":
@@ -411,7 +423,7 @@ def run(
         lang_metrics = compute_lang_metrics(
             all_lang,
             dataloader.dataset,
-            args,
+            # commented out argument `args`, see definition above
             attrs=all_attrs,
             reprs=all_reprs,
             attrs_numeric=attrs_numeric,
@@ -427,7 +439,7 @@ def run(
 
     log_epoch_summary(epoch, split, metrics)
 
-    if args.vis:
+    if config['vis']:
         vis.report(
             spk_inp.cpu(),
             spk_y.cpu(),
@@ -439,7 +451,7 @@ def run(
             {"sender": lang_text},
             true_lang_text_joined,
             {"sender": lis_pred},
-            exp_dir=os.path.join("exp", args.name),
+            exp_dir=os.path.join("exp", config['name']),
         )
 
     clean_language(all_lang)
@@ -473,6 +485,35 @@ class Pair(nn.Module):
 class NoArguments(Exception):
     pass
 
+class ConfigError(Exception):
+    # TODO: move this to parse_config.py
+    pass
+
+def validate_config(config: dict) -> bool:
+    """
+    Check that the config doesn't contradict itself and has the necessary arguments.
+
+    Based on some lines in code/io_util.py
+    """
+    # TODO: move this to parse_config.py
+    
+    # TODO: add some kind of check to make sure all the appropriate config fields/args are specified
+
+    if config['use_lang'] and (config['copy_listener'] or config['listener_only']):
+        raise ConfigError(
+            "`use_lang` must be false if `copy_listener` or `listener_only` is true."
+        )
+
+    if config['copy_listener'] and config['listener_only']:
+        raise ConfigError(
+            "`copy_listener` not allowed with `listener_only`"
+        )
+
+    if config['reference_game_xent'] and not config['reference_game']:
+        raise ConfigError(
+            "reference_game_xent=true requires reference_game=true"
+        )
+
 if __name__ == "__main__":
     # args = io_util.parse_args()
     # args_dict = vars(args)
@@ -483,14 +524,15 @@ if __name__ == "__main__":
         )
     else:
         config = parse_config(arguments[0])
+        assert validate_config(config)
 
-    exp_dir = os.path.join("exp", args.name)
+    exp_dir = os.path.join("exp", config['name'])
     os.makedirs(exp_dir, exist_ok=True)
-    util.save_args(args, exp_dir)
+    util.save_args(config, exp_dir)
 
-    dataloaders = data.loader.load_dataloaders(args)
+    dataloaders = data.loader.load_dataloaders(config['data'])
     # model_config = models.builder.build_models(dataloaders, args)
-    this_game_type = data.util.get_game_type(args)
+    this_game_type = data.util.get_game_type(config['data'])
 
     sender_class = getattr(emergentlanguageagents.senders, config['sender']['class'])
     sender = sender_class(**config['sender']['arguments'])
@@ -500,25 +542,34 @@ if __name__ == "__main__":
 
     pair = Pair(sender, receiver)
 
-    if args.cuda:
+    if config['cuda']:
         pair = pair.cuda()
     
-    run_args = (
-        pair,#model_config["pair"],
-        model_config["optimizer"], # TODO: import a library that will build my optimizer based on config
-        dataloaders, args
-    )
+    # TODO: import a library that will build my optimizer based on config
 
+    optimiser = None # FIXME: build an optimiser here
+
+    run_args = (
+        pair,
+        optimiser,
+        dataloaders,
+        config
+    )
     all_metrics = []
     metrics = init_metrics()
-    for epoch in range(args.epochs):
+    total_epochs = (
+        config['warm_up_epochs']
+        + config['straight_epochs']
+        + config['annealing_epochs']
+    )
+    for epoch in range(total_epochs):
         # No reset on epoch 0, but reset after epoch 2, epoch 4, etc
         if (
-            args.receiver_reset_interval > 0
-            and (epoch % args.receiver_reset_interval) == 0
+            config['receiver_reset_interval'] > 0
+            and (epoch % config['receiver_reset_interval']) == 0
         ):
             logging.info(f"Resetting receiver at epoch {epoch}")
-            model_config["pair"].receiver.reset_parameters()
+            pair.receiver.reset_parameters()
 
         metrics["epoch"] = epoch
 
@@ -528,7 +579,7 @@ if __name__ == "__main__":
 
         # Eval across seen/unseen splits, and all game configurations
         for game_type in ["ref", "setref", "concept"]:
-            if args.no_cross_eval and game_type != this_game_type:
+            if config['no_cross_eval'] and game_type != this_game_type:
                 continue
             for split in ["val", "test"]:
                 split_metrics = defaultdict(list)
@@ -568,16 +619,16 @@ if __name__ == "__main__":
             metrics["best_acc"] = metrics["val_avg_acc"]
             metrics["best_loss"] = metrics["val_avg_loss"]
             metrics["best_epoch"] = epoch
-            if args.use_lang:
+            if config['use_lang']:
                 lang.to_csv(os.path.join(exp_dir, "best_lang.csv"), index=False)
             # Save the model
             model_fname = os.path.join(exp_dir, "best_model.pt")
-            torch.save(model_config["pair"].state_dict(), model_fname)
+            torch.save(pair.state_dict(), model_fname)
 
-        if epoch % args.save_interval == 0:
+        if epoch % config['save_interval'] == 0:
             model_fname = os.path.join(exp_dir, f"{epoch}_model.pt")
-            torch.save(model_config["pair"].state_dict(), model_fname)
-            if args.use_lang:
+            torch.save(pair.state_dict(), model_fname)
+            if config['use_lang']:
                 lang.to_csv(os.path.join(exp_dir, f"{epoch}_lang.csv"), index=False)
 
         # Additionally track best for splits separately

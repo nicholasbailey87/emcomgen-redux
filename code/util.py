@@ -164,8 +164,9 @@ def compute_average_metrics(meters):
     return metrics
 
 
-def save_args(args, exp_dir, filename="args.json"):
-    args_dict = vars(args)
+def save_args(args_dict, exp_dir, filename="args.json"):
+    # Note: no longer need `args_dict = vars(args)` as args will now already
+    # be a dict, see train.py
     args_dict["git_hash"], args_dict["git_unstaged_changes"] = current_git_hash()
     with open(os.path.join(exp_dir, filename), "w") as f:
         json.dump(args_dict, f, indent=4, separators=(",", ": "), sort_keys=True)
