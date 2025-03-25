@@ -1,6 +1,7 @@
 # Default experimental settings, required to reproduce https://github.com/jayelm/emergent-generalization
 
 name = "DEFAULT" # experiment name - should be the same as file name
+experiment_directory = "../exp"
 cuda = true
 wandb = false
 wandb_project_name = "cc"
@@ -21,6 +22,11 @@ debug = false
 vis = false
 load_shapeworld_into_memory = false
 receiver_reset_interval = 0.0
+# TODO: add to config validation that only one of the force game type options for zero shot evaluation can be true
+force_reference_game = false # Can be used in zero-shot eval
+force_concept_game = false # Can be used in zero-shot eval
+force_setref_game = false # Can be used in zero-shot eval
+zero_shot_eval_epochs = 5
 
 [data]
 dataset = "data/shapeworld"
@@ -28,6 +34,7 @@ batch_size = 32
 percent_novel = 1.0
 n_examples = 10 # number of examples seen by agents, including distractors
 ref_dataset="data/shapeworld_ref"
+n_sample = 2E5 # Number of samples for inspecting the language. Used in sample.py
 
 [optimiser]
 accumulator_steps = 1

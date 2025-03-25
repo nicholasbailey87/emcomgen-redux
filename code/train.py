@@ -4,6 +4,7 @@ then train an RNN language model to generate sequences
 """
 
 import sys
+from pathlib import Path
 
 import contextlib
 from collections import defaultdict
@@ -221,6 +222,7 @@ def run(
     dataloaders,
     # args,
     config,
+    exp_dir,
     random_state=None,
     force_no_train=False,
 ):
@@ -451,7 +453,7 @@ def run(
             {"sender": lang_text},
             true_lang_text_joined,
             {"sender": lis_pred},
-            exp_dir=os.path.join("exp", config['name']),
+            exp_dir=exp_dir,
         )
 
     clean_language(all_lang)
@@ -472,15 +474,6 @@ def clean_language(all_lang_df):
 
     all_lang_df["lang"] = all_lang_df["lang"].apply(clean_lang)
     all_lang_df["true_lang"] = all_lang_df["true_lang"].apply(clean_true_lang)
-
-class Pair(nn.Module):
-    """
-    Simple wrapper to allow the sender and receiver to be treated as one module.
-    """
-    def __init__(self, sender, receiver):
-        super().__init__()
-        self.sender = sender
-        self.receiver = receiver
 
 class NoArguments(Exception):
     pass
@@ -513,6 +506,8 @@ def validate_config(config: dict) -> bool:
         raise ConfigError(
             "reference_game_xent=true requires reference_game=true"
         )
+    
+    return True
 
 if __name__ == "__main__":
     # args = io_util.parse_args()
@@ -523,10 +518,10 @@ if __name__ == "__main__":
             "Intended usage: `python train.py [path to experiment TOML file]`"
         )
     else:
-        config = parse_config(arguments[0])
+        config = parse_config.get_config(arguments[0])
         assert validate_config(config)
 
-    exp_dir = os.path.join("exp", config['name'])
+    exp_dir = str(Path(config['experiment_directory']) / Path(config['name']))
     os.makedirs(exp_dir, exist_ok=True)
     util.save_args(config, exp_dir)
 
@@ -540,7 +535,7 @@ if __name__ == "__main__":
     receiver_class = getattr(emergentlanguageagents.receivers, config['receiver']['class'])
     receiver = receiver_class(**config['receiver']['arguments'])
 
-    pair = Pair(sender, receiver)
+    pair = util.Pair(sender, receiver)
 
     if config['cuda']:
         pair = pair.cuda()

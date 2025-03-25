@@ -1,0 +1,14 @@
+# Updated experimental settings, required to run perceiver models
+
+name = "perceiver" # experiment name - should be the same as file name
+
+[optimiser]
+accumulator_steps = 1
+warm_up_epochs = 100 # Transformers seem to need this more than other architectures
+straight_epochs = 0
+annealing_epochs = 100
+reduce_lr_on_plateau = false
+weight_decay = 0.00001 # "a slight weight decay cosine schedule from 0.0 to 10^−5 enables easier training" using transformers with a spectral norm linear layer https://arxiv.org/pdf/2303.06296
+clip_grad_norm = 1.0 # per e.g. Andrej Karpathy's MinGPT
+
+# TODO: add standard Perceiver options below when Perceiver agents are available

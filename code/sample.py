@@ -4,19 +4,22 @@ of concepts)
 """
 
 import os
+import sys
+from pathlib import Path
 
 import torch
 import pandas as pd
 
+import parse_config
 import util
-import models
+# import models
 import data
 from train import run
 import json
 from tqdm import tqdm
+import emergentlanguageagents
 
-
-def sample(pair, dataloaders, exp_args, args):
+def sample(pair, dataloaders, config, exp_dir):
     dname = dataloaders["train"].dataset.name
     if dname == "cub":
         n_train_concepts = 100
@@ -29,8 +32,8 @@ def sample(pair, dataloaders, exp_args, args):
         raise NotImplementedError(dname)
 
     train_pct = n_train_concepts / (n_train_concepts + n_test_concepts)
-    n_train_samples = round(train_pct * args.n)
-    n_test_samples = args.n - n_train_samples
+    n_train_samples = round(train_pct * config['data']['n_sample'])
+    n_test_samples = config['data']['n_sample'] - n_train_samples
 
     def sample_split(split, n):
         stats = util.Statistics()
@@ -38,7 +41,7 @@ def sample(pair, dataloaders, exp_args, args):
         pbar = tqdm(desc=f"sample {split}", total=n)
         while all_lang.shape[0] < n:
             split_stats, lang = run(
-                split, 0, pair, None, dataloaders, exp_args, force_no_train=True
+                split, 0, pair, None, dataloaders, config, force_no_train=True
             )
             if dname == "cub":  # Zero out metadata
                 lang["md"] = 0
@@ -54,15 +57,15 @@ def sample(pair, dataloaders, exp_args, args):
     train_stats, train_lang = sample_split("train", n_train_samples)
     test_stats, test_lang = sample_split("test", n_test_samples)
 
-    if args.force_reference_game:
+    if config['force_reference_game']:
         lang_fname = "sampled_lang_force_ref.csv"
-    elif args.force_concept_game:
+    elif config['force_concept_game']:
         lang_fname = "sampled_lang_force_concept.csv"
-    elif args.force_setref_game:
+    elif config['force_setref_game']:
         lang_fname = "sampled_lang_force_setref.csv"
     else:
         lang_fname = "sampled_lang.csv"
-    lang_fname = os.path.join(args.exp_dir, lang_fname)
+    lang_fname = os.path.join(exp_dir, lang_fname)
     all_lang = pd.concat((train_lang, test_lang))
     all_lang.to_csv(lang_fname, index=False)
 
@@ -70,73 +73,79 @@ def sample(pair, dataloaders, exp_args, args):
     comb_stats = {}
     util.update_with_prefix(comb_stats, train_stats, "train")
     util.update_with_prefix(comb_stats, test_stats, "test")
-    if args.force_reference_game:
+    if config['force_reference_game']:
         fname = "sampled_stats_force_ref.json"
-    elif args.force_concept_game:
+    elif config['force_concept_game']:
         fname = "sampled_stats_force_concept.json"
-    elif args.force_setref_game:
+    elif config['force_setref_game']:
         fname = "sampled_stats_force_setref.json"
     else:
         fname = "sampled_stats.json"
-    with open(os.path.join(args.exp_dir, fname), "w") as f:
+    with open(os.path.join(exp_dir, fname), "w") as f:
         json.dump(comb_stats, f)
 
-
 if __name__ == "__main__":
-    from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter, Namespace
+    
+    arguments = sys.argv[1:]
+    if not arguments:
+        class NoArguments(Exception):
+            pass
+        raise NoArguments(
+            "Intended usage: `python sample.py [experiment directory]`"
+        )
+    else:
+        # TODO: make sure we're actually saving each experiment's config as config.toml in the experiment directory
+        # The below will automatically restore defaults if missing
+        exp_dir = arguments[0]
+        config = parse_config.get_config(Path(exp_dir) / 'config.toml')
 
-    parser = ArgumentParser(
-        description=__doc__, formatter_class=ArgumentDefaultsHelpFormatter
-    )
-
-    parser.add_argument("exp_dir")
-    parser.add_argument("--n", default=200000, type=int, help="Number of samples")
-
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--force_reference_game", action="store_true")
-    group.add_argument("--force_concept_game", action="store_true")
-    group.add_argument("--force_setref_game", action="store_true")
-
-    args = parser.parse_args()
-
-    # Restore args + defaults if missing
-    exp_args = Namespace(**util.load_args(args.exp_dir))
-    util.restore_missing_defaults(exp_args)
-
-    if args.force_reference_game:
-        exp_args.reference_game = True
-        exp_args.percent_novel = 0.0
+    if config['force_reference_game']:
+        config['reference_game'] = True
+        config['data']['percent_novel'] = 0.0
         if (
-            "shapeworld" in exp_args.dataset
-            and "shapeworld_ref" not in exp_args.dataset
+            "shapeworld" in config['data']['dataset']
+            and "shapeworld_ref" not in config['data']['dataset']
         ):
             # Change SW dataset to ref version (no change for CUB)
-            if "shapeworld_all" in exp_args.dataset:
-                exp_args.dataset = exp_args.dataset.replace(
+            if "shapeworld_all" in config['data']['dataset']:
+                config['data']['dataset'] = config['data']['dataset'].replace(
                     "shapeworld_all", "shapeworld_ref"
                 )
             else:
-                exp_args.dataset = exp_args.dataset.replace(
+                config['data']['dataset'] = config['data']['dataset'].replace(
                     "shapeworld", "shapeworld_ref"
                 )
-    elif args.force_concept_game:
-        exp_args.reference_game = False
-        exp_args.percent_novel = 1.0
-        if "shapeworld_ref" in exp_args.dataset:
+    elif config['force_concept_game']:
+        config['reference_game'] = False
+        config['data']['percent_novel'] = 1.0
+        if "shapeworld_ref" in config['data']['dataset']:
             # Change SW dataset to ref version (no change for CUB)
-            exp_args.dataset = exp_args.dataset.replace("shapeworld_ref", "shapeworld")
-    elif args.force_setref_game:
-        exp_args.reference_game = False
-        exp_args.percent_novel = 0.0
-        if "shapeworld_ref" in exp_args.dataset:
+            config['data']['dataset'] = config['data']['dataset'].replace("shapeworld_ref", "shapeworld")
+    elif config['force_setref_game']:
+        config['reference_game'] = False
+        config['data']['percent_novel'] = 0.0
+        if "shapeworld_ref" in config['data']['dataset']:
             # Change SW dataset to ref version (no change for CUB)
-            exp_args.dataset = exp_args.dataset.replace("shapeworld_ref", "shapeworld")
+            config['data']['dataset'] = config['data']['dataset'].replace("shapeworld_ref", "shapeworld")
 
-    dataloaders = data.loader.load_dataloaders(exp_args)
-    model_config = models.builder.build_models(dataloaders, exp_args)
-    pair = model_config["pair"]
+    dataloaders = data.loader.load_dataloaders(config['data'])
 
-    state_dict = torch.load(os.path.join(args.exp_dir, "best_model.pt"))
+    sender_class = getattr(emergentlanguageagents.senders, config['sender']['class'])
+    sender = sender_class(**config['sender']['arguments'])
+
+    receiver_class = getattr(emergentlanguageagents.receivers, config['receiver']['class'])
+    receiver = receiver_class(**config['receiver']['arguments'])
+
+    pair = util.Pair(sender, receiver)
+
+    # dataloaders = data.loader.load_dataloaders(exp_args)
+    # model_config = models.builder.build_models(dataloaders, exp_args)
+    # pair = model_config["pair"]
+
+    state_dict = torch.load(os.path.join(exp_dir, "best_model.pt"))
     pair.load_state_dict(state_dict)
+    
+    if config['cuda']:
+        pair.cuda()
 
-    sample(pair, dataloaders, exp_args, args)
+    sample(pair, dataloaders, config, exp_dir)

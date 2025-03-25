@@ -8,11 +8,10 @@ import subprocess
 import json
 import warnings
 import numpy as np
-import io_util
 from PIL import Image
 import torch
 from collections import defaultdict
-
+import torch.nn as nn
 
 def current_git_hash():
     """
@@ -182,15 +181,16 @@ def load_args(exp_dir, filename="args.json"):
             del args["git_unstaged_changes"]
     return args
 
-
-def restore_missing_defaults(args, verbose=False):
-    defaults = io_util.parse_args(defaults=True)
-    defaults = vars(defaults)
-    for missing_attr, default_value in defaults.items():
-        if not hasattr(args, missing_attr):
-            if verbose:
-                print("Restoring {missing_attr}={default_value}")
-            setattr(args, missing_attr, default_value)
+# This function is no longer needed as the new way of loading experiment config
+# (parse_config.py) applies defaults when arguments are missing
+# def restore_missing_defaults(args, verbose=False):
+#     defaults = io_util.parse_args(defaults=True)
+#     defaults = vars(defaults)
+#     for missing_attr, default_value in defaults.items():
+#         if not hasattr(args, missing_attr):
+#             if verbose:
+#                 print("Restoring {missing_attr}={default_value}")
+#             setattr(args, missing_attr, default_value)
 
 
 # Debug utilities
@@ -275,3 +275,13 @@ class FastTensorDataLoader:
 
     def __len__(self):
         return self.n_batches
+
+
+class Pair(nn.Module):
+    """
+    Simple wrapper to allow the sender and receiver to be treated as one module.
+    """
+    def __init__(self, sender, receiver):
+        super().__init__()
+        self.sender = sender
+        self.receiver = receiver

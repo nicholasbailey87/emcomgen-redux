@@ -3,7 +3,10 @@ Zero shot eval according to composed utterances
 """
 
 import os
+import sys
+from pathlib import Path
 
+import parse_config
 import vis
 import torch
 import numpy as np
@@ -18,11 +21,11 @@ from tqdm import tqdm
 import scipy.stats
 
 import util
-import models
 import data
 from data.shapeworld import concept_to_lf
 from tqdm import trange
 import emergence
+import emergentlanguageagents
 
 
 from nltk.translate.bleu_score import sentence_bleu
@@ -251,7 +254,7 @@ def compute_metrics_by_concept(concepts, **kwargs):
 
 
 def eval_zero_shot(
-    split, pair, dataloaders, sampled_lang, exp_args, args, epochs=1, n_vis=500
+    split, pair, dataloaders, sampled_lang, config, exp_dir, n_vis=500
 ):
     other_split = "test" if split == "train" else "train"
     pair.eval()
@@ -260,7 +263,7 @@ def eval_zero_shot(
 
     stats = util.Statistics()
 
-    lang_per_concept = get_lang_per_concept(args.exp_dir)
+    lang_per_concept = get_lang_per_concept(exp_dir)
     lpc_counts = get_lang_per_concept_counts(lang_per_concept)
     lpc_unique = {
         c: list(set(list(lang_counts.keys()))) for c, lang_counts in lpc_counts.items()
@@ -271,10 +274,10 @@ def eval_zero_shot(
     all_concepts = list(lang_per_concept.keys())
     concept_distances = PairwiseDistances(all_concepts)
 
-    vocab_size = exp_args.vocab_size + 3
-    acre_split = get_acre_split(args.exp_dir)
+    vocab_size = config['sender']['vocabulary'] + 3 # FIXME: this assumes we're using the default emcomgen agents
+    acre_split = get_acre_split(exp_dir)
 
-    for epoch in trange(epochs, desc="Eval"):
+    for epoch in trange(config['zero_shot_eval_epochs'], desc="Eval"):
         n_vis_so_far = 0
         vis_spk_inp = []
         vis_spk_y = []
@@ -298,7 +301,7 @@ def eval_zero_shot(
                     lis_inp = lis_inp.float()
                 spk_y = spk_y.float()
                 lis_y = lis_y.float()
-                if args.cuda:
+                if config['cuda']:
                     spk_inp = spk_inp.cuda()
                     lis_inp = lis_inp.cuda()
                     lis_y = lis_y.cuda()
@@ -345,7 +348,7 @@ def eval_zero_shot(
                 # Random language uniformly sampled from strings
                 langs["random"] = sample_rand_unif_lang(
                     batch_size,
-                    exp_args.max_lang_length,
+                    config['sender']['message_length'], # TODO: confirm we should be looking at the sender message length rather than the receiver message length!
                     vocab_size,
                 )
 
@@ -367,7 +370,7 @@ def eval_zero_shot(
                 # Also sample from speaker (sanity check)
                 with torch.no_grad():
                     spk_lang, _ = pair.speaker(
-                        spk_inp, spk_y, max_len=exp_args.max_lang_length
+                        spk_inp, spk_y, config['sender']['message_length']
                     )
                     langs["ground_truth_2"] = spk_lang
 
@@ -406,7 +409,7 @@ def eval_zero_shot(
                     for clang, concept in zip(lang_text, concepts):
                         lang_types_per_concept[lang_type][concept[4:-5]][clang] += 1
 
-                    if args.cuda:
+                    if config['cuda']:
                         lang = lang.cuda()
                         lang_length = lang_length.cuda()
 
@@ -488,7 +491,7 @@ def eval_zero_shot(
             vis_lang,
             vis_true_lang,
             vis_lis_pred,
-            exp_dir=os.path.join(args.exp_dir, "zero_shot"),
+            exp_dir=os.path.join(exp_dir, "zero_shot"),
         )
 
     seen_str = "seen" if split == "train" else "unseen"
@@ -521,44 +524,66 @@ def get_lang_type_records(lang_types, **kwargs):
 
 
 if __name__ == "__main__":
-    from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter, Namespace
+    
+    arguments = sys.argv[1:]
+    if not arguments:
+        class NoArguments(Exception):
+            pass
+        raise NoArguments(
+            "Intended usage: `python sample.py [experiment directory]`"
+        )
+    else:
+        # TODO: make sure we're actually saving each experiment's config as config.toml in the experiment directory
+        # The below will automatically restore defaults if missing
+        exp_dir = arguments[0]
+        config = parse_config.get_config(Path(exp_dir) / 'config.toml')
+    
+    # from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter, Namespace
 
-    parser = ArgumentParser(
-        description=__doc__, formatter_class=ArgumentDefaultsHelpFormatter
-    )
+    # parser = ArgumentParser(
+    #     description=__doc__, formatter_class=ArgumentDefaultsHelpFormatter
+    # )
 
-    parser.add_argument("exp_dir")
-    parser.add_argument("--cuda", action="store_true")
-    parser.add_argument("--epochs", type=int, default=5)
+    # parser.add_argument("exp_dir")
+    # parser.add_argument("--cuda", action="store_true")
+    # parser.add_argument("--epochs", type=int, default=5)
 
-    args = parser.parse_args()
+    # args = parser.parse_args()
 
-    # Restore
-    exp_args = Namespace(**util.load_args(args.exp_dir))
-    util.restore_missing_defaults(exp_args)
-    dataloaders = data.loader.load_dataloaders(exp_args, fast=True)
-    model_config = models.builder.build_models(dataloaders, exp_args)
-    pair = model_config["pair"]
-    if args.cuda:
-        pair.cuda()
+    # # Restore
+    # exp_args = Namespace(**util.load_args(args.exp_dir))
+    # util.restore_missing_defaults(exp_args)
 
-    state_dict = torch.load(os.path.join(args.exp_dir, "best_model.pt"))
+    dataloaders = data.loader.load_dataloaders(config['data'])
+
+    sender_class = getattr(emergentlanguageagents.senders, config['sender']['class'])
+    sender = sender_class(**config['sender']['arguments'])
+
+    receiver_class = getattr(emergentlanguageagents.receivers, config['receiver']['class'])
+    receiver = receiver_class(**config['receiver']['arguments'])
+
+    pair = util.Pair(sender, receiver)
+
+    state_dict = torch.load(os.path.join(exp_dir, "best_model.pt"))
     pair.load_state_dict(state_dict)
+    
+    if config['cuda']:
+        pair.cuda()
 
     # split here is acre split, but you should be evalling across all datasets...
     # maybe concatenate train, val, test?
     lang_type_records = []
     for split in ["train", "test"]:
         sampled_lang = torch.load(
-            os.path.join(args.exp_dir, f"sampled_lang_{split}_sampled_lang.pt")
+            os.path.join(exp_dir, f"sampled_lang_{split}_sampled_lang.pt")
         )
         metrics, records = eval_zero_shot(
-            split, pair, dataloaders, sampled_lang, exp_args, args, epochs=args.epochs
+            split, pair, dataloaders, sampled_lang, config, exp_dir
         )
-        with open(os.path.join(args.exp_dir, f"zero_shot_{split}.json"), "w") as f:
+        with open(os.path.join(exp_dir, f"zero_shot_{split}.json"), "w") as f:
             json.dump(metrics, f)
         lang_type_records.extend(records)
 
     pd.DataFrame(lang_type_records).to_csv(
-        os.path.join(args.exp_dir, "zero_shot_lang_type_stats.csv"), index=False
+        os.path.join(exp_dir, "zero_shot_lang_type_stats.csv"), index=False
     )
