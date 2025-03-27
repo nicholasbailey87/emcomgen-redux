@@ -158,7 +158,7 @@ def load_other_data(this_game_type, split, dataset, fast=False, into_memory=Fals
     return load_split(other_dataset, split, fast=fast, into_memory=into_memory)
 
 
-def load(args, fast=False):
+def load(data_config, fast=False):
     datas = {}
     if args.backbone == "resnet18":
         # Need larger images

@@ -104,7 +104,7 @@ def load_img_metadata(cub_path):
     return md_dict
 
 
-def load_cub_metadata(args):
+def load_cub_metadata(data_config):
     cub_dir = os.path.join(args.dataset, "CUB_200_2011")
 
     # Load metadata per image
@@ -135,7 +135,7 @@ def load_cub_metadata(args):
     return img_md, class_md
 
 
-def load(args):
+def load(data_config):
     img_dir = os.path.join(args.dataset, "CUB_200_2011", "images")
     classes = os.listdir(img_dir)
     imgs = {}

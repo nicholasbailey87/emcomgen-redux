@@ -35,6 +35,7 @@ percent_novel = 1.0
 n_examples = 10 # number of examples seen by agents, including distractors
 ref_dataset="data/shapeworld_ref"
 n_sample = 2E5 # Number of samples for inspecting the language. Used in sample.py
+n_workers = 0
 
 [optimiser]
 accumulator_steps = 1
