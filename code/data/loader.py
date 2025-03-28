@@ -6,14 +6,14 @@ from . import shapeworld
 from . import cub
 
 
-def load(data_config):
-    if "shapeworld" in data_config['dataset']:
+def load(config):
+    if "shapeworld" in config['data']['dataset']:
         lf = shapeworld.load
-    elif "cub" in data_config['dataset']:
+    elif "cub" in config['data']['dataset']:
         lf = cub.load
     else:
-        raise ValueError(f"Unknown dataset {data_config['dataset']}")
-    return lf(data_config)
+        raise ValueError(f"Unknown dataset {config['data']['dataset']}")
+    return lf(config)
 
 
 def worker_init(worker_id):
@@ -21,15 +21,15 @@ def worker_init(worker_id):
     torch.seed()
 
 
-def load_dataloaders(data_config):
-    datas = load(data_config)
+def load_dataloaders(config):
+    datas = load(config)
 
     def to_dl(dset):
         return DataLoader(
             dset,
-            batch_size=data_config['batch_size'],
+            batch_size=config['data']['batch_size'],
             shuffle=True,
-            num_workers=data_config['batch_size'],
+            num_workers=config['data']['batch_size'],
             pin_memory=True,
             worker_init_fn=worker_init,
         )
@@ -37,20 +37,20 @@ def load_dataloaders(data_config):
     dataloaders = {split: to_dl(dset) for split, dset in datas.items()}
     
     # Commented out as never used in practice in EmComGen. Reimplement if needed.
-    if data_config['test_dataset'] is not None:
-        orig_dataset = data_config['dataset']
-        orig_percent_novel = data_config['percent_novel']
-        orig_n_examples = data_config['n_examples']
+    if config['data']['test_dataset'] is not None:
+        orig_dataset = config['data']['dataset']
+        orig_percent_novel = config['data']['percent_novel']
+        orig_n_examples = config['data']['n_examples']
 
-        data_config['dataset'] = data_config['test_dataset']
-        data_config['percent_novel'] = data_config['test_percent_novel']
-        data_config['n_examples'] = data_config['test_n_examples']
+        config['data']['dataset'] = config['data']['test_dataset']
+        config['data']['percent_novel'] = config['data']['test_percent_novel']
+        config['data']['n_examples'] = config['data']['test_n_examples']
 
-        test_datas = load(data_config)
+        test_datas = load(config)
 
-        data_config['dataset'] = orig_dataset
-        data_config['percent_novel'] = orig_percent_novel
-        data_config['n_examples'] = orig_n_examples
+        config['data']['dataset'] = orig_dataset
+        config['data']['percent_novel'] = orig_percent_novel
+        config['data']['n_examples'] = orig_n_examples
 
         dataloaders["test"] = to_dl(test_datas["test"])
 

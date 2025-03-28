@@ -51,17 +51,17 @@ def get_config(filepath: str = None, defaults: str = "../config/DEFAULT.toml"):
             "Config TOML must specify ```\n['data']\ndataset = ...```."
         )
         
-    if config['data']['dataset'] == 'data/cub':
+    if config['data']['dataset'] == '../data/cub':
         birds_config = defaults['birds']
         recursive_update(birds_config, custom_config)
         recursive_update(config, birds_config)
-    elif config['data']['dataset'] == 'data/shapeworld':
+    elif config['data']['dataset'] == '../data/shapeworld':
         shapeworld_config = defaults['shapeworld']
         recursive_update(shapeworld_config, custom_config)
         recursive_update(config, shapeworld_config)
     else:
         raise InvalidConfig(
-            "Dataset must be 'data/cub' or 'data/shapeworld'."
+            "Dataset must be '../data/cub' or '../data/shapeworld'."
         )
 
     recursive_update(config, custom_config)

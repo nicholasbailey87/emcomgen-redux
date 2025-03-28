@@ -104,8 +104,8 @@ def load_img_metadata(cub_path):
     return md_dict
 
 
-def load_cub_metadata(data_config):
-    cub_dir = os.path.join(args.dataset, "CUB_200_2011")
+def load_cub_metadata(config):
+    cub_dir = os.path.join(config['data']['dataset'], "CUB_200_2011")
 
     # Load metadata per image
     img_md = load_img_metadata(cub_dir)
@@ -135,14 +135,14 @@ def load_cub_metadata(data_config):
     return img_md, class_md
 
 
-def load(data_config):
-    img_dir = os.path.join(args.dataset, "CUB_200_2011", "images")
+def load(config):
+    img_dir = os.path.join(config['data']['dataset'], "CUB_200_2011", "images")
     classes = os.listdir(img_dir)
     imgs = {}
     print("Loading CUB...")
     for cl in classes:
         cl_n = int(cl.split(".")[0])
-        if args.debug:
+        if config['debug']:
             if not any(
                 cl_n in r
                 for r in [TRAIN_CLASSES_DEBUG, VAL_CLASSES_DEBUG, TEST_CLASSES_DEBUG]
@@ -160,13 +160,13 @@ def load(data_config):
     print("...done")
 
     # Load metadata
-    img_md, class_md = load_cub_metadata(args)
-    if args.reference_game:
+    img_md, class_md = load_cub_metadata(config)
+    if config['reference_game']:
         md = img_md
     else:
         md = class_md
 
-    attr_dict = load_attr_dict(args.dataset)
+    attr_dict = load_attr_dict(config)
 
     tloader = iu.TransformLoader(IMAGE_SIZE)
     train_transform = tloader.get_composed_transform(
@@ -188,13 +188,13 @@ def load(data_config):
             tr = test_transform
             length = 200
 
-        if args.debug:
+        if config['debug']:
             length = length // 10
 
         if percent_novel is None:
-            percent_novel = args.percent_novel
+            percent_novel = config['data']['percent_novel']
         if reference_game is None:
-            reference_game = args.reference_game
+            reference_game = config['reference_game']
 
         subset = {k: v for k, v in imgs.items() if k in classes}
         return CUBDataset(
@@ -203,13 +203,13 @@ def load(data_config):
             img_md,
             attr_dict,
             transform=tr,
-            n_examples=args.n_examples,
+            n_examples=config['data']['n_examples'],
             length=length,
             reference_game=reference_game,
             percent_novel=percent_novel,
         )
 
-    if args.debug:
+    if config['debug']:
         classes = {
             "train": TRAIN_CLASSES_DEBUG,
             "val": VAL_CLASSES_DEBUG,
@@ -229,7 +229,7 @@ def load(data_config):
     }
 
     # Load other splits
-    this_game_type = util.get_game_type(args)
+    this_game_type = util.get_game_type(config)
     for _split in ["val", "test"]:
         for game_type in ["ref", "setref", "concept"]:
             split = f"{_split}_{game_type}"

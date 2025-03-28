@@ -141,12 +141,12 @@ def get_pairwise_hausdorff_distances(concepts):
     return dists
 
 
-def get_game_type(args):
-    if args.reference_game:
+def get_game_type(config):
+    if config['reference_game']:
         return "ref"
-    elif args.percent_novel == 0.0:
+    elif config['data']['percent_novel'] == 0.0:
         return "setref"
-    elif args.percent_novel == 1.0:
+    elif config['data']['percent_novel'] == 1.0:
         return "concept"
     else:
         return None

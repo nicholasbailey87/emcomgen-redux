@@ -20,7 +20,6 @@ ignore_language = false
 ignore_examples = false
 debug = false
 vis = false
-load_shapeworld_into_memory = false
 receiver_reset_interval = 0.0
 # TODO: add to config validation that only one of the force game type options for zero shot evaluation can be true
 force_reference_game = false # Can be used in zero-shot eval
@@ -29,11 +28,12 @@ force_setref_game = false # Can be used in zero-shot eval
 zero_shot_eval_epochs = 5
 
 [data]
-dataset = "data/shapeworld"
+dataset = "../data/shapeworld"
+load_shapeworld_into_memory = false
 batch_size = 32
 percent_novel = 1.0
 n_examples = 10 # number of examples seen by agents, including distractors
-ref_dataset="data/shapeworld_ref"
+ref_dataset="../data/shapeworld_ref"
 n_sample = 2E5 # Number of samples for inspecting the language. Used in sample.py
 n_workers = 0
 
@@ -86,7 +86,7 @@ dropout = 0.1
 temperature = 1.0
 
 [shapeworld.data]
-ref_dataset="data/shapeworld_ref"
+ref_dataset="../data/shapeworld_ref"
 n_examples="20" # number of examples given to teacher/student, divided evenly b/t targets and distractors (must be even!)
 
 [shapeworld.optimiser]
@@ -104,7 +104,7 @@ message_length = 7
 [birds.data]
 batch_size = 16
 n_workers = 4
-ref_dataset = "data/cub"
+ref_dataset = "../data/cub"
 
 [birds.sender.arguments]
 vocabulary = 20

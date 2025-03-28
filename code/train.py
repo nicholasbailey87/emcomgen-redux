@@ -525,9 +525,9 @@ if __name__ == "__main__":
     os.makedirs(exp_dir, exist_ok=True)
     util.save_args(config, exp_dir)
 
-    dataloaders = data.loader.load_dataloaders(config['data'])
+    dataloaders = data.loader.load_dataloaders(config)
     # model_config = models.builder.build_models(dataloaders, args)
-    this_game_type = data.util.get_game_type(config['data'])
+    this_game_type = data.util.get_game_type(config)
 
     sender_class = getattr(emergentlanguageagents.senders, config['sender']['class'])
     sender = sender_class(**config['sender']['arguments'])

@@ -6,10 +6,7 @@ import h5py
 import torch
 import torch.nn.functional as F
 
-try:
-    import ujson as json
-except ImportError:
-    import json
+import json
 
 from . import generic
 from . import language
@@ -158,16 +155,16 @@ def load_other_data(this_game_type, split, dataset, fast=False, into_memory=Fals
     return load_split(other_dataset, split, fast=fast, into_memory=into_memory)
 
 
-def load(data_config, fast=False):
+def load(config, fast=False):
     datas = {}
-    if args.backbone == "resnet18":
+    if config['sender']['arguments']['image_encoder'] == "PretrainedResNet18":
         # Need larger images
         image_size = 224
     else:
         image_size = 64
 
     for split in SPLITS:
-        sfile = os.path.join(args.dataset, f"{split}.npz")
+        sfile = os.path.join(config['data']['dataset'], f"{split}.npz")
         sfile_hdf5 = sfile.replace(".npz", ".hdf5")
         is_present = os.path.exists(sfile) or os.path.exists(sfile_hdf5)
         if not is_present:
@@ -177,7 +174,10 @@ def load(data_config, fast=False):
             else:
                 continue
         datas[split] = load_split(
-            args.dataset, split, fast=fast, into_memory=args.load_shapeworld_into_memory
+            config['data']['dataset'],
+            split,
+            fast=fast,
+            into_memory=config['data']['load_shapeworld_into_memory']
         )
 
     langs = np.concatenate([datas[s]["langs"] for s in datas])
@@ -198,7 +198,7 @@ def load(data_config, fast=False):
         concept_distances = util.get_pairwise_hausdorff_distances(concepts)
 
     dataset_kwargs = {
-        "n_examples": args.n_examples,
+        "n_examples": config['data']['n_examples'],
         "visfunc": generic.vis_image,
         "name": "shapeworld",
         "image_size": image_size,
@@ -211,8 +211,8 @@ def load(data_config, fast=False):
             datas[split],
             vocab,
             augment=split == "train",
-            percent_novel=args.percent_novel,
-            reference_game=args.reference_game,
+            percent_novel=config['data']['percent_novel'],
+            reference_game=config['reference_game'],
             shapes=datas[split]["shapes"],
             concepts=concepts,
             concept_distances=concept_distances,
@@ -221,15 +221,15 @@ def load(data_config, fast=False):
         )
 
     # Load other versions of datasets for eval
-    this_game_type = util.get_game_type(args)
+    this_game_type = util.get_game_type(config)
     for _split in ["val", "test", "val_same", "test_same"]:
         # Load the other dataset
         other_data = load_other_data(
             this_game_type,
             _split,
-            args.dataset,
+            config['data']['dataset'],
             fast=fast,
-            into_memory=args.load_shapeworld_into_memory,
+            into_memory=config['data']['load_shapeworld_into_memory'],
         )
         other_data["metadata"] = get_metadata(other_data["langs"], md_vocab)[0]
         # other_vocab is used to measure the correct concept distances
