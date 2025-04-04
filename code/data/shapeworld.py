@@ -34,7 +34,7 @@ def get_unique_concepts(dfolder):
             # Try hdf5
             data = h5py.File(data_file.replace(".npz", ".hdf5"), "r")
 
-        if data["langs"].dtype != np.unicode:
+        if data["langs"].dtype != str:
             langs_decoded = [lang.decode("utf-8") for lang in data["langs"]]
         else:
             langs_decoded = data["langs"]
@@ -151,7 +151,7 @@ def load_other_data(this_game_type, split, dataset, fast=False, into_memory=Fals
         assert "_ref" in dataset
         other_dataset = dataset.replace("_ref", "")
     else:
-        other_dataset = "data/shapeworld_ref/"
+        other_dataset = "../data/shapeworld_ref/"
     return load_split(other_dataset, split, fast=fast, into_memory=into_memory)
 
 
@@ -293,13 +293,13 @@ def load_split(dataset, split, fast=False, into_memory=False):
         imgs = imgs[:]
         labels = labels[:]
 
-    if data["langs"].dtype != np.unicode:
+    if data["langs"].dtype != str:
         langs_decoded = [lang.decode("utf-8") for lang in data["langs"]]
     else:
         langs_decoded = data["langs"]
 
     # Force 1D object array
-    langs = np.empty(len(langs_decoded), dtype=np.object)
+    langs = np.empty(len(langs_decoded), dtype=object)
     langs[:] = [t.lower().split() for t in langs_decoded]
 
     return {
@@ -414,8 +414,8 @@ class ShapeWorldDataset(generic.ConceptDataset):
     def shapes_to_idx(self):
         n = len(self.shapes)
         n_img = len(self.shapes[0])
-        shape_lang_len = np.full((n, n_img), 5, dtype=np.int)
-        shape_lang_idx = np.zeros((n, n_img, 5), dtype=np.int)
+        shape_lang_len = np.full((n, n_img), 5, dtype=int)
+        shape_lang_idx = np.zeros((n, n_img, 5), dtype=int)
         for i in range(n):
             for j in range(n_img):
                 shape_lang_idx[i, j, 0] = self.w2i[language.SOS_TOKEN]

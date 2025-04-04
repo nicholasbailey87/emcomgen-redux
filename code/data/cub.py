@@ -1,5 +1,6 @@
 import numpy as np
 import os
+from pathlib import Path
 import torch
 from PIL import Image
 import pandas as pd
@@ -25,7 +26,7 @@ TEST_CLASSES_DEBUG = range(8, 12)
 
 
 def load_attr_dict(cub_path):
-    fpath = os.path.join(cub_path, "attributes.txt")
+    fpath = str(Path(cub_path) / "attributes.txt")
     attr_df = pd.read_csv(
         fpath,
         header=None,
@@ -59,8 +60,8 @@ def load_attr_dict(cub_path):
 
 
 def load_class_metadata(cub_path):
-    md_path = os.path.join(
-        cub_path, "attributes", "class_attribute_labels_continuous.txt"
+    md_path = str(
+        Path(cub_path) / "attributes" / "class_attribute_labels_continuous.txt"
     )
     md = pd.read_csv(md_path, sep=" ", header=None).to_numpy(dtype=np.float32)
     md = (md > 50.0).astype(np.uint8)
@@ -69,7 +70,7 @@ def load_class_metadata(cub_path):
     for i in range(md.shape[0]):
         md_dict[i + 1] = md[i]
     # Now map from image ids to unique class names
-    im_path = os.path.join(cub_path, "image_class_labels.txt")
+    im_path = str(Path(cub_path) / "image_class_labels.txt")
     im2cl = pd.read_csv(im_path, sep=" ", header=None, names=["image_id", "class_id"])
     im2cl = dict(zip(im2cl["image_id"], im2cl["class_id"]))
 
@@ -83,7 +84,7 @@ def load_img_metadata(cub_path):
     """
     TODO - do we do per class here?
     """
-    md_path = os.path.join(cub_path, "attributes", "image_attribute_labels.txt")
+    md_path = str(Path(cub_path) / "attributes" / "image_attribute_labels.txt")
     md = pd.read_csv(
         md_path,
         sep=" ",
@@ -105,7 +106,7 @@ def load_img_metadata(cub_path):
 
 
 def load_cub_metadata(config):
-    cub_dir = os.path.join(config['data']['dataset'], "CUB_200_2011")
+    cub_dir = str(Path(config['data']['dataset']) / "CUB_200_2011")
 
     # Load metadata per image
     img_md = load_img_metadata(cub_dir)
@@ -113,19 +114,21 @@ def load_cub_metadata(config):
 
     # Load mapping from image names (npz keys) to metadata
     id2name = pd.read_csv(
-        os.path.join(cub_dir, "images.txt"),
+        str(Path(cub_dir) / "images.txt"),
         sep=" ",
         names=["image_id", "name"],
         header=None,
     )
-    id2name = dict(zip(id2name["image_id"], id2name["name"]))
+    ids = id2name["image_id"]
+    names = [str(Path(i)) for i in id2name["name"]]
+    id2name = dict(zip(ids, names))
 
     def rename_md(md):
         # Rename to image names
         md = {id2name[i]: m for i, m in md.items()}
         # Add path to cub dir so we can look up md in CUBDataset
         md = {
-            os.path.join("cub", "CUB_200_2011", "images", k): v for k, v in md.items()
+            str(Path("cub") / "CUB_200_2011" / "images" / k): v for k, v in md.items()
         }
         return md
 
@@ -136,7 +139,8 @@ def load_cub_metadata(config):
 
 
 def load(config):
-    img_dir = os.path.join(config['data']['dataset'], "CUB_200_2011", "images")
+    img_dir = str(Path(config['data']['dataset']) / "CUB_200_2011" / "images")
+
     classes = os.listdir(img_dir)
     imgs = {}
     print("Loading CUB...")
@@ -148,14 +152,16 @@ def load(config):
                 for r in [TRAIN_CLASSES_DEBUG, VAL_CLASSES_DEBUG, TEST_CLASSES_DEBUG]
             ):
                 continue
-        npz_dir = os.path.join(img_dir, cl, "img.npz")
+        npz_dir = str(Path(img_dir) / cl / "img.npz")
         if not os.path.exists(npz_dir):
             raise RuntimeError(
                 f"Couldn't find {npz_dir}, run save_cub_np.py in data/ first?"
             )
         cl_imgs = np.load(npz_dir)
-        if LOAD_INTO_MEMORY:  # Load npz into memory
-            cl_imgs = dict(cl_imgs)
+        # if LOAD_INTO_MEMORY:  # Load npz into memory
+        #     cl_imgs = dict(cl_imgs)
+        cl_imgs = dict(cl_imgs)
+        cl_imgs = {str(Path(a)): b for a, b in cl_imgs.items()}
         imgs[cl_n] = cl_imgs
     print("...done")
 
@@ -166,7 +172,7 @@ def load(config):
     else:
         md = class_md
 
-    attr_dict = load_attr_dict(config)
+    attr_dict = load_attr_dict(config['data']['dataset'])
 
     tloader = iu.TransformLoader(IMAGE_SIZE)
     train_transform = tloader.get_composed_transform(
@@ -279,7 +285,7 @@ class CUBDataset:
         else:
             self.n_examples = n_examples
         self.percent_novel = percent_novel
-
+        
         # Make sure the metadata matches up
         for c, ls in self.img_names.items():
             for l in ls:
@@ -359,8 +365,8 @@ class CUBDataset:
 
     def vis_input(self, inp, overwrite=True, **kwargs):
         img_fname = f"{kwargs['name']}_{kwargs['epoch']}_{kwargs['split']}_{kwargs['game_i']}_{kwargs['i']}.jpg"
-        img_f = os.path.join(kwargs["exp_dir"], "images", img_fname)
-        img_html = f"""<img src="{os.path.join('images', img_fname)}">"""
+        img_f = str(Path(kwargs["exp_dir"]) / "images" / img_fname)
+        img_html = f"""<img src="{str(Path('images') / img_fname)}">"""
         if os.path.exists(img_f) and not overwrite:
             return img_html
             return

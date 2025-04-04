@@ -125,9 +125,9 @@ class ConceptDataset:
 
     def to_idx(self, langs):
         # Add SOS, EOS
-        lang_len = np.array([len(t) for t in langs], dtype=np.int) + 2
+        lang_len = np.array([len(t) for t in langs], dtype=int) + 2
         lang_idx = np.full(
-            (len(langs), max(lang_len)), self.w2i[language.PAD_TOKEN], dtype=np.int
+            (len(langs), max(lang_len)), self.w2i[language.PAD_TOKEN], dtype=int
         )
         for i, toks in enumerate(langs):
             lang_idx[i, 0] = self.w2i[language.SOS_TOKEN]

@@ -1,6 +1,7 @@
-import toml
 from collections import defaultdict
 from pathlib import Path
+import warnings
+import toml
 
 class InvalidConfig(Exception):
     pass
@@ -29,6 +30,19 @@ def parse_toml(filepath: str) -> dict:
 
     with open(str(Path(filepath)), 'r') as f:
         return toml.load(f)
+
+class SafeDict(dict):
+    """
+    A default dict that raises warnings when keys are absent.
+    """
+    def __init__(self):
+        super().__init__()
+    def __missing__(self, key):
+        self[key] = None
+        warnings.warn(
+            f"The config doesn't contain {key}. Defaulting to None."
+        )
+        return self[key]
 
 def get_config(filepath: str = None, defaults: str = "../config/DEFAULT.toml"):
 
@@ -65,8 +79,8 @@ def get_config(filepath: str = None, defaults: str = "../config/DEFAULT.toml"):
         )
 
     recursive_update(config, custom_config)
-    
-    safe_config = defaultdict(lambda: None)
+
+    safe_config = SafeDict()
     safe_config.update(config)
     
     return safe_config

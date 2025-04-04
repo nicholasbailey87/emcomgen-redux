@@ -1,7 +1,7 @@
 # Default experimental settings, required to reproduce https://github.com/jayelm/emergent-generalization
 
 name = "DEFAULT" # experiment name - should be the same as file name
-experiment_directory = "../exp"
+experiments_directory = "../exp"
 cuda = true
 wandb = false
 wandb_project_name = "cc"
@@ -26,6 +26,7 @@ force_reference_game = false # Can be used in zero-shot eval
 force_concept_game = false # Can be used in zero-shot eval
 force_setref_game = false # Can be used in zero-shot eval
 zero_shot_eval_epochs = 5
+save_interval = 10
 
 [data]
 dataset = "../data/shapeworld"
@@ -49,7 +50,6 @@ weight_decay = 0.0 # This makes AdamW the same as Adam
 clip_grad_norm = 100.0
 kl_regularisation = false
 log_interval = 100
-save_interval = 10
 
 [sender]
 class = "ECGSpeaker"
@@ -87,10 +87,10 @@ temperature = 1.0
 
 [shapeworld.data]
 ref_dataset="../data/shapeworld_ref"
-n_examples="20" # number of examples given to teacher/student, divided evenly b/t targets and distractors (must be even!)
+n_examples=20 # number of examples given to teacher/student, divided evenly b/t targets and distractors (must be even!)
 
 [shapeworld.optimiser]
-accumulator_steps="4"
+accumulator_steps=4
 
 [shapeworld.sender.arguments]
 vocabulary = 14

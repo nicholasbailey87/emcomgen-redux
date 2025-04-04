@@ -1,6 +1,9 @@
 # Updated experimental settings, required to run perceiver models
 
-name = "perceiver" # experiment name - should be the same as file name
+name = "testbirds" # experiment name - should be the same as file name
+
+[data]
+dataset = '../data/cub'
 
 [optimiser]
 accumulator_steps = 1

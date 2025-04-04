@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-import emergentlanguageagents
+import emergentlanguageagents.models as eml
 import parse_config
 import util
 import data
@@ -222,7 +222,6 @@ def run(
     dataloaders,
     # args,
     config,
-    exp_dir,
     random_state=None,
     force_no_train=False,
 ):
@@ -279,12 +278,12 @@ def run(
 
     if training:
         optimizer.zero_grad()
-        this_epoch_eps = max(0.0, config['eps'] - (epoch * config['eps_anneal']))
+        this_epoch_eps = max(0.0, config['sender']['arguments']['eps'] - (epoch * config['sender']['arguments']['eps_anneal']))
         this_epoch_uniform_weight = max(
-            0.0, config['uniform_weight'] - (epoch * config['uniform_weight_anneal'])
+            0.0, config['sender']['arguments']['uniform_weight'] - (epoch * config['sender']['arguments']['uniform_weight_anneal'])
         )
         this_epoch_softmax_temp = max(
-            1.0, config['temperature'] - (epoch * config['softmax_temp_anneal'])
+            1.0, config['sender']['arguments']['temperature'] - (epoch * config['sender']['arguments']['temperature_annealing'])
         )
     else:
         this_epoch_eps = 0.0
@@ -453,7 +452,7 @@ def run(
             {"sender": lang_text},
             true_lang_text_joined,
             {"sender": lis_pred},
-            exp_dir=exp_dir,
+            exp_dir=config['exp_dir'],
         )
 
     clean_language(all_lang)
@@ -521,7 +520,9 @@ if __name__ == "__main__":
         config = parse_config.get_config(arguments[0])
         assert validate_config(config)
 
-    exp_dir = str(Path(config['experiment_directory']) / Path(config['name']))
+    exp_dir = str(Path(config['experiments_directory']) / Path(config['name']))
+    config['exp_dir'] = exp_dir
+
     os.makedirs(exp_dir, exist_ok=True)
     util.save_args(config, exp_dir)
 
@@ -529,10 +530,10 @@ if __name__ == "__main__":
     # model_config = models.builder.build_models(dataloaders, args)
     this_game_type = data.util.get_game_type(config)
 
-    sender_class = getattr(emergentlanguageagents.senders, config['sender']['class'])
+    sender_class = getattr(eml.senders, config['sender']['class'])
     sender = sender_class(**config['sender']['arguments'])
 
-    receiver_class = getattr(emergentlanguageagents.receivers, config['receiver']['class'])
+    receiver_class = getattr(eml.receivers, config['receiver']['class'])
     receiver = receiver_class(**config['receiver']['arguments'])
 
     pair = util.Pair(sender, receiver)
@@ -542,7 +543,10 @@ if __name__ == "__main__":
     
     # TODO: import a library that will build my optimizer based on config
 
-    optimiser = None # FIXME: build an optimiser here
+    optimiser = optim.Adam( # FIXME: build a better optimiser here
+        pair.parameters(),
+        lr=config['optimiser']['lr']
+    )
 
     run_args = (
         pair,
@@ -553,9 +557,9 @@ if __name__ == "__main__":
     all_metrics = []
     metrics = init_metrics()
     total_epochs = (
-        config['warm_up_epochs']
-        + config['straight_epochs']
-        + config['annealing_epochs']
+        config['optimiser']['warm_up_epochs']
+        + config['optimiser']['straight_epochs']
+        + config['optimiser']['annealing_epochs']
     )
     for epoch in range(total_epochs):
         # No reset on epoch 0, but reset after epoch 2, epoch 4, etc
@@ -606,6 +610,7 @@ if __name__ == "__main__":
                     # Default
                     util.update_with_prefix(metrics, split_metrics, f"{split}_avg")
 
+        # TODO: include some optimiser.step() line here
         #  model_config['scheduler'].step(metrics["val_avg_loss"])
 
         # Use validation accuracy to choose the best model.
