@@ -1,6 +1,6 @@
 # Updated experimental settings, required to run perceiver models
 
-name = "testbirds" # experiment name - should be the same as file name
+name = "testbirds2" # experiment name - should be the same as file name
 
 [data]
 dataset = '../data/cub'

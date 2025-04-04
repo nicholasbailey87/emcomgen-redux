@@ -610,7 +610,7 @@ if __name__ == "__main__":
                     # Default
                     util.update_with_prefix(metrics, split_metrics, f"{split}_avg")
 
-        # TODO: include some optimiser.step() line here
+        # TODO: include some scheduler.step() line here
         #  model_config['scheduler'].step(metrics["val_avg_loss"])
 
         # Use validation accuracy to choose the best model.
