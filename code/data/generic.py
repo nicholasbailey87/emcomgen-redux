@@ -173,7 +173,6 @@ class GenLoader:
 
         # Calculate # batches
         n_batches, remainder = divmod(self.dataset_len, self.batch_size)
-        # FIXME - this breaks if dataset length not divisible
         if remainder > 0:
             n_batches += 1
         self.n_batches = n_batches

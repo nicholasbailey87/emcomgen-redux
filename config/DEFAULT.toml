@@ -21,7 +21,6 @@ ignore_examples = false
 debug = false
 vis = false
 receiver_reset_interval = 0.0
-# TODO: add to config validation that only one of the force game type options for zero shot evaluation can be true
 force_reference_game = false # Can be used in zero-shot eval
 force_concept_game = false # Can be used in zero-shot eval
 force_setref_game = false # Can be used in zero-shot eval
@@ -39,17 +38,15 @@ n_sample = 2E5 # Number of samples for inspecting the language. Used in sample.p
 n_workers = 0
 
 [optimiser]
+class = "AdamW"
 accumulator_steps = 1
-# TODO: create scheduler class that can handle linear warmup, cosine anneal, reduce LR on plateau, all below
-warm_up_epochs = 0
-straight_epochs = 100 # no warm up or annealing
-annealing_epochs = 0
 lr = 1e-4
-reduce_lr_on_plateau = true
-weight_decay = 0.0 # This makes AdamW the same as Adam
+weight_decay = 0.0
 clip_grad_norm = 100.0
-kl_regularisation = false
 log_interval = 100
+
+[scheduler]
+epochs = 100
 
 [sender]
 class = "ECGSpeaker"

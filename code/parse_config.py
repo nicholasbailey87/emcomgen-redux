@@ -44,6 +44,44 @@ class SafeDict(dict):
         )
         return self[key]
 
+def validate_config(config: dict) -> bool:
+    """
+    Check that the config doesn't contradict itself and has the necessary arguments.
+
+    Based on some lines in code/io_util.py
+    """
+
+    if (
+        # Remembering that True == 1 in Python...
+        config['force_reference_game']
+        + config['force_concept_game']
+        + config['force_setref_game']
+     ) > 1:
+        raise InvalidConfig(
+            "Only one of the following can be true: `force_reference_game`,"
+            " `force_concept_game`, `force_setref_game`."
+        )
+        
+    if config['use_lang'] and (config['copy_listener'] or config['listener_only']):
+        raise InvalidConfig(
+            "`use_lang` must be false if `copy_listener` or `listener_only` is true."
+        )
+
+    if config['copy_listener'] and config['listener_only']:
+        raise InvalidConfig(
+            "`copy_listener` not allowed with `listener_only`"
+        )
+
+    if config['reference_game_xent'] and not config['reference_game']:
+        raise InvalidConfig(
+            "reference_game_xent=true requires reference_game=true"
+        )
+    
+    if 'dataset' not in config['data']:
+        raise InvalidConfig(
+            "Config TOML must specify ```\n['data']\ndataset = ...```."
+        )
+
 def get_config(filepath: str = None, defaults: str = "../config/DEFAULT.toml"):
 
     defaults = parse_toml(defaults)
@@ -58,13 +96,7 @@ def get_config(filepath: str = None, defaults: str = "../config/DEFAULT.toml"):
         recursive_update(config, custom_config)
     else:
         custom_config = dict()
-    
-    # TODO: make this part of a separate validate_config function that runs at the end of this parse function once the intended config has been resolved in the proper order of precedence
-    if 'dataset' not in config['data']:
-        raise InvalidConfig(
-            "Config TOML must specify ```\n['data']\ndataset = ...```."
-        )
-        
+           
     if config['data']['dataset'] == '../data/cub':
         birds_config = defaults['birds']
         recursive_update(birds_config, custom_config)
@@ -83,4 +115,6 @@ def get_config(filepath: str = None, defaults: str = "../config/DEFAULT.toml"):
     safe_config = SafeDict()
     safe_config.update(config)
     
+    validate_config(safe_config)
+
     return safe_config

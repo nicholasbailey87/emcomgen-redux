@@ -469,7 +469,6 @@ class OpDataset:
 
         # Construct the input sequence from the concept
         concept = self.input[i]
-        # FIXME - this is inefficient
         concept_str = lf_to_concept((self.optype,) + concept)
         inp = self.create_input(concept)
         if inp is None:
@@ -657,7 +656,6 @@ def train_model(model, models, optype, opdata, vocab_size, args):
                         )
 
             if not training:
-                # TODO - sample and measure top1 accuracy?
                 pass
 
             stats.update(
@@ -1101,8 +1099,6 @@ def process(lang_file, args):
         }
         if not args.standard_split:
             all_concepts = unique_concepts["train"] + unique_concepts["test"]
-            # XXX: these could include duplicates (e.g. if there's no config
-            # split in the dataset), so make this a set.
             all_concepts = list(set(all_concepts))
             if args.include_not:
                 higher_threshold = 1
@@ -1130,7 +1126,6 @@ def process(lang_file, args):
     else:
         concepts = [(str(x),) for x in lf["true_lang"]]
         unique_concepts = {
-            # FIXME - this is slightly off since CUB are 1-indexed.
             "train": [(str(i),) for i in range(1, 100)],
             "test": [(str(i),) for i in range(150, 200)],
         }

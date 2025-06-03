@@ -6,6 +6,7 @@ utils
 import os
 import subprocess
 import json
+import toml
 import warnings
 import numpy as np
 from PIL import Image
@@ -165,10 +166,13 @@ def compute_average_metrics(meters):
 
 def save_args(args_dict, exp_dir, filename="args.json"):
     # Note: no longer need `args_dict = vars(args)` as args will now already
-    # be a dict, see train.py
+    # be a dict, see train.py. Also we output to moth json and toml to support
+    # original and new functionality.
     args_dict["git_hash"], args_dict["git_unstaged_changes"] = current_git_hash()
-    with open(os.path.join(exp_dir, filename), "w") as f:
+    with open(os.path.join(exp_dir, "args.json"), "w") as f:
         json.dump(args_dict, f, indent=4, separators=(",", ": "), sort_keys=True)
+    with open(os.path.join(exp_dir, "config.toml"), "w") as f:
+        toml.dump(args_dict, f)
 
 
 def load_args(exp_dir, filename="args.json"):

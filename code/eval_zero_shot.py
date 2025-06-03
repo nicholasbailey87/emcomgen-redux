@@ -274,7 +274,7 @@ def eval_zero_shot(
     all_concepts = list(lang_per_concept.keys())
     concept_distances = PairwiseDistances(all_concepts)
 
-    vocab_size = config['sender']['vocabulary'] + 3 # FIXME: this assumes we're using the default emcomgen agents
+    vocab_size = pair.sender.vocab_size
     acre_split = get_acre_split(exp_dir)
 
     for epoch in trange(config['zero_shot_eval_epochs'], desc="Eval"):
@@ -348,7 +348,7 @@ def eval_zero_shot(
                 # Random language uniformly sampled from strings
                 langs["random"] = sample_rand_unif_lang(
                     batch_size,
-                    config['sender']['message_length'], # TODO: confirm we should be looking at the sender message length rather than the receiver message length!
+                    config['sender']['message_length'],
                     vocab_size,
                 )
 

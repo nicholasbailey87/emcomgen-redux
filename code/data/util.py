@@ -9,8 +9,6 @@ import itertools
 def stack_pos_neg(pos_imgs, neg_imgs):
     """
     Given positive images and negative images, stack them, then create a y tensor of labels.
-
-    TODO - instead of stack just assign?
     """
     pos_imgs = torch.stack(pos_imgs)
     neg_imgs = torch.stack(neg_imgs)

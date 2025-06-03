@@ -370,7 +370,6 @@ class ShapeWorldDataset(generic.ConceptDataset):
 
     @util.return_index
     def get_reference_game(self, i):
-        # FIXME - code reuse here (maybe use a temporary lang?)
         img = self.x[i]
         label = self.labels[i]
         md = self.metadata[i]

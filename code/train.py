@@ -2,6 +2,7 @@
 Train an RNN decoder to make binary predictions;
 then train an RNN language model to generate sequences
 """
+from torch.amp import GradScaler, autocast
 
 import sys
 from pathlib import Path
@@ -213,13 +214,14 @@ def init_metrics():
     metrics["best_epoch"] = 0
     return metrics
 
-
 def run(
     split,
     epoch,
     pair,
     optimizer,
     dataloaders,
+    scheduler,
+    scaler,
     # args,
     config,
     random_state=None,
@@ -268,7 +270,7 @@ def run(
 
     all_lang = []
     all_toks = []  # language, unjoined text form, ragged
-    # FIXME - make this one class
+
     if dataloader.dataset.name == "cub":
         all_attrs = []
         all_reprs = []  # representations
@@ -311,100 +313,106 @@ def run(
             lis_inp = lis_inp.cuda()
             lis_y = lis_y.cuda()
 
-        if config['receiver_only']:
-            lis_scores = pair.receiver(lis_inp, None)
-        elif config['copy_receiver']:
-            sender_emb = pair.sender(spk_inp, spk_y)
-            lis_scores = pair.receiver(lis_inp, sender_emb)
-        else:
-            (lang, lang_length), states = pair.sender(
-                spk_inp,
-                spk_y,
-                max_len=config['sender']['arguments']['message_length'],
-                eps=this_epoch_eps,
-                softmax_temp=this_epoch_softmax_temp,
-                uniform_weight=this_epoch_uniform_weight,
-            )
-            lis_scores = pair.receiver(lis_inp, lang, lang_length)
-
-        # Evaluate loss and accuracy
-        if config['reference_game_xent']:
-            # Take only 0th receiver score + after midpoint. Then do cross
-            # entropy
-            assert lis_scores.shape[1] % 2 == 0
-            midp = lis_scores.shape[1] // 2
-            lis_scores_xent = torch.cat((lis_scores[:, :1], lis_scores[:, midp:]), 1)
-            zeros = torch.zeros(batch_size, dtype=torch.int64, device=lis_scores.device)
-            this_loss = xent_criterion(lis_scores_xent, zeros)
-            lis_pred = lis_scores_xent.argmax(1)
-            per_game_acc = (lis_pred == 0).float().cpu().numpy()
-            this_acc = per_game_acc.mean()
-        else:
-            this_loss = bce_criterion(lis_scores, lis_y)
-            lis_pred = (lis_scores > 0).float()
-            per_game_acc = (lis_pred == lis_y).float().mean(1).cpu().numpy()
-            this_acc = per_game_acc.mean()
-
-        # Save language
-        if config['use_lang']:
-            lang_i = lang.argmax(2)
-            lang_text_unjoined = util.to_emergent_text(lang_i)
-            lang_text = [" ".join(toks) for toks in lang_text_unjoined]
-        else:
-            lang_text_unjoined = [["N/A"] for _ in range(batch_size)]
-            lang_text = ["N/A" for _ in range(batch_size)]
-        true_lang_text = get_true_lang(
-            batch,
-            dataloader.dataset,
-            # commented out argument `args`, see definition above
-            join=False
-        )
-        true_lang_text_joined = [" ".join(t) for t in true_lang_text]
-
-        # Game difficulty/other metadata indicator
-        all_lang.extend(zip(lang_text, true_lang_text, per_game_acc, md.numpy()))
-
-        # Get attributes
-        all_toks.extend(lang_text_unjoined)
-        if dataloader.dataset.name == "cub":
-            attrs = md.numpy()[:, 1:]
-            all_attrs.extend(attrs)
-            all_reprs.extend(states.detach().cpu().numpy())
-
-        if config['joint_training']:
-            # Also train sender on classification task
-            spk_scores = pair.sender.classify_from_states(states, lis_inp)
-            spk_loss = bce_criterion(spk_scores, lis_y)
-            spk_pred = (spk_scores > 0).float()
-            spk_per_game_acc = (spk_pred == lis_y).float().mean(1).cpu().numpy()
-            spk_acc = spk_per_game_acc.mean()
-            stats.update(spk_loss=spk_loss, spk_acc=spk_acc)
-            comb_loss = this_loss + config['joint_training_lambda'] * spk_loss
-        else:
-            comb_loss = this_loss
-
-        if training:
-            comb_loss.backward()
-
-            if (batch_i + 1) % config['optimiser']['accumulator_steps'] == 0:
-                torch.nn.utils.clip_grad_norm_(pair.parameters(), config['optimiser']['clip_grad_norm'])
-                optimizer.step()
-                optimizer.zero_grad()
-                backpropped = True
+        # This is the bit where the models process the inputs
+        with autocast(device_type='cuda', dtype=torch.float16):
+            if config['receiver_only']:
+                lis_scores = pair.receiver(lis_inp, None)
+            elif config['copy_receiver']:
+                sender_emb = pair.sender(spk_inp, spk_y)
+                lis_scores = pair.receiver(lis_inp, sender_emb)
             else:
-                backpropped = False
+                (lang, lang_length), states = pair.sender(
+                    spk_inp,
+                    spk_y,
+                    max_len=config['sender']['arguments']['message_length'],
+                    eps=this_epoch_eps,
+                    softmax_temp=this_epoch_softmax_temp,
+                    uniform_weight=this_epoch_uniform_weight,
+                )
+                lis_scores = pair.receiver(lis_inp, lang, lang_length)
 
-            if batch_i % config['optimiser']['log_interval'] == 0:
-                log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats)
+            # Evaluate loss and accuracy
+            if config['reference_game_xent']:
+                # Take only 0th receiver score + after midpoint. Then do cross
+                # entropy
+                assert lis_scores.shape[1] % 2 == 0
+                midp = lis_scores.shape[1] // 2
+                lis_scores_xent = torch.cat((lis_scores[:, :1], lis_scores[:, midp:]), 1)
+                zeros = torch.zeros(batch_size, dtype=torch.int64, device=lis_scores.device)
+                this_loss = xent_criterion(lis_scores_xent, zeros)
+                lis_pred = lis_scores_xent.argmax(1)
+                per_game_acc = (lis_pred == 0).float().cpu().numpy()
+                this_acc = per_game_acc.mean()
+            else:
+                this_loss = bce_criterion(lis_scores, lis_y)
+                lis_pred = (lis_scores > 0).float()
+                per_game_acc = (lis_pred == lis_y).float().mean(1).cpu().numpy()
+                this_acc = per_game_acc.mean()
 
-        stats.update(
-            loss=this_loss, acc=this_acc, batch_size=batch_size, combined_loss=comb_loss
-        )
+            # Save language
+            if config['use_lang']:
+                lang_i = lang.argmax(2)
+                lang_text_unjoined = util.to_emergent_text(lang_i)
+                lang_text = [" ".join(toks) for toks in lang_text_unjoined]
+            else:
+                lang_text_unjoined = [["N/A"] for _ in range(batch_size)]
+                lang_text = ["N/A" for _ in range(batch_size)]
+            true_lang_text = get_true_lang(
+                batch,
+                dataloader.dataset,
+                # commented out argument `args`, see definition above
+                join=False
+            )
+            true_lang_text_joined = [" ".join(t) for t in true_lang_text]
 
-    if training and not backpropped:
-        torch.nn.utils.clip_grad_norm_(pair.parameters(), config['optimiser']['clip_grad_norm'])
-        optimizer.step()
-        optimizer.zero_grad()
+            # Game difficulty/other metadata indicator
+            all_lang.extend(zip(lang_text, true_lang_text, per_game_acc, md.numpy()))
+
+            # Get attributes
+            all_toks.extend(lang_text_unjoined)
+            if dataloader.dataset.name == "cub":
+                attrs = md.numpy()[:, 1:]
+                all_attrs.extend(attrs)
+                all_reprs.extend(states.detach().cpu().numpy())
+
+            if config['joint_training']:
+                # Also train sender on classification task
+                spk_scores = pair.sender.classify_from_states(states, lis_inp)
+                spk_loss = bce_criterion(spk_scores, lis_y)
+                spk_pred = (spk_scores > 0).float()
+                spk_per_game_acc = (spk_pred == lis_y).float().mean(1).cpu().numpy()
+                spk_acc = spk_per_game_acc.mean()
+                stats.update(spk_loss=spk_loss, spk_acc=spk_acc)
+                comb_loss = this_loss + config['joint_training_lambda'] * spk_loss
+            else:
+                comb_loss = this_loss
+
+            if training:
+                scaler.scale(comb_loss).backward()
+
+                if (batch_i + 1) % config['optimiser']['accumulator_steps'] == 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(pair.parameters(), config['optimiser']['clip_grad_norm'])
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+                    backpropped = True
+                else:
+                    backpropped = False
+
+                if batch_i % config['optimiser']['log_interval'] == 0:
+                    log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats)
+
+            stats.update(
+                loss=this_loss, acc=this_acc, batch_size=batch_size, combined_loss=comb_loss
+            )
+
+        if training and not backpropped:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(pair.parameters(), config['optimiser']['clip_grad_norm'])
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
 
     # Compute metrics + collect generation language
     metrics = stats.averages()
@@ -415,7 +423,6 @@ def run(
 
     if config['use_lang']:
         # Compute emergent communication statistics
-        # TODO - this should generally be a "meaning preprocess" function
         if dataloader.dataset.name == "cub":
             attrs_numeric = dataloader.dataset.attr_to_numeric(all_attrs)
         else:
@@ -477,37 +484,6 @@ def clean_language(all_lang_df):
 class NoArguments(Exception):
     pass
 
-class ConfigError(Exception):
-    # TODO: move this to parse_config.py
-    pass
-
-def validate_config(config: dict) -> bool:
-    """
-    Check that the config doesn't contradict itself and has the necessary arguments.
-
-    Based on some lines in code/io_util.py
-    """
-    # TODO: move this to parse_config.py
-    
-    # TODO: add some kind of check to make sure all the appropriate config fields/args are specified
-
-    if config['use_lang'] and (config['copy_listener'] or config['listener_only']):
-        raise ConfigError(
-            "`use_lang` must be false if `copy_listener` or `listener_only` is true."
-        )
-
-    if config['copy_listener'] and config['listener_only']:
-        raise ConfigError(
-            "`copy_listener` not allowed with `listener_only`"
-        )
-
-    if config['reference_game_xent'] and not config['reference_game']:
-        raise ConfigError(
-            "reference_game_xent=true requires reference_game=true"
-        )
-    
-    return True
-
 if __name__ == "__main__":
     # args = io_util.parse_args()
     # args_dict = vars(args)
@@ -518,7 +494,6 @@ if __name__ == "__main__":
         )
     else:
         config = parse_config.get_config(arguments[0])
-        assert validate_config(config)
 
     exp_dir = str(Path(config['experiments_directory']) / Path(config['name']))
     config['exp_dir'] = exp_dir
@@ -547,21 +522,26 @@ if __name__ == "__main__":
         pair.parameters(),
         lr=config['optimiser']['lr']
     )
+    
+    scaler = GradScaler()
+    
+    # TODO: Add scheduler stuff here
+    scheduler = None
 
     run_args = (
         pair,
         optimiser,
         dataloaders,
+        scheduler,
+        scaler,
         config
     )
+
     all_metrics = []
     metrics = init_metrics()
-    total_epochs = (
-        config['optimiser']['warm_up_epochs']
-        + config['optimiser']['straight_epochs']
-        + config['optimiser']['annealing_epochs']
-    )
-    for epoch in range(total_epochs):
+    epochs = config['scheduler']['epochs']
+    
+    for epoch in range(epochs):
         # No reset on epoch 0, but reset after epoch 2, epoch 4, etc
         if (
             config['receiver_reset_interval'] > 0
@@ -609,9 +589,6 @@ if __name__ == "__main__":
                 if this_game_type == game_type:
                     # Default
                     util.update_with_prefix(metrics, split_metrics, f"{split}_avg")
-
-        # TODO: include some scheduler.step() line here
-        #  model_config['scheduler'].step(metrics["val_avg_loss"])
 
         # Use validation accuracy to choose the best model.
         is_best = metrics["val_avg_acc"] > metrics["best_acc"]

@@ -14,11 +14,15 @@ from . import image_util as iu
 IMAGE_SIZE = 224
 LOAD_INTO_MEMORY = True
 
+# TODO: verify this works before deleting the commented stuff below
+TRAIN_CLASSES = range(1, 101)
+VAL_CLASSES = range(101, 151)
+TEST_CLASSES = range(151, 201)
 
 # FIXME - this is slightly incorrect since CUB classes are 1-indexed.
-TRAIN_CLASSES = range(100)
-VAL_CLASSES = range(100, 150)
-TEST_CLASSES = range(150, 200)
+# TRAIN_CLASSES = range(100)
+# VAL_CLASSES = range(100, 150)
+# TEST_CLASSES = range(150, 200)
 
 TRAIN_CLASSES_DEBUG = range(4)
 VAL_CLASSES_DEBUG = range(4, 8)
@@ -81,9 +85,6 @@ def load_class_metadata(cub_path):
 
 
 def load_img_metadata(cub_path):
-    """
-    TODO - do we do per class here?
-    """
     md_path = str(Path(cub_path) / "attributes" / "image_attribute_labels.txt")
     md = pd.read_csv(
         md_path,
