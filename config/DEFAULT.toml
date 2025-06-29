@@ -47,6 +47,9 @@ log_interval = 100
 
 [scheduler]
 epochs = 100
+range_test = false
+microcycle_type = "flat"
+macrocycle_type = "flat"
 
 [sender]
 class = "ECGSpeaker"

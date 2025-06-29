@@ -17,7 +17,7 @@ import data
 from train import run
 import json
 from tqdm import tqdm
-import emergentlanguageagents
+import emergentlanguageagents.models as elam
 
 def sample(pair, dataloaders, config, exp_dir):
     dname = dataloaders["train"].dataset.name
@@ -41,7 +41,7 @@ def sample(pair, dataloaders, config, exp_dir):
         pbar = tqdm(desc=f"sample {split}", total=n)
         while all_lang.shape[0] < n:
             split_stats, lang = run(
-                split, 0, pair, None, dataloaders, config, force_no_train=True
+                split, 0, pair, None, dataloaders, None, None, config, force_no_train=True
             )
             if dname == "cub":  # Zero out metadata
                 lang["md"] = 0
@@ -128,12 +128,12 @@ if __name__ == "__main__":
             # Change SW dataset to ref version (no change for CUB)
             config['data']['dataset'] = config['data']['dataset'].replace("shapeworld_ref", "shapeworld")
 
-    dataloaders = data.loader.load_dataloaders(config['data'])
+    dataloaders = data.loader.load_dataloaders(config)
 
-    sender_class = getattr(emergentlanguageagents.senders, config['sender']['class'])
+    sender_class = getattr(elam.senders, config['sender']['class'])
     sender = sender_class(**config['sender']['arguments'])
 
-    receiver_class = getattr(emergentlanguageagents.receivers, config['receiver']['class'])
+    receiver_class = getattr(elam.receivers, config['receiver']['class'])
     receiver = receiver_class(**config['receiver']['arguments'])
 
     pair = util.Pair(sender, receiver)

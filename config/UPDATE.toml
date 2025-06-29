@@ -1,6 +1,10 @@
 # Updated experimental settings, required to run perceiver models
 
-name = "testbirds3" # experiment name - should be the same as file name
+name = "short_test" # experiment name - should be the same as file name
 
 [data]
 dataset = '../data/cub'
+n_sample = 1E3
+
+[scheduler]
+epochs = 10

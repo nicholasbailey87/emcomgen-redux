@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-import emergentlanguageagents.models as eml
+import emergentlanguageagents.models as elam
 import parse_config
 import util
 import data
@@ -357,6 +357,7 @@ def run(
             else:
                 lang_text_unjoined = [["N/A"] for _ in range(batch_size)]
                 lang_text = ["N/A" for _ in range(batch_size)]
+            
             true_lang_text = get_true_lang(
                 batch,
                 dataloader.dataset,
@@ -505,10 +506,10 @@ if __name__ == "__main__":
     # model_config = models.builder.build_models(dataloaders, args)
     this_game_type = data.util.get_game_type(config)
 
-    sender_class = getattr(eml.senders, config['sender']['class'])
+    sender_class = getattr(elam.senders, config['sender']['class'])
     sender = sender_class(**config['sender']['arguments'])
 
-    receiver_class = getattr(eml.receivers, config['receiver']['class'])
+    receiver_class = getattr(elam.receivers, config['receiver']['class'])
     receiver = receiver_class(**config['receiver']['arguments'])
 
     pair = util.Pair(sender, receiver)

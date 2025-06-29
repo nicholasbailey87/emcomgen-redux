@@ -3,9 +3,6 @@ io util
 """
 
 
-from models.backbone import BACKBONES
-
-
 def parse_args(defaults=False):
     from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
@@ -23,7 +20,6 @@ def parse_args(defaults=False):
     parser.add_argument(
         "--backbone",
         default=None,
-        choices=list(BACKBONES.keys()),
         type=str,
         help="Vision backbone. If None, uses default in models.builder",
     )
@@ -243,14 +239,14 @@ def parse_args(defaults=False):
     if args.test_n_examples is None:
         args.test_n_examples = args.n_examples
 
-    if args.wandb:
-        import wandb
+    # if args.wandb:
+    #     import wandb
 
-        wandb.init(args.wandb_project_name, config=args)
-        if args.name is not None:
-            wandb.run.name = args.name
-        else:
-            args.name = wandb.run.name
+    #     wandb.init(args.wandb_project_name, config=args)
+    #     if args.name is not None:
+    #         wandb.run.name = args.name
+    #     else:
+    #         args.name = wandb.run.name
 
     if args.name is None:
         args.name = "debug"

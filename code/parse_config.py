@@ -62,14 +62,14 @@ def validate_config(config: dict) -> bool:
             " `force_concept_game`, `force_setref_game`."
         )
         
-    if config['use_lang'] and (config['copy_listener'] or config['listener_only']):
+    if config['use_lang'] and (config['copy_receiver'] or config['receiver_only']):
         raise InvalidConfig(
-            "`use_lang` must be false if `copy_listener` or `listener_only` is true."
+            "`use_lang` must be false if `copy_receiver` or `receiver_only` is true."
         )
 
-    if config['copy_listener'] and config['listener_only']:
+    if config['copy_receiver'] and config['receiver_only']:
         raise InvalidConfig(
-            "`copy_listener` not allowed with `listener_only`"
+            "`copy_receiver` not allowed with `receiver_only`"
         )
 
     if config['reference_game_xent'] and not config['reference_game']:
