@@ -2,15 +2,5 @@
 
 name = "speed_test" # experiment name - should be the same as file name
 
-[data]
-dataset = '../data/cub'
-batch_size = 32
-n_sample = 1E4
-
-[optimiser]
-class = "AdamW"
-accumulator_steps = 1
-lr = 1e-4
-
 [scheduler]
 epochs = 1

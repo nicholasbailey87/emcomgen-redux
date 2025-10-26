@@ -1,8 +1,21 @@
-# Emergent Communication of Generalizations
+# Emergent Communication of Generalizations, Redux
 
-https://arxiv.org/abs/2106.02668
+This repository represents experiments based on [the work "Emergent Communication of Generalizations" published at NeurIPS 2021](https://github.com/jayelm/emergent-generalization).
 
-NeurIPS 2021
+## Getting started
+
+Things can get a bit funky if you don't install the required packages in the right order. PyTorch is left out of the requirements as the version of PyTorch you use is highly dependent on the of your environment (e.g. Cuda toolkit version).
+
+* On Windows, first get Cuda 13.0 from here https://developer.nvidia.com/cuda-toolkit-archive
+* You will need an environment with Python 3.12
+* Then create a virtual env with `python -m venv venv`
+* Then `pip install -f requirements.txt`
+* Then install pytorch with `pip install torch==2.9.0 torchvision==0.24.0 --index-url https://download.pytorch.org/whl/cu130`
+* Then install mup with `pip install mup-1.0.0` (after PyTorch, so that it doesn't try to pick its own PyTorch version)
+
+Other instructions for getting started still apply per the original repository: https://github.com/jayelm/emergent-generalization, see below
+
+# README from the original repository below
 
 ## Setup
 

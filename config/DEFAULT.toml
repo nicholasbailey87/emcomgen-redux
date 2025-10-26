@@ -9,6 +9,7 @@ use_lang = true
 copy_receiver = false
 receiver_only = false
 share_feat_model = false
+share_language_model = false
 n_transformer_heads = 8
 n_transformer_layers = 5
 joint_training = false
@@ -39,7 +40,7 @@ n_workers = 0
 
 [optimiser]
 class = "AdamW"
-accumulator_steps = 1
+accumulator_steps = 4
 lr = 1e-4
 weight_decay = 0.0
 clip_grad_norm = 100.0
@@ -52,12 +53,13 @@ microcycle_type = "flat"
 macrocycle_type = "flat"
 
 [sender]
-class = "ECGSpeaker"
+class = "Sender"
 
 [sender.arguments]
 vocabulary = 11
 message_length = 4
-image_encoder = "Conv4"
+image_encoder = "conv4"
+language_model = "rnn"
 prototype = "average"
 gradient_trick = "gumbel"
 layers = 2
@@ -72,12 +74,13 @@ eps = 0.0
 eps_anneal = 0.0
 
 [receiver]
-class = "ECGListener"
+class = "Receiver"
 
 [receiver.arguments]
 vocabulary = 11
 message_length = 4
-image_encoder = "Conv4"
+image_encoder = "conv4"
+language_model = "rnn"
 pretrained_feat_model = false
 layers = 2
 embedding_size = 500
