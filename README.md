@@ -12,6 +12,7 @@ Things can get a bit funky if you don't install the required packages in the rig
 * Then `pip install -f requirements.txt`
 * Then install pytorch with `pip install torch==2.9.0 torchvision==0.24.0 --index-url https://download.pytorch.org/whl/cu130`
 * Then install mup with `pip install mup-1.0.0` (after PyTorch, so that it doesn't try to pick its own PyTorch version)
+* Then install flash attention if using Ampere GPUs or newer, with `pip install flash-attn --no-build-isolation` **NOTE: This must be done in an environment with C++ build tools available, e.g. in "x64 Native Tools Command Prompt" on Windows. This may take some time.**
 
 Other instructions for getting started still apply per the original repository: https://github.com/jayelm/emergent-generalization, see below
 

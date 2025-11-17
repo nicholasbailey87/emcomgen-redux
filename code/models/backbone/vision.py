@@ -73,11 +73,22 @@ class ViT2(nn.Module):
 def tiny_vit(n_feats=(3, 64, 64)):
     return ViT2(
         n_feats=n_feats,
-        embedding_size=8,
+        embedding_size=4,
         transformer_heads=2,
         transformer_relative_position_embedding=False,
-        transformer_layers=2,
+        transformer_layers=1,
         activation=nn.GELU,
+        logit_projection_layer=nn.Linear
+    )
+
+def tiny_vit(n_feats=(3, 64, 64)):
+    return ViT2(
+        n_feats=n_feats,
+        embedding_size=32,
+        transformer_heads=4,
+        transformer_relative_position_embedding=True,
+        transformer_layers=4,
+        activation=SwiGLU,
         logit_projection_layer=nn.Linear
     )
 

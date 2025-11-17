@@ -4,8 +4,8 @@ Model building logic
 
 
 from . import base
-from . import sender
-from . import receiver
+from . import sender2 as sender
+from . import receiver2 as receiver
 
 from .backbone import vision
 # from .backbone import feature
@@ -33,6 +33,8 @@ def build_models(dataloaders, config):
     #     should never apply in my experiments
     assert not config['receiver_only']
     assert not config['copy_receiver']
+    assert not config['share_language_model']
+    assert not config['share_feat_model']
     assert not len(n_feats) == 1
 
     # if len(n_feats) == 1:  # Feature based; use mlp
@@ -73,33 +75,46 @@ def build_models(dataloaders, config):
     #     print("Parameters of sender vision backbone:")
     #     print(sum(p.numel() for p in sender_feat_model.parameters() if p.requires_grad))
 
-    sender_feat_model = (
-        BACKBONES[config['sender']['arguments']['image_encoder']](n_feats=n_feats)
-    )
-    sender_language_model = nn.GRU(
-        config['sender']['arguments']['embedding_size'],
-        config['sender']['arguments']['d_model']
-    )
-    print("Parameters of sender vision backbone:")
-    print(sum(p.numel() for p in sender_feat_model.parameters() if p.requires_grad))
-    print("Parameters of sender language_model:")
-    print(sum(p.numel() for p in sender_language_model.parameters() if p.requires_grad))
+    # Set up sender
+    sender_class = getattr(sender, config['sender']['class'])
+    sender_feature_model_class = getattr(vision, config['sender']['feature_model'])
+    sender_prototyper_class = getattr(sender, config['sender']['prototyper'])
+    sender_language_model_class = getattr(sender, config['sender']['language_model'])
 
-    if config['share_feat_model']:
-        assert sender_feat_model is not None
-        receiver_feat_model = sender_feat_model
-    else:
-        receiver_feat_model = (
-            BACKBONES[config['receiver']['arguments']['image_encoder']](n_feats=n_feats)
-        )
-        print("Parameters of receiver vision backbone:")
-        print(sum(p.numel() for p in receiver_feat_model.parameters() if p.requires_grad))
+    sender_feat_model = sender_feature_model_class(n_feats=n_feats)
+    sender_prototyper = sender_prototyper_class(config)
+    sender_language_model = sender_language_model_class(config)
 
-    if config['share_language_model']:
-        assert sender_language_model is not None
-        receiver_language_model = sender_language_model
-    else:
-        receiver_language_model = None
+    sender_ = sender_class(
+        feat_model = sender_feat_model,
+        prototyper = sender_prototyper,
+        language_model = sender_language_model,
+        dropout = config['sender']['arguments']['dropout']
+    )
+
+    # Set up receiver
+    receiver_class = getattr(receiver, config['receiver']['class'])
+    receiver_feature_model_class = getattr(vision, config['receiver']['feature_model'])
+    receiver_comparer_class = getattr(receiver, config['receiver']['comparer'])
+    
+    receiver_feature_model = receiver_feature_model_class(n_feats=n_feats)
+    receiver_token_embedding_module = nn.Embedding(
+        config['sender']['arguments']['vocabulary'] + 3,
+        config['receiver']['arguments']['token_embedding_size']
+    )
+    receiver_comparer = receiver_comparer_class(receiver_feature_model.final_feat_dim, config)
+
+    receiver_ = receiver_class(
+        feature_model = receiver_feature_model,
+        token_embedding_module=receiver_token_embedding_module,
+        comparer = receiver_comparer,
+        dropout = config['receiver']['arguments']['dropout']
+    )
+    # if config['share_language_model']:
+    #     assert sender_language_model is not None
+    #     receiver_language_model = sender_language_model
+    # else:
+    #     receiver_language_model = None
         # nn.GRU(
         #     config['receiver']['arguments']['embedding_size'],
         #     config['receiver']['arguments']['d_model']
@@ -127,38 +142,38 @@ def build_models(dataloaders, config):
     # else:
     # (account for SOS, EOS, UNK)
 
-    sender_embs = nn.Embedding(
-        config['sender']['arguments']['vocabulary'] + 3,
-        config['sender']['arguments']['embedding_size']
-    )
-    receiver_embs = nn.Embedding(
-        config['sender']['arguments']['vocabulary'] + 3,
-        config['receiver']['arguments']['embedding_size']
-    )
+    # sender_embs = nn.Embedding(
+    #     config['sender']['arguments']['vocabulary'] + 3,
+    #     config['sender']['arguments']['embedding_size']
+    # )
+    # receiver_embs = nn.Embedding(
+    #     config['receiver']['arguments']['vocabulary'] + 3,
+    #     config['receiver']['arguments']['embedding_size']
+    # )
 
-    sender_class = getattr(sender, config['sender']['class'])
+    # sender_class = getattr(sender, config['sender']['class'])
 
-    receiver_class = getattr(receiver, config['receiver']['class'])
+    # receiver_class = getattr(receiver, config['receiver']['class'])
     
-    sender_ = sender_class(
-        sender_feat_model,
-        sender_language_model,
-        sender_embs,
-        hidden_size=config['sender']['arguments']['d_model'],
-        dropout=config['sender']['arguments']['dropout'],
-        tau=config['sender']['arguments']['temperature'],
-        prototype=config['sender']['arguments']['prototype'],
+    # sender_ = sender_class(
+    #     sender_feat_model,
+    #     sender_language_model,
+    #     sender_embs,
+    #     hidden_size=config['sender']['arguments']['d_model'],
+    #     dropout=config['sender']['arguments']['dropout'],
+    #     tau=config['sender']['arguments']['temperature'],
+    #     prototype=config['sender']['arguments']['prototype'],
         # n_transformer_heads=args.n_transformer_heads,
         # n_transformer_layers=args.n_transformer_layers,
-    )
+    # )
     
-    receiver_ = receiver_class(
-        receiver_feat_model,
-        receiver_language_model,
-        receiver_embs,
-        message_size=config['receiver']['arguments']['d_model'],
-        dropout=config['receiver']['arguments']['dropout'],
-    )
+    # receiver_ = receiver_class(
+    #     receiver_feat_model,
+    #     receiver_language_model,
+    #     receiver_embs,
+    #     message_size=config['receiver']['arguments']['d_model'],
+    #     dropout=config['receiver']['arguments']['dropout'],
+    # )
 
     pair = base.Pair(sender_, receiver_)
 

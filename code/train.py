@@ -41,24 +41,24 @@ logging.basicConfig(
 )
 
 
-def convert_lang_to_numeric(lang, lang_length, pad_val=-1, skip_sos_eos=True):
-    """
-    Convert lang to numeric, with custom padding, for later language analysis
-    """
-    lang_i = lang.argmax(2)
-    for i, length in enumerate(lang_length):
+# def convert_lang_to_numeric(lang, lang_length, pad_val=-1, skip_sos_eos=True):
+#     """
+#     Convert lang to numeric, with custom padding, for later language analysis
+#     """
+#     lang_i = lang.argmax(2)
+#     for i, length in enumerate(lang_length):
 
-        if skip_sos_eos:
-            # zero out EOS
-            lang_i[i, length - 1 :] = pad_val
-        else:
-            lang_i[i, length:] = pad_val
+#         if skip_sos_eos:
+#             # zero out EOS
+#             lang_i[i, length - 1 :] = pad_val
+#         else:
+#             lang_i[i, length:] = pad_val
 
-    # shave off SOS, ending EOS if present
-    if skip_sos_eos:
-        lang_i = lang_i[:, 1:-1]
+#     # shave off SOS, ending EOS if present
+#     if skip_sos_eos:
+#         lang_i = lang_i[:, 1:-1]
 
-    return lang_i
+#     return lang_i
 
 
 def get_true_lang(
@@ -338,16 +338,18 @@ def run(
         batch_preparation.append(batch_preparation_end - batch_start)
 
         # This is the bit where the models process the inputs
-        with autocast(device_type='cuda', dtype=torch.float16):
-            print("pong")
+        with autocast(
+            device_type='cuda',
+            dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        ):
             if config['receiver_only']:
                 lis_scores = pair.receiver(lis_inp, None)
             elif config['copy_receiver']:
                 sender_emb = pair.sender(spk_inp, spk_y)
                 lis_scores = pair.receiver(lis_inp, sender_emb)
             else:
-                print("ping")
-                (lang, lang_length), states = pair.sender(
+                # (lang, lang_length), states = pair.sender(
+                lang, states = pair.sender(
                     spk_inp,
                     spk_y,
                     max_len=config['sender']['arguments']['message_length'],
@@ -359,7 +361,7 @@ def run(
                 sender_inference_end = time()
                 sender_inference.append(sender_inference_end - batch_preparation_end)
 
-                lis_scores = pair.receiver(lis_inp, lang, lang_length)
+                lis_scores = pair.receiver(lis_inp, lang)#, lang_length)
 
                 receiver_inference_end = time()
                 receiver_inference.append(receiver_inference_end - sender_inference_end)
@@ -567,16 +569,21 @@ if __name__ == "__main__":
         )
     else:
         config = parse_config.get_config(arguments[0])
+        # from pprint import pprint
+        # pprint(config)
+        # import sys
+        # sys.exit()
 
     exp_dir = str(Path(config['experiments_directory']) / Path(config['name']))
     config['exp_dir'] = exp_dir
 
+    print(f"LR: {config['optimiser']['lr']}")
+    
     os.makedirs(exp_dir, exist_ok=True)
     util.save_args(config, exp_dir)
 
     dataloaders = data.loader.load_dataloaders(config)
     model_config = models.builder.build_models(dataloaders, config)
-    print('Paff')
     this_game_type = data.util.get_game_type(config)
 
     # sender_class = getattr(models.sender, config['sender']['class'])
@@ -617,10 +624,12 @@ if __name__ == "__main__":
     all_metrics = []
     metrics = init_metrics()
     epochs = config['scheduler']['epochs']
-    print(epochs)
     
+    print("Starting to train")
+
+    compiled_run_function = torch.compile(run)
+
     for epoch in range(epochs):
-        print("Started epochs!")
         # No reset on epoch 0, but reset after epoch 2, epoch 4, etc
         if (
             config['receiver_reset_interval'] > 0
@@ -632,8 +641,7 @@ if __name__ == "__main__":
         metrics["epoch"] = epoch
 
         # Train
-        print("about to run!")
-        train_metrics, lang = run("train", epoch, *run_args)
+        train_metrics, lang = compiled_run_function("train", epoch, *run_args)
         util.update_with_prefix(metrics, train_metrics, "train")
 
         # Eval across seen/unseen splits, and all game configurations
@@ -646,7 +654,7 @@ if __name__ == "__main__":
                 for split_type in ["", "_same"]:
                     sname = f"{split}{split_type}_{game_type}"
                     if sname in dataloaders:
-                        eval_metrics, eval_lang = run(sname, epoch, *run_args)
+                        eval_metrics, eval_lang = compiled_run_function(sname, epoch, *run_args)
                         util.update_with_prefix(metrics, eval_metrics, sname)
                         if this_game_type == game_type:
                             # Default

@@ -195,7 +195,7 @@ class Sender(CopySender):
             # finished generating language.
             if all(done_sampling):
                 break
-            outputs, states = self.lnguage_model(inputs, states)  # outputs: (L=1,B,H)
+            outputs, states = self.language_model(inputs, states)  # outputs: (L=1,B,H)
             outputs = outputs.squeeze(0)  # outputs: (B,H)
             outputs = self.outputs2vocab(outputs)  # outputs: (B,V)
 
