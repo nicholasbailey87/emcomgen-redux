@@ -82,8 +82,15 @@ def build_models(dataloaders, config):
     sender_language_model_class = getattr(sender, config['sender']['language_model'])
 
     sender_feat_model = sender_feature_model_class(n_feats=n_feats)
-    sender_prototyper = sender_prototyper_class(config)
-    sender_language_model = sender_language_model_class(config)
+    sender_prototyper = sender_prototyper_class(config['sender']['arguments']['d_model'])
+    sender_language_model = sender_language_model_class(
+        receiver_feature_model.final_feat_dim,
+        config['sender']['token_embedding_size'],
+        config['sender']['d_model'],
+        config['sender']['vocabulary'],
+        config['sender']['layers'],
+        config['sender']['bidirectional']
+    )
 
     sender_ = sender_class(
         feat_model = sender_feat_model,
@@ -102,7 +109,10 @@ def build_models(dataloaders, config):
         config['sender']['arguments']['vocabulary'] + 3,
         config['receiver']['arguments']['token_embedding_size']
     )
-    receiver_comparer = receiver_comparer_class(receiver_feature_model.final_feat_dim, config)
+    receiver_comparer = receiver_comparer_class(
+        receiver_feature_model.final_feat_dim,
+        config
+    )
 
     receiver_ = receiver_class(
         feature_model = receiver_feature_model,

@@ -4,7 +4,7 @@ Listener models
 
 import torch
 import torch.nn as nn
-from . import rnn
+# from . import rnn
 import broccoli
 
 class BilinearGRUComparer(nn.Module):
