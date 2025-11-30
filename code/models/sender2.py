@@ -8,16 +8,12 @@ Speaker models. This includes speakers with a GRU-based language model as
 """
 
 import warnings
+import math
 
 import torch
 import torch.nn as nn
 import numpy as np
 from torch.nn import functional as F
-# from torch.distributions import Gumbel
-# from torch.nn.utils.rnn import pad_sequence
-
-# from einops import einsum
-# from einops.layers.torch import Rearrange
 
 import data
 import data.language
@@ -78,49 +74,50 @@ class AttentionPrototyper(nn.Module):
         self.pos_pool.reset_parameters()
         self.neg_pool.reset_parameters()
 
+
 class SenderGRULM(nn.Module):
     def __init__(
         self,
         referent_embedding_size,
-        token_embedding_size,
-        d_model,
-        vocabulary,
-        max_len,
-        softmax_temp,
-        uniform_weight,
-        dropout,
-        layers,
-        bidirectional
+        **kwargs
     ):
         super().__init__()
         self.referent_embedding_size = referent_embedding_size
-        self.token_embedding_size = token_embedding_size
-        self.d_model = d_model
-        self.vocabulary = vocabulary
-        self.max_len = max_len
-        self.softmax_temp = softmax_temp
-        self.uniform_weight = uniform_weight
-        self.dropout = dropout
-        self.layers = layers
-        self.bidirectional = bidirectional
+        self.token_embedding_size = kwargs["token_embedding_size"]
+        self.d_model = kwargs["d_model"]
+        self.vocabulary = kwargs["vocabulary"]
+        self.message_length = kwargs["message_length"]
+        self.softmax_temperature = kwargs["softmax_temperature"]
+        self.uniform_weight = kwargs["uniform_weight"]
+        self.dropout = kwargs["dropout"]
+        self.layers = kwargs["layers"]
+        self.bidirectional = kwargs["bidirectional"]
         self.directions = 2 if self.bidirectional else 1
         
         self.gru = nn.GRU(
-            token_embedding_size,
-            d_model,
-            num_layers=layers,
+            self.token_embedding_size,
+            self.d_model,
+            num_layers=self.layers,
             bias=True,
             batch_first=True,
-            dropout=dropout,
-            bidirectional=bidirectional
+            dropout=self.dropout,
+            bidirectional=self.bidirectional
         )
-        self.outputs2vocab = nn.Linear(self.d_model * self.directions, vocabulary)
+
+        self.outputs2vocab = nn.Linear(
+            self.d_model * self.directions,
+            self.vocabulary
+        )
+
         self.init_h = nn.Linear(
             2 * referent_embedding_size, 
-            self.layers * self.directions * d_model
+            self.layers * self.directions * self.d_model
         )
         
-        self.token_embedding = nn.Embedding(vocabulary, token_embedding_size)
+        self.token_embedding = nn.Embedding(
+            self.vocabulary,
+            self.token_embedding_size
+        )
 
     def forward(
         self,
@@ -154,8 +151,8 @@ class SenderGRULM(nn.Module):
         inputs = sos_onehot # Shape: (B, 1, V)
         inputs = inputs @ self.token_embedding.weight  # Shape: (B, 1, D)
 
-        # Main sampling loop (fixed length of max_len - 2)
-        for i in range(self.max_len - 2):
+        # Main sampling loop (fixed length of message_length - 2)
+        for i in range(self.message_length - 2):
 
             # Input is (B, 1, D), Output is (B, 1, H)
             outputs, states = self.gru(inputs, states)
@@ -163,7 +160,7 @@ class SenderGRULM(nn.Module):
             # outputs = outputs.squeeze(1) # Shape: (B, H)
             outputs = self.outputs2vocab(outputs[:, -1, :]) # Shape: (B, V)
 
-            outputs = F.gumbel_softmax(outputs, tau=self.softmax_temp, hard=False)
+            outputs = F.gumbel_softmax(outputs, tau=self.softmax_temperature, hard=False)
 
             if self.uniform_weight != 0.0:
                 uniform_outputs = torch.full_like(
@@ -197,7 +194,7 @@ class SenderGRULM(nn.Module):
         lang.append(eos_onehot)
 
         # Concatenate along the sequence dim (1)
-        lang_tensor = torch.cat(lang, 1) # (B, max_len, V)
+        lang_tensor = torch.cat(lang, 1) # (B, message_length, V)
 
         return lang_tensor
 
@@ -212,31 +209,65 @@ class SenderTransformerLM(nn.Module):
     def __init__(
         self,
         referent_embedding_size,
-        token_embedding_size,
-        d_model,
-        vocabulary,
-        max_len,
-        softmax_temp,
-        uniform_weight,
-        dropout,
-        layers,
-        bidirectional,
-        heads = 4,
-        bos_tokens = 16
+        **kwargs
     ):
+        """
+        The idea here is that we create a model that can accept some prototype
+            embeddings of referents and output a message.
+        
+        We allow the model to learn a fixed query tensor, of size
+            (1, message_lengthgth - 2, d_model)
+        
+            We use "message_length - 2" as we save space for SOS and EOS tokens.
+
+        We use cross-attention with this query and the sequence of prototype
+            embeddings to produce an initial sequence for input to a Transformer.
+        
+        The Transformer produces a message-length sequence of embedded tokens,
+            which we project into the vocabulary space with an nn.Linear
+            module.
+
+        We standardise the logits and create a vector of gumbel noise, which we
+            also standardise. We linearly interpolate between these two vectors
+            for each token in each sample in the batch, like
+
+            `confidence * normalised_logits + (1-confidence) * noise`
+        
+            where `confidence` is determined by the entropy of the logits in
+            the following way:
+
+            `c = H(normalised_logits) / log_2(vocabulary)`
+
+        The gumbel noise helps the model to explore new vocabulary, and by
+            using the method described above we encourage more exploration
+            when the model is less sure what word to use in a given context.
+        
+        The evolving preferences of the listener agent(s) is ultimately what
+            dictates the amount of positive feedback for each message, which
+            introduces a mitigation for the "confident idiot" issue where a
+            consistently very confident but very wrong word choice gets
+            little exploration: a consistent word choice in a given context
+            simply becomes part of the language.
+        
+        We prefer softmax temperature higher than 1 (e.g. 16) when using
+            straight-through Gumbel softmax, for the reasons described here:
+            https://arxiv.org/abs/2502.20604
+        """
         super().__init__()
         self.referent_embedding_size = referent_embedding_size
-        self.token_embedding_size = token_embedding_size
-        self.d_model = d_model
-        self.vocabulary = vocabulary
-        self.max_len = max_len
-        self.softmax_temp = softmax_temp
-        self.uniform_weight = uniform_weight
-        self.dropout = dropout
-        self.layers = layers
-        self.bidirectional = bidirectional
-        self.heads = heads
-        self.bos_tokens = bos_tokens
+        self.token_embedding_size = kwargs["token_embedding_size"]
+        self.d_model = kwargs["d_model"]
+        self.vocabulary = kwargs["vocabulary"]
+        self.max_entropy = math.log(self.vocabulary)
+        self.message_length = kwargs["message_length"]
+        self.softmax_temperature = kwargs["softmax_temperature"]
+        self.confidence_based_exploration = kwargs["confidence_based_exploration"]
+        self.uniform_weight = kwargs["uniform_weight"]
+        self.dropout = kwargs["dropout"]
+        self.layers = kwargs["layers"]
+        self.bidirectional = kwargs["bidirectional"]
+        self.heads = kwargs["heads"]
+        self.utility_tokens = kwargs["utility_tokens"]
 
         if self.referent_embedding_size != self.token_embedding_size:
             raise NotImplementedError(
@@ -244,20 +275,21 @@ class SenderTransformerLM(nn.Module):
                 "be the same for Transformer-based speaker models!"
             )
 
-        if int((self.d_model / self.heads) / self.bos_tokens) < 3:
+        if int((self.d_model / self.heads) / self.utility_tokens) < 3:
             warnings.warn(
-                "Fewer than 3 head dimensions per BOS token may be suboptimal."
+                "Fewer than 3 head dimensions per utility token may be suboptimal."
             )
 
-        if max_len < 3:
-            raise ValueError("max_len must be at least 3 (due to SOS and EOS tokens)")
+        if self.message_length < 3:
+            raise ValueError(
+                "message_length must be at least 3 (due to SOS and EOS tokens)"
+            )
 
-        self.content_length = self.max_len - 2
+        self.content_length = self.message_length - 2
 
         self.query = nn.Parameter(
-            torch.empty(self.bos_tokens, self.d_model)
+            torch.empty(self.content_length, self.d_model)
         )
-        nn.init.normal_(self.query, mean=0.0, std=1.0)
 
         self.cross_attention = broccoli.transformer.MHAttention(
             self.d_model,
@@ -269,11 +301,11 @@ class SenderTransformerLM(nn.Module):
         )
 
         self.transformer = broccoli.transformer.TransformerEncoder(
-            self.bos_tokens + self.content_length,
+            self.utility_tokens + self.content_length,
             self.d_model,
             self.layers,
             self.heads,
-            absolute_position_embedding=False, # We manually add this in
+            absolute_position_embedding=True,
             relative_position_embedding=True,
             source_size=(self.content_length,),
             mlp_ratio=2,
@@ -283,13 +315,26 @@ class SenderTransformerLM(nn.Module):
             msa_dropout=0.,
             stochastic_depth=0.2,
             causal = not self.bidirectional,
-            bos_tokens=0, # BOS tokens are used differently here
-            return_bos_tokens=False,
+            utility_tokens=self.utility_tokens,
+            return_utility_tokens=False,
         )
 
-        self.outputs2vocab = nn.Linear(d_model, vocabulary)
+        self.outputs2vocab = nn.Linear(self.d_model, self.vocabulary)
 
-        self.position_embedding = nn.Embedding(self.content_length, self.d_model)
+        self.reset_parameters()
+
+    def get_noise_coefficients(self, logits):
+        """
+        Calculates the per-token noise coefficient (0.0 to 1.0) for every token
+            in a batch of generated messages. Returns shape: (B, L, 1).
+        """
+        with torch.no_grad():
+            probs = F.softmax(logits, dim=-1)
+            log_probs = F.log_softmax(logits, dim=-1)
+            token_entropy = -(probs * log_probs).sum(dim=-1)
+            norm_entropy = token_entropy / self.max_entropy
+            norm_entropy = torch.clamp(norm_entropy, 0.0, 1.0)
+            return norm_entropy.unsqueeze(-1)
 
     def forward(
         self,
@@ -298,39 +343,53 @@ class SenderTransformerLM(nn.Module):
     ):
         batch_size = prototypes[0].size(0)
         device = prototypes[0].device
+        finfo = torch.finfo(prototypes[0].dtype)
+        eps = finfo.eps
 
-        stack_prototypes = torch.stack(prototypes, 1)
+        stack_prototypes = torch.stack(prototypes, 1) # To sequence
 
         query = self.query.unsqueeze(0).expand(
             batch_size,
-            self.bos_tokens,
+            self.content_length,
             self.d_model
         )
 
-        bos_tokens = self.cross_attention(
+        initial_sequence = self.cross_attention(
             query, stack_prototypes, stack_prototypes
-        ) # (batch, self.bos_tokens, self.d_model)
+        ) # (batch, self.content_length, self.d_model)
 
-        positions = torch.arange(
-            0,
-            self.content_length,
-            dtype=torch.long,
-            device=prototypes[0].device
-        ).unsqueeze(0) # shape (1, t)
+        outputs = self.transformer(initial_sequence)
 
-        position_embeddings = self.position_embedding(positions) # (1, self.content_length, self.d_model)
+        logits = self.outputs2vocab(outputs)
 
-        position_embeddings = position_embeddings.expand(
-            batch_size,
-            self.content_length,
-            self.d_model
+        uniform_distribution = torch.clamp(
+            torch.rand_like(logits),
+            min=eps,
+            max=1.0 - eps
         )
 
-        input_sequences = torch.cat([bos_tokens, position_embeddings], dim=1)
+        if self.confidence_based_exploration:
+            noise_coefficients = self.get_noise_coefficients(logits)
 
-        outputs = self.transformer(input_sequences)[:, self.bos_tokens:, :] # Strip out BOS tokens
-        logits = self.outputs2vocab(outputs)
-        outputs = F.gumbel_softmax(logits, tau=self.softmax_temp, hard=False)
+            logits_mean = logits.mean(dim=-1, keepdim=True)
+            logits_std = logits.std(dim=-1, keepdim=True)
+            logits_norm = (logits - logits_mean) / (logits_std + eps)
+
+            gumbel_distribution = -torch.log(-torch.log(uniform_distribution))
+            # The Gumbel noise should have approximately these mean and std:
+            gumbel_norm = (gumbel_distribution - 0.58) / 1.28
+
+            logits = (
+                noise_coefficients * gumbel_norm
+                +
+                (1 - noise_coefficients) * logits_norm
+            )
+        else: # Just add Gumbel noise
+            # This looks like subtraction but it should be correct!
+            logits = logits - torch.log(-torch.log(uniform_distribution))
+        
+        logits /= self.softmax_temperature
+        outputs = F.softmax(logits, dim=-1)
 
         if self.uniform_weight != 0.0:
             uniform_outputs = torch.full_like(
@@ -361,194 +420,7 @@ class SenderTransformerLM(nn.Module):
 
         onehot = torch.cat([sos_onehot, onehot_content, eos_onehot], dim=1)
 
-        return onehot # (batch, max_len, vocabulary)
-
-    def reset_parameters(self):
-        nn.init.normal_(self.query, mean=0.0, std=1.0)
-        self.cross_attention.reset_parameters()
-        self.transformer.reset_parameters()
-        self.outputs2vocab.reset_parameters()
-
-
-class SenderGPTLM(nn.Module):
-    def __init__(
-        self,
-        referent_embedding_size,
-        token_embedding_size,
-        d_model,
-        vocabulary,
-        max_len,
-        softmax_temp,
-        uniform_weight,
-        dropout,
-        layers,
-        bidirectional,
-        heads = 4,
-        bos_tokens = 16
-    ):
-        super().__init__()
-        self.referent_embedding_size = referent_embedding_size
-        self.token_embedding_size = token_embedding_size
-        self.d_model = d_model
-        self.vocabulary = vocabulary
-        self.max_len = max_len
-        self.softmax_temp = softmax_temp
-        self.uniform_weight = uniform_weight
-        self.dropout = dropout
-        self.layers = layers
-        self.bidirectional = bidirectional
-        self.heads = heads
-        self.bos_tokens = bos_tokens
-
-        if self.referent_embedding_size != self.token_embedding_size:
-            raise NotImplementedError(
-                "`referent_embedding_size` and `token_embedding_size` must "
-                "be the same for Transformer-based speaker models!"
-            )
-
-        if int((self.d_model / self.heads) / self.bos_tokens) < 3:
-            warnings.warn(
-                "Fewer than 3 head dimensions per BOS token may be suboptimal."
-            )
-
-        if max_len < 3:
-            raise ValueError("max_len must be at least 3 (due to SOS and EOS tokens)")
-
-        self.content_length = self.max_len - 2
-
-        self.query = nn.Parameter(
-            torch.empty(self.bos_tokens, self.d_model)
-        )
-        nn.init.normal_(self.query, mean=0.0, std=1.0)
-
-        self.cross_attention = broccoli.transformer.MHAttention(
-            self.d_model,
-            self.heads,
-            dropout=self.dropout,
-            causal=False, # Whole image informs whole initial message
-            seq_len=self.content_length,
-            scaling="d",
-        )
-
-        self.transformer = broccoli.transformer.TransformerEncoder(
-            self.bos_tokens + self.content_length,
-            self.d_model,
-            self.layers,
-            self.heads,
-            absolute_position_embedding=False, # We manually add this in
-            relative_position_embedding=True,
-            source_size=(self.content_length,),
-            mlp_ratio=2,
-            activation=broccoli.activation.SwiGLU,
-            activation_kwargs=None,
-            mlp_dropout=0.,
-            msa_dropout=0.,
-            stochastic_depth=0.2,
-            causal = not self.bidirectional,
-            bos_tokens=0, # BOS tokens are used differently here
-            return_bos_tokens=False,
-        )
-
-        self.outputs2vocab = nn.Linear(d_model, vocabulary)
-
-        self.position_embedding = nn.Embedding(self.content_length, self.d_model)
-        
-        self.token_embedding = nn.Embedding(vocabulary, token_embedding_size)
-
-    def forward(
-        self,
-        prototypes,
-        **kwargs
-    ):
-        batch_size = prototypes[0].size(0)
-        device = prototypes[0].device
-
-        sos_onehot = torch.zeros(batch_size, 1, self.vocabulary, device=device)
-        sos_onehot[:, 0, data.language.SOS_IDX] = 1.0
-        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary, device=device)
-        eos_onehot[:, 0, data.language.EOS_IDX] = 1.0
-
-        stack_prototypes = torch.stack(prototypes, 1)
-
-        query = self.query.unsqueeze(0).expand(
-            batch_size,
-            self.bos_tokens,
-            self.d_model
-        )
-
-        bos_tokens = self.cross_attention(
-            query, stack_prototypes, stack_prototypes
-        ) # (batch, self.bos_tokens, self.d_model)
-
-        positions = torch.arange(
-            0,
-            self.content_length,
-            dtype=torch.long,
-            device=prototypes[0].device
-        ).unsqueeze(0) # shape (1, t)
-
-        position_embeddings = self.position_embedding(positions) # (1, self.content_length, self.d_model)
-
-        position_embeddings = position_embeddings.expand(
-            batch_size,
-            self.content_length,
-            self.d_model
-        )
-
-        input_sequences = torch.cat([bos_tokens, position_embeddings], dim=1)
-
-        spoken_so_far = torch.empty(
-            (batch_size, 0, self.d_model),
-            dtype=position_embeddings.dtype,
-            device=position_embeddings.device
-        )
-
-        # Main sampling loop (fixed length of max_len - 2)
-        for i in range(self.content_length):
-
-            input_sequences = torch.cat(
-                [
-                    bos_tokens,
-                    spoken_so_far[:i],
-                    position_embeddings[:, i:, :]
-                ],
-                dim=1
-            )
-
-            outputs = self.transformer(input_sequences)[:, self.bos_tokens:, :] # Strip out BOS tokens
-            logits = self.outputs2vocab(outputs)
-            outputs = F.gumbel_softmax(logits, tau=self.softmax_temp, hard=False)
-
-            if self.uniform_weight != 0.0:
-                uniform_outputs = torch.full_like(
-                    outputs,
-                    1 / outputs.shape[-1]
-                )
-                outputs = (
-                    (1 - self.uniform_weight) * outputs
-                    +
-                    self.uniform_weight * uniform_outputs
-                )
-                    
-            onehot_content = (
-                torch.zeros_like(outputs)
-                    .scatter_(
-                        -1,
-                        torch.argmax(outputs, dim=-1).unsqueeze(-1),
-                        1.
-                    )
-                )
-
-            onehot_content = onehot_content - outputs.detach() + outputs # (B, self.content_length, V)
-
-            spoken_so_far = onehot_content[:, :i + 1, :] @ self.token_embedding.weight # (B, self.content_length, self.d_model)
-
-            current_message = torch.cat([sos_onehot, onehot_content, eos_onehot], dim=1)
-
-            if self.bidirectional:
-                break
-
-        return current_message
+        return onehot # (batch, message_length, vocabulary)
 
     def reset_parameters(self):
         nn.init.normal_(self.query, mean=0.0, std=1.0)
@@ -563,7 +435,7 @@ class Sender(nn.Module):
         feat_model: nn.Module,
         prototyper: nn.Module,
         language_model: nn.Module,
-        dropout: float= 0.5
+        vision_dropout: float= 0.5
     ):
         """
         An agent that will receive one or more positive examples of a concept and
@@ -582,7 +454,7 @@ class Sender(nn.Module):
         self.feat_size = feat_model.final_feat_dim
         self.prototyper = prototyper
         self.language_model = language_model
-        self.dropout = nn.Dropout(p=dropout)
+        self.vision_dropout = nn.Dropout(p=vision_dropout)
 
     def forward(
         self,
@@ -608,7 +480,7 @@ class Sender(nn.Module):
         n_obj = samples.shape[1]
         rest = samples.shape[2:]
         flat_samples = samples.view(batch_size * n_obj, *rest)
-        embedded_samples = self.dropout(self.feat_model(flat_samples))
+        embedded_samples = self.vision_dropout(self.feat_model(flat_samples))
         embedded_samples = embedded_samples.view(batch_size, n_obj, -1)
 
         prototypes = self.prototyper(embedded_samples, targets)

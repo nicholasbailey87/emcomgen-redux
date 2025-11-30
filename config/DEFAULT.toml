@@ -54,35 +54,48 @@ macrocycle_type = "flat"
 
 [sender]
 class = "Sender"
+feature_model = "Conv4"
+vision_dropout = 0.1
+prototyper = "AveragePrototyper"
+language_model = "SenderGRULM"
 
-[sender.arguments]
+[sender_feature_model]
+embedding_size = 16 # Only applies to Transformer vision models
+layers = 4 # Only applies to Transformer vision models
+heads = 4 # Only applies to Transformer vision models
+utility_tokens = 0 # Only applies to Transformer vision models
+
+[sender_language_model]
 token_embedding_size = 500
 d_model = 1024
 vocabulary = 11
 message_length = 4
-image_encoder = "conv4"
-language_model = "rnn"
-prototype = "average"
-gradient_trick = "gumbel"
+softmax_temperature = 1.0
+confidence_based_exploration = true
+uniform_weight = 0.1
+dropout = 0.1
 layers = 1
 bidirectional = False
-dropout = 0.1
-temperature = 1.0
-temperature_annealing = 0.0
-uniform_weight = 0.1
-uniform_weight_anneal = 0.0
-eps = 0.0
-eps_anneal = 0.0
+heads = 4 # Heads per layer - only applies to Transformer language models
+utility_tokens = 4 # Only applies to Transformer language models
 
 [receiver]
 class = "Receiver"
+feature_model = "Conv4"
+comparer = "BilinearGRUComparer"
+vision_dropout = 0.1
 
-[receiver.arguments]
-image_encoder = "conv4"
-layers = 1
-bidirectional = False
+[receiver_comparer]
 token_embedding_size = 500
 d_model = 1024
+dropout = 0.1
+bidirectional = false
+layers = 1
+message_length = 4 # Only applies to Transformer comparers. Should be the same as sender_language_model.message_length
+heads = 4 # Only applies to Transformer comparers
+utility_tokens = 0 # Only applies to Transformer comparers
+
+bidirectional = False
 dropout = 0.1
 temperature = 1.0
 

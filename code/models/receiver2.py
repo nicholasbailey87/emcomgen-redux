@@ -4,14 +4,14 @@ Listener models
 
 import torch
 import torch.nn as nn
-# from . import rnn
+
 import broccoli
 
 class BilinearGRUComparer(nn.Module):
     def __init__(
         self,
         referent_embedding_size,
-        config
+        **kwargs
     ):
         """
         Use a bilinear model to compare embedded messages with sets of possible
@@ -52,19 +52,33 @@ class BilinearGRUComparer(nn.Module):
             the message said. We disable the bias to prevent this.
         """
         super().__init__()
-        self.token_embedding_size = token_embedding_size
         self.referent_embedding_size = referent_embedding_size
-        self.gru_hidden_size = gru_hidden_size
-        self.dropout = nn.Dropout(p=dropout)
-        self.bilinear = nn.Linear(gru_hidden_size, self.referent_embedding_size, bias=False)
+        self.token_embedding_size = kwargs["token_embedding_size"]
+        self.d_model = kwargs["d_model"]
+        self.dropout = nn.Dropout(p=kwargs["dropout"])
+        self.bidirectional = kwargs["bidirectional"]
+        self.layers = kwargs["layers"]
+
         self.gru = nn.GRU(
             self.token_embedding_size,
-            self.gru_hidden_size,
-            num_layers=1,
+            self.d_model,
+            num_layers=self.layers,
             bias=True,
             batch_first=True,
-            dropout=dropout,
-            bidirectional=False
+            dropout=kwargs["dropout"],
+            bidirectional=self.bidirectional
+        )
+
+        gru_output_dim = (
+            self.d_model * 2
+            if self.bidirectional
+            else self.d_model
+        )
+
+        self.bilinear = nn.Linear(
+            gru_output_dim,
+            self.referent_embedding_size,
+            bias=False
         )
 
     def forward(
@@ -80,22 +94,40 @@ class BilinearGRUComparer(nn.Module):
 
         Returns a batch of scores, of shape (batch_size, n_obj)
         """
-        token_embeddings, _ = self.gru(messages) # (b, seq_len, d_gru)
-        message_embeddings = token_embeddings[:, -1, ...] # (b, d_gru)
+        token_embeddings, _ = self.gru(messages) # (b, seq, directions * d_model)
+
+        # XXX: Getting the sequence embedding like this could be suboptimal for unidirectional GRU if sequences are padded at the end
+        if self.bidirectional:
+            final_state_of_forward_pass = token_embeddings[:, -1, :self.d_model]
+            final_state_of_backward_pass = token_embeddings[:, 0, self.d_model:]
+            message_embeddings = torch.cat(
+                (
+                    final_state_of_forward_pass,
+                    final_state_of_backward_pass
+                ),
+                dim=1
+            )
+        else:
+            # Standard unidirectional extraction
+            message_embeddings = token_embeddings[:, -1, ...]
+        
         message_embeddings = self.dropout(message_embeddings)
         projected = self.bilinear(message_embeddings)
-        scores = torch.einsum("ijh,ih->ij", (referents, message_embeddings))
-        return scores # (batch, n_objects)
+
+        scores = torch.einsum("ijh,ih->ij", (referents, projected)) # (batch, n_objects)
+
+        return scores
 
     def reset_parameters(self):
         self.gru.reset_parameters()
         self.bilinear.reset_parameters()
 
+
 class TransformerCrossAttentionComparer(nn.Module):
     def __init__(
         self,
         referent_embedding_size,
-        config
+        **kwargs
     ):
         """
         Use multiheaded cross-attention as per Attention Is All You Need
@@ -103,32 +135,48 @@ class TransformerCrossAttentionComparer(nn.Module):
             with sets of possible message referents.
         """
         super().__init__()
-        self.seq_len = seq_len
-        self.d_model = d_model
+        self.referent_embedding_size = referent_embedding_size
+        self.token_embedding_size = kwargs["token_embedding_size"]
+
+        if self.token_embedding_size != self.referent_embedding_size:
+            self.adapter = nn.Linear(
+                self.referent_embedding_size,
+                self.token_embedding_size
+            )
+        else:
+            self.adapter = nn.Identity()
+        
+        self.message_length = kwargs["message_length"]
+        self.d_model = kwargs["d_model"]
+        self.dropout = kwargs["dropout"]
+        self.bidirectional = kwargs["bidirectional"]
+        self.layers = kwargs["layers"]
+        self.heads = kwargs["heads"]
+        self.utility_tokens = kwargs["utility_tokens"]
 
         self.cross_attention = broccoli.MHAttention(
-            d_model,
-            n_heads,
-            dropout=0.0,
+            self.d_model,
+            self.heads,
+            dropout=self.dropout,
             causal=False,
-            seq_len=seq_len,
+            seq_len=self.message_length,
             scaling="d",
         )
 
         self.transformer = broccoli.TransformerEncoder(
-            seq_len = seq_len,
-            d_model = d_model,
-            n_layers,
-            n_heads,
+            self.message_length,
+            self.d_model,
+            self.layers,
+            self.heads,
             absolute_position_embedding=True,
             relative_position_embedding=True,
-            source_size=(seq_len,),
+            source_size=(self.message_length,),
             mlp_ratio=2,
             activation = broccoli.activation.SwiGLU,
             stochastic_depth=0.0,
             causal=False,
-            bos_tokens=0,
-            return_bos_tokens=False,
+            utility_tokens=self.utility_tokens,
+            return_utility_tokens=False,
             pre_norm=True,
             post_norm=True,
             normformer=True,
@@ -136,7 +184,7 @@ class TransformerCrossAttentionComparer(nn.Module):
             checkpoint_ff=True,
         )
 
-        self.scorer = nn.Linear(d_model, 1, bias=False)
+        self.scorer = nn.Linear(self.d_model, 1, bias=False)
 
     def forward(
         self,
@@ -151,10 +199,11 @@ class TransformerCrossAttentionComparer(nn.Module):
 
         Returns a batch of scores, of shape (batch_size, n_obj)
         """
+        referents = self.adapter(referents)
         mixed = self.cross_attention(referents, messages, messages)
         transformed = self.transformer(mixed)
-        scores = self.scorer(transformed)
-        return scores.squeeze() # (batch, n_objects)
+        scores = self.scorer(transformed) # (batch, n_objects, 1)
+        return scores.squeeze(-1) # (batch, n_objects)
 
     def reset_parameters(self):
         self.cross_attention.reset_parameters()
@@ -163,23 +212,30 @@ class TransformerCrossAttentionComparer(nn.Module):
 
 
 class Receiver(nn.Module):
-    def __init__(self, feature_model, token_embedding_module, comparer, dropout):
+    def __init__(self, feature_model, token_embedding_module, comparer, vision_dropout):
         super().__init__()
         self.feature_model = feature_model
-        self.dropout = nn.Dropout(p=dropout)
         self.token_embedding = token_embedding_module
         self.comparer = comparer
+        self.vision_dropout = nn.Dropout(p=vision_dropout)
 
     def forward(self, referents, messages):
-        # Embed features
-        embedded_referents = self.dropout(self.embed_features(feats))
+        batch_size = referents.shape[0]
+        n_obj = referents.shape[1]
+        rest = referents.shape[2:]
 
-        # Embed language
+        # Embed the referents
+        referents_flat = referents.view(batch_size * n_obj, *rest)
+        embedded_referents = self.feature_model(referents_flat)
+        embedded_referents = self.vision_dropout(embedded_referents)
+        embedded_referents = embedded_referents.view(batch_size, n_obj, -1)
+
+        # Embed the messages
         messages = messages @ self.token_embedding.weight
 
         return self.comparer(embedded_referents, messages)
 
     def reset_parameters(self):
-        self.feat_model.reset_parameters()
+        self.feature_model.reset_parameters()
         self.token_embedding.reset_parameters()
         self.comparer.reset_parameters()

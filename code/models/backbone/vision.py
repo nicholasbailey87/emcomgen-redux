@@ -9,25 +9,18 @@ import torch.nn.functional as F
 from torch.nn.utils.weight_norm import WeightNorm
 import torchvision.models as models
 
-from broccoli.activation import SwiGLU, ReLU
+from broccoli.activation import SwiGLU
 from broccoli.vit import ViT, SequencePoolClassificationHead
-
-from mup import MuReadout
 
 class ViT2(nn.Module):
     def __init__(
             self,
             n_feats=(3, 64, 64),
-            embedding_size=16,
-            transformer_heads=4,
-            transformer_layers=4,
-            activation=SwiGLU,
-            logit_projection_layer=MuReadout,
-            transformer_relative_position_embedding=True
+            **kwargs
         ):
         super().__init__()
         
-        self.embedding_size = embedding_size
+        self.embedding_size = kwargs["embedding_size"]
 
         self.backbone = ViT(
             input_size=n_feats[1:],
@@ -48,20 +41,20 @@ class ViT2(nn.Module):
             transformer_normformer=True,
             transformer_post_norm=True,
             transformer_absolute_position_embedding=True,
-            transformer_relative_position_embedding=transformer_relative_position_embedding,
+            transformer_relative_position_embedding=True,
             transformer_embedding_size=self.embedding_size,
-            transformer_layers=transformer_layers,
-            transformer_heads=transformer_heads,
+            transformer_layers=kwargs["layers"],
+            transformer_heads=kwargs["heads"],
             transformer_mlp_ratio=2,
-            transformer_bos_tokens=0,
-            transformer_return_bos_tokens=False,
-            transformer_activation=activation,
+            transformer_utility_tokens=kwargs["utility_tokens"],
+            transformer_return_utility_tokens=False,
+            transformer_activation=SwiGLU,
             transformer_activation_kwargs=None,
             transformer_mlp_dropout=0.,
             transformer_msa_dropout=0.,
             transformer_stochastic_depth=0.1,
             batch_norm_logits=True,
-            logit_projection_layer=logit_projection_layer,
+            logit_projection_layer=nn.Linear,
             linear_module=nn.Linear,
             head=SequencePoolClassificationHead,
         )
@@ -69,28 +62,6 @@ class ViT2(nn.Module):
 
     def forward(self, x):
         return self.backbone(x)
-
-def tiny_vit(n_feats=(3, 64, 64)):
-    return ViT2(
-        n_feats=n_feats,
-        embedding_size=4,
-        transformer_heads=2,
-        transformer_relative_position_embedding=False,
-        transformer_layers=1,
-        activation=nn.GELU,
-        logit_projection_layer=nn.Linear
-    )
-
-def tiny_vit(n_feats=(3, 64, 64)):
-    return ViT2(
-        n_feats=n_feats,
-        embedding_size=32,
-        transformer_heads=4,
-        transformer_relative_position_embedding=True,
-        transformer_layers=4,
-        activation=SwiGLU,
-        logit_projection_layer=nn.Linear
-    )
 
 class Identity(nn.Module):
     def __init__(self):
@@ -451,203 +422,201 @@ class ConvNet(nn.Module):
                 layer.reset_parameters()
 
 
-class ConvNetNopool(
-    nn.Module
-):  # Relation net use a 4 layer conv with pooling in only first two layers, else no pooling
-    def __init__(self, depth, flatten=False):
-        super(ConvNetNopool, self).__init__()
-        trunk = []
-        for i in range(depth):
-            indim = 3 if i == 0 else 64
-            outdim = 64
-            B = ConvBlock(
-                indim, outdim, pool=(i in [0, 1]), padding=0 if i in [0, 1] else 1
-            )  # only first two layer has pooling and no padding
-            trunk.append(B)
-
-        if flatten:
-            trunk.append(Flatten())
-
-        self.trunk = nn.Sequential(*trunk)
-        if flatten:
-            # FIXME: This dimension is for conv4 only
-            self.final_feat_dim = 12544
-        else:
-            self.final_feat_dim = [64, 19, 19]
-
-    def forward(self, x):
-        out = self.trunk(x)
-        return out
-
-
-class ConvNetS(nn.Module):  # For omniglot, only 1 input channel, output dim is 64
-    def __init__(self, depth, flatten=True):
-        super(ConvNetS, self).__init__()
-        trunk = []
-        for i in range(depth):
-            indim = 1 if i == 0 else 64
-            outdim = 64
-            B = ConvBlock(indim, outdim, pool=(i < 4))  # only pooling for fist 4 layers
-            trunk.append(B)
-
-        if flatten:
-            trunk.append(Flatten())
-
-        self.trunk = nn.Sequential(*trunk)
-        self.final_feat_dim = 64
-
-    def forward(self, x):
-        out = x[:, 0:1, :, :]  # only use the first dimension
-        out = self.trunk(out)
-        return out
-
-
-class ConvNetSNopool(
-    nn.Module
-):  # Relation net use a 4 layer conv with pooling in only first two layers, else no pooling. For omniglot, only 1 input channel, output dim is [64,5,5]
-    def __init__(self, depth):
-        super(ConvNetSNopool, self).__init__()
-        trunk = []
-        for i in range(depth):
-            indim = 1 if i == 0 else 64
-            outdim = 64
-            B = ConvBlock(
-                indim, outdim, pool=(i in [0, 1]), padding=0 if i in [0, 1] else 1
-            )  # only first two layer has pooling and no padding
-            trunk.append(B)
-
-        self.trunk = nn.Sequential(*trunk)
-        self.final_feat_dim = [64, 5, 5]
-
-    def forward(self, x):
-        out = x[:, 0:1, :, :]  # only use the first dimension
-        out = self.trunk(out)
-        return out
-
-
-class ResNet(nn.Module):
-    maml = False  # Default
-
-    def __init__(self, block, list_of_num_layers, list_of_out_dims, flatten=True):
-        # list_of_num_layers specifies number of layers in each stage
-        # list_of_out_dims specifies number of output channel for each stage
-        super(ResNet, self).__init__()
-        assert len(list_of_num_layers) == 4, "Can have only four stages"
-        if self.maml:
-            conv1 = Conv2d_fw(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
-            bn1 = BatchNorm2d_fw(64)
-        else:
-            conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
-            bn1 = nn.BatchNorm2d(64)
-
-        relu = nn.ReLU()
-        pool1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-
-        init_layer(conv1)
-        init_layer(bn1)
-
-        trunk = [conv1, bn1, relu, pool1]
-
-        indim = 64
-        for i in range(4):
-
-            for j in range(list_of_num_layers[i]):
-                half_res = (i >= 1) and (j == 0)
-                B = block(indim, list_of_out_dims[i], half_res)
-                trunk.append(B)
-                indim = list_of_out_dims[i]
-
-        if flatten:
-            avgpool = nn.AvgPool2d(7)
-            trunk.append(avgpool)
-            trunk.append(Flatten())
-            self.final_feat_dim = indim
-        else:
-            self.final_feat_dim = [indim, 7, 7]
-
-        self.trunk = nn.Sequential(*trunk)
-
-    def forward(self, x):
-        out = self.trunk(x)
-        return out
-
-    def reset_parameters(self):
-        reset_parameters(self)
-
-
 def Conv4(
-    # Conv4 doesn't care how big the image is, due to pooling,
-    #     but I put this here for consistent interface with ViT:
-    n_feats=(3, 64, 64)
+    **kwargs
 ):
     return ConvNet(4)
 
+# MODELS BELOW HERE SHOULD NOT BE USED
 
-def Conv6():
-    return ConvNet(6)
+# class ConvNetNopool(
+#     nn.Module
+# ):  # Relation net use a 4 layer conv with pooling in only first two layers, else no pooling
+#     def __init__(self, depth, flatten=False):
+#         super(ConvNetNopool, self).__init__()
+#         trunk = []
+#         for i in range(depth):
+#             indim = 3 if i == 0 else 64
+#             outdim = 64
+#             B = ConvBlock(
+#                 indim, outdim, pool=(i in [0, 1]), padding=0 if i in [0, 1] else 1
+#             )  # only first two layer has pooling and no padding
+#             trunk.append(B)
 
+#         if flatten:
+#             trunk.append(Flatten())
 
-def Conv4NP():
-    return ConvNetNopool(4, flatten=True)
+#         self.trunk = nn.Sequential(*trunk)
+#         if flatten:
+#             # FIXME: This dimension is for conv4 only
+#             self.final_feat_dim = 12544
+#         else:
+#             self.final_feat_dim = [64, 19, 19]
 
-
-def Conv6NP():
-    return ConvNetNopool(6)
-
-
-def Conv4S():
-    return ConvNetS(4)
-
-
-def Conv4SNP():
-    return ConvNetSNopool(4)
-
-
-def ResNet10(flatten=True):
-    return ResNet(SimpleBlock, [1, 1, 1, 1], [64, 128, 256, 512], flatten)
-
-
-def reset_parameters(model):
-    def weight_reset(m):
-        if (
-            isinstance(m, nn.Conv1d)
-            or isinstance(m, nn.Conv2d)
-            or isinstance(m, nn.Linear)
-            or isinstance(m, nn.Conv3d)
-            or isinstance(m, nn.ConvTranspose1d)
-            or isinstance(m, nn.ConvTranspose2d)
-            or isinstance(m, nn.ConvTranspose3d)
-            or isinstance(m, nn.BatchNorm1d)
-            or isinstance(m, nn.BatchNorm2d)
-            or isinstance(m, nn.BatchNorm3d)
-            or isinstance(m, nn.GroupNorm)
-        ):
-            m.reset_parameters()
-
-    model.apply(weight_reset)
+#     def forward(self, x):
+#         out = self.trunk(x)
+#         return out
 
 
-def ResNet18(flatten=True):
-    rn18 = ResNet(SimpleBlock, [2, 2, 2, 2], [64, 128, 256, 512], flatten)
-    return rn18
+# class ConvNetS(nn.Module):  # For omniglot, only 1 input channel, output dim is 64
+#     def __init__(self, depth, flatten=True):
+#         super(ConvNetS, self).__init__()
+#         trunk = []
+#         for i in range(depth):
+#             indim = 1 if i == 0 else 64
+#             outdim = 64
+#             B = ConvBlock(indim, outdim, pool=(i < 4))  # only pooling for fist 4 layers
+#             trunk.append(B)
+
+#         if flatten:
+#             trunk.append(Flatten())
+
+#         self.trunk = nn.Sequential(*trunk)
+#         self.final_feat_dim = 64
+
+#     def forward(self, x):
+#         out = x[:, 0:1, :, :]  # only use the first dimension
+#         out = self.trunk(out)
+#         return out
 
 
-def PretrainedResNet18():
-    rn18 = models.resnet18(pretrained=True)
-    rn18.final_feat_dim = 512
-    rn18.fc = Identity()  # We don't use final fc
-    # Define reset parameters on resnet18
-    rn18.reset_parameters = reset_parameters.__get__(rn18)
-    return rn18
+# class ConvNetSNopool(
+#     nn.Module
+# ):  # Relation net use a 4 layer conv with pooling in only first two layers, else no pooling. For omniglot, only 1 input channel, output dim is [64,5,5]
+#     def __init__(self, depth):
+#         super(ConvNetSNopool, self).__init__()
+#         trunk = []
+#         for i in range(depth):
+#             indim = 1 if i == 0 else 64
+#             outdim = 64
+#             B = ConvBlock(
+#                 indim, outdim, pool=(i in [0, 1]), padding=0 if i in [0, 1] else 1
+#             )  # only first two layer has pooling and no padding
+#             trunk.append(B)
+
+#         self.trunk = nn.Sequential(*trunk)
+#         self.final_feat_dim = [64, 5, 5]
+
+#     def forward(self, x):
+#         out = x[:, 0:1, :, :]  # only use the first dimension
+#         out = self.trunk(out)
+#         return out
 
 
-def ResNet34(flatten=True):
-    return ResNet(SimpleBlock, [3, 4, 6, 3], [64, 128, 256, 512], flatten)
+# class ResNet(nn.Module):
+#     maml = False  # Default
+
+#     def __init__(self, block, list_of_num_layers, list_of_out_dims, flatten=True):
+#         # list_of_num_layers specifies number of layers in each stage
+#         # list_of_out_dims specifies number of output channel for each stage
+#         super(ResNet, self).__init__()
+#         assert len(list_of_num_layers) == 4, "Can have only four stages"
+#         if self.maml:
+#             conv1 = Conv2d_fw(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+#             bn1 = BatchNorm2d_fw(64)
+#         else:
+#             conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+#             bn1 = nn.BatchNorm2d(64)
+
+#         relu = nn.ReLU()
+#         pool1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+#         init_layer(conv1)
+#         init_layer(bn1)
+
+#         trunk = [conv1, bn1, relu, pool1]
+
+#         indim = 64
+#         for i in range(4):
+
+#             for j in range(list_of_num_layers[i]):
+#                 half_res = (i >= 1) and (j == 0)
+#                 B = block(indim, list_of_out_dims[i], half_res)
+#                 trunk.append(B)
+#                 indim = list_of_out_dims[i]
+
+#         if flatten:
+#             avgpool = nn.AvgPool2d(7)
+#             trunk.append(avgpool)
+#             trunk.append(Flatten())
+#             self.final_feat_dim = indim
+#         else:
+#             self.final_feat_dim = [indim, 7, 7]
+
+#         self.trunk = nn.Sequential(*trunk)
+
+#     def forward(self, x):
+#         out = self.trunk(x)
+#         return out
+
+#     def reset_parameters(self):
+#         reset_parameters(self)
+
+# def Conv6():
+#     return ConvNet(6)
 
 
-def ResNet50(flatten=True):
-    return ResNet(BottleneckBlock, [3, 4, 6, 3], [256, 512, 1024, 2048], flatten)
+# def Conv4NP():
+#     return ConvNetNopool(4, flatten=True)
 
 
-def ResNet101(flatten=True):
-    return ResNet(BottleneckBlock, [3, 4, 23, 3], [256, 512, 1024, 2048], flatten)
+# def Conv6NP():
+#     return ConvNetNopool(6)
+
+
+# def Conv4S():
+#     return ConvNetS(4)
+
+
+# def Conv4SNP():
+#     return ConvNetSNopool(4)
+
+
+# def ResNet10(flatten=True):
+#     return ResNet(SimpleBlock, [1, 1, 1, 1], [64, 128, 256, 512], flatten)
+
+
+# def reset_parameters(model):
+#     def weight_reset(m):
+#         if (
+#             isinstance(m, nn.Conv1d)
+#             or isinstance(m, nn.Conv2d)
+#             or isinstance(m, nn.Linear)
+#             or isinstance(m, nn.Conv3d)
+#             or isinstance(m, nn.ConvTranspose1d)
+#             or isinstance(m, nn.ConvTranspose2d)
+#             or isinstance(m, nn.ConvTranspose3d)
+#             or isinstance(m, nn.BatchNorm1d)
+#             or isinstance(m, nn.BatchNorm2d)
+#             or isinstance(m, nn.BatchNorm3d)
+#             or isinstance(m, nn.GroupNorm)
+#         ):
+#             m.reset_parameters()
+
+#     model.apply(weight_reset)
+
+
+# def ResNet18(flatten=True):
+#     rn18 = ResNet(SimpleBlock, [2, 2, 2, 2], [64, 128, 256, 512], flatten)
+#     return rn18
+
+
+# def PretrainedResNet18():
+#     rn18 = models.resnet18(pretrained=True)
+#     rn18.final_feat_dim = 512
+#     rn18.fc = Identity()  # We don't use final fc
+#     # Define reset parameters on resnet18
+#     rn18.reset_parameters = reset_parameters.__get__(rn18)
+#     return rn18
+
+
+# def ResNet34(flatten=True):
+#     return ResNet(SimpleBlock, [3, 4, 6, 3], [64, 128, 256, 512], flatten)
+
+
+# def ResNet50(flatten=True):
+#     return ResNet(BottleneckBlock, [3, 4, 6, 3], [256, 512, 1024, 2048], flatten)
+
+
+# def ResNet101(flatten=True):
+#     return ResNet(BottleneckBlock, [3, 4, 23, 3], [256, 512, 1024, 2048], flatten)
