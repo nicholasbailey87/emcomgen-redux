@@ -287,17 +287,17 @@ def run(
 
     if training:
         optimizer.zero_grad()
-        this_epoch_eps = max(0.0, config['sender']['arguments']['eps'] - (epoch * config['sender']['arguments']['eps_anneal']))
-        this_epoch_uniform_weight = max(
-            0.0, config['sender']['arguments']['uniform_weight'] - (epoch * config['sender']['arguments']['uniform_weight_anneal'])
-        )
-        this_epoch_softmax_temp = max(
-            1.0, config['sender']['arguments']['temperature'] - (epoch * config['sender']['arguments']['temperature_annealing'])
-        )
-    else:
-        this_epoch_eps = 0.0
-        this_epoch_uniform_weight = 0.0
-        this_epoch_softmax_temp = 1.0
+        # this_epoch_eps = max(0.0, config['sender']['arguments']['eps'] - (epoch * config['sender']['arguments']['eps_anneal']))
+        # this_epoch_uniform_weight = max(
+        #     0.0, config['sender']['arguments']['uniform_weight'] - (epoch * config['sender']['arguments']['uniform_weight_anneal'])
+        # )
+        # this_epoch_softmax_temp = max(
+        #     1.0, config['sender']['arguments']['temperature'] - (epoch * config['sender']['arguments']['temperature_annealing'])
+        # )
+    # else:
+    #     this_epoch_eps = 0.0
+    #     this_epoch_uniform_weight = 0.0
+    #     this_epoch_softmax_temp = 1.0
     
     setup_finished_in = time() - epoch_start
 
@@ -352,10 +352,10 @@ def run(
                 lang, states = pair.sender(
                     spk_inp,
                     spk_y,
-                    max_len=config['sender']['arguments']['message_length'],
-                    eps=this_epoch_eps,
-                    softmax_temp=this_epoch_softmax_temp,
-                    uniform_weight=this_epoch_uniform_weight,
+                    # max_len=config['sender']['arguments']['message_length'],
+                    # eps=this_epoch_eps,
+                    # softmax_temp=this_epoch_softmax_temp,
+                    # uniform_weight=this_epoch_uniform_weight,
                 )
 
                 sender_inference_end = time()
@@ -627,7 +627,8 @@ if __name__ == "__main__":
     
     print("Starting to train")
 
-    compiled_run_function = torch.compile(run)
+    if config['compile']:
+        run = torch.compile(run)
 
     for epoch in range(epochs):
         # No reset on epoch 0, but reset after epoch 2, epoch 4, etc
@@ -641,7 +642,7 @@ if __name__ == "__main__":
         metrics["epoch"] = epoch
 
         # Train
-        train_metrics, lang = compiled_run_function("train", epoch, *run_args)
+        train_metrics, lang = run("train", epoch, *run_args)
         util.update_with_prefix(metrics, train_metrics, "train")
 
         # Eval across seen/unseen splits, and all game configurations
@@ -654,7 +655,7 @@ if __name__ == "__main__":
                 for split_type in ["", "_same"]:
                     sname = f"{split}{split_type}_{game_type}"
                     if sname in dataloaders:
-                        eval_metrics, eval_lang = compiled_run_function(sname, epoch, *run_args)
+                        eval_metrics, eval_lang = run(sname, epoch, *run_args)
                         util.update_with_prefix(metrics, eval_metrics, sname)
                         if this_game_type == game_type:
                             # Default

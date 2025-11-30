@@ -157,11 +157,11 @@ def load_other_data(this_game_type, split, dataset, fast=False, into_memory=Fals
 
 def load(config, fast=False):
     datas = {}
-    if config['sender']['arguments']['image_encoder'] == "PretrainedResNet18":
-        # Need larger images
-        image_size = 224
-    else:
-        image_size = 64
+    # if config['sender']['arguments']['image_encoder'] == "PretrainedResNet18":
+    #     # Need larger images
+    #     image_size = 224
+    # else:
+    image_size = 64
 
     for split in SPLITS:
         sfile = os.path.join(config['data']['dataset'], f"{split}.npz")

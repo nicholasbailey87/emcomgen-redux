@@ -106,7 +106,7 @@ class SenderGRULM(nn.Module):
 
         self.outputs2vocab = nn.Linear(
             self.d_model * self.directions,
-            self.vocabulary
+            self.vocabulary + 2 # +2 for SOS and EOS
         )
 
         self.init_h = nn.Linear(
@@ -115,7 +115,7 @@ class SenderGRULM(nn.Module):
         )
         
         self.token_embedding = nn.Embedding(
-            self.vocabulary,
+            self.vocabulary + 2, # +2 for SOS and EOS
             self.token_embedding_size
         )
 
@@ -144,7 +144,7 @@ class SenderGRULM(nn.Module):
         lang = []
 
         # Create and add SOS token
-        sos_onehot = torch.zeros(batch_size, 1, self.vocabulary).to(prototypes[0].device)
+        sos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 2).to(prototypes[0].device)
         sos_onehot[:, 0, data.language.SOS_IDX] = 1.0
         lang.append(sos_onehot)
 
@@ -189,7 +189,7 @@ class SenderGRULM(nn.Module):
             inputs = (predicted_onehot.unsqueeze(1)) @ self.token_embedding.weight # (B, 1, D)
 
         # Add final EOS token
-        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary).to(prototypes[0].device)
+        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 2).to(prototypes[0].device)
         eos_onehot[:, 0, data.language.EOS_IDX] = 1.0
         lang.append(eos_onehot)
 
@@ -319,7 +319,10 @@ class SenderTransformerLM(nn.Module):
             return_utility_tokens=False,
         )
 
-        self.outputs2vocab = nn.Linear(self.d_model, self.vocabulary)
+        self.outputs2vocab = nn.Linear(
+            self.d_model,
+            self.vocabulary + 2 # +2 for SOS and EOS
+        )
 
         self.reset_parameters()
 
@@ -413,9 +416,9 @@ class SenderTransformerLM(nn.Module):
 
         onehot_content = onehot_content - outputs.detach() + outputs
 
-        sos_onehot = torch.zeros(batch_size, 1, self.vocabulary, device=device)
+        sos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 2, device=device)
         sos_onehot[:, 0, data.language.SOS_IDX] = 1.0
-        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary, device=device)
+        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 2, device=device)
         eos_onehot[:, 0, data.language.EOS_IDX] = 1.0
 
         onehot = torch.cat([sos_onehot, onehot_content, eos_onehot], dim=1)

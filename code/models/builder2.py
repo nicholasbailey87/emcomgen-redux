@@ -7,17 +7,8 @@ from . import sender2 as sender
 from . import receiver2 as receiver
 
 from .backbone import vision
-from .backbone import BACKBONES
 
 from torch import optim, nn
-
-from data.shapeworld import SHAPES, COLORS
-
-# In my work, this is never used:
-DEFAULT_MODELS = {
-    "shapeworld": vision.Conv4,
-    "cub": vision.ResNet18,
-}
 
 
 def is_transformer_param(name):
@@ -45,8 +36,11 @@ def build_models(dataloaders, config):
         n_feats=n_feats,
         **config['sender_feature_model']
     )
-    sender_prototyper = sender_prototyper_class(config['sender']['arguments']['d_model'])
-    sender_language_model = sender_language_model_class(**config['sender_language_model'])
+    sender_prototyper = sender_prototyper_class(sender_feature_model.final_feat_dim)
+    sender_language_model = sender_language_model_class(
+        sender_feature_model.final_feat_dim,
+        **config['sender_language_model']
+    )
 
     sender_ = sender_class(
         feat_model = sender_feature_model,
@@ -62,7 +56,7 @@ def build_models(dataloaders, config):
     
     receiver_feature_model = receiver_feature_model_class(n_feats=n_feats)
     receiver_token_embedding_module = nn.Embedding(
-        config['sender_language_model']['vocabulary'] + 2,
+        config['sender_language_model']['vocabulary'] + 2, # +2 for SOS and EOS
         config['receiver_comparer']['token_embedding_size']
     )
     if (
@@ -81,7 +75,7 @@ def build_models(dataloaders, config):
 
     receiver_comparer = receiver_comparer_class(
         receiver_feature_model.final_feat_dim,
-        config
+        **config['receiver_comparer']
     )
 
     receiver_ = receiver_class(

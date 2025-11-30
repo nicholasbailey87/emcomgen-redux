@@ -3,6 +3,7 @@
 name = "DEFAULT" # experiment name - should be the same as file name
 experiments_directory = "../exp"
 cuda = true
+compile = false
 wandb = false
 wandb_project_name = "cc"
 use_lang = true
@@ -75,7 +76,7 @@ confidence_based_exploration = true
 uniform_weight = 0.1
 dropout = 0.1
 layers = 1
-bidirectional = False
+bidirectional = false
 heads = 4 # Heads per layer - only applies to Transformer language models
 utility_tokens = 4 # Only applies to Transformer language models
 
@@ -94,10 +95,6 @@ layers = 1
 message_length = 4 # Only applies to Transformer comparers. Should be the same as sender_language_model.message_length
 heads = 4 # Only applies to Transformer comparers
 utility_tokens = 0 # Only applies to Transformer comparers
-
-bidirectional = False
-dropout = 0.1
-temperature = 1.0
 
 [shapeworld.data]
 ref_dataset="../data/shapeworld_ref"
