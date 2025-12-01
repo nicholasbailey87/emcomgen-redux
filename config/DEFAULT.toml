@@ -32,7 +32,7 @@ save_interval = 10
 
 [data]
 dataset = "../data/shapeworld"
-ref_dataset="../data/shapeworld_ref"
+ref_dataset = "../data/shapeworld_ref"
 load_shapeworld_into_memory = false
 batch_size = 32
 percent_novel = 1.0
