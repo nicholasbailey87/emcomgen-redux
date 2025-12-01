@@ -415,7 +415,7 @@ def run(
             if dataloader.dataset.name == "cub":
                 attrs = md.numpy()[:, 1:]
                 all_attrs.extend(attrs)
-                all_reprs.extend(states.detach().cpu().numpy())
+                all_reprs.extend(states.detach().cpu().float().numpy())
 
             pushing_metadata_end = time()
             pushing_metadata.append(pushing_metadata_end - getting_true_lang_end)
@@ -612,6 +612,31 @@ if __name__ == "__main__":
         patience=10,
     )
 
+    checkpoint_path = os.path.join(exp_dir, "checkpoint_last.pt")
+    start_epoch = 0
+    
+    # Initialize metrics normally first
+    metrics = init_metrics()
+    all_metrics = [] # Initialize this too
+
+    if config.get('resume', False) and os.path.exists(checkpoint_path):
+        print(f"Resuming from checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
+        
+        # Load states
+        model_config['pair'].load_state_dict(checkpoint['model_state_dict'])
+        model_config['optimiser'].load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        
+        # Restore metadata
+        start_epoch = checkpoint['epoch']
+        metrics = checkpoint['metrics'] # Restore best_acc, etc.
+        if 'all_metrics' in checkpoint:
+            all_metrics = checkpoint['all_metrics']
+            
+        print(f"Resumed at epoch {start_epoch}")
+
     run_args = (
         model_config['pair'],
         model_config['optimiser'],
@@ -623,16 +648,14 @@ if __name__ == "__main__":
 
     all_metrics = []
     metrics = init_metrics()
-    epochs = config['scheduler']['epochs']
     
     print("Starting to train")
 
     if config['compile']:
         run = torch.compile(run)
 
-    for epoch in range(epochs):
-        # No reset on epoch 0, but reset after epoch 2, epoch 4, etc
-        if (
+    for epoch in range(start_epoch, config['scheduler']['epochs']):
+        if (# No reset on epoch 0, but reset after epoch 2, epoch 4, etc
             config['receiver_reset_interval'] > 0
             and (epoch % config['receiver_reset_interval']) == 0
         ):
@@ -696,6 +719,21 @@ if __name__ == "__main__":
             torch.save(model_config['pair'].state_dict(), model_fname)
             if config['use_lang']:
                 lang.to_csv(os.path.join(exp_dir, f"{epoch}_lang.csv"), index=False)
+
+        # Checkpoint every epoch to allow resuming
+        checkpoint_state = {
+            'epoch': epoch + 1, # Save the NEXT epoch index
+            'model_state_dict': model_config['pair'].state_dict(),
+            'optimizer_state_dict': model_config['optimiser'].state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'scaler_state_dict': scaler.state_dict(),
+            'metrics': metrics,
+            'all_metrics': all_metrics,
+            'rng_state': torch.get_rng_state(),
+            'cuda_rng_state': torch.cuda.get_rng_state(),
+            'numpy_rng_state': np.random.get_state()
+        }
+        torch.save(checkpoint_state, checkpoint_path)
 
         # Additionally track best for splits separately
         metrics["best_val_acc"] = max(metrics["best_val_acc"], metrics["val_acc"])

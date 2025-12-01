@@ -503,54 +503,56 @@ def Conv4(
 #         return out
 
 
-# class ResNet(nn.Module):
-#     maml = False  # Default
+class ResNet(nn.Module):
+    maml = False  # Default
 
-#     def __init__(self, block, list_of_num_layers, list_of_out_dims, flatten=True):
-#         # list_of_num_layers specifies number of layers in each stage
-#         # list_of_out_dims specifies number of output channel for each stage
-#         super(ResNet, self).__init__()
-#         assert len(list_of_num_layers) == 4, "Can have only four stages"
-#         if self.maml:
-#             conv1 = Conv2d_fw(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
-#             bn1 = BatchNorm2d_fw(64)
-#         else:
-#             conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
-#             bn1 = nn.BatchNorm2d(64)
+    def __init__(self, block, list_of_num_layers, list_of_out_dims, flatten=True):
+        # list_of_num_layers specifies number of layers in each stage
+        # list_of_out_dims specifies number of output channel for each stage
+        super(ResNet, self).__init__()
+        assert len(list_of_num_layers) == 4, "Can have only four stages"
+        if self.maml:
+            conv1 = Conv2d_fw(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+            bn1 = BatchNorm2d_fw(64)
+        else:
+            conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+            bn1 = nn.BatchNorm2d(64)
 
-#         relu = nn.ReLU()
-#         pool1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        relu = nn.ReLU()
+        pool1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
 
-#         init_layer(conv1)
-#         init_layer(bn1)
+        init_layer(conv1)
+        init_layer(bn1)
 
-#         trunk = [conv1, bn1, relu, pool1]
+        trunk = [conv1, bn1, relu, pool1]
 
-#         indim = 64
-#         for i in range(4):
+        indim = 64
+        for i in range(4):
 
-#             for j in range(list_of_num_layers[i]):
-#                 half_res = (i >= 1) and (j == 0)
-#                 B = block(indim, list_of_out_dims[i], half_res)
-#                 trunk.append(B)
-#                 indim = list_of_out_dims[i]
+            for j in range(list_of_num_layers[i]):
+                half_res = (i >= 1) and (j == 0)
+                B = block(indim, list_of_out_dims[i], half_res)
+                trunk.append(B)
+                indim = list_of_out_dims[i]
 
-#         if flatten:
-#             avgpool = nn.AvgPool2d(7)
-#             trunk.append(avgpool)
-#             trunk.append(Flatten())
-#             self.final_feat_dim = indim
-#         else:
-#             self.final_feat_dim = [indim, 7, 7]
+        if flatten:
+            avgpool = nn.AvgPool2d(7)
+            trunk.append(avgpool)
+            trunk.append(Flatten())
+            self.final_feat_dim = indim
+        else:
+            self.final_feat_dim = [indim, 7, 7]
 
-#         self.trunk = nn.Sequential(*trunk)
+        self.trunk = nn.Sequential(*trunk)
 
-#     def forward(self, x):
-#         out = self.trunk(x)
-#         return out
+    def forward(self, x):
+        out = self.trunk(x)
+        return out
 
-#     def reset_parameters(self):
-#         reset_parameters(self)
+    def reset_parameters(self):
+        for module in self.trunk:
+            if hasattr(module, "reset_parameters"):
+                module.reset_parameters()
 
 # def Conv6():
 #     return ConvNet(6)
@@ -596,9 +598,9 @@ def Conv4(
 #     model.apply(weight_reset)
 
 
-# def ResNet18(flatten=True):
-#     rn18 = ResNet(SimpleBlock, [2, 2, 2, 2], [64, 128, 256, 512], flatten)
-#     return rn18
+def ResNet18(*args, **kwargs):
+    rn18 = ResNet(SimpleBlock, [2, 2, 2, 2], [64, 128, 256, 512], flatten=True)
+    return rn18
 
 
 # def PretrainedResNet18():

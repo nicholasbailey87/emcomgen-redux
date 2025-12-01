@@ -3,4 +3,4 @@
 name = "speed_test" # experiment name - should be the same as file name
 
 [scheduler]
-epochs = 1
+epochs = 2

@@ -2,6 +2,7 @@ from collections import defaultdict
 from pathlib import Path
 import warnings
 import toml
+import copy
 
 class InvalidConfig(Exception):
     pass
@@ -77,43 +78,72 @@ def validate_config(config: dict) -> bool:
             "reference_game_xent=true requires reference_game=true"
         )
     
+    if (
+        config['sender_language_model']['message_length']
+        !=
+        config['receiver_comparer']['message_length']
+    ):
+        raise InvalidConfig(
+            "`sender_language_model` message length must be the same as "
+            "`receiver_comparer` message length."            
+        )
+    
     if 'dataset' not in config['data']:
         raise InvalidConfig(
             "Config TOML must specify ```\n['data']\ndataset = ...```."
         )
 
 def get_config(filepath: str = None, defaults: str = "../config/DEFAULT.toml"):
+    """
+    This function gets a custom experiment config by combining some default
+        parameters with a TOML file specified by the user.
+
+    First get the plain defaults and the dataset-specific defaults.
+
+    Then create a provisional custom config by overwriting the generic
+        default config with the provided custom config.
+    
+    Parse the required data set from the provisional custom config (we don't
+        parse directly from the provided custom TOML file just in case it doesn't
+        specify a data set) and create an updated default by overwriting
+        parameters in the generic default with the parameters from the
+        data-specific defaults.
+    
+    Create the final custom config by overwriting any parameters in the updated
+        defaults that are also found in the custom TOML.
+    """
 
     defaults = parse_toml(defaults)
 
-    config = {
+    plain_default = {
         k: v for k, v in defaults.items()
         if k not in ['shapeworld', 'birds']
     }
+    birds_defaults = defaults['birds']
+
+    active_defaults = copy.deepcopy(plain_default)
+    provisional_config = copy.deepcopy(plain_default)
 
     if filepath is not None:
         custom_config = parse_toml(filepath)
-        recursive_update(config, custom_config)
+        recursive_update(provisional_config, custom_config)
     else:
         custom_config = dict()
            
-    if config['data']['dataset'] == '../data/cub':
-        birds_config = defaults['birds']
-        recursive_update(birds_config, custom_config)
-        recursive_update(config, birds_config)
-    elif config['data']['dataset'] == '../data/shapeworld':
-        shapeworld_config = defaults['shapeworld']
-        recursive_update(shapeworld_config, custom_config)
-        recursive_update(config, shapeworld_config)
+    if provisional_config['data']['dataset'] == '../data/cub':
+        recursive_update(active_defaults, birds_defaults)
+    elif provisional_config['data']['dataset'] == '../data/shapeworld':
+        pass # Defaults are already correct for shapeworld
     else:
         raise InvalidConfig(
             "Dataset must be '../data/cub' or '../data/shapeworld'."
         )
-
-    recursive_update(config, custom_config)
+    
+    actual_config = active_defaults
+    recursive_update(actual_config, custom_config)
 
     safe_config = SafeDict()
-    safe_config.update(config)
+    safe_config.update(actual_config)
     
     validate_config(safe_config)
 
