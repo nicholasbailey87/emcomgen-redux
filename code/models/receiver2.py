@@ -210,7 +210,7 @@ class TransformerCrossAttentionComparer(nn.Module):
             checkpoint_ff=True,
         )
 
-        self.comparison = nn.Linear(self.d_model, 1, bias=False)
+        self.decision = nn.Linear(self.d_model, 1, bias=False)
 
     def forward(
         self,
@@ -234,14 +234,14 @@ class TransformerCrossAttentionComparer(nn.Module):
             encoded_messages
         )
         refined = self.fusion(mixed)
-        scores = self.comparison(refined) # (batch, n_objects, 1)
+        scores = self.decision(refined) # (batch, n_objects, 1)
         return scores.squeeze(-1) # (batch, n_objects)
 
     def reset_parameters(self):
         self.encoding.reset_parameters()
         self.fusion.reset_parameters()
         self.cross_attention.reset_parameters()
-        self.comparison.reset_parameters()
+        self.decision.reset_parameters()
 
 
 class Receiver(nn.Module):
