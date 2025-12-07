@@ -136,21 +136,46 @@ class TransformerCrossAttentionComparer(nn.Module):
         """
         super().__init__()
         self.d_model = kwargs["d_model"]
-        self.referent_embedding_size = referent_embedding_size
-        self.referent_adapter = nn.Linear(
-            self.referent_embedding_size,
-            self.d_model
-        )
         self.token_embedding_size = kwargs["token_embedding_size"]
-        self.message_adapter = nn.Linear(
-            self.token_embedding_size,
-            self.d_model
-        )
+        self.referent_embedding_size = referent_embedding_size
         self.message_length = kwargs["message_length"]
         self.dropout = kwargs["dropout"]
         self.layers = kwargs["layers"]
         self.heads = kwargs["heads"]
         self.utility_tokens = kwargs["utility_tokens"]
+        self.bidirectional = kwargs["bidirectional"]
+        self.stochastic_depth = 0.1 if int(self.layers // 2) > 1 else 0.0
+
+        self.referent_adapter = nn.Linear(
+            self.referent_embedding_size,
+            self.d_model
+        )
+
+        self.message_adapter = nn.Linear(
+            self.token_embedding_size,
+            self.d_model
+        )
+
+        self.encoding = broccoli.transformer.TransformerEncoder(
+            self.message_length, # seq_len can be none as length-invariant
+            self.d_model,
+            self.layers - (self.layers // 2),
+            self.heads,
+            absolute_position_embedding=True,
+            relative_position_embedding=True,
+            source_size=(self.message_length,),
+            mlp_ratio=2,
+            activation = broccoli.activation.SwiGLU,
+            stochastic_depth=self.stochastic_depth,
+            causal=not self.bidirectional,
+            utility_tokens=self.utility_tokens,
+            return_utility_tokens=False,
+            pre_norm=True,
+            post_norm=True,
+            normformer=True,
+            msa_scaling="d",
+            checkpoint_ff=True,
+        )
 
         self.cross_attention = broccoli.transformer.MHAttention(
             self.d_model,
@@ -161,17 +186,20 @@ class TransformerCrossAttentionComparer(nn.Module):
             scaling="d",
         )
 
-        self.transformer = broccoli.transformer.TransformerEncoder(
-            self.message_length,
+        # Fusion module to refine the cross-attention output
+        # This makes use of the position embeddings from the two encoders,
+        #     so doesn't need its own position embeddings and is seq_len-invariant
+        self.fusion = broccoli.transformer.TransformerEncoder(
+            None, # seq_len can be none as length-invariant
             self.d_model,
-            self.layers,
+            int(self.layers // 2),
             self.heads,
-            absolute_position_embedding=True,
-            relative_position_embedding=True,
+            absolute_position_embedding=False,
+            relative_position_embedding=False,
             source_size=(self.message_length,),
             mlp_ratio=2,
             activation = broccoli.activation.SwiGLU,
-            stochastic_depth=0.0,
+            stochastic_depth=self.stochastic_depth,
             causal=False,
             utility_tokens=self.utility_tokens,
             return_utility_tokens=False,
@@ -182,7 +210,7 @@ class TransformerCrossAttentionComparer(nn.Module):
             checkpoint_ff=True,
         )
 
-        self.scorer = nn.Linear(self.d_model, 1, bias=False)
+        self.comparison = nn.Linear(self.d_model, 1, bias=False)
 
     def forward(
         self,
@@ -199,15 +227,21 @@ class TransformerCrossAttentionComparer(nn.Module):
         """
         referents = self.referent_adapter(referents)
         messages = self.message_adapter(messages)
-        mixed = self.cross_attention(referents, messages, messages)
-        transformed = self.transformer(mixed)
-        scores = self.scorer(transformed) # (batch, n_objects, 1)
+        encoded_messages = self.encoding(messages)
+        mixed = self.cross_attention(
+            referents,
+            encoded_messages,
+            encoded_messages
+        )
+        refined = self.fusion(mixed)
+        scores = self.comparison(refined) # (batch, n_objects, 1)
         return scores.squeeze(-1) # (batch, n_objects)
 
     def reset_parameters(self):
+        self.encoding.reset_parameters()
+        self.fusion.reset_parameters()
         self.cross_attention.reset_parameters()
-        self.transformer.reset_parameters()
-        self.scorer.reset_parameters()
+        self.comparison.reset_parameters()
 
 
 class Receiver(nn.Module):
