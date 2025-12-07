@@ -54,7 +54,10 @@ def build_models(dataloaders, config):
     receiver_feature_model_class = getattr(vision, config['receiver']['feature_model'])
     receiver_comparer_class = getattr(receiver, config['receiver']['comparer'])
     
-    receiver_feature_model = receiver_feature_model_class(n_feats=n_feats)
+    receiver_feature_model = receiver_feature_model_class(
+        n_feats=n_feats,
+        **config['sender_feature_model']
+    )
     receiver_token_embedding_module = nn.Embedding(
         config['sender_language_model']['vocabulary'] + 2, # +2 for SOS and EOS
         config['receiver_comparer']['token_embedding_size']

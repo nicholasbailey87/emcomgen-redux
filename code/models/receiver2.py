@@ -149,7 +149,6 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.message_length = kwargs["message_length"]
         self.d_model = kwargs["d_model"]
         self.dropout = kwargs["dropout"]
-        self.bidirectional = kwargs["bidirectional"]
         self.layers = kwargs["layers"]
         self.heads = kwargs["heads"]
         self.utility_tokens = kwargs["utility_tokens"]

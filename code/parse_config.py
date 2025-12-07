@@ -115,14 +115,13 @@ def get_config(filepath: str = None, defaults: str = "../config/DEFAULT.toml"):
 
     defaults = parse_toml(defaults)
 
-    plain_default = {
+    active_defaults = {
         k: v for k, v in defaults.items()
         if k not in ['shapeworld', 'birds']
     }
     birds_defaults = defaults['birds']
 
-    active_defaults = copy.deepcopy(plain_default)
-    provisional_config = copy.deepcopy(plain_default)
+    provisional_config = copy.deepcopy(active_defaults)
 
     if filepath is not None:
         custom_config = parse_toml(filepath)
