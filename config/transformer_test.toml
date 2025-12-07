@@ -1,32 +1,34 @@
 # Updated experimental settings, required to run perceiver models
 
-name = "speed_test" # experiment name - should be the same as file name
+name = "transformer_test" # experiment name - should be the same as file name
+compile = true
 
 [scheduler]
 epochs = 2
 
 [sender]
 feature_model = "ViT2"
-vision_dropout = 0.
+vision_dropout = 0.0
 prototyper = "AttentionPrototyper"
 language_model = "SenderTransformerLM"
 
 [sender_feature_model]
-embedding_size = 128 # Only applies to Transformer vision models
-layers = 4 # Only applies to Transformer vision models
+embedding_size = 64 # Only applies to Transformer vision models
+layers = 2 # Only applies to Transformer vision models
 heads = 4 # Only applies to Transformer vision models
-utility_tokens = 16 # Only applies to Transformer vision models
+utility_tokens = 4 # Only applies to Transformer vision models
 
 [sender_language_model]
 message_length = 7 # Leave this in for Transformer agents to make sure it matches receiver model
-d_model = 128
-uniform_weight = 0.
-dropout = 0.
-layers = 4
+token_embedding_size = 64 # Must be the same as d_model for transformers
+d_model = 64
+uniform_weight = 0.0
+dropout = 0.0
+layers = 2
 bidirectional = true
 confidence_based_exploration = true # Only applies to Transformer language models
 heads = 4 # Heads per layer - only applies to Transformer language models
-utility_tokens = 16 # Only applies to Transformer language models
+utility_tokens = 4 # Only applies to Transformer language models
 
 [receiver]
 class = "Receiver"
@@ -35,17 +37,17 @@ comparer = "TransformerCrossAttentionComparer"
 vision_dropout = 0.1
 
 [receiver_feature_model]
-embedding_size = 128 # Only applies to Transformer vision models
-layers = 4 # Only applies to Transformer vision models
+embedding_size = 64 # Only applies to Transformer vision models
+layers = 2 # Only applies to Transformer vision models
 heads = 4 # Only applies to Transformer vision models
-utility_tokens = 16 # Only applies to Transformer vision models
+utility_tokens = 4 # Only applies to Transformer vision models
 
 [receiver_comparer]
 token_embedding_size = 500
-d_model = 128
-dropout = 0.
-layers = 4
+d_model = 64
+dropout = 0.0
+layers = 2
 bidirectional = true # No affect on transformer receivers
 message_length = 7 # Only applies to Transformer comparers. Should be the same as sender_language_model.message_length
 heads = 4 # Only applies to Transformer comparers
-utility_tokens = 0 # Only applies to Transformer comparers
+utility_tokens = 4 # Only applies to Transformer comparers

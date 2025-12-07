@@ -2,7 +2,6 @@
 Train an RNN decoder to make binary predictions;
 then train an RNN language model to generate sequences
 """
-from time import time
 from typing import List, Union
 
 from torch.amp import GradScaler, autocast
@@ -265,7 +264,6 @@ def run(
         Metrics from this run; keys are statistics and values are their average
         values across the batches
     """
-    epoch_start = time()
     bce_criterion = nn.BCEWithLogitsLoss()
     xent_criterion = nn.CrossEntropyLoss()
     training = (split == "train") and not force_no_train
@@ -298,22 +296,8 @@ def run(
     #     this_epoch_eps = 0.0
     #     this_epoch_uniform_weight = 0.0
     #     this_epoch_softmax_temp = 1.0
-    
-    setup_finished_in = time() - epoch_start
-
-    # Performance stats
-    def avg(x: List[Union[float, int]]): return sum(x) / len(x)
-    batch_preparation = []
-    sender_inference = []
-    receiver_inference = []
-    saving_language = []
-    getting_true_lang = []
-    pushing_metadata = []
-    optimising = []
-    updating_stats = []
 
     for batch_i, batch in enumerate(dataloader):
-        batch_start = time()
         spk_inp, spk_y, lis_inp, lis_y, true_lang, md, idx = batch
         batch_size = spk_inp.shape[0]
 
@@ -333,9 +317,6 @@ def run(
             spk_y = spk_y.cuda()
             lis_inp = lis_inp.cuda()
             lis_y = lis_y.cuda()
-        
-        batch_preparation_end = time()
-        batch_preparation.append(batch_preparation_end - batch_start)
 
         # This is the bit where the models process the inputs
         with autocast(
@@ -358,13 +339,7 @@ def run(
                     # uniform_weight=this_epoch_uniform_weight,
                 )
 
-                sender_inference_end = time()
-                sender_inference.append(sender_inference_end - batch_preparation_end)
-
                 lis_scores = pair.receiver(lis_inp, lang)#, lang_length)
-
-                receiver_inference_end = time()
-                receiver_inference.append(receiver_inference_end - sender_inference_end)
 
             # Evaluate loss and accuracy
             if config['reference_game_xent']:
@@ -393,9 +368,6 @@ def run(
                 lang_text_unjoined = [["N/A"] for _ in range(batch_size)]
                 lang_text = ["N/A" for _ in range(batch_size)]
 
-            saving_language_end = time()
-            saving_language.append(saving_language_end - receiver_inference_end)
-
             true_lang_text = get_true_lang(
                 batch,
                 dataloader.dataset,
@@ -403,9 +375,6 @@ def run(
                 join=False
             )
             true_lang_text_joined = [" ".join(t) for t in true_lang_text]
-
-            getting_true_lang_end = time()
-            getting_true_lang.append(getting_true_lang_end - saving_language_end)
 
             # Game difficulty/other metadata indicator
             all_lang.extend(zip(lang_text, true_lang_text, per_game_acc, md.numpy()))
@@ -416,9 +385,6 @@ def run(
                 attrs = md.numpy()[:, 1:]
                 all_attrs.extend(attrs)
                 all_reprs.extend(states.detach().cpu().float().numpy())
-
-            pushing_metadata_end = time()
-            pushing_metadata.append(pushing_metadata_end - getting_true_lang_end)
 
             if config['joint_training']:
                 class DoNotUse(Exception): pass
@@ -447,40 +413,13 @@ def run(
                 else:
                     backpropped = False
 
-            optimisation_step_end = time()
-            optimising.append(optimisation_step_end - pushing_metadata_end)
-
             stats.update(
                 loss=this_loss, acc=this_acc, batch_size=batch_size, combined_loss=comb_loss
             )
 
-            updating_stats_end = time()
-            updating_stats.append(updating_stats_end - optimisation_step_end)
-
         if training:
             if batch_i % config['optimiser']['log_interval'] == 0:
                 log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats)
-                print("SPEED STATS\n======================")
-                print(f"Batch preparation:\t\t{avg(batch_preparation)} seconds")
-                print(f"Sender inference:\t\t{avg(sender_inference)} seconds")
-                print(f"Receiver inference:\t\t{avg(receiver_inference)} seconds")
-                print(f"Saving language:\t\t{avg(saving_language)} seconds")
-                print(f"Getting true language:\t\t{avg(getting_true_lang)} seconds")
-                print(f"Pushing metadata:\t\t{avg(pushing_metadata)} seconds")
-                print(f"Optimising:\t\t{avg(optimising)} seconds")
-                print(f"Updating stats:\t\t{avg(updating_stats)} seconds")
-                print("==========================")
-                total = (
-                    avg(batch_preparation) +
-                    avg(sender_inference) +
-                    avg(receiver_inference) +
-                    avg(saving_language) +
-                    avg(getting_true_lang) +
-                    avg(pushing_metadata) +
-                    avg(optimising) +
-                    avg(updating_stats)
-                )
-                print(f"Total:\t\t{total} seconds")
 
         if training and not backpropped:
             scaler.unscale_(optimizer)
@@ -636,6 +575,10 @@ if __name__ == "__main__":
             all_metrics = checkpoint['all_metrics']
             
         print(f"Resumed at epoch {start_epoch}")
+    
+    if config['compile']:
+        print("Compiling model...")
+        model_config['pair'] = torch.compile(model_config['pair'])
 
     run_args = (
         model_config['pair'],
@@ -650,9 +593,6 @@ if __name__ == "__main__":
     metrics = init_metrics()
     
     print("Starting to train")
-
-    if config['compile']:
-        run = torch.compile(run)
 
     for epoch in range(start_epoch, config['scheduler']['epochs']):
         if (# No reset on epoch 0, but reset after epoch 2, epoch 4, etc

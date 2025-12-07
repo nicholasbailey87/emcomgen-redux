@@ -301,7 +301,7 @@ class SenderTransformerLM(nn.Module):
         )
 
         self.transformer = broccoli.transformer.TransformerEncoder(
-            self.utility_tokens + self.content_length,
+            self.content_length,
             self.d_model,
             self.layers,
             self.heads,

@@ -135,25 +135,24 @@ class TransformerCrossAttentionComparer(nn.Module):
             with sets of possible message referents.
         """
         super().__init__()
-        self.referent_embedding_size = referent_embedding_size
-        self.token_embedding_size = kwargs["token_embedding_size"]
-
-        if self.token_embedding_size != self.referent_embedding_size:
-            self.adapter = nn.Linear(
-                self.referent_embedding_size,
-                self.token_embedding_size
-            )
-        else:
-            self.adapter = nn.Identity()
-        
-        self.message_length = kwargs["message_length"]
         self.d_model = kwargs["d_model"]
+        self.referent_embedding_size = referent_embedding_size
+        self.referent_adapter = nn.Linear(
+            self.referent_embedding_size,
+            self.d_model
+        )
+        self.token_embedding_size = kwargs["token_embedding_size"]
+        self.message_adapter = nn.Linear(
+            self.token_embedding_size,
+            self.d_model
+        )
+        self.message_length = kwargs["message_length"]
         self.dropout = kwargs["dropout"]
         self.layers = kwargs["layers"]
         self.heads = kwargs["heads"]
         self.utility_tokens = kwargs["utility_tokens"]
 
-        self.cross_attention = broccoli.MHAttention(
+        self.cross_attention = broccoli.transformer.MHAttention(
             self.d_model,
             self.heads,
             dropout=self.dropout,
@@ -162,7 +161,7 @@ class TransformerCrossAttentionComparer(nn.Module):
             scaling="d",
         )
 
-        self.transformer = broccoli.TransformerEncoder(
+        self.transformer = broccoli.transformer.TransformerEncoder(
             self.message_length,
             self.d_model,
             self.layers,
@@ -198,7 +197,8 @@ class TransformerCrossAttentionComparer(nn.Module):
 
         Returns a batch of scores, of shape (batch_size, n_obj)
         """
-        referents = self.adapter(referents)
+        referents = self.referent_adapter(referents)
+        messages = self.message_adapter(messages)
         mixed = self.cross_attention(referents, messages, messages)
         transformed = self.transformer(mixed)
         scores = self.scorer(transformed) # (batch, n_objects, 1)
