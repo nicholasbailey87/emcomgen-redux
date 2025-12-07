@@ -22,6 +22,15 @@ class ViT2(nn.Module):
         
         self.embedding_size = kwargs["embedding_size"]
 
+        self.image_max_side = max(n_feats[1:])
+
+        def close_even_number(x):
+            return int(x) if int(x) % 2 == 0 else int(x) - 1
+        
+        self.pooling_kernel_size = close_even_number((self.image_max_side / 32) * 4)
+        self.pooling_kernel_stride = int(self.pooling_kernel_size / 2)
+        self.pooling_padding = self.pooling_kernel_stride
+
         self.backbone = ViT(
             input_size=n_feats[1:],
             image_classes=self.embedding_size,
@@ -29,9 +38,9 @@ class ViT2(nn.Module):
             initial_batch_norm=True,
             cnn=False,
             pooling_type="concat",
-            pooling_kernel_size=4,
-            pooling_kernel_stride=2,
-            pooling_padding=1,
+            pooling_kernel_size=self.pooling_kernel_size,
+            pooling_kernel_stride=self.pooling_kernel_stride,
+            pooling_padding=self.pooling_padding,
             transformer_feedforward_first=True,
             transformer_initial_ff_residual_path=False, # So that d_model can be as small as we like
             transformer_initial_ff_linear_module_up=None,
