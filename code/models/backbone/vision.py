@@ -20,7 +20,7 @@ class ViT2(nn.Module):
         ):
         super().__init__()
         
-        self.embedding_size = kwargs["embedding_size"]
+        self.d_model = kwargs["d_model"]
 
         self.image_max_side = max(n_feats[1:])
 
@@ -33,7 +33,7 @@ class ViT2(nn.Module):
 
         self.backbone = ViT(
             input_size=n_feats[1:],
-            image_classes=self.embedding_size,
+            image_classes=self.d_model, # Just return an overall embedding
             in_channels=n_feats[0],
             initial_batch_norm=True,
             cnn=False,
@@ -51,7 +51,7 @@ class ViT2(nn.Module):
             transformer_post_norm=True,
             transformer_absolute_position_embedding=True,
             transformer_relative_position_embedding=True,
-            transformer_embedding_size=self.embedding_size,
+            transformer_embedding_size=self.d_model,
             transformer_layers=kwargs["layers"],
             transformer_heads=kwargs["heads"],
             transformer_mlp_ratio=2,
@@ -67,7 +67,7 @@ class ViT2(nn.Module):
             linear_module=nn.Linear,
             head=SequencePoolClassificationHead,
         )
-        self.final_feat_dim = self.embedding_size
+        self.final_feat_dim = self.d_model
 
     def forward(self, x):
         return self.backbone(x)

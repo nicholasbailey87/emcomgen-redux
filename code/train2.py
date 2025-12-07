@@ -7,6 +7,7 @@ from typing import List, Union
 from torch.amp import GradScaler, autocast
 
 import sys
+import os
 from pathlib import Path
 
 import contextlib
@@ -23,7 +24,6 @@ import models.backbone
 import parse_config
 import util
 import data
-import os
 import vis
 import emergence
 
@@ -218,7 +218,6 @@ def init_metrics():
     metrics["best_epoch"] = 0
     return metrics
 
-#TODO: Why is this function so slow?
 def run(
     split,
     epoch,
@@ -285,17 +284,6 @@ def run(
 
     if training:
         optimizer.zero_grad()
-        # this_epoch_eps = max(0.0, config['sender']['arguments']['eps'] - (epoch * config['sender']['arguments']['eps_anneal']))
-        # this_epoch_uniform_weight = max(
-        #     0.0, config['sender']['arguments']['uniform_weight'] - (epoch * config['sender']['arguments']['uniform_weight_anneal'])
-        # )
-        # this_epoch_softmax_temp = max(
-        #     1.0, config['sender']['arguments']['temperature'] - (epoch * config['sender']['arguments']['temperature_annealing'])
-        # )
-    # else:
-    #     this_epoch_eps = 0.0
-    #     this_epoch_uniform_weight = 0.0
-    #     this_epoch_softmax_temp = 1.0
 
     for batch_i, batch in enumerate(dataloader):
         spk_inp, spk_y, lis_inp, lis_y, true_lang, md, idx = batch
@@ -333,13 +321,9 @@ def run(
                 lang, states = pair.sender(
                     spk_inp,
                     spk_y,
-                    # max_len=config['sender']['arguments']['message_length'],
-                    # eps=this_epoch_eps,
-                    # softmax_temp=this_epoch_softmax_temp,
-                    # uniform_weight=this_epoch_uniform_weight,
                 )
 
-                lis_scores = pair.receiver(lis_inp, lang)#, lang_length)
+                lis_scores = pair.receiver(lis_inp, lang)
 
             # Evaluate loss and accuracy
             if config['reference_game_xent']:
@@ -389,14 +373,6 @@ def run(
             if config['joint_training']:
                 class DoNotUse(Exception): pass
                 raise DoNotUse("This should never happen as joint_training should always be false!")
-                # Also train sender on classification task
-                spk_scores = pair.sender.classify_from_states(states, lis_inp)
-                spk_loss = bce_criterion(spk_scores, lis_y)
-                spk_pred = (spk_scores > 0).float()
-                spk_per_game_acc = (spk_pred == lis_y).float().mean(1).cpu().numpy()
-                spk_acc = spk_per_game_acc.mean()
-                stats.update(spk_loss=spk_loss, spk_acc=spk_acc)
-                comb_loss = this_loss + config['joint_training_lambda'] * spk_loss
             else:
                 comb_loss = this_loss
 
@@ -508,12 +484,12 @@ if __name__ == "__main__":
         )
     else:
         config = parse_config.get_config(arguments[0])
-        # from pprint import pprint
-        # pprint(config)
-        # import sys
-        # sys.exit()
 
-    exp_dir = str(Path(config['experiments_directory']) / Path(config['name']))
+    exp_dir = os.path.abspath(
+        str(
+            Path(config['experiments_directory']) / Path(config['name'])
+        )
+    )
     config['exp_dir'] = exp_dir
 
     print(f"LR: {config['optimiser']['lr']}")
@@ -524,27 +500,9 @@ if __name__ == "__main__":
     dataloaders = data.loader.load_dataloaders(config)
     model_config = models.builder2.build_models(dataloaders, config)
     this_game_type = data.util.get_game_type(config)
-
-    # sender_class = getattr(models.sender, config['sender']['class'])
-    # sender = sender_class(**config['sender']['arguments'])
-
-    # receiver_class = getattr(models.receiver, config['receiver']['class'])
-    # receiver = receiver_class(**config['receiver']['arguments'])
-
-    # pair = util.Pair(sender, receiver)
-
-    # if config['cuda']:
-    #     pair = pair.cuda()
-    
-
-    # optimiser = optim.Adam( # FIXME: build a better optimiser here
-    #     pair.parameters(),
-    #     lr=config['optimiser']['lr']
-    # )
-    
     scaler = GradScaler()
     
-    # TODO: replace this with PASS scheduler
+    # TODO: remove this as it's never used
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         model_config['optimiser'],
         factor=0.5,
@@ -561,9 +519,19 @@ if __name__ == "__main__":
     if config.get('resume', False) and os.path.exists(checkpoint_path):
         print(f"Resuming from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, weights_only=False)
-        
-        # Load states
-        model_config['pair'].load_state_dict(checkpoint['model_state_dict'])
+
+        # If agent pair was compiled, model state dict needs cleaning
+        model_state_dict = checkpoint['model_state_dict']
+        new_model_state_dict = {}
+        for k, v in model_state_dict.items():
+            if k.startswith('_orig_mod.'):
+                # Strip the "_orig_mod." prefix (length 10)
+                new_model_state_dict[k[10:]] = v
+            else:
+                new_model_state_dict[k] = v
+
+        model_config['pair'].load_state_dict(new_model_state_dict)
+
         model_config['optimiser'].load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         scaler.load_state_dict(checkpoint['scaler_state_dict'])

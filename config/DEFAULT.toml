@@ -59,7 +59,7 @@ prototyper = "AveragePrototyper"
 language_model = "SenderGRULM"
 
 [sender_feature_model]
-embedding_size = 16 # Only applies to Transformer vision models
+d_model = 16 # Only applies to Transformer vision models
 layers = 4 # Only applies to Transformer vision models
 heads = 4 # Only applies to Transformer vision models
 utility_tokens = 0 # Only applies to Transformer vision models
@@ -85,7 +85,7 @@ comparer = "BilinearGRUComparer"
 vision_dropout = 0.1
 
 [receiver_feature_model]
-embedding_size = 16 # Only applies to Transformer vision models
+d_model = 16 # Only applies to Transformer vision models
 layers = 4 # Only applies to Transformer vision models
 heads = 4 # Only applies to Transformer vision models
 utility_tokens = 0 # Only applies to Transformer vision models
