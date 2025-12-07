@@ -361,7 +361,7 @@ def run(
 
             # Save language
             if config['use_lang']:
-                lang_i = lang.argmax(2)
+                lang_i = lang.argmax(2).detach().cpu()
                 lang_text_unjoined = util.to_emergent_text(lang_i)
                 lang_text = [" ".join(toks) for toks in lang_text_unjoined]
             else:
