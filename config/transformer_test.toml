@@ -3,6 +3,9 @@
 name = "transformer_test" # experiment name - should be the same as file name
 compile = true
 
+[data]
+n_workers = 4
+
 [scheduler]
 epochs = 100
 
@@ -16,19 +19,22 @@ language_model = "SenderTransformerLM"
 d_model = 128 # Only applies to Transformer vision models
 layers = 7 # Only applies to Transformer vision models
 heads = 4 # Only applies to Transformer vision models
-utility_tokens = 16 # Only applies to Transformer vision models
+utility_tokens = 8 # Only applies to Transformer vision models
 
 [sender_language_model]
 message_length = 7 # Leave this in for Transformer agents to make sure it matches receiver model
-token_embedding_size = 64 # Must be the same as d_model for transformers
+token_embedding_size = 128 # Must be the same as d_model for transformer sender
 d_model = 128
-uniform_weight = 0.0
+uniform_weight = 0.1
+softmax_temperature = 8.0
+exploration_temperature = 2.0
+batch_norm_logits = true
 dropout = 0.0
 layers = 7
 bidirectional = true
 confidence_based_exploration = true # Only applies to Transformer language models
 heads = 4 # Heads per layer - only applies to Transformer language models
-utility_tokens = 16 # Only applies to Transformer language models
+utility_tokens = 8 # Only applies to Transformer language models
 
 [receiver]
 class = "Receiver"
@@ -40,7 +46,7 @@ vision_dropout = 0.1
 d_model = 128 # Only applies to Transformer vision models
 layers = 7 # Only applies to Transformer vision models
 heads = 4 # Only applies to Transformer vision models
-utility_tokens = 16 # Only applies to Transformer vision models
+utility_tokens = 8 # Only applies to Transformer vision models
 
 [receiver_comparer]
 token_embedding_size = 500
@@ -50,4 +56,4 @@ layers = 7
 bidirectional = true # No affect on transformer receivers
 message_length = 7 # Only applies to Transformer comparers. Should be the same as sender_language_model.message_length
 heads = 4 # Only applies to Transformer comparers
-utility_tokens = 16 # Only applies to Transformer comparers
+utility_tokens = 8 # Only applies to Transformer comparers

@@ -15,10 +15,61 @@ import torch.nn as nn
 import numpy as np
 from torch.nn import functional as F
 
+import einops
+
 import data
 import data.language
 
 import broccoli
+
+def batch_norm_logits(module: nn.BatchNorm1d, logits: torch.Tensor) -> torch.Tensor:
+    """
+    Applies nn.BatchNorm1d to vocabulary logits that are arranged in a
+        sequence like (batch, seq, vocabulary)
+    
+    Args:
+        module: The nn.BatchNorm1d module
+        logits: Tensor of shape (Batch, Length, Vocab)
+        
+    Returns:
+        Tensor of shape (Batch, Length, Vocab)
+    """
+    logits = module(einops.rearrange(logits, 'b l c -> b c l'))
+    return einops.rearrange(logits, 'b c l -> b l c')
+
+def flatten_logit_distribution(
+    logits: torch.Tensor,
+    uniform_weight: float
+) -> torch.Tensor:
+    """
+    Returns a weighted average of 
+
+    Args:
+        logits: some provided unnormalised log probabilities
+        uniform_weight: the relative weight to give the uniform distribution
+            when mixing it in to the provided logits
+    
+    Returns:
+        A torch.Tensor of logits where the absolute differences between
+            logits is reduced - i..e. a less "certain" distribution
+    """
+    normalised_logits = F.log_softmax(logits, dim=-1)
+    # Make a uniform distribution, but in the log space
+    uniform_log_probs = torch.full_like(
+        normalised_logits,
+        -np.log(logits.shape[-1])
+    )
+    
+    # Mix the log distributions, like log( w * uniform + (1-w) * model )
+    combined_logits = torch.stack(
+        [
+            uniform_log_probs + np.log(uniform_weight),
+            logits + np.log(1 - uniform_weight),
+        ],
+        dim=-1,
+    )
+
+    return torch.logsumexp(combined_logits, dim=-1)
 
 
 class AveragePrototyper(nn.Module):
@@ -88,7 +139,9 @@ class SenderGRULM(nn.Module):
         self.vocabulary = kwargs["vocabulary"]
         self.message_length = kwargs["message_length"]
         self.softmax_temperature = kwargs["softmax_temperature"]
+        self.exploration_temperature = kwargs["exploration_temperature"]
         self.uniform_weight = kwargs["uniform_weight"]
+        self.batch_norm_logits = kwargs["batch_norm_logits"]
         self.dropout = kwargs["dropout"]
         self.layers = kwargs["layers"]
         self.bidirectional = kwargs["bidirectional"]
@@ -106,8 +159,13 @@ class SenderGRULM(nn.Module):
 
         self.outputs2vocab = nn.Linear(
             self.d_model * self.directions,
-            self.vocabulary + 2 # +2 for SOS and EOS
+            self.vocabulary + 4 # +4 for PAD, SOS, EOS, UNK
         )
+
+        if self.batch_norm_logits:
+            self.batch_norm = nn.BatchNorm1d(self.vocabulary + 4) # +4 for PAD, SOS, EOS, UNK
+        else:
+            self.batch_norm = None
 
         self.init_h = nn.Linear(
             2 * referent_embedding_size, 
@@ -115,9 +173,11 @@ class SenderGRULM(nn.Module):
         )
         
         self.token_embedding = nn.Embedding(
-            self.vocabulary + 2, # +2 for SOS and EOS
+            self.vocabulary + 4, # +4 for PAD, SOS, EOS, UNK
             self.token_embedding_size
         )
+
+        self.reset_parameters()
 
     def forward(
         self,
@@ -131,70 +191,72 @@ class SenderGRULM(nn.Module):
             commented upon in the original paper).
         """
         batch_size = prototypes[0].size(0)
+        device = prototypes[0].device
 
         # Initialize hidden state. Must be (num_layers * directions, B, H)
         concatenate_prototypes = torch.cat(prototypes, 1)
-        
         states = (
             self.init_h(concatenate_prototypes)
                 .view(batch_size, self.layers, self.directions, self.d_model)
                 .permute(1, 2, 0, 3).contiguous() # (L, Dir, B, D)
                 .view(self.layers * self.directions, batch_size, self.d_model)
         )
+
         lang = []
 
         # Create and add SOS token
-        sos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 2).to(prototypes[0].device)
+        sos_onehot = torch.zeros(
+            batch_size,
+            1,
+            self.vocabulary + 4, # +4 for PAD, SOS, EOS, UNK
+            device=device
+        )  # Shape: (B, 1, V)
         sos_onehot[:, 0, data.language.SOS_IDX] = 1.0
         lang.append(sos_onehot)
 
-        inputs = sos_onehot # Shape: (B, 1, V)
-        inputs = inputs @ self.token_embedding.weight  # Shape: (B, 1, D)
+        gru_in = sos_onehot @ self.token_embedding.weight  # Shape: (B, 1, D)
 
         # Main sampling loop (fixed length of message_length - 2)
         for i in range(self.message_length - 2):
 
-            # Input is (B, 1, D), Output is (B, 1, H)
-            outputs, states = self.gru(inputs, states)
-
-            # outputs = outputs.squeeze(1) # Shape: (B, H)
-            outputs = self.outputs2vocab(outputs[:, -1, :]) # Shape: (B, V)
-
-            outputs = F.gumbel_softmax(outputs, tau=self.softmax_temperature, hard=False)
-
-            if self.uniform_weight != 0.0:
-                uniform_outputs = torch.full_like(
-                    outputs,
-                    1 / outputs.shape[-1]
-                )
-                outputs = (
-                    (1 - self.uniform_weight) * outputs
-                    +
-                    self.uniform_weight * uniform_outputs
-                )
+            gru_out, states = self.gru(gru_in, states)
             
-            predicted_onehot = (
-                torch.zeros_like(outputs)
-                    .scatter_(
-                        -1,
-                        torch.argmax(outputs, dim=-1).unsqueeze(-1),
-                        1.
-                    )
+            logits = self.outputs2vocab(gru_out[:, -1, :]) # Shape: (B, V)
+
+            if self.batch_norm_logits:
+                # This must come before the uniform weight mixing
+                #     as it would otherwise mess up the distribution
+                logits = self.batch_norm(logits)
+            
+            if self.uniform_weight > 0.0:
+                logits = flatten_logit_distribution(logits, self.uniform_weight)
+
+            logits = logits / self.exploration_temperature
+            
+            # Remove probability mass from reserved tokens
+            # Probability mass there should atrophy anyway as it won't have gradient(?)
+            logits[:, :4] = -float('inf')
+
+            # 5. Gumbel-Softmax (hard=True)
+            # This handles the noise addition + argmax + straight-through gradient
+            predicted_onehot = F.gumbel_softmax(
+                logits,
+                tau=self.softmax_temperature,
+                hard=True,
+                dim=-1
             )
 
-            predicted_onehot = predicted_onehot - outputs.detach() + outputs
-
-            lang.append(predicted_onehot.unsqueeze(1)) # (B, 1, V)
-
-            inputs = (predicted_onehot.unsqueeze(1)) @ self.token_embedding.weight # (B, 1, D)
+            # 6. Prepare next input
+            lang.append(predicted_onehot.unsqueeze(1))
+            gru_in = (predicted_onehot.unsqueeze(1)) @ self.token_embedding.weight # (B, 1, D)
 
         # Add final EOS token
-        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 2).to(prototypes[0].device)
+        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 2, device=device)
         eos_onehot[:, 0, data.language.EOS_IDX] = 1.0
         lang.append(eos_onehot)
 
-        # Concatenate along the sequence dim (1)
-        lang_tensor = torch.cat(lang, 1) # (B, message_length, V)
+        # Concatenate
+        lang_tensor = torch.cat(lang, 1) 
 
         return lang_tensor
 
@@ -203,6 +265,8 @@ class SenderGRULM(nn.Module):
         self.gru.reset_parameters()
         self.outputs2vocab.reset_parameters()
         self.token_embedding.reset_parameters()
+        if self.batch_norm is not None:
+            self.batch_norm.reset_parameters()
 
 
 class SenderTransformerLM(nn.Module):
@@ -212,42 +276,7 @@ class SenderTransformerLM(nn.Module):
         **kwargs
     ):
         """
-        The idea here is that we create a model that can accept some prototype
-            embeddings of referents and output a message.
-        
-        We allow the model to learn a fixed query tensor, of size
-            (1, message_lengthgth - 2, d_model)
-        
-            We use "message_length - 2" as we save space for SOS and EOS tokens.
-
-        We use cross-attention with this query and the sequence of prototype
-            embeddings to produce an initial sequence for input to a Transformer.
-        
-        The Transformer produces a message-length sequence of embedded tokens,
-            which we project into the vocabulary space with an nn.Linear
-            module.
-
-        We standardise the logits and create a vector of gumbel noise, which we
-            also standardise. We linearly interpolate between these two vectors
-            for each token in each sample in the batch, like
-
-            `confidence * normalised_logits + (1-confidence) * noise`
-        
-            where `confidence` is determined by the entropy of the logits in
-            the following way:
-
-            `c = H(normalised_logits) / log_2(vocabulary)`
-
-        The gumbel noise helps the model to explore new vocabulary, and by
-            using the method described above we encourage more exploration
-            when the model is less sure what word to use in a given context.
-        
-        The evolving preferences of the listener agent(s) is ultimately what
-            dictates the amount of positive feedback for each message, which
-            introduces a mitigation for the "confident idiot" issue where a
-            consistently very confident but very wrong word choice gets
-            little exploration: a consistent word choice in a given context
-            simply becomes part of the language.
+        ...
         
         We prefer softmax temperature higher than 1 (e.g. 16) when using
             straight-through Gumbel softmax, for the reasons described here:
@@ -261,8 +290,9 @@ class SenderTransformerLM(nn.Module):
         self.max_entropy = math.log(self.vocabulary)
         self.message_length = kwargs["message_length"]
         self.softmax_temperature = kwargs["softmax_temperature"]
-        self.confidence_based_exploration = kwargs["confidence_based_exploration"]
+        self.exploration_temperature = kwargs["exploration_temperature"]
         self.uniform_weight = kwargs["uniform_weight"]
+        self.batch_norm_logits = kwargs["batch_norm_logits"]
         self.dropout = kwargs["dropout"]
         self.layers = kwargs["layers"]
         self.bidirectional = kwargs["bidirectional"]
@@ -321,23 +351,15 @@ class SenderTransformerLM(nn.Module):
 
         self.outputs2vocab = nn.Linear(
             self.d_model,
-            self.vocabulary + 2 # +2 for SOS and EOS
+            self.vocabulary + 4 # +4 for PAD, SOS, EOS, UNK
         )
 
-        self.reset_parameters()
+        if self.batch_norm_logits:
+            self.batch_norm = nn.BatchNorm1d(self.vocabulary + 4) # +4 for PAD, SOS, EOS, UNK
+        else:
+            self.batch_norm = None
 
-    def get_noise_coefficients(self, logits):
-        """
-        Calculates the per-token noise coefficient (0.0 to 1.0) for every token
-            in a batch of generated messages. Returns shape: (B, L, 1).
-        """
-        with torch.no_grad():
-            probs = F.softmax(logits, dim=-1)
-            log_probs = F.log_softmax(logits, dim=-1)
-            token_entropy = -(probs * log_probs).sum(dim=-1)
-            norm_entropy = token_entropy / self.max_entropy
-            norm_entropy = torch.clamp(norm_entropy, 0.0, 1.0)
-            return norm_entropy.unsqueeze(-1)
+        self.reset_parameters()
 
     def forward(
         self,
@@ -346,8 +368,6 @@ class SenderTransformerLM(nn.Module):
     ):
         batch_size = prototypes[0].size(0)
         device = prototypes[0].device
-        finfo = torch.finfo(prototypes[0].dtype)
-        eps = finfo.eps
 
         stack_prototypes = torch.stack(prototypes, 1) # To sequence
 
@@ -365,60 +385,30 @@ class SenderTransformerLM(nn.Module):
 
         logits = self.outputs2vocab(outputs)
 
-        uniform_distribution = torch.clamp(
-            torch.rand_like(logits),
-            min=eps,
-            max=1.0 - eps
-        )
+        if self.batch_norm_logits:
+            # This must come before the uniform weight mixing
+            #     as it would otherwise mess up the distribution
+            logits = batch_norm_logits(self.batch_norm, logits)
+            
+        if self.uniform_weight > 0.0:
+            logits = flatten_logit_distribution(logits, self.uniform_weight)
 
-        if self.confidence_based_exploration:
-            noise_coefficients = self.get_noise_coefficients(logits)
-
-            logits_mean = logits.mean(dim=-1, keepdim=True)
-            logits_std = logits.std(dim=-1, keepdim=True)
-            logits_norm = (logits - logits_mean) / (logits_std + eps)
-
-            gumbel_distribution = -torch.log(-torch.log(uniform_distribution))
-            # The Gumbel noise should have approximately these mean and std:
-            gumbel_norm = (gumbel_distribution - 0.58) / 1.28
-
-            logits = (
-                noise_coefficients * gumbel_norm
-                +
-                (1 - noise_coefficients) * logits_norm
-            )
-        else: # Just add Gumbel noise
-            # This looks like subtraction but it should be correct!
-            logits = logits - torch.log(-torch.log(uniform_distribution))
+        logits = logits / self.exploration_temperature
         
-        logits /= self.softmax_temperature
-        outputs = F.softmax(logits, dim=-1)
+        # Remove probability mass from reserved tokens
+        # Probability mass there should atrophy anyway as it won't have gradient(?)
+        logits[:, :, :4] = -float('inf')
 
-        if self.uniform_weight != 0.0:
-            uniform_outputs = torch.full_like(
-                outputs,
-                1 / outputs.shape[-1]
-            )
-            outputs = (
-                (1 - self.uniform_weight) * outputs
-                +
-                self.uniform_weight * uniform_outputs
-            )
-                
-        onehot_content = (
-            torch.zeros_like(outputs)
-                .scatter_(
-                    -1,
-                    torch.argmax(outputs, dim=-1).unsqueeze(-1),
-                    1.
-                )
+        onehot_content = F.gumbel_softmax(
+            logits,
+            tau=self.softmax_temperature,
+            hard=True,
+            dim=-1
         )
 
-        onehot_content = onehot_content - outputs.detach() + outputs
-
-        sos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 2, device=device)
+        sos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 4, device=device)
         sos_onehot[:, 0, data.language.SOS_IDX] = 1.0
-        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 2, device=device)
+        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 4, device=device)
         eos_onehot[:, 0, data.language.EOS_IDX] = 1.0
 
         onehot = torch.cat([sos_onehot, onehot_content, eos_onehot], dim=1)
@@ -430,6 +420,8 @@ class SenderTransformerLM(nn.Module):
         self.cross_attention.reset_parameters()
         self.transformer.reset_parameters()
         self.outputs2vocab.reset_parameters()
+        if self.batch_norm is not None:
+            self.batch_norm.reset_parameters()
 
 
 class Sender(nn.Module):

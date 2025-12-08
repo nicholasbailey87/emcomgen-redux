@@ -59,7 +59,7 @@ def build_models(dataloaders, config):
         **config['sender_feature_model']
     )
     receiver_token_embedding_module = nn.Embedding(
-        config['sender_language_model']['vocabulary'] + 2, # +2 for SOS and EOS
+        config['sender_language_model']['vocabulary'] + 4, # +4 for PAD, SOS, EOS, UNK
         config['receiver_comparer']['token_embedding_size']
     )
     if (
@@ -93,6 +93,7 @@ def build_models(dataloaders, config):
     if config['cuda']:
         pair = pair.cuda()
     
+    # TODO: replace this with something more suitable for transformers:
     optimiser = optim.AdamW(pair.parameters(), lr=config['optimiser']['lr'])
     
     return {
