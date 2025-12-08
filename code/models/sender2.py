@@ -278,9 +278,7 @@ class SenderTransformerLM(nn.Module):
         """
         ...
         
-        We prefer softmax temperature higher than 1 (e.g. 16) when using
-            straight-through Gumbel softmax, for the reasons described here:
-            https://arxiv.org/abs/2502.20604
+        https://arxiv.org/abs/2502.20604
         """
         super().__init__()
         self.referent_embedding_size = referent_embedding_size

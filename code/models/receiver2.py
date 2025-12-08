@@ -210,7 +210,7 @@ class TransformerCrossAttentionComparer(nn.Module):
             checkpoint_ff=True,
         )
 
-        self.decision = nn.Linear(self.d_model, 1, bias=False)
+        self.decision = nn.Linear(self.d_model, 1, bias=True)
 
     def forward(
         self,
