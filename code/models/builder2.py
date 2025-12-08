@@ -10,6 +10,7 @@ from .backbone import vision
 
 from torch import optim, nn
 
+from gradboard.optimiser import get_optimiser
 
 def is_transformer_param(name):
     return name.startswith("sender.transformer") or name.startswith("sender.cls_emb")
@@ -93,8 +94,11 @@ def build_models(dataloaders, config):
     if config['cuda']:
         pair = pair.cuda()
     
-    # TODO: replace this with something more suitable for transformers:
-    optimiser = optim.AdamW(pair.parameters(), lr=config['optimiser']['lr'])
+    optimiser = get_optimiser(
+        pair,
+        lr=config['optimiser']['lr'],
+        weight_decay=config['optimiser']['weight_decay']
+    )
     
     return {
         "pair": pair,
