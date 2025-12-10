@@ -251,7 +251,7 @@ class SenderGRULM(nn.Module):
             gru_in = (predicted_onehot.unsqueeze(1)) @ self.token_embedding.weight # (B, 1, D)
 
         # Add final EOS token
-        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 2, device=device)
+        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 4, device=device)
         eos_onehot[:, 0, data.language.EOS_IDX] = 1.0
         lang.append(eos_onehot)
 

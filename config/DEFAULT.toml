@@ -51,8 +51,9 @@ log_interval = 100
 [scheduler]
 warm_up_epochs = 0
 epochs = 100
-lr_schedule_shape="ascent" # will be a straight line as cool point multiplier = 1.0
-cool_point_multiplier=1.0
+lr_schedule_shape = "ascent" # will be a straight line as cool point multiplier = 1.0
+cool_point_multiplier = 1.0
+range_test = false
 
 [sender]
 class = "Sender"
