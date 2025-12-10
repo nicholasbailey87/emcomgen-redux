@@ -76,7 +76,6 @@ batch_norm_logits = false
 dropout = 0.1
 layers = 1
 bidirectional = false
-confidence_based_exploration = true # Only applies to Transformer language models
 heads = 4 # Heads per layer - only applies to Transformer language models
 utility_tokens = 4 # Only applies to Transformer language models
 

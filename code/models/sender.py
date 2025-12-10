@@ -1,303 +1,503 @@
 """
-Speaker models
+Speaker models. This includes speakers with a GRU-based language model as
+    originally presented in "Emergent Communication of Generalizations"
+    (https://arxiv.org/abs/2106.02668) and speakers with causal or non-causal
+    Transformer language models. The intention is to show that
+    Transformer-based speakers can be just as successful in tasks and show
+    equal or greater compositionality.
 """
 
+import warnings
+import math
 
 import torch
 import torch.nn as nn
 import numpy as np
 from torch.nn import functional as F
-from torch.distributions import Gumbel
+
+import einops
 
 import data
 import data.language
 
+import broccoli
 
-class CopySender(nn.Module):
+def batch_norm_logits(module: nn.BatchNorm1d, logits: torch.Tensor) -> torch.Tensor:
+    """
+    Applies nn.BatchNorm1d to vocabulary logits that are arranged in a
+        sequence like (batch, seq, vocabulary)
+    
+    Args:
+        module: The nn.BatchNorm1d module
+        logits: Tensor of shape (Batch, Length, Vocab)
+        
+    Returns:
+        Tensor of shape (Batch, Length, Vocab)
+    """
+    logits = module(einops.rearrange(logits, 'b l c -> b c l'))
+    return einops.rearrange(logits, 'b c l -> b l c')
+
+def flatten_logit_distribution(
+    logits: torch.Tensor,
+    uniform_weight: float
+) -> torch.Tensor:
+    """
+    Returns a weighted average of 
+
+    Args:
+        logits: some provided unnormalised log probabilities
+        uniform_weight: the relative weight to give the uniform distribution
+            when mixing it in to the provided logits
+    
+    Returns:
+        A torch.Tensor of logits where the absolute differences between
+            logits is reduced - i..e. a less "certain" distribution
+    """
+    normalised_logits = F.log_softmax(logits, dim=-1)
+    # Make a uniform distribution, but in the log space
+    uniform_log_probs = torch.full_like(
+        normalised_logits,
+        -np.log(logits.shape[-1])
+    )
+    
+    # Mix the log distributions, like log( w * uniform + (1-w) * model )
+    combined_logits = torch.stack(
+        [
+            uniform_log_probs + np.log(uniform_weight),
+            logits + np.log(1 - uniform_weight),
+        ],
+        dim=-1,
+    )
+
+    return torch.logsumexp(combined_logits, dim=-1)
+
+
+class AveragePrototyper(nn.Module):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    def forward(self, samples, labels=None):
+        """
+        Args:
+            samples: a tensor of shape (batch, n_examples, embedding size)
+                where each example is an embedded image. n_examples must
+                be even. The first n_examples / 2 examples are positive
+                examples and the remainder are negative examples.
+            labels: the labels for the examples provided. This argument
+                exists for backwards compatibility, but is not used for
+                anything as the first half of provided examples is always
+                positive and the second half negative. See `samples` definition.
+        """
+        n_pos_ex = samples.size(1) // 2
+
+        positive_examples = samples[:, :n_pos_ex, :]
+        negative_examples = samples[:, n_pos_ex:, :]
+
+        positive_prototype = positive_examples.mean(1)
+        negative_prototype = negative_examples.mean(1)
+
+        return positive_prototype, negative_prototype
+
+    def reset_parameters(self):
+        pass
+
+
+class AttentionPrototyper(nn.Module):
+    def __init__(self, d_model, *args, **kwargs):
+        super().__init__()
+        self.d_model = d_model
+        self.pos_pool = broccoli.vit.SequencePool(d_model)
+        self.neg_pool = broccoli.vit.SequencePool(d_model)
+
+    def forward(self, samples, labels=None):
+        n_pos_ex = samples.size(1) // 2
+
+        positive_examples = samples[:, :n_pos_ex, :]
+        negative_examples = samples[:, n_pos_ex:, :]
+
+        positive_prototype = self.pos_pool(positive_examples)
+        negative_prototype = self.neg_pool(negative_examples)
+
+        return positive_prototype, negative_prototype
+
+    def reset_parameters(self):
+        self.pos_pool.reset_parameters()
+        self.neg_pool.reset_parameters()
+
+
+class SenderGRULM(nn.Module):
     def __init__(
         self,
-        feat_model,
-        dropout=0.5,
-        prototype="average",
-        # n_transformer_heads=8,
-        # n_transformer_layers=2,
+        referent_embedding_size,
+        **kwargs
     ):
+        super().__init__()
+        self.referent_embedding_size = referent_embedding_size
+        self.token_embedding_size = kwargs["token_embedding_size"]
+        self.d_model = kwargs["d_model"]
+        self.vocabulary = kwargs["vocabulary"]
+        self.message_length = kwargs["message_length"]
+        self.softmax_temperature = kwargs["softmax_temperature"]
+        self.exploration_temperature = kwargs["exploration_temperature"]
+        self.uniform_weight = kwargs["uniform_weight"]
+        self.batch_norm_logits = kwargs["batch_norm_logits"]
+        self.dropout = kwargs["dropout"]
+        self.layers = kwargs["layers"]
+        self.bidirectional = kwargs["bidirectional"]
+        self.directions = 2 if self.bidirectional else 1
+        
+        self.gru = nn.GRU(
+            self.token_embedding_size,
+            self.d_model,
+            num_layers=self.layers,
+            bias=True,
+            batch_first=True,
+            dropout=self.dropout,
+            bidirectional=self.bidirectional
+        )
+
+        self.outputs2vocab = nn.Linear(
+            self.d_model * self.directions,
+            self.vocabulary + 4 # +4 for PAD, SOS, EOS, UNK
+        )
+
+        if self.batch_norm_logits:
+            self.batch_norm = nn.BatchNorm1d(self.vocabulary + 4) # +4 for PAD, SOS, EOS, UNK
+        else:
+            self.batch_norm = None
+
+        self.init_h = nn.Linear(
+            2 * referent_embedding_size, 
+            self.layers * self.directions * self.d_model
+        )
+        
+        self.token_embedding = nn.Embedding(
+            self.vocabulary + 4, # +4 for PAD, SOS, EOS, UNK
+            self.token_embedding_size
+        )
+
+        self.reset_parameters()
+
+    def forward(
+        self,
+        prototypes,
+        **kwargs
+    ):
+        """
+        We don't include options for greedy or epsilon-greedy generation as
+            the former is only used in the parts of the code that relate to
+            ACRe and the latter are by default not used (and are not
+            commented upon in the original paper).
+        """
+        batch_size = prototypes[0].size(0)
+        device = prototypes[0].device
+
+        # Initialize hidden state. Must be (num_layers * directions, B, H)
+        concatenate_prototypes = torch.cat(prototypes, 1)
+        states = (
+            self.init_h(concatenate_prototypes)
+                .view(batch_size, self.layers, self.directions, self.d_model)
+                .permute(1, 2, 0, 3).contiguous() # (L, Dir, B, D)
+                .view(self.layers * self.directions, batch_size, self.d_model)
+        )
+
+        lang = []
+
+        # Create and add SOS token
+        sos_onehot = torch.zeros(
+            batch_size,
+            1,
+            self.vocabulary + 4, # +4 for PAD, SOS, EOS, UNK
+            device=device
+        )  # Shape: (B, 1, V)
+        sos_onehot[:, 0, data.language.SOS_IDX] = 1.0
+        lang.append(sos_onehot)
+
+        gru_in = sos_onehot @ self.token_embedding.weight  # Shape: (B, 1, D)
+
+        # Main sampling loop (fixed length of message_length - 2)
+        for i in range(self.message_length - 2):
+
+            gru_out, states = self.gru(gru_in, states)
+            
+            logits = self.outputs2vocab(gru_out[:, -1, :]) # Shape: (B, V)
+
+            if self.batch_norm_logits:
+                # This must come before the uniform weight mixing
+                #     as it would otherwise mess up the distribution
+                logits = self.batch_norm(logits)
+            
+            if self.uniform_weight > 0.0:
+                logits = flatten_logit_distribution(logits, self.uniform_weight)
+
+            logits = logits / self.exploration_temperature
+            
+            # Remove probability mass from reserved tokens
+            # Probability mass there should atrophy anyway as it won't have gradient(?)
+            logits[:, :4] = -float('inf')
+
+            # 5. Gumbel-Softmax (hard=True)
+            # This handles the noise addition + argmax + straight-through gradient
+            predicted_onehot = F.gumbel_softmax(
+                logits,
+                tau=self.softmax_temperature,
+                hard=True,
+                dim=-1
+            )
+
+            # 6. Prepare next input
+            lang.append(predicted_onehot.unsqueeze(1))
+            gru_in = (predicted_onehot.unsqueeze(1)) @ self.token_embedding.weight # (B, 1, D)
+
+        # Add final EOS token
+        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 2, device=device)
+        eos_onehot[:, 0, data.language.EOS_IDX] = 1.0
+        lang.append(eos_onehot)
+
+        # Concatenate
+        lang_tensor = torch.cat(lang, 1) 
+
+        return lang_tensor
+
+    def reset_parameters(self):
+        self.init_h.reset_parameters()
+        self.gru.reset_parameters()
+        self.outputs2vocab.reset_parameters()
+        self.token_embedding.reset_parameters()
+        if self.batch_norm is not None:
+            self.batch_norm.reset_parameters()
+
+
+class SenderTransformerLM(nn.Module):
+    def __init__(
+        self,
+        referent_embedding_size,
+        **kwargs
+    ):
+        """
+        ...
+        
+        https://arxiv.org/abs/2502.20604
+        """
+        super().__init__()
+        self.referent_embedding_size = referent_embedding_size
+        self.token_embedding_size = kwargs["token_embedding_size"]
+        self.d_model = kwargs["d_model"]
+        self.vocabulary = kwargs["vocabulary"]
+        self.max_entropy = math.log(self.vocabulary)
+        self.message_length = kwargs["message_length"]
+        self.softmax_temperature = kwargs["softmax_temperature"]
+        self.exploration_temperature = kwargs["exploration_temperature"]
+        self.uniform_weight = kwargs["uniform_weight"]
+        self.batch_norm_logits = kwargs["batch_norm_logits"]
+        self.dropout = kwargs["dropout"]
+        self.layers = kwargs["layers"]
+        self.bidirectional = kwargs["bidirectional"]
+        self.heads = kwargs["heads"]
+        self.utility_tokens = kwargs["utility_tokens"]
+
+        if self.referent_embedding_size != self.token_embedding_size:
+            raise NotImplementedError(
+                "`referent_embedding_size` and `token_embedding_size` must "
+                "be the same for Transformer-based speaker models!"
+            )
+
+        if int((self.d_model / self.heads) / self.utility_tokens) < 3:
+            warnings.warn(
+                "Fewer than 3 head dimensions per utility token may be suboptimal."
+            )
+
+        if self.message_length < 3:
+            raise ValueError(
+                "message_length must be at least 3 (due to SOS and EOS tokens)"
+            )
+
+        self.content_length = self.message_length - 2
+
+        self.query = nn.Parameter(
+            torch.empty(self.content_length, self.d_model)
+        )
+
+        self.query_layer_norm = nn.LayerNorm(self.d_model)
+        self.referent_layer_norm = nn.LayerNorm(self.d_model)
+
+        self.cross_attention = broccoli.transformer.MHAttention(
+            self.d_model,
+            self.heads,
+            dropout=self.dropout,
+            causal=False, # Whole image informs whole initial message
+            seq_len=self.content_length,
+            scaling="d",
+        )
+
+        self.transformer = broccoli.transformer.TransformerEncoder(
+            self.content_length,
+            self.d_model,
+            self.layers,
+            self.heads,
+            absolute_position_embedding=True,
+            relative_position_embedding=True,
+            source_size=(self.content_length,),
+            mlp_ratio=2,
+            activation=broccoli.activation.SwiGLU,
+            activation_kwargs=None,
+            mlp_dropout=0.,
+            msa_dropout=0.,
+            stochastic_depth=0.2,
+            causal = not self.bidirectional,
+            utility_tokens=self.utility_tokens,
+            return_utility_tokens=False,
+        )
+
+        self.outputs2vocab = nn.Linear(
+            self.d_model,
+            self.vocabulary + 4 # +4 for PAD, SOS, EOS, UNK
+        )
+
+        if self.batch_norm_logits:
+            self.batch_norm = nn.BatchNorm1d(self.vocabulary + 4) # +4 for PAD, SOS, EOS, UNK
+        else:
+            self.batch_norm = None
+
+        self.reset_parameters()
+
+    def forward(
+        self,
+        prototypes,
+        **kwargs
+    ):
+        batch_size = prototypes[0].size(0)
+        device = prototypes[0].device
+
+        stack_prototypes = torch.stack(prototypes, 1) # To sequence
+
+        normed_prototypes = self.referent_layer_norm(stack_prototypes)
+
+        query = self.query.unsqueeze(0).expand(
+            batch_size,
+            self.content_length,
+            self.d_model
+        )
+
+        normed_query = self.query_layer_norm(query)
+
+        initial_sequence = self.cross_attention(
+            normed_query, normed_prototypes, normed_prototypes
+        ) # (batch, self.content_length, self.d_model)
+
+        outputs = self.transformer(initial_sequence)
+
+        logits = self.outputs2vocab(outputs)
+
+        if self.batch_norm_logits:
+            # This must come before the uniform weight mixing
+            #     as it would otherwise mess up the distribution
+            logits = batch_norm_logits(self.batch_norm, logits)
+            
+        if self.uniform_weight > 0.0:
+            logits = flatten_logit_distribution(logits, self.uniform_weight)
+
+        logits = logits / self.exploration_temperature
+        
+        # Remove probability mass from reserved tokens
+        # Probability mass there should atrophy anyway as it won't have gradient(?)
+        logits[:, :, :4] = -float('inf')
+
+        onehot_content = F.gumbel_softmax(
+            logits,
+            tau=self.softmax_temperature,
+            hard=True,
+            dim=-1
+        )
+
+        sos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 4, device=device)
+        sos_onehot[:, 0, data.language.SOS_IDX] = 1.0
+        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 4, device=device)
+        eos_onehot[:, 0, data.language.EOS_IDX] = 1.0
+
+        onehot = torch.cat([sos_onehot, onehot_content, eos_onehot], dim=1)
+
+        return onehot # (batch, message_length, vocabulary)
+
+    def reset_parameters(self):
+        nn.init.normal_(self.query, mean=0.0, std=1.0)
+        self.query_layer_norm.reset_parameters()
+        self.referent_layer_norm.reset_parameters()
+        self.cross_attention.reset_parameters()
+        self.transformer.reset_parameters()
+        self.outputs2vocab.reset_parameters()
+        if self.batch_norm is not None:
+            self.batch_norm.reset_parameters()
+
+
+class Sender(nn.Module):
+    def __init__(
+        self,
+        feat_model: nn.Module,
+        prototyper: nn.Module,
+        language_model: nn.Module,
+        vision_dropout: float= 0.5
+    ):
+        """
+        An agent that will receive one or more positive examples of a concept and
+            one or more negative examples of a concept and will produce an utterance
+            intended to communicate the concept
+
+        Args:
+            feat_model: The module used to produce embeddings from referents
+            prototyper: The module used to create prototypes from positive and
+                negative examples of referents
+            language_model: The module used to create utterances based on prototypes
+            dropout: Dropout probability between the `feat_model` and `prototyper`
+        """
         super().__init__()
         self.feat_model = feat_model
         self.feat_size = feat_model.final_feat_dim
-        self.emb_size = 2 * self.feat_size
-        self.dropout = nn.Dropout(p=dropout)
-
-        self.prototype = prototype
-        # if self.prototype == "transformer":
-        #     encoder_layer = nn.TransformerEncoderLayer(
-        #         d_model=self.feat_size,
-        #         nhead=n_transformer_heads,
-        #         dim_feedforward=self.feat_size,
-        #     )
-        #     self.transformer = nn.TransformerEncoder(
-        #         encoder_layer,
-        #         num_layers=n_transformer_layers,
-        #         norm=nn.LayerNorm(self.feat_size),
-        #     )
-
-        #     cls_emb = torch.empty(self.feat_size)
-        #     cls_emb.uniform_(-0.1, 0.1)
-        #     self.cls_emb = nn.Parameter(cls_emb)
-
-    def embed_features(self, feats, targets=None):
-        """
-        Prototype to embed positive and negative examples of concept
-        """
-        batch_size = feats.shape[0]
-        n_obj = feats.shape[1]
-        rest = feats.shape[2:]
-        feats_flat = feats.view(batch_size * n_obj, *rest)
-
-        feats_emb_flat = self.feat_model(feats_flat)
-
-        feats_emb = feats_emb_flat.unsqueeze(1).view(batch_size, n_obj, -1)
-
-        if targets is None:
-            feats_emb_dropout = self.dropout(feats_emb)
-            return feats_emb_dropout
-        else:
-            prototypes = self.form_prototypes(feats_emb, targets)
-            prototypes_dropout = self.dropout(prototypes)
-
-            return prototypes_dropout
-
-    def form_prototypes(self, feats_emb, targets):
-        if self.prototype == "average":
-            return self._form_average_prototypes(feats_emb, targets)
-        elif self.prototype == "transformer":
-            return self._form_transformer_prototypes(feats_emb, targets)
-        else:
-            raise RuntimeError(f"Unknown prototype {self.prototype}")
-
-    def add_cls_token(self, feats):
-        cls_embs = self.cls_emb.unsqueeze(0).unsqueeze(1).expand(feats.shape[0], -1, -1)
-        return torch.cat([cls_embs, feats], 1)
-
-    def _form_transformer_prototypes(self, feats_emb, targets):
-        # Targets/rev_targets just happen to be transformer masks?
-        # Here we depend that the first inputs are always positive targets, and
-        # last inputs are always negative
-        midp = targets.shape[1] // 2
-        if not ((targets[:, :midp] == 1.0).all() and (targets[:, midp:] == 0.0).all()):
-            raise NotImplementedError("Implement generic masking")
-
-        pos_emb = self.add_cls_token(feats_emb[:, :midp])
-        neg_emb = self.add_cls_token(feats_emb[:, midp:])
-
-        # Transpose
-        pos_emb = pos_emb.transpose(0, 1)
-        neg_emb = neg_emb.transpose(0, 1)
-
-        pos_output = self.transformer(pos_emb)
-        neg_output = self.transformer(neg_emb)
-
-        pos_output = pos_output.transpose(0, 1)
-        neg_output = neg_output.transpose(0, 1)
-
-        pos_proto = pos_output[:, 0]
-        neg_proto = neg_output[:, 0]
-
-        return torch.cat([pos_proto, neg_proto], -1)
-
-    def _form_average_prototypes(self, feats_emb, targets):
-        """
-        Given embedded features and targets, form into prototypes (i.e. average
-        together positive examples, average together negative examples)
-        """
-        rev_targets = 1 - targets
-        pos_proto = (feats_emb * targets.unsqueeze(2)).sum(1)
-        neg_proto = (feats_emb * rev_targets.unsqueeze(2)).sum(1)
-
-        n_pos = targets.sum(1, keepdim=True)
-        n_neg = rev_targets.sum(1, keepdim=True)
-
-        # Avoid div by 0 (when n_pos is clamped to min 1, pos_proto is all 0s
-        # anyways)
-        n_pos = torch.clamp(n_pos, min=1)
-        n_neg = torch.clamp(n_neg, min=1)
-
-        # Divide by sums (avoid div by 0 error)
-        pos_proto = pos_proto / n_pos
-        neg_proto = neg_proto / n_neg
-
-        ft_concat = torch.cat([pos_proto, neg_proto], 1)
-
-        return ft_concat
-
-    def forward(self, feats, targets):
-        """
-        Pass through entire model hidden state
-        """
-        return self.embed_features(feats, targets)
-
-
-class Sender(CopySender):
-    def __init__(
-        self, feat_model, language_model, embedding_module, tau=1.0, hidden_size=100, **kwargs
-    ):
-        super().__init__(feat_model, **kwargs)
-
-        self.embedding_dim = embedding_module.embedding_dim
-        self.embedding = embedding_module
-        self.vocab_size = embedding_module.num_embeddings
-        self.hidden_size = hidden_size
-        self.tau = tau
-
+        self.prototyper = prototyper
         self.language_model = language_model
-        self.outputs2vocab = nn.Linear(self.hidden_size, self.vocab_size)
-        # 2 * feat_size - one for positive prototype, one for negative
-        self.init_h = nn.Linear(2 * self.feat_size, self.hidden_size)
-        self.bilinear = nn.Linear(self.hidden_size, self.feat_size, bias=False)
+        self.vision_dropout = nn.Dropout(p=vision_dropout)
 
-    def sample(
+    def forward(
         self,
-        states,
-        greedy=False,
-        max_len=4,
-        eps=0.0,
-        softmax_temp=1.0,
-        uniform_weight=0.0,
+        samples,
+        targets,
+        **kwargs
     ):
-        """ """
-        batch_size = states.shape[1]  # 0th dim is singleton for GRU
-        # This contains are series of sampled onehot vectors
-        lang = []
-        # And verctor lengths
-        lang_length = torch.ones(batch_size, dtype=torch.int64).to(states.device)
-        done_sampling = [False for _ in range(batch_size)]
+        if samples.size(1) % 2 != 0:
+            raise NotImplementedError(
+                "The prototyper must be passed an even number of samples, "
+                "the first n / 2 should be positive and the rest negative."
+            )
+            
+        midp = targets.shape[1] // 2
 
-        # first input is SOS token
-        # (batch_size, n_vocab)
-        inputs_onehot = torch.zeros(batch_size, self.vocab_size).to(states.device)
-        inputs_onehot[:, data.language.SOS_IDX] = 1.0
+        if not ((targets[:, :midp] == 1.0).all() and (targets[:, midp:] == 0.0).all()):
+            raise NotImplementedError(
+                "The prototyper must be passed an even number of samples, "
+                "the first n / 2 should be positive and the rest negative."
+            )
+        
+        batch_size = samples.shape[0]
+        n_obj = samples.shape[1]
+        rest = samples.shape[2:]
+        flat_samples = samples.view(batch_size * n_obj, *rest)
+        embedded_samples = self.vision_dropout(self.feat_model(flat_samples))
+        embedded_samples = embedded_samples.view(batch_size, n_obj, -1)
 
-        # (batch_size, len, n_vocab)
-        inputs_onehot = inputs_onehot.unsqueeze(1)
+        prototypes = self.prototyper(embedded_samples, targets)
 
-        # Add SOS to lang
-        lang.append(inputs_onehot)
+        prototypes_concat = torch.cat(prototypes, 1)
 
-        # (B,L,D) to (L,B,D)
-        inputs_onehot = inputs_onehot.transpose(0, 1)
+        messages = self.language_model(
+            prototypes,
+            **kwargs
+        )
 
-        # compute embeddings
-        # (1, batch_size, n_vocab) X (n_vocab, h) -> (1, batch_size, h)
-        inputs = inputs_onehot @ self.embedding.weight
+        return messages, prototypes_concat
 
-        for i in range(max_len - 2):  # Have room for SOS, EOS if never sampled
-            # FIXME: This is inefficient since I do sampling even if we've
-            # finished generating language.
-            if all(done_sampling):
-                break
-            outputs, states = self.language_model(inputs, states)  # outputs: (L=1,B,H)
-            outputs = outputs.squeeze(0)  # outputs: (B,H)
-            outputs = self.outputs2vocab(outputs)  # outputs: (B,V)
-
-            if greedy:
-                predicted = outputs.max(1)[1]
-                predicted = predicted.unsqueeze(1)
-            else:
-                # Normalize first
-                outputs = torch.log_softmax(outputs, -1)
-
-                if uniform_weight != 0.0:
-                    uniform_outputs = torch.full_like(
-                        outputs, np.log(1 / outputs.shape[1])
-                    )
-                    # Weighted average of logits and uniform distribution in log space
-                    combined_outputs = torch.stack(
-                        [
-                            uniform_outputs + np.log(uniform_weight),
-                            outputs + np.log(1 - uniform_weight),
-                        ],
-                        2,
-                    )
-                    outputs = torch.logsumexp(combined_outputs, 2)
-
-                if softmax_temp != 1.0:
-                    outputs = outputs / softmax_temp
-
-                predicted_onehot = F.gumbel_softmax(outputs, tau=self.tau, hard=True)
-
-                # Epsilon - random sample (not sure if this works)
-                if np.random.random() < eps:
-                    random_i = torch.randint(
-                        outputs.shape[1], (outputs.shape[0], 1)
-                    ).to(predicted_onehot.device)
-                    random_onehot = torch.zeros_like(predicted_onehot).scatter_(
-                        -1, random_i, 1.0
-                    )
-                    predicted_onehot = (
-                        random_onehot - predicted_onehot.detach()
-                    ) + predicted_onehot
-
-                # Add to lang
-                lang.append(predicted_onehot.unsqueeze(1))
-
-            predicted_npy = predicted_onehot.argmax(1).cpu().numpy()
-
-            # Update language lengths
-            for i, pred in enumerate(predicted_npy):
-                if not done_sampling[i]:
-                    lang_length[i] += 1
-                if pred == data.language.EOS_IDX:
-                    done_sampling[i] = True
-
-            # (1, batch_size, n_vocab) X (n_vocab, h) -> (1, batch_size, h)
-            inputs = (predicted_onehot.unsqueeze(0)) @ self.embedding.weight
-
-        # Add EOS if we've never sampled it
-        eos_onehot = torch.zeros(batch_size, 1, self.vocab_size).to(states.device)
-        eos_onehot[:, 0, data.language.EOS_IDX] = 1.0
-        lang.append(eos_onehot)
-        # Cut off the rest of the sentences
-        for i, _ in enumerate(predicted_npy):
-            if not done_sampling[i]:
-                lang_length[i] += 1
-            done_sampling[i] = True
-
-        # Cat language tensors
-        lang_tensor = torch.cat(lang, 1)
-
-        # Trim max length
-        max_lang_len = lang_length.max()
-        lang_tensor = lang_tensor[:, :max_lang_len, :]
-
-        return lang_tensor, lang_length
-
-    def forward(self, feats, targets, **kwargs):
-        """Sample from image features"""
-        feats_emb = self.embed_features(feats, targets)
-        # initialize hidden states using image features
-        states = self.init_h(feats_emb)
-
-        return self.sample(states.unsqueeze(0), **kwargs), states
-
-    def classify(self, feats, targets, test_feats):
-        feats_emb = self.embed_features(feats, targets)
-        states = self.init_h(feats_emb)
-        return self.classify_from_states(states, test_feats)
-
-    def classify_from_states(self, states, test_feats):
-        states = self.bilinear(states)
-        test_feats_emb = self.embed_features(test_feats)
-        scores = torch.bmm(test_feats_emb, states.unsqueeze(2)).squeeze(2)
-        return scores
-
-    def to_text(self, lang_onehot):
-        texts = []
-        lang = lang_onehot.argmax(2)
-        for sample in lang.cpu().numpy():
-            text = []
-            for item in sample:
-                text.append(data.ITOS[item])
-                if item == data.EOS_IDX:
-                    break
-            texts.append(" ".join(text))
-        return np.array(texts, dtype=np.unicode_)
+    def reset_parameters(self):
+        if hasattr(self.feat_model, 'reset_parameters'):
+            self.feat_model.reset_parameters()
+        self.prototyper.reset_parameters()
+        self.language_model.reset_parameters()

@@ -2,15 +2,14 @@
 Train an RNN decoder to make binary predictions;
 then train an RNN language model to generate sequences
 """
-from time import time
 from typing import List, Union
 
 from torch.amp import GradScaler, autocast
 
 import sys
+import os
 from pathlib import Path
 
-import contextlib
 from collections import defaultdict
 
 import numpy as np
@@ -24,7 +23,6 @@ import models.backbone
 import parse_config
 import util
 import data
-import os
 import vis
 import emergence
 
@@ -39,27 +37,6 @@ logging.basicConfig(
     level=logging.INFO,
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-
-
-# def convert_lang_to_numeric(lang, lang_length, pad_val=-1, skip_sos_eos=True):
-#     """
-#     Convert lang to numeric, with custom padding, for later language analysis
-#     """
-#     lang_i = lang.argmax(2)
-#     for i, length in enumerate(lang_length):
-
-#         if skip_sos_eos:
-#             # zero out EOS
-#             lang_i[i, length - 1 :] = pad_val
-#         else:
-#             lang_i[i, length:] = pad_val
-
-#     # shave off SOS, ending EOS if present
-#     if skip_sos_eos:
-#         lang_i = lang_i[:, 1:-1]
-
-#     return lang_i
-
 
 def get_true_lang(
         batch,
@@ -219,7 +196,6 @@ def init_metrics():
     metrics["best_epoch"] = 0
     return metrics
 
-#TODO: Why is this function so slow?
 def run(
     split,
     epoch,
@@ -265,7 +241,6 @@ def run(
         Metrics from this run; keys are statistics and values are their average
         values across the batches
     """
-    epoch_start = time()
     bce_criterion = nn.BCEWithLogitsLoss()
     xent_criterion = nn.CrossEntropyLoss()
     training = (split == "train") and not force_no_train
@@ -287,33 +262,8 @@ def run(
 
     if training:
         optimizer.zero_grad()
-        this_epoch_eps = max(0.0, config['sender']['arguments']['eps'] - (epoch * config['sender']['arguments']['eps_anneal']))
-        this_epoch_uniform_weight = max(
-            0.0, config['sender']['arguments']['uniform_weight'] - (epoch * config['sender']['arguments']['uniform_weight_anneal'])
-        )
-        this_epoch_softmax_temp = max(
-            1.0, config['sender']['arguments']['temperature'] - (epoch * config['sender']['arguments']['temperature_annealing'])
-        )
-    else:
-        this_epoch_eps = 0.0
-        this_epoch_uniform_weight = 0.0
-        this_epoch_softmax_temp = 1.0
-    
-    setup_finished_in = time() - epoch_start
-
-    # Performance stats
-    def avg(x: List[Union[float, int]]): return sum(x) / len(x)
-    batch_preparation = []
-    sender_inference = []
-    receiver_inference = []
-    saving_language = []
-    getting_true_lang = []
-    pushing_metadata = []
-    optimising = []
-    updating_stats = []
 
     for batch_i, batch in enumerate(dataloader):
-        batch_start = time()
         spk_inp, spk_y, lis_inp, lis_y, true_lang, md, idx = batch
         batch_size = spk_inp.shape[0]
 
@@ -333,9 +283,6 @@ def run(
             spk_y = spk_y.cuda()
             lis_inp = lis_inp.cuda()
             lis_y = lis_y.cuda()
-        
-        batch_preparation_end = time()
-        batch_preparation.append(batch_preparation_end - batch_start)
 
         # This is the bit where the models process the inputs
         with autocast(
@@ -352,19 +299,9 @@ def run(
                 lang, states = pair.sender(
                     spk_inp,
                     spk_y,
-                    max_len=config['sender']['arguments']['message_length'],
-                    eps=this_epoch_eps,
-                    softmax_temp=this_epoch_softmax_temp,
-                    uniform_weight=this_epoch_uniform_weight,
                 )
 
-                sender_inference_end = time()
-                sender_inference.append(sender_inference_end - batch_preparation_end)
-
-                lis_scores = pair.receiver(lis_inp, lang)#, lang_length)
-
-                receiver_inference_end = time()
-                receiver_inference.append(receiver_inference_end - sender_inference_end)
+                lis_scores = pair.receiver(lis_inp, lang)
 
             # Evaluate loss and accuracy
             if config['reference_game_xent']:
@@ -386,15 +323,12 @@ def run(
 
             # Save language
             if config['use_lang']:
-                lang_i = lang.argmax(2)
+                lang_i = lang.argmax(2).detach().cpu()
                 lang_text_unjoined = util.to_emergent_text(lang_i)
                 lang_text = [" ".join(toks) for toks in lang_text_unjoined]
             else:
                 lang_text_unjoined = [["N/A"] for _ in range(batch_size)]
                 lang_text = ["N/A" for _ in range(batch_size)]
-
-            saving_language_end = time()
-            saving_language.append(saving_language_end - receiver_inference_end)
 
             true_lang_text = get_true_lang(
                 batch,
@@ -404,9 +338,6 @@ def run(
             )
             true_lang_text_joined = [" ".join(t) for t in true_lang_text]
 
-            getting_true_lang_end = time()
-            getting_true_lang.append(getting_true_lang_end - saving_language_end)
-
             # Game difficulty/other metadata indicator
             all_lang.extend(zip(lang_text, true_lang_text, per_game_acc, md.numpy()))
 
@@ -415,22 +346,11 @@ def run(
             if dataloader.dataset.name == "cub":
                 attrs = md.numpy()[:, 1:]
                 all_attrs.extend(attrs)
-                all_reprs.extend(states.detach().cpu().numpy())
-
-            pushing_metadata_end = time()
-            pushing_metadata.append(pushing_metadata_end - getting_true_lang_end)
+                all_reprs.extend(states.detach().cpu().float().numpy())
 
             if config['joint_training']:
                 class DoNotUse(Exception): pass
                 raise DoNotUse("This should never happen as joint_training should always be false!")
-                # Also train sender on classification task
-                spk_scores = pair.sender.classify_from_states(states, lis_inp)
-                spk_loss = bce_criterion(spk_scores, lis_y)
-                spk_pred = (spk_scores > 0).float()
-                spk_per_game_acc = (spk_pred == lis_y).float().mean(1).cpu().numpy()
-                spk_acc = spk_per_game_acc.mean()
-                stats.update(spk_loss=spk_loss, spk_acc=spk_acc)
-                comb_loss = this_loss + config['joint_training_lambda'] * spk_loss
             else:
                 comb_loss = this_loss
 
@@ -447,40 +367,13 @@ def run(
                 else:
                     backpropped = False
 
-            optimisation_step_end = time()
-            optimising.append(optimisation_step_end - pushing_metadata_end)
-
             stats.update(
                 loss=this_loss, acc=this_acc, batch_size=batch_size, combined_loss=comb_loss
             )
 
-            updating_stats_end = time()
-            updating_stats.append(updating_stats_end - optimisation_step_end)
-
         if training:
             if batch_i % config['optimiser']['log_interval'] == 0:
                 log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats)
-                print("SPEED STATS\n======================")
-                print(f"Batch preparation:\t\t{avg(batch_preparation)} seconds")
-                print(f"Sender inference:\t\t{avg(sender_inference)} seconds")
-                print(f"Receiver inference:\t\t{avg(receiver_inference)} seconds")
-                print(f"Saving language:\t\t{avg(saving_language)} seconds")
-                print(f"Getting true language:\t\t{avg(getting_true_lang)} seconds")
-                print(f"Pushing metadata:\t\t{avg(pushing_metadata)} seconds")
-                print(f"Optimising:\t\t{avg(optimising)} seconds")
-                print(f"Updating stats:\t\t{avg(updating_stats)} seconds")
-                print("==========================")
-                total = (
-                    avg(batch_preparation) +
-                    avg(sender_inference) +
-                    avg(receiver_inference) +
-                    avg(saving_language) +
-                    avg(getting_true_lang) +
-                    avg(pushing_metadata) +
-                    avg(optimising) +
-                    avg(updating_stats)
-                )
-                print(f"Total:\t\t{total} seconds")
 
         if training and not backpropped:
             scaler.unscale_(optimizer)
@@ -569,12 +462,12 @@ if __name__ == "__main__":
         )
     else:
         config = parse_config.get_config(arguments[0])
-        # from pprint import pprint
-        # pprint(config)
-        # import sys
-        # sys.exit()
 
-    exp_dir = str(Path(config['experiments_directory']) / Path(config['name']))
+    exp_dir = os.path.abspath(
+        str(
+            Path(config['experiments_directory']) / Path(config['name'])
+        )
+    )
     config['exp_dir'] = exp_dir
 
     print(f"LR: {config['optimiser']['lr']}")
@@ -583,34 +476,55 @@ if __name__ == "__main__":
     util.save_args(config, exp_dir)
 
     dataloaders = data.loader.load_dataloaders(config)
-    model_config = models.builder.build_models(dataloaders, config)
+    model_config = models.builder2.build_models(dataloaders, config)
     this_game_type = data.util.get_game_type(config)
-
-    # sender_class = getattr(models.sender, config['sender']['class'])
-    # sender = sender_class(**config['sender']['arguments'])
-
-    # receiver_class = getattr(models.receiver, config['receiver']['class'])
-    # receiver = receiver_class(**config['receiver']['arguments'])
-
-    # pair = util.Pair(sender, receiver)
-
-    # if config['cuda']:
-    #     pair = pair.cuda()
-    
-
-    # optimiser = optim.Adam( # FIXME: build a better optimiser here
-    #     pair.parameters(),
-    #     lr=config['optimiser']['lr']
-    # )
-    
     scaler = GradScaler()
     
-    # TODO: replace this with PASS scheduler
+    # TODO: remove this as it's never used
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         model_config['optimiser'],
         factor=0.5,
         patience=10,
     )
+
+    checkpoint_path = os.path.join(exp_dir, "checkpoint_last.pt")
+    start_epoch = 0
+    
+    # Initialize metrics normally first
+    metrics = init_metrics()
+    all_metrics = [] # Initialize this too
+
+    if config.get('resume', False) and os.path.exists(checkpoint_path):
+        print(f"Resuming from checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, weights_only=False)
+
+        # If agent pair was compiled, model state dict needs cleaning
+        model_state_dict = checkpoint['model_state_dict']
+        new_model_state_dict = {}
+        for k, v in model_state_dict.items():
+            if k.startswith('_orig_mod.'):
+                # Strip the "_orig_mod." prefix (length 10)
+                new_model_state_dict[k[10:]] = v
+            else:
+                new_model_state_dict[k] = v
+
+        model_config['pair'].load_state_dict(new_model_state_dict)
+
+        model_config['optimiser'].load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        
+        # Restore metadata
+        start_epoch = checkpoint['epoch']
+        metrics = checkpoint['metrics'] # Restore best_acc, etc.
+        if 'all_metrics' in checkpoint:
+            all_metrics = checkpoint['all_metrics']
+            
+        print(f"Resumed at epoch {start_epoch}")
+    
+    if config['compile']:
+        print("Compiling model...")
+        model_config['pair'] = torch.compile(model_config['pair'])
 
     run_args = (
         model_config['pair'],
@@ -623,15 +537,11 @@ if __name__ == "__main__":
 
     all_metrics = []
     metrics = init_metrics()
-    epochs = config['scheduler']['epochs']
     
     print("Starting to train")
 
-    compiled_run_function = torch.compile(run)
-
-    for epoch in range(epochs):
-        # No reset on epoch 0, but reset after epoch 2, epoch 4, etc
-        if (
+    for epoch in range(start_epoch, config['scheduler']['epochs']):
+        if (# No reset on epoch 0, but reset after epoch 2, epoch 4, etc
             config['receiver_reset_interval'] > 0
             and (epoch % config['receiver_reset_interval']) == 0
         ):
@@ -641,7 +551,7 @@ if __name__ == "__main__":
         metrics["epoch"] = epoch
 
         # Train
-        train_metrics, lang = compiled_run_function("train", epoch, *run_args)
+        train_metrics, lang = run("train", epoch, *run_args)
         util.update_with_prefix(metrics, train_metrics, "train")
 
         # Eval across seen/unseen splits, and all game configurations
@@ -654,7 +564,7 @@ if __name__ == "__main__":
                 for split_type in ["", "_same"]:
                     sname = f"{split}{split_type}_{game_type}"
                     if sname in dataloaders:
-                        eval_metrics, eval_lang = compiled_run_function(sname, epoch, *run_args)
+                        eval_metrics, eval_lang = run(sname, epoch, *run_args)
                         util.update_with_prefix(metrics, eval_metrics, sname)
                         if this_game_type == game_type:
                             # Default
@@ -695,6 +605,21 @@ if __name__ == "__main__":
             torch.save(model_config['pair'].state_dict(), model_fname)
             if config['use_lang']:
                 lang.to_csv(os.path.join(exp_dir, f"{epoch}_lang.csv"), index=False)
+
+        # Checkpoint every epoch to allow resuming
+        checkpoint_state = {
+            'epoch': epoch + 1, # Save the NEXT epoch index
+            'model_state_dict': model_config['pair'].state_dict(),
+            'optimizer_state_dict': model_config['optimiser'].state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'scaler_state_dict': scaler.state_dict(),
+            'metrics': metrics,
+            'all_metrics': all_metrics,
+            'rng_state': torch.get_rng_state(),
+            'cuda_rng_state': torch.cuda.get_rng_state(),
+            'numpy_rng_state': np.random.get_state()
+        }
+        torch.save(checkpoint_state, checkpoint_path)
 
         # Additionally track best for splits separately
         metrics["best_val_acc"] = max(metrics["best_val_acc"], metrics["val_acc"])
