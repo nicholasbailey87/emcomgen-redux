@@ -1,6 +1,0 @@
-# Updated experimental settings, required to run perceiver models
-
-name = "speed_test" # experiment name - should be the same as file name
-
-[scheduler]
-epochs = 2
