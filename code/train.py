@@ -32,6 +32,9 @@ import pandas as pd
 # Logging
 import logging
 
+import gradboard.cycles
+from gradboard.scheduler import PASS
+
 logging.basicConfig(
     format="%(asctime)s %(levelname)-8s %(message)s",
     level=logging.INFO,
@@ -351,36 +354,41 @@ def run(
             if config['joint_training']:
                 class DoNotUse(Exception): pass
                 raise DoNotUse("This should never happen as joint_training should always be false!")
-            else:
-                comb_loss = this_loss
 
             if training:
-                scaler.scale(comb_loss).backward()
+                scaler.scale(this_loss / config['optimiser']['accumulator_steps']).backward()
 
                 if (batch_i + 1) % config['optimiser']['accumulator_steps'] == 0:
+                    # Unscale then clip, per https://docs.pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(pair.parameters(), config['optimiser']['clip_grad_norm'])
+                    torch.nn.utils.clip_grad_norm_(
+                        pair.parameters(),
+                        config['optimiser']['clip_grad_norm']
+                    )
                     scaler.step(optimizer)
                     scaler.update()
+                    scheduler.step(this_loss.item())
                     optimizer.zero_grad()
                     backpropped = True
                 else:
                     backpropped = False
 
             stats.update(
-                loss=this_loss, acc=this_acc, batch_size=batch_size, combined_loss=comb_loss
+                loss=this_loss, acc=this_acc, batch_size=batch_size, combined_loss=this_loss
             )
 
         if training:
             if batch_i % config['optimiser']['log_interval'] == 0:
                 log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats)
 
-        if training and not backpropped:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(pair.parameters(), config['optimiser']['clip_grad_norm'])
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
+    if training and not backpropped:
+        # Unscale then clip, per https://docs.pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(pair.parameters(), config['optimiser']['clip_grad_norm'])
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step(this_loss.item())
+        optimizer.zero_grad()
 
     # Compute metrics + collect generation language
     metrics = stats.averages()
@@ -476,15 +484,42 @@ if __name__ == "__main__":
     util.save_args(config, exp_dir)
 
     dataloaders = data.loader.load_dataloaders(config)
-    model_config = models.builder2.build_models(dataloaders, config)
+    model_config = models.builder.build_models(dataloaders, config)
     this_game_type = data.util.get_game_type(config)
     scaler = GradScaler()
     
     # TODO: remove this as it's never used
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    training_examples = len(dataloaders['train'].dataset)
+    epochs = config['scheduler']['epochs']
+    warmup_epochs = min(config['scheduler']['warm_up_epochs'], epochs)
+    batch_size = config['data']['batch_size'] * config['optimiser']['accumulator_steps']
+
+    lr_stages = [
+        gradboard.cycles.Cycle(
+            gradboard.cycles.ascent,
+            training_examples,
+            warmup_epochs,
+            batch_size
+        )
+    ]
+
+    if epochs > warmup_epochs:
+        lr_stages.append(
+            gradboard.cycles.Cycle(
+                config['scheduler']['lr_schedule_shape'],
+                training_examples,
+                epochs - warmup_epochs,
+                batch_size
+            )
+        )
+    
+    scheduler = PASS(
+        gradboard.cycles.CycleSequence(lr_stages),
+        model_config['pair'],
         model_config['optimiser'],
-        factor=0.5,
-        patience=10,
+        scaler=scaler,
+        range_test=config['scheduler']['range_test'],
+        cool_point_multiplier=config['scheduler']['cool_point_multiplier']
     )
 
     checkpoint_path = os.path.join(exp_dir, "checkpoint_last.pt")

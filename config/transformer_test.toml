@@ -7,7 +7,15 @@ compile = true
 n_workers = 4
 
 [scheduler]
+warm_up_epochs = 5
 epochs = 100
+lr_schedule_shape="half_cosine"
+cool_point_multiplier=0.0166
+
+[optimiser]
+class = "AdamW"
+weight_decay = 0.1
+clip_grad_norm = 1.0
 
 [sender]
 feature_model = "ViT2"
