@@ -151,6 +151,8 @@ class TransformerCrossAttentionComparer(nn.Module):
             self.d_model
         )
 
+        self.referent_layer_norm = nn.LayerNorm(self.d_model)
+
         self.message_adapter = nn.Linear(
             self.token_embedding_size,
             self.d_model
@@ -226,10 +228,11 @@ class TransformerCrossAttentionComparer(nn.Module):
         Returns a batch of scores, of shape (batch_size, n_obj)
         """
         referents = self.referent_adapter(referents)
+        normed_referents = self.referent_layer_norm(referents)
         messages = self.message_adapter(messages)
         encoded_messages = self.encoding(messages)
         mixed = self.cross_attention(
-            referents,
+            normed_referents,
             encoded_messages,
             encoded_messages
         )

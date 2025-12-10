@@ -348,6 +348,10 @@ class SenderTransformerLM(nn.Module):
             causal = not self.bidirectional,
             utility_tokens=self.utility_tokens,
             return_utility_tokens=False,
+            pre_norm=True,
+            post_norm=True,
+            normformer=True,
+            msa_scaling="d",
         )
 
         self.outputs2vocab = nn.Linear(
