@@ -6,12 +6,6 @@ compile = true
 [data]
 n_workers = 4
 
-[scheduler]
-warm_up_epochs = 5
-epochs = 100
-lr_schedule_shape="half_cosine"
-cool_point_multiplier=0.0166
-
 [optimiser]
 class = "AdamW"
 weight_decay = 0.1
@@ -31,7 +25,7 @@ utility_tokens = 0 # Only applies to Transformer vision models
 
 [sender_language_model]
 message_length = 7 # Leave this in for Transformer agents to make sure it matches receiver model
-token_embedding_size = 32 # Must be the same as d_model for transformer sender
+token_embedding_size = 128 # Must be the same as d_model for transformer sender
 d_model = 32
 uniform_weight = 0.1
 softmax_temperature = 16.0

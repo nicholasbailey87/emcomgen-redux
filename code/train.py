@@ -494,14 +494,17 @@ if __name__ == "__main__":
     warmup_epochs = min(config['scheduler']['warm_up_epochs'], epochs)
     batch_size = config['data']['batch_size'] * config['optimiser']['accumulator_steps']
 
-    lr_stages = [
-        gradboard.cycles.Cycle(
-            gradboard.cycles.ascent,
-            training_examples,
-            warmup_epochs,
-            batch_size
+    lr_stages = []
+
+    if warmup_epochs:
+        lr_stages.append(
+            gradboard.cycles.Cycle(
+                gradboard.cycles.ascent,
+                training_examples,
+                warmup_epochs,
+                batch_size
+            )
         )
-    ]
 
     if epochs > warmup_epochs:
         lr_stages.append(

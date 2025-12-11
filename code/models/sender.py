@@ -303,7 +303,10 @@ class SenderTransformerLM(nn.Module):
                 "be the same for Transformer-based speaker models!"
             )
 
-        if int((self.d_model / self.heads) / self.utility_tokens) < 3:
+        if (
+            self.utility_tokens
+            and (int((self.d_model / self.heads) / self.utility_tokens) < 3)
+        ):
             warnings.warn(
                 "Fewer than 3 head dimensions per utility token may be suboptimal."
             )
