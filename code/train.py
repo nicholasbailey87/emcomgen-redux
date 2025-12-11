@@ -540,6 +540,12 @@ if __name__ == "__main__":
         metrics = checkpoint['metrics'] # Restore best_acc, etc.
         if 'all_metrics' in checkpoint:
             all_metrics = checkpoint['all_metrics']
+        if 'rng_state' in checkpoint:
+            torch.set_rng_state(checkpoint['rng_state'])
+        if 'cuda_rng_state' in checkpoint:
+            torch.cuda.set_rng_state(checkpoint['cuda_rng_state'])
+        if 'numpy_rng_state' in checkpoint:
+            np.random.set_state(checkpoint['numpy_rng_state'])
             
         print(f"Resumed at epoch {start_epoch}")
     
