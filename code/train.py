@@ -533,21 +533,7 @@ if __name__ == "__main__":
         print(f"Resuming from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, weights_only=False)
 
-        # If agent pair was compiled, model state dict needs cleaning
-        model_state_dict = checkpoint['model_state_dict']
-        new_model_state_dict = {}
-        for k, v in model_state_dict.items():
-            if k.startswith('_orig_mod.'):
-                # Strip the "_orig_mod." prefix (length 10)
-                new_model_state_dict[k[10:]] = v
-            else:
-                new_model_state_dict[k] = v
-
-        model_config['pair'].load_state_dict(new_model_state_dict)
-
-        model_config['optimiser'].load_state_dict(checkpoint['optimizer_state_dict'])
-        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        scheduler.load_state_dict(checkpoint)
         
         # Restore metadata
         start_epoch = checkpoint['epoch']
@@ -642,18 +628,17 @@ if __name__ == "__main__":
                 lang.to_csv(os.path.join(exp_dir, f"{epoch}_lang.csv"), index=False)
 
         # Checkpoint every epoch to allow resuming
-        checkpoint_state = {
-            'epoch': epoch + 1, # Save the NEXT epoch index
-            'model_state_dict': model_config['pair'].state_dict(),
-            'optimizer_state_dict': model_config['optimiser'].state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'scaler_state_dict': scaler.state_dict(),
-            'metrics': metrics,
-            'all_metrics': all_metrics,
-            'rng_state': torch.get_rng_state(),
-            'cuda_rng_state': torch.cuda.get_rng_state(),
-            'numpy_rng_state': np.random.get_state()
-        }
+        checkpoint_state = scheduler.state_dict()
+        checkpoint_state.update(
+            {
+                'epoch': epoch + 1, # Save the NEXT epoch index
+                'metrics': metrics,
+                'all_metrics': all_metrics,
+                'rng_state': torch.get_rng_state(),
+                'cuda_rng_state': torch.cuda.get_rng_state(),
+                'numpy_rng_state': np.random.get_state()
+            }
+        )
         torch.save(checkpoint_state, checkpoint_path)
 
         # Additionally track best for splits separately
