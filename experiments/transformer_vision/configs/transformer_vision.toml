@@ -1,6 +1,6 @@
 # Updated experimental settings, required to run perceiver models
 
-name = "transformer_test" # experiment name - should be the same as file name
+name = "transformer_vision" # experiment name - should be the same as file name
 compile = true
 
 [data]
@@ -33,3 +33,11 @@ d_model = 32 # Only applies to Transformer vision models
 layers = 4 # Only applies to Transformer vision models
 heads = 4 # Only applies to Transformer vision models
 utility_tokens = 0 # Only applies to Transformer vision models
+[experiment]
+repeats = 5
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

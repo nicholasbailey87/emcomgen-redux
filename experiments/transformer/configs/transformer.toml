@@ -1,10 +1,16 @@
 # Updated experimental settings, required to run perceiver models
 
-name = "transformer_test" # experiment name - should be the same as file name
+name = "transformer" # experiment name - should be the same as file name
 compile = true
 
 [data]
 n_workers = 4
+
+[scheduler]
+warm_up_epochs = 5
+epochs = 100
+lr_schedule_shape="half_cosine"
+cool_point_multiplier=0.0166
 
 [optimiser]
 class = "AdamW"
@@ -25,7 +31,7 @@ utility_tokens = 0 # Only applies to Transformer vision models
 
 [sender_language_model]
 message_length = 7 # Leave this in for Transformer agents to make sure it matches receiver model
-token_embedding_size = 128 # Must be the same as d_model for transformer sender
+token_embedding_size = 32 # Must be the same as d_model for transformer sender
 d_model = 32
 uniform_weight = 0.1
 softmax_temperature = 16.0
@@ -58,3 +64,11 @@ bidirectional = true # No affect on transformer receivers
 message_length = 7 # Only applies to Transformer comparers. Should be the same as sender_language_model.message_length
 heads = 4 # Only applies to Transformer comparers
 utility_tokens = 0 # Only applies to Transformer comparers
+[experiment]
+repeats = 5
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

@@ -166,17 +166,15 @@ class TransformerCrossAttentionComparer(nn.Module):
             absolute_position_embedding=True,
             relative_position_embedding=True,
             source_size=(self.message_length,),
-            mlp_ratio=2,
+            ff_ratio=2,
             activation = broccoli.activation.SwiGLU,
             stochastic_depth=self.stochastic_depth,
             causal=not self.bidirectional,
-            utility_tokens=self.utility_tokens,
-            return_utility_tokens=False,
-            pre_norm=True,
+            bos_tokens=self.utility_tokens,
+            return_bos_tokens=False,
+            pre_norm=False,
             post_norm=True,
-            normformer=True,
             msa_scaling="d",
-            checkpoint_ff=True,
         )
 
         self.cross_attention = broccoli.transformer.MHAttention(
@@ -199,17 +197,15 @@ class TransformerCrossAttentionComparer(nn.Module):
             absolute_position_embedding=False,
             relative_position_embedding=False,
             source_size=(self.message_length,),
-            mlp_ratio=2,
+            ff_ratio=2,
             activation = broccoli.activation.SwiGLU,
             stochastic_depth=self.stochastic_depth,
             causal=False,
-            utility_tokens=self.utility_tokens,
-            return_utility_tokens=False,
-            pre_norm=True,
+            bos_tokens=self.utility_tokens,
+            return_bos_tokens=False,
+            pre_norm=False,
             post_norm=True,
-            normformer=True,
             msa_scaling="d",
-            checkpoint_ff=True,
         )
 
         self.decision = nn.Linear(self.d_model, 1, bias=True)

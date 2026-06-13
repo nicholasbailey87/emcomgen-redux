@@ -1,9 +1,9 @@
-broccoli-ml==3.3.1
+broccoli-ml @ git+https://github.com/nicholasbailey87/broccoli.git@neovit
+gradboard @ git+https://github.com/nicholasbailey87/gradboard.git@neovit
 click==8.3.0
 colorama==0.4.6
 editdistance==0.8.1
 einops==0.8.1
-gradboard==4.0.0
 h5py==3.15.1
 hausdorff==0.2.6
 Jinja2==3.1.6

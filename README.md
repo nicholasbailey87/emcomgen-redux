@@ -35,43 +35,108 @@ Code used for generating the ShapeWorld data is located [here](https://github.co
 
 ## Running experiments
 
-### Quickstart
+### Quickstart (SLURM array jobs)
 
-`./run_cub.sh` and `./run_sw.sh` contain ready-to-go commands for running
-reference, set reference, and concept agents for birds and ShapeWorld,
-respectively. See those scripts for more details. If you need more info, read
-on for the basic workflow.
+Experiments are organised as follows: a top-level `config.json` declares the
+storage paths, each experiment is a folder under `experiments/<name>/configs/`
+holding one or more TOML configs, and "repeats" are realised as SLURM array
+indices mapped to seeds.
 
-### 1. Train model
+```bash
+# one-time: stage data from slow storage to fast storage
+./scripts/prepare_data.sh
+# launch an experiment as a SLURM array (repeats per config -> one array task each)
+./scripts/run_experiment.sh transformer            # or: ... 10 gpu-a100 --rerun
+# monitor
+squeue -u $USER
+tail -f experiments/transformer/logs/transformer_*.o
+```
 
-Run `python code/train.py --cuda --name NAME --dataset DATASET` where `NAME` is
-an experiment name (results saved in `exp/NAME`) and `DATASET` is the dataset
-(`data/cub`, `data/shapeworld`, or `data/shapeworld_ref`).
-To specify the type of game use the following additional flags:
+Results land under `<output_root>/<experiment>/<config_stem>_seed<seed>/`
+(e.g. `~/archive/results/transformer/transformer_seed0/metrics.csv`), with the
+topographic-similarity and generalization columns described below.
 
-- `--percent_novel 1.0`: runs concept game (i.e. percent novel indicates what
-    % of images are novel to the student; note you can try values in between if
-    you'd like)
-- `--percent_novel 0.0`: runs setref game
-- `--percent_novel 0.0 --reference_game`: runs reference game. **For
-    ShapeWorld, be sure to pass in the 30-concept reference game dataset `shapeworld_ref`,
-    not the standard 312-concept dataset `shapeworld`!**
+`./scripts/run_experiment.sh` takes
+`<experiment> [max_concurrent] [partition] [--rerun] [--gpu-type T]` (defaults:
+`max_concurrent=5`, `partition=gpu-a100`). Without `--rerun` it skips jobs whose
+`metrics.csv` already has at least `[scheduler].epochs` rows; `--rerun` resubmits
+everything from scratch (passing `--no_resume` to `train.py`).
 
-Additional flags relevant for experiments:
-- `--max_lang_length`: maximum message length. **This includes sos/eos token,
-    so the true length is this value minus 2**
-- `--vocab_size`: vocab size of the agents.
-- `--n_examples`: number of examples given to agents
-- `--uniform_weight`: add uniform noise to gumbel softmax exploration policy
-- `--wandb`: activate wandb logging (run `wandb init` yourself)
+#### Storage paths (`config.json`)
 
-There are other options documented in `code/io_util.py`.
+```json
+{
+    "data_slow_storage": "~/archive/data",
+    "data_fast_storage": "~/sharedscratch/data",
+    "output_root": "~/archive/results"
+}
+```
 
+On Hyperion the CUB training data lives at `~/archive/data/emcomgen/data/cub`
+(`data_slow_storage` + `/emcomgen/data/cub`); `prepare_data.sh` stages it to
+`~/sharedscratch/data/emcomgen/data/cub` (`data_fast_storage`), which is what jobs
+read. `train.py` rewrites each config's `dataset`/`ref_dataset` logical name
+(`cub`/`shapeworld`/`shapeworld_ref`) to its fast-storage location at runtime.
+
+### 1. Train model (one SLURM array task)
+
+Each array task runs `train.py` once:
+
+```bash
+python code/train.py --config experiments/<exp>/configs/<file>.toml --seed <n> [--no_resume]
+```
+
+`--seed` seeds `random`/`numpy`/`torch` so repeats differ; the SLURM wrappers map
+array index → `(config, seed)` via `scripts/job_utils.py`. The output directory is
+derived from the config path: `<output_root>/<experiment>/<config_stem>_seed<seed>/`.
+
+Game type and the other hyperparameters are set **in the TOML config**, not via
+CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
+
+- `[data] percent_novel = 1.0`: concept game (fraction of images novel to the student)
+- `[data] percent_novel = 0.0`: setref game
+- `[data] percent_novel = 0.0` + `reference_game = true`: reference game. **For
+    ShapeWorld, use the 30-concept reference dataset `shapeworld_ref`, not the
+    standard 312-concept `shapeworld`!**
+- `[sender_language_model] message_length` / `[receiver_comparer] message_length`:
+    max message length (**includes sos/eos, so true length is this minus 2**; the
+    two must match)
+- `[sender_language_model] vocabulary`: vocab size of the agents
+- `[data] n_examples`: number of examples given to agents
+- `[sender_language_model] uniform_weight`: uniform noise on the gumbel-softmax policy
+- `wandb = true`: activate wandb logging (run `wandb init` yourself)
+
+Two extra sections drive the launcher (the `[experiment]` and `[slurm]` keys):
+
+```toml
+[experiment]
+repeats = 5            # array tasks per config
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24
+```
+
+See `DEFAULT.toml` for the full set of options and their defaults.
+
+#### Topsim & generalization from `train.py` alone
+
+In-training topographic similarity (`ts`/`langts`/`hausdorff`/`reprts`) is computed
+once per split per epoch from the model's own (utterance, meaning) pairs over that
+split, capped at `max_analysis_length=1000`. Per-split episode counts are fixed
+(`code/data/cub.py`): CUB train = 1000, CUB val/test = 200; ShapeWorld splits draw
+from the 20k-game corpus and hit the random-1000 cap. So a CUB **generalization-split**
+topsim rests on only ~200 episodes/epoch — fine for headline numbers. For
+low-variance CUB topsim, the route is `sample.py`'s 200k balanced-utterance corpus
+(optional downstream analysis, along with `acre.py`); `train.py` alone is sufficient
+for the per-epoch topsim + generalization accuracies in `metrics.csv`.
 
 #### Metrics
 
-Metrics are logged into `exp/NAME/metrics.csv` and logged to wandb (if
-`--wandb` is enabled). The relevant ones are:
+Metrics are logged into `<output_root>/<experiment>/<config_stem>_seed<seed>/metrics.csv`
+and logged to wandb (if `wandb = true`). The relevant ones are:
 
 - `train_acc`:
 - `test`. For shapeworld, this metric is split into `{test,val}_acc` and `{test,val}_same_acc` to denote unseen and seen splits, respectively, where `{test,val}_avg_acc` averages the two.

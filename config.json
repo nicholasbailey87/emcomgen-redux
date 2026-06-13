@@ -1,0 +1,5 @@
+{
+    "data_slow_storage": "~/archive/data",
+    "data_fast_storage": "~/sharedscratch/data",
+    "output_root": "~/archive/results"
+}

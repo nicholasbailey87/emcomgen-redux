@@ -64,7 +64,7 @@ def flatten_logit_distribution(
     combined_logits = torch.stack(
         [
             uniform_log_probs + np.log(uniform_weight),
-            logits + np.log(1 - uniform_weight),
+            normalised_logits + np.log(1 - uniform_weight),
         ],
         dim=-1,
     )
@@ -342,18 +342,17 @@ class SenderTransformerLM(nn.Module):
             absolute_position_embedding=True,
             relative_position_embedding=True,
             source_size=(self.content_length,),
-            mlp_ratio=2,
+            ff_ratio=2,
             activation=broccoli.activation.SwiGLU,
             activation_kwargs=None,
-            mlp_dropout=0.,
+            ff_dropout=0.,
             msa_dropout=0.,
             stochastic_depth=0.2,
             causal = not self.bidirectional,
-            utility_tokens=self.utility_tokens,
-            return_utility_tokens=False,
-            pre_norm=True,
+            bos_tokens=self.utility_tokens,
+            return_bos_tokens=False,
+            pre_norm=False,
             post_norm=True,
-            normformer=True,
             msa_scaling="d",
         )
 

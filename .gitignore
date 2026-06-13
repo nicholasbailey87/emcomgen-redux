@@ -115,8 +115,12 @@ best_lang.csv
 
 vis/
 
-exp/*
-!exp/README.md
+# Results output_root (kept locally only; arranged by experiment)
+results/*
+!results/README.md
+
+# SLURM logs written at submit time, per experiment
+experiments/*/logs/
 
 test.jpg
 .Rproj.user

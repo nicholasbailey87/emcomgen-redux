@@ -373,8 +373,11 @@ def run(
                 else:
                     backpropped = False
 
+            # .item() detaches: passing the live tensor would make AverageMeter's
+            # running sum retain the autograd graph across the whole epoch.
             stats.update(
-                loss=this_loss, acc=this_acc, batch_size=batch_size, combined_loss=this_loss
+                loss=this_loss.item(), acc=this_acc, batch_size=batch_size,
+                combined_loss=this_loss.item()
             )
 
         if training:
@@ -461,25 +464,60 @@ class NoArguments(Exception):
     pass
 
 if __name__ == "__main__":
-    # args = io_util.parse_args()
-    # args_dict = vars(args)
-    arguments = sys.argv[1:]
-    if not arguments:
-        raise NoArguments(
-            "Intended usage: `python train.py [path to experiment TOML file]`"
-        )
-    else:
-        config = parse_config.get_config(arguments[0])
+    import argparse
+    import random
 
-    exp_dir = os.path.abspath(
-        str(
-            Path(config['experiments_directory']) / Path(config['name'])
-        )
+    import paths
+
+    parser = argparse.ArgumentParser(
+        description="Train an emcomgen sender/receiver pair from a TOML config."
     )
+    parser.add_argument(
+        "--config", required=True, type=str,
+        help="Path to the experiment TOML config "
+             "(experiments/<exp>/configs/<file>.toml)."
+    )
+    parser.add_argument(
+        "--seed", type=int, default=0,
+        help="Random seed; SLURM array indices map to seeds for repeats."
+    )
+    parser.add_argument(
+        "--no_resume", action="store_true",
+        help="Ignore any existing checkpoint and train from scratch."
+    )
+    args = parser.parse_args()
+
+    seed = args.seed
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    config = parse_config.get_config(args.config)
+    if args.no_resume:
+        config['resume'] = False
+
+    # Resolve dataset logical names ('cub'/'shapeworld'/'shapeworld_ref') to
+    # their location on fast storage. This must happen *after* get_config(),
+    # which branches on the original '../data/cub' string to pick birds defaults.
+    data_fast_storage = paths.data_fast_storage()
+    output_root = paths.output_root()
+    emcomgen_data = data_fast_storage / "emcomgen" / "data"
+    for key in ('dataset', 'ref_dataset'):
+        if key in config['data']:
+            basename = Path(config['data'][key]).name
+            config['data'][key] = str(emcomgen_data / basename)
+
+    # Results are arranged by experiment:
+    #   <output_root>/<experiment>/<config_stem>_seed<seed>/
+    # where <experiment> is the experiments/<exp>/configs/<file>.toml parent.
+    experiment = Path(args.config).resolve().parents[1].name
+    config_stem = Path(args.config).stem
+    exp_dir = str(output_root / experiment / f"{config_stem}_seed{seed}")
     config['exp_dir'] = exp_dir
 
     print(f"LR: {config['optimiser']['lr']}")
-    
+
     os.makedirs(exp_dir, exist_ok=True)
     util.save_args(config, exp_dir)
 
@@ -526,32 +564,32 @@ if __name__ == "__main__":
     )
 
     checkpoint_path = os.path.join(exp_dir, "checkpoint_last.pt")
+    metrics_path = os.path.join(exp_dir, "metrics.csv")
     start_epoch = 0
-    
-    # Initialize metrics normally first
+
+    # The metrics dict persists across the loop; only the best_* trackers need to
+    # carry over a resume (per-epoch metrics are recomputed each epoch). Earlier
+    # epoch rows live in metrics.csv on disk, which we append to rather than
+    # rebuild, so they survive a resume.
     metrics = init_metrics()
-    all_metrics = [] # Initialize this too
 
     if config.get('resume', False) and os.path.exists(checkpoint_path):
         print(f"Resuming from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, weights_only=False)
 
-        scheduler.load_state_dict(checkpoint)
-        
-        # Restore metadata
-        start_epoch = checkpoint['epoch']
-        metrics = checkpoint['metrics'] # Restore best_acc, etc.
-        if 'all_metrics' in checkpoint:
-            all_metrics = checkpoint['all_metrics']
-        if 'rng_state' in checkpoint:
-            torch.set_rng_state(checkpoint['rng_state'])
-        if 'cuda_rng_state' in checkpoint:
-            torch.cuda.set_rng_state(checkpoint['cuda_rng_state'])
-        if 'numpy_rng_state' in checkpoint:
-            np.random.set_state(checkpoint['numpy_rng_state'])
-            
-        print(f"Resumed at epoch {start_epoch}")
-    
+        # gradboard's PASS restores model + optimiser + scaler + step_count.
+        scheduler.load_state_dict(checkpoint["scheduler_state"])
+
+        start_epoch = checkpoint["epoch"]
+        metrics.update(checkpoint.get("best_metrics", {}))
+
+        print(f"Resumed at epoch {start_epoch} (best_acc={metrics['best_acc']:.4f})")
+
+    # A fresh start (--no_resume, or no checkpoint to resume from) must not append
+    # onto a stale metrics.csv from a previous run, since we now append per epoch.
+    if start_epoch == 0 and os.path.exists(metrics_path):
+        os.remove(metrics_path)
+
     if config['compile']:
         print("Compiling model...")
         model_config['pair'] = torch.compile(model_config['pair'])
@@ -565,9 +603,6 @@ if __name__ == "__main__":
         config
     )
 
-    all_metrics = []
-    metrics = init_metrics()
-    
     print("Starting to train")
 
     for epoch in range(start_epoch, config['scheduler']['epochs']):
@@ -636,20 +671,6 @@ if __name__ == "__main__":
             if config['use_lang']:
                 lang.to_csv(os.path.join(exp_dir, f"{epoch}_lang.csv"), index=False)
 
-        # Checkpoint every epoch to allow resuming
-        checkpoint_state = scheduler.state_dict()
-        checkpoint_state.update(
-            {
-                'epoch': epoch + 1, # Save the NEXT epoch index
-                'metrics': metrics,
-                'all_metrics': all_metrics,
-                'rng_state': torch.get_rng_state(),
-                'cuda_rng_state': torch.cuda.get_rng_state(),
-                'numpy_rng_state': np.random.get_state()
-            }
-        )
-        torch.save(checkpoint_state, checkpoint_path)
-
         # Additionally track best for splits separately
         metrics["best_val_acc"] = max(metrics["best_val_acc"], metrics["val_acc"])
         if "val_same_acc" in metrics:
@@ -657,13 +678,38 @@ if __name__ == "__main__":
                 metrics["best_val_same_acc"], metrics["val_same_acc"]
             )
 
-        all_metrics.append(metrics.copy())
-
         # if args.wandb:
         #     import wandb
 
         #     wandb.log(metrics)
 
-        pd.DataFrame(all_metrics).to_csv(
-            os.path.join(exp_dir, "metrics.csv"), index=False
+        # Append this epoch's row to metrics.csv (write the header only for a new
+        # file). Appending — rather than rewriting from an in-memory list — is
+        # what lets earlier rows survive a resume.
+        pd.DataFrame([metrics]).to_csv(
+            metrics_path,
+            mode="a",
+            header=not os.path.exists(metrics_path),
+            index=False,
+        )
+
+        # Checkpoint after the row is on disk so the model/optimiser state and
+        # the best_* trackers stay in sync with metrics.csv on resume. As in vit,
+        # a crash between these two writes can re-emit one row, which is benign.
+        torch.save(
+            {
+                "epoch": epoch + 1,  # resume at the NEXT epoch
+                "scheduler_state": scheduler.state_dict(),
+                "best_metrics": {
+                    k: metrics[k]
+                    for k in (
+                        "best_acc",
+                        "best_val_acc",
+                        "best_val_same_acc",
+                        "best_loss",
+                        "best_epoch",
+                    )
+                },
+            },
+            checkpoint_path,
         )

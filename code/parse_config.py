@@ -93,7 +93,10 @@ def validate_config(config: dict) -> bool:
             "Config TOML must specify ```\n['data']\ndataset = ...```."
         )
 
-def get_config(filepath: str = None, defaults: str = "../config/DEFAULT.toml"):
+def get_config(
+    filepath: str = None,
+    defaults: str = str(Path(__file__).resolve().parents[1] / "DEFAULT.toml"),
+):
     """
     This function gets a custom experiment config by combining some default
         parameters with a TOML file specified by the user.
