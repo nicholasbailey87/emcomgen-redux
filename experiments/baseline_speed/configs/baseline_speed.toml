@@ -4,7 +4,11 @@ name = "baseline_speed" # experiment name - should be the same as file name
 
 [data]
 n_workers = 4
-load_shapeworld_into_memory = true
+batch_size = 256
+
+[optimiser]
+lr = 1e-3
+weight_decay = 0.5
 
 [scheduler]
 epochs = 100
