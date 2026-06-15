@@ -41,7 +41,7 @@ sif_window = 2         # co-occurrence context radius for SIF symbol embeddings
 dataset = "../data/shapeworld"
 ref_dataset = "../data/shapeworld_ref"
 load_shapeworld_into_memory = false
-batch_size = 1024
+batch_size = 128
 percent_novel = 1.0
 n_examples = 20 # number of examples seen by agents, including distractors
 n_workers = 0
@@ -49,7 +49,7 @@ n_workers = 0
 [optimiser]
 class = "AdamW"
 accumulator_steps = 4
-lr = 3e-3
+lr = 1e-3
 weight_decay = 0.05
 clip_grad_norm = 100.0
 log_interval = 100
