@@ -10,15 +10,17 @@ import sys
 import os
 from pathlib import Path
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 import numpy as np
+from scipy.spatial.distance import squareform
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
 import models
 import models.backbone
+import models.sender
 
 import parse_config
 import util
@@ -70,84 +72,99 @@ def get_positive_examples(inp, y):
     return sel
 
 
-def subsample(items, idx):
-    return [items[i] for i in idx]
+def concept_keys_from_true_lang(true_lang_text, dataset_name):
+    """
+    Map each item's ground-truth language to the concept key that indexes the
+    dataset's pairwise ``concept_distance`` table. These derivations mirror the
+    historical Hausdorff topsim: a CUB concept is its (integer) class id; a
+    shapeworld concept is the logical-form string with SOS/EOS stripped.
+    """
+    if dataset_name == "cub":
+        return [int(t[1]) for t in true_lang_text]
+    return [" ".join(t[1:-1]) for t in true_lang_text]
 
 
-def compute_lang_metrics(
-    all_lang,
+def representative_message(messages):
+    """The most common token sequence among messages for one concept."""
+    counts = Counter(tuple(m) for m in messages)
+    return list(counts.most_common(1)[0][0])
+
+
+def compute_topsim_metrics(
+    messages,
+    reprs,
+    concept_keys,
     dataset,
-    # args isn't used in this function, so we commented it out
-    # args,
-    attrs=None,
-    reprs=None,
-    attrs_numeric=None,
-    toks=None,
-    max_analysis_length=1000,
+    vocab_size,
+    sif_dim,
+    sif_window,
+    max_samples,
 ):
-    lang_metrics = {}
-    if all_lang.shape[0] > max_analysis_length:
-        idx = np.random.choice(
-            all_lang.shape[0], size=max_analysis_length, replace=False
-        )
+    """
+    Topsim across two meaning bases (concept distance ``ts``, sender-repr cosine
+    ``reprts``) x three message distances (``lev``, ``tanimoto``, ``sif``), at
+    two granularities (per-image ``_img`` and per-concept-prototype ``_proto``).
 
-        all_lang = all_lang.iloc[idx].reset_index()
+    The SIF principal component is estimated on the larger image-level set and
+    reused for the prototype set, where estimating it from ~K concepts would be
+    noisy. Concept distances are vectorized via a ``K x K`` table + indexing
+    (``emergence.condensed_from_index``).
+    """
+    reprs = np.asarray(reprs, dtype=np.float64)
+    n = len(messages)
+    if n > max_samples:
+        idx = np.random.choice(n, size=max_samples, replace=False)
+        messages = [messages[i] for i in idx]
+        reprs = reprs[idx]
+        concept_keys = [concept_keys[i] for i in idx]
+        n = max_samples
 
-        if attrs is not None:
-            attrs = subsample(attrs, idx)
-        if toks is not None:
-            toks = subsample(toks, idx)
-        if reprs is not None:
-            reprs = subsample(reprs, idx)
+    # Unique concepts + dense K x K concept-distance table (cheap: K is small).
+    unique = list(dict.fromkeys(concept_keys))
+    cpos = {c: i for i, c in enumerate(unique)}
+    K = len(unique)
+    if n < 2 or K < 2:
+        return {}
+    concept_dist = np.zeros((K, K), dtype=np.float64)
+    for i in range(K):
+        for j in range(i + 1, K):
+            d = dataset.concept_distance(unique[i], unique[j])
+            concept_dist[i, j] = concept_dist[j, i] = d
+    item_idx = np.array([cpos[c] for c in concept_keys])
 
-    # topographic similarity between ground truth language and tokens
-    # only do it if the ground truth language is meaningful
-    if dataset.name == "shapeworld":
-        langts = emergence.topsim(
-            all_lang["true_lang"], toks, meaning_distance_fn="edit"
-        )
-        lang_metrics["langts"] = langts
+    metrics = {}
 
-    if dataset.name == "shapeworld":
+    # Per-image granularity.
+    grid_img, sif_pc = emergence.topsim_grid(
+        messages,
+        reprs,
+        vocab_size,
+        concept_meaning_cond=emergence.condensed_from_index(concept_dist, item_idx),
+        sif_dim=sif_dim,
+        sif_window=sif_window,
+    )
+    for k, v in grid_img.items():
+        metrics[f"{k}_img"] = v
 
-        def compute_hd(tl1, tl2):
-            # Remove SOS, EOS
-            tl1 = " ".join(tl1[1:-1])
-            tl2 = " ".join(tl2[1:-1])
-            return dataset.concept_distance(tl1, tl2)
+    # Per-concept-prototype granularity: one mean repr + representative message.
+    proto_reprs = np.stack([reprs[item_idx == i].mean(0) for i in range(K)])
+    proto_messages = [
+        representative_message([messages[j] for j in range(n) if item_idx[j] == i])
+        for i in range(K)
+    ]
+    grid_proto, _ = emergence.topsim_grid(
+        proto_messages,
+        proto_reprs,
+        vocab_size,
+        concept_meaning_cond=squareform(concept_dist, checks=False),
+        sif_dim=sif_dim,
+        sif_window=sif_window,
+        sif_pc=sif_pc,
+    )
+    for k, v in grid_proto.items():
+        metrics[f"{k}_proto"] = v
 
-    elif dataset.name == "cub":
-
-        def compute_hd(tl1, tl2):
-            tl1 = int(tl1[1])
-            tl2 = int(tl2[1])
-            return dataset.concept_distance(tl1, tl2)
-
-    if dataset.concept_distances is not None:
-        hd = emergence.topsim(
-            all_lang["true_lang"], toks, meaning_distance_fn=compute_hd
-        )
-        lang_metrics["hausdorff"] = hd
-
-    if attrs is not None:
-        # topographic similarity between meanings and tokens
-        ts = emergence.topsim(
-            attrs, toks, meaning_distance_fn=dataset.meaning_distance_fn
-        )
-        lang_metrics["ts"] = ts
-
-        # topographic similarity between reprs and attributes
-        # For random sets later, worth disentangling prototype repr from
-        # individual inputs repr
-        reprts = emergence.topsim(
-            attrs,
-            reprs,
-            meaning_distance_fn=dataset.meaning_distance_fn,
-            message_distance_fn="euclidean",
-        )
-        lang_metrics["reprts"] = reprts
-
-    return lang_metrics
+    return metrics
 
 
 def compute_metrics_by_md(all_lang, md_vocab=None):
@@ -211,6 +228,7 @@ def run(
     config,
     random_state=None,
     force_no_train=False,
+    compute_topsim=False,
 ):
     """
     Run the model for a single epoch.
@@ -237,6 +255,11 @@ def run(
     random_state : ``np.random.RandomState``
         The numpy random state in case anything stochastic happens during the
         run
+    compute_topsim : ``bool``
+        If true, collect (representation, message, concept) triples during the
+        run and compute the vectorized topsim grid at the end. Set only for the
+        active game type's eval passes (topsim is a property of the language,
+        not the game framing, so it is not computed per game type or on train).
 
     Returns
     -------
@@ -254,14 +277,19 @@ def run(
     stats = util.Statistics()
 
     all_lang = []
-    all_toks = []  # language, unjoined text form, ragged
 
-    if dataloader.dataset.name == "cub":
-        all_attrs = []
-        all_reprs = []  # representations
-    else:
-        all_attrs = None
-        all_reprs = None
+    # Collected only when topsim is computed for this split (the active game
+    # framing's eval passes). Skipped otherwise to keep non-topsim splits light.
+    all_messages = []   # emergent messages as ragged content-token-id lists
+    all_reprs = []      # sender representation vectors (prototypes_concat)
+    all_true_lang = []  # ground-truth language tokens, for concept keys
+
+    collect = (
+        compute_topsim
+        and config['use_lang']
+        and not config['receiver_only']
+        and not config['copy_receiver']
+    )
 
     if training:
         optimizer.zero_grad()
@@ -344,12 +372,13 @@ def run(
             # Game difficulty/other metadata indicator
             all_lang.extend(zip(lang_text, true_lang_text, per_game_acc, md.numpy()))
 
-            # Get attributes
-            all_toks.extend(lang_text_unjoined)
-            if dataloader.dataset.name == "cub":
-                attrs = md.numpy()[:, 1:]
-                all_attrs.extend(attrs)
+            # Collect (representation, message, concept) for topsim. Only on the
+            # active game framing's eval passes (compute_topsim); the sender
+            # path (lang + states) must have run for this to be meaningful.
+            if collect:
+                all_messages.extend(models.sender.trim_messages(lang_i.tolist()))
                 all_reprs.extend(states.detach().cpu().float().numpy())
+                all_true_lang.extend(true_lang_text)
 
             if config['joint_training']:
                 class DoNotUse(Exception): pass
@@ -373,8 +402,6 @@ def run(
                 else:
                     backpropped = False
 
-            # .item() detaches: passing the live tensor would make AverageMeter's
-            # running sum retain the autograd graph across the whole epoch.
             stats.update(
                 loss=this_loss.item(), acc=this_acc, batch_size=batch_size,
                 combined_loss=this_loss.item()
@@ -400,21 +427,21 @@ def run(
         columns=["lang", "true_lang", "acc", "md"],
     )
 
-    if config['use_lang']:
-        # Compute emergent communication statistics
-        if dataloader.dataset.name == "cub":
-            attrs_numeric = dataloader.dataset.attr_to_numeric(all_attrs)
-        else:
-            attrs_numeric = None
-
-        lang_metrics = compute_lang_metrics(
-            all_lang,
+    if collect and all_messages:
+        # Vectorized topsim over the collected (representation, message, concept)
+        # triples for this (active-framing) eval split.
+        concept_keys = concept_keys_from_true_lang(
+            all_true_lang, dataloader.dataset.name
+        )
+        lang_metrics = compute_topsim_metrics(
+            all_messages,
+            all_reprs,
+            concept_keys,
             dataloader.dataset,
-            # commented out argument `args`, see definition above
-            attrs=all_attrs,
-            reprs=all_reprs,
-            attrs_numeric=attrs_numeric,
-            toks=all_toks,
+            vocab_size=config['sender_language_model']['vocabulary'] + 4,
+            sif_dim=config['analysis']['sif_embedding_dim'],
+            sif_window=config['analysis']['sif_window'],
+            max_samples=config['analysis']['max_samples'],
         )
         metrics.update(lang_metrics)
 
@@ -629,7 +656,14 @@ if __name__ == "__main__":
                 for split_type in ["", "_same"]:
                     sname = f"{split}{split_type}_{game_type}"
                     if sname in dataloaders:
-                        eval_metrics, eval_lang = run(sname, epoch, *run_args)
+                        # Topsim is a property of the language under the framing
+                        # the model was trained on; compute it once, on the
+                        # active game type's eval passes only (not per game type,
+                        # and not on train).
+                        eval_metrics, eval_lang = run(
+                            sname, epoch, *run_args,
+                            compute_topsim=(game_type == this_game_type),
+                        )
                         util.update_with_prefix(metrics, eval_metrics, sname)
                         if this_game_type == game_type:
                             # Default

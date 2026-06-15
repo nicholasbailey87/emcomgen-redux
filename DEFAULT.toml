@@ -24,11 +24,18 @@ ignore_examples = false
 debug = false
 vis = false
 receiver_reset_interval = 0.0
-force_reference_game = false # Can be used in zero-shot eval
-force_concept_game = false # Can be used in zero-shot eval
-force_setref_game = false # Can be used in zero-shot eval
-zero_shot_eval_epochs = 5
 save_interval = 10
+
+[analysis]
+# Topsim metric settings (see code/emergence.py and compute_topsim_metrics in
+# code/train.py). Topsim is computed once per epoch from the active game type's
+# eval passes.
+max_samples = 2000     # cap on per-image points entering one topsim computation
+sif_embedding_dim = 4  # SIF symbol-embedding dim. Emergent vocab is only ~10-20,
+                       # and the embedding is a truncated SVD whose rank is
+                       # bounded by the corpus, so keep this small (4) to avoid
+                       # exceeding the available rank.
+sif_window = 2         # co-occurrence context radius for SIF symbol embeddings
 
 [data]
 dataset = "../data/shapeworld"
@@ -37,7 +44,6 @@ load_shapeworld_into_memory = false
 batch_size = 32
 percent_novel = 1.0
 n_examples = 20 # number of examples seen by agents, including distractors
-n_sample = 2E5 # Number of samples for inspecting the language. Used in sample.py
 n_workers = 0
 
 [optimiser]

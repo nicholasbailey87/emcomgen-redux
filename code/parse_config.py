@@ -52,17 +52,6 @@ def validate_config(config: dict) -> bool:
     Based on some lines in code/io_util.py
     """
 
-    if (
-        # Remembering that True == 1 in Python...
-        config['force_reference_game']
-        + config['force_concept_game']
-        + config['force_setref_game']
-     ) > 1:
-        raise InvalidConfig(
-            "Only one of the following can be true: `force_reference_game`,"
-            " `force_concept_game`, `force_setref_game`."
-        )
-        
     if config['use_lang'] and (config['copy_receiver'] or config['receiver_only']):
         raise InvalidConfig(
             "`use_lang` must be false if `copy_receiver` or `receiver_only` is true."

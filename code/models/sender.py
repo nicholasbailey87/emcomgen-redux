@@ -22,6 +22,30 @@ import data.language
 
 import broccoli
 
+
+def trim_messages(token_id_rows):
+    """
+    Turn rows of decoded token ids into ragged content-token sequences: drop the
+    leading SOS and truncate at the first EOS. The language model masks the
+    reserved tokens (PAD/SOS/EOS/UNK) mid-sequence, so the surviving tokens are
+    all real symbols. Accepts anything iterable-of-iterables (e.g. a CPU tensor
+    via ``.tolist()``); returns a list of python int lists.
+    """
+    sos, eos = data.language.SOS_IDX, data.language.EOS_IDX
+    trimmed = []
+    for row in token_id_rows:
+        toks = []
+        for t in row:
+            t = int(t)
+            if t == sos:
+                continue
+            if t == eos:
+                break
+            toks.append(t)
+        trimmed.append(toks)
+    return trimmed
+
+
 def batch_norm_logits(module: nn.BatchNorm1d, logits: torch.Tensor) -> torch.Tensor:
     """
     Applies nn.BatchNorm1d to vocabulary logits that are arranged in a
@@ -501,6 +525,33 @@ class Sender(nn.Module):
         )
 
         return messages, prototypes_concat
+
+    def represent(self, samples, targets):
+        """
+        No-grad collection of (representation, message) pairs for metrics.
+
+        Returns the sender's image-representation vector -- the concatenated
+        positive/negative prototypes that seed the language model, identical to
+        the ``prototypes_concat`` returned by :meth:`forward` -- together with
+        the emitted message as content token ids: the leading SOS is dropped and
+        the sequence is truncated at the first EOS, giving one python list per
+        item in the batch.
+
+        Decoding follows the ordinary forward path (Gumbel-sampled), so the
+        collected language matches what the model actually produces at
+        evaluation time; there is no separate greedy decoder (greedy generation
+        was removed along with ACRe).
+        """
+        was_training = self.training
+        self.eval()
+        try:
+            with torch.no_grad():
+                messages, prototypes_concat = self.forward(samples, targets)
+        finally:
+            self.train(was_training)
+
+        messages = trim_messages(messages.argmax(-1).cpu().tolist())
+        return prototypes_concat, messages
 
     def reset_parameters(self):
         if hasattr(self.feat_model, 'reset_parameters'):

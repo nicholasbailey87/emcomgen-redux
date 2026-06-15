@@ -151,7 +151,7 @@ def load_other_data(this_game_type, split, dataset, fast=False, into_memory=Fals
         assert "_ref" in dataset
         other_dataset = dataset.replace("_ref", "")
     else:
-        other_dataset = "../data/shapeworld_ref/"
+        other_dataset = os.path.join(os.path.dirname(dataset.rstrip("/")), "shapeworld_ref")
     return load_split(other_dataset, split, fast=fast, into_memory=into_memory)
 
 

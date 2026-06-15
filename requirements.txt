@@ -1,5 +1,6 @@
 broccoli-ml @ git+https://github.com/nicholasbailey87/broccoli.git@neovit
 gradboard @ git+https://github.com/nicholasbailey87/gradboard.git@neovit
+tiny-lang-embed @ git+https://github.com/nicholasbailey87/tiny-lang-embed.git
 click==8.3.0
 colorama==0.4.6
 editdistance==0.8.1
@@ -19,6 +20,7 @@ pillow==12.0.0
 psutil==7.1.2
 python-dateutil==2.9.0.post0
 pytz==2025.2
+rapidfuzz==3.14.5
 regex==2025.10.23
 scikit-learn==1.7.2
 scipy==1.16.2
