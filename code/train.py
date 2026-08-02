@@ -198,24 +198,6 @@ def log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats):
     logging.info(f"Epoch {epoch} [{data_i}/{data_total} ({pct}%)] {meter_str}")
 
 
-def init_metrics():
-    """
-    Initialize the metrics for this training run. This is a defaultdict, so
-    metrics not specified here can just be appended to/assigned to during
-    training.
-    Returns
-    -------
-    metrics : `collections.defaultdict`
-        All training metrics
-    """
-    metrics = {}
-    metrics["best_acc"] = 0.0
-    metrics["best_val_acc"] = 0.0
-    metrics["best_val_same_acc"] = 0.0
-    metrics["best_loss"] = float("inf")
-    metrics["best_epoch"] = 0
-    return metrics
-
 def run(
     split,
     epoch,
@@ -257,9 +239,9 @@ def run(
         run
     compute_topsim : ``bool``
         If true, collect (representation, message, concept) triples during the
-        run and compute the vectorized topsim grid at the end. Set only for the
-        active game type's eval passes (topsim is a property of the language,
-        not the game framing, so it is not computed per game type or on train).
+        run and compute the vectorized topsim grid at the end. Set on the eval
+        passes only; topsim is a property of the language, so there is no point
+        computing it mid-training-pass.
 
     Returns
     -------
@@ -278,8 +260,8 @@ def run(
 
     all_lang = []
 
-    # Collected only when topsim is computed for this split (the active game
-    # framing's eval passes). Skipped otherwise to keep non-topsim splits light.
+    # Collected only when topsim is computed for this split (the eval passes).
+    # Skipped otherwise to keep the train pass light.
     all_messages = []   # emergent messages as ragged content-token-id lists
     all_reprs = []      # sender representation vectors (prototypes_concat)
     all_true_lang = []  # ground-truth language tokens, for concept keys
@@ -373,8 +355,8 @@ def run(
             all_lang.extend(zip(lang_text, true_lang_text, per_game_acc, md.numpy()))
 
             # Collect (representation, message, concept) for topsim. Only on the
-            # active game framing's eval passes (compute_topsim); the sender
-            # path (lang + states) must have run for this to be meaningful.
+            # eval passes (compute_topsim); the sender path (lang + states) must
+            # have run for this to be meaningful.
             if collect:
                 all_messages.extend(models.sender.trim_messages(lang_i.tolist()))
                 all_reprs.extend(states.detach().cpu().float().numpy())
@@ -429,7 +411,7 @@ def run(
 
     if collect and all_messages:
         # Vectorized topsim over the collected (representation, message, concept)
-        # triples for this (active-framing) eval split.
+        # triples for this eval split.
         concept_keys = concept_keys_from_true_lang(
             all_true_lang, dataloader.dataset.name
         )
@@ -550,7 +532,6 @@ if __name__ == "__main__":
 
     dataloaders = data.loader.load_dataloaders(config)
     model_config = models.builder.build_models(dataloaders, config)
-    this_game_type = data.util.get_game_type(config)
     scaler = GradScaler()
     
     # TODO: remove this as it's never used
@@ -594,11 +575,10 @@ if __name__ == "__main__":
     metrics_path = os.path.join(exp_dir, "metrics.csv")
     start_epoch = 0
 
-    # The metrics dict persists across the loop; only the best_* trackers need to
-    # carry over a resume (per-epoch metrics are recomputed each epoch). Earlier
-    # epoch rows live in metrics.csv on disk, which we append to rather than
-    # rebuild, so they survive a resume.
-    metrics = init_metrics()
+    # The metrics dict is rebuilt from scratch each epoch, so nothing in it needs
+    # to survive a resume. Earlier epoch rows live in metrics.csv on disk, which
+    # we append to rather than rebuild, so they survive a resume.
+    metrics = {}
 
     if config.get('resume', False) and os.path.exists(checkpoint_path):
         print(f"Resuming from checkpoint: {checkpoint_path}")
@@ -608,9 +588,8 @@ if __name__ == "__main__":
         scheduler.load_state_dict(checkpoint["scheduler_state"])
 
         start_epoch = checkpoint["epoch"]
-        metrics.update(checkpoint.get("best_metrics", {}))
 
-        print(f"Resumed at epoch {start_epoch} (best_acc={metrics['best_acc']:.4f})")
+        print(f"Resumed at epoch {start_epoch}")
 
     # A fresh start (--no_resume, or no checkpoint to resume from) must not append
     # onto a stale metrics.csv from a previous run, since we now append per epoch.
@@ -646,71 +625,40 @@ if __name__ == "__main__":
         train_metrics, lang = run("train", epoch, *run_args)
         util.update_with_prefix(metrics, train_metrics, "train")
 
-        # Eval across seen/unseen splits, and all game configurations
-        for game_type in ["ref", "setref", "concept"]:
-            if config['no_cross_eval'] and game_type != this_game_type:
+        # Eval on the held-out seen (`test`) and novel (`test_same`) concepts.
+        # A single game framing means no cross-eval, and a fixed training
+        # endpoint means no val split, so this is two passes rather than twelve.
+        # Topsim is computed on both.
+        split_metrics = defaultdict(list)
+        for split in ["test", "test_same"]:
+            if split not in dataloaders:
+                # `test_same` is optional
                 continue
-            for split in ["val", "test"]:
-                split_metrics = defaultdict(list)
 
-                for split_type in ["", "_same"]:
-                    sname = f"{split}{split_type}_{game_type}"
-                    if sname in dataloaders:
-                        # Topsim is a property of the language under the framing
-                        # the model was trained on; compute it once, on the
-                        # active game type's eval passes only (not per game type,
-                        # and not on train).
-                        eval_metrics, eval_lang = run(
-                            sname, epoch, *run_args,
-                            compute_topsim=(game_type == this_game_type),
-                        )
-                        util.update_with_prefix(metrics, eval_metrics, sname)
-                        if this_game_type == game_type:
-                            # Default
-                            util.update_with_prefix(
-                                metrics, eval_metrics, f"{split}{split_type}"
-                            )
+            eval_metrics, eval_lang = run(
+                split, epoch, *run_args, compute_topsim=True
+            )
+            util.update_with_prefix(metrics, eval_metrics, split)
 
-                        for metric, value in eval_metrics.items():
-                            split_metrics[metric].append(value)
+            for metric, value in eval_metrics.items():
+                split_metrics[metric].append(value)
 
-                    if sname == f"test_{this_game_type}":
-                        # Store + concatenate test language
-                        lang = pd.concat((lang, eval_lang), axis=0)
+            if split == "test":
+                # Store + concatenate test language
+                lang = pd.concat((lang, eval_lang), axis=0)
 
-                # Average across seen and novel
-                split_metrics = {k: np.mean(v) for k, v in split_metrics.items()}
-                util.update_with_prefix(
-                    metrics, split_metrics, f"{split}_avg_{game_type}"
-                )
-                if this_game_type == game_type:
-                    # Default
-                    util.update_with_prefix(metrics, split_metrics, f"{split}_avg")
-
-        # Use validation accuracy to choose the best model.
-        is_best = metrics["val_avg_acc"] > metrics["best_acc"]
-        if is_best:
-            metrics["best_acc"] = metrics["val_avg_acc"]
-            metrics["best_loss"] = metrics["val_avg_loss"]
-            metrics["best_epoch"] = epoch
-            if config['use_lang']:
-                lang.to_csv(os.path.join(exp_dir, "best_lang.csv"), index=False)
-            # Save the model
-            model_fname = os.path.join(exp_dir, "best_model.pt")
-            torch.save(model_config['pair'].state_dict(), model_fname)
+        # Average across seen and novel
+        util.update_with_prefix(
+            metrics,
+            {k: np.mean(v) for k, v in split_metrics.items()},
+            "test_avg",
+        )
 
         if epoch % config['save_interval'] == 0:
             model_fname = os.path.join(exp_dir, f"{epoch}_model.pt")
             torch.save(model_config['pair'].state_dict(), model_fname)
             if config['use_lang']:
                 lang.to_csv(os.path.join(exp_dir, f"{epoch}_lang.csv"), index=False)
-
-        # Additionally track best for splits separately
-        metrics["best_val_acc"] = max(metrics["best_val_acc"], metrics["val_acc"])
-        if "val_same_acc" in metrics:
-            metrics["best_val_same_acc"] = max(
-                metrics["best_val_same_acc"], metrics["val_same_acc"]
-            )
 
         # if args.wandb:
         #     import wandb
@@ -727,23 +675,24 @@ if __name__ == "__main__":
             index=False,
         )
 
-        # Checkpoint after the row is on disk so the model/optimiser state and
-        # the best_* trackers stay in sync with metrics.csv on resume. As in vit,
-        # a crash between these two writes can re-emit one row, which is benign.
+        # Checkpoint after the row is on disk so the model/optimiser state stays
+        # in sync with metrics.csv on resume. As in vit, a crash between these
+        # two writes can re-emit one row, which is benign.
         torch.save(
             {
                 "epoch": epoch + 1,  # resume at the NEXT epoch
                 "scheduler_state": scheduler.state_dict(),
-                "best_metrics": {
-                    k: metrics[k]
-                    for k in (
-                        "best_acc",
-                        "best_val_acc",
-                        "best_val_same_acc",
-                        "best_loss",
-                        "best_epoch",
-                    )
-                },
             },
             checkpoint_path,
         )
+
+    # Fixed endpoint: there is no best-epoch selection, so the deliverables are
+    # the final model, the language it produces, and the per-epoch trajectory
+    # already in metrics.csv. Skipped when resuming a run that is already done.
+    if start_epoch < config['scheduler']['epochs']:
+        torch.save(
+            model_config['pair'].state_dict(),
+            os.path.join(exp_dir, "final_model.pt"),
+        )
+        if config['use_lang']:
+            lang.to_csv(os.path.join(exp_dir, "final_lang.csv"), index=False)

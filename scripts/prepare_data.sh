@@ -4,9 +4,10 @@
 #
 # Stages each emcomgen dataset from slow storage to fast storage:
 #   <data_slow_storage>/emcomgen/data/<name>  ->  <data_fast_storage>/emcomgen/data/<name>
-# for name in cub, shapeworld, shapeworld_ref. Datasets absent from slow
-# storage are skipped with a message. (CUB expects the preprocessed img.npz per
-# class already present in slow storage; this script copies whatever is there.)
+# for name in cub, shapeworld_40, shapeworld, shapeworld_ref. Datasets absent
+# from slow storage are skipped with a message. (CUB expects the preprocessed
+# img.npz per class already present in slow storage; this script copies whatever
+# is there.)
 #
 # Usage: ./scripts/prepare_data.sh
 
@@ -37,7 +38,10 @@ echo "=============================================="
 
 mkdir -p "$DEST_ROOT"
 
-DATASETS=("cub" "shapeworld" "shapeworld_ref")
+# shapeworld_40 is the 40-image-per-game dataset the ShapeWorld experiments
+# actually train on; build it once from `shapeworld` with
+# `python data/shrink_shapeworld.py`, then stage it here.
+DATASETS=("cub" "shapeworld_40" "shapeworld" "shapeworld_ref")
 
 for name in "${DATASETS[@]}"; do
     echo ""

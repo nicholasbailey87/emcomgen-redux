@@ -121,13 +121,18 @@ def get_config(
     else:
         custom_config = dict()
            
-    if provisional_config['data']['dataset'] == '../data/cub':
+    # Which family of defaults to apply is decided by the dataset's *name*, not
+    # its location: `train.py` later rewrites this to a fast-storage path.
+    # ShapeWorld has several variants (`shapeworld_40`, `shapeworld_ref`, ...)
+    # which all share the same defaults.
+    dataset_name = Path(provisional_config['data']['dataset']).name
+    if dataset_name == 'cub':
         recursive_update(active_defaults, birds_defaults)
-    elif provisional_config['data']['dataset'] == '../data/shapeworld':
+    elif dataset_name.startswith('shapeworld'):
         pass # Defaults are already correct for shapeworld
     else:
         raise InvalidConfig(
-            "Dataset must be '../data/cub' or '../data/shapeworld'."
+            f"Dataset must be named 'cub' or 'shapeworld*', got '{dataset_name}'."
         )
     
     actual_config = active_defaults

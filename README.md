@@ -28,10 +28,30 @@ Other instructions for getting started still apply per the original repository: 
     - [shapeworld_all](http://nlp.stanford.edu/data/muj/emergent-generalization/shapeworld/shapeworld_all.tar.gz): 20k games over the 312 conjunctive concepts, *but no
         compositional split*.
 
-Note that running concept/setref game agents loads the shapeworld ref dataset
-(and vice versa) because we do zero shot eval, so download everything.
-
 Code used for generating the ShapeWorld data is located [here](https://github.com/jayelm/minishapeworld/tree/neurips2021).
+
+#### Shrink ShapeWorld to 40 images per game (required)
+
+ShapeWorld experiments train on `shapeworld_40`, a 40-image-per-game copy of
+`shapeworld`. Build it once after downloading:
+
+```bash
+python data/shrink_shapeworld.py --src ../data/shapeworld --dst ../data/shapeworld_40
+```
+
+The stored games hold 80-100 images but `split_spk_lis` only ever reads 20 (10
+per agent per polarity), so 40 is the smallest row that preserves the concept
+game's speaker/listener disjointness. That takes the train store from ~20-25 GB
+to ~9.8 GB, which fits in RAM — hence `load_shapeworld_into_memory = true` and
+~32 GB less disk I/O per epoch. The script draws its 20 keepers per half
+*proportionally within descriptor strata* rather than slicing the first 20,
+which would drop an entire stratum of the paper's 1/3-1/3-1/3 hard-target
+sampling; run it with `--audit` to see the ordering in your own copy of the
+data. Originals are left untouched.
+
+The unmodified `shapeworld` and `shapeworld_ref` datasets are only needed for
+reference-game runs and downstream analysis (`acre.py`); concept-game training
+does not read them.
 
 ## Running experiments
 
@@ -76,7 +96,8 @@ On Hyperion the CUB training data lives at `~/archive/data/emcomgen/data/cub`
 (`data_slow_storage` + `/emcomgen/data/cub`); `prepare_data.sh` stages it to
 `~/sharedscratch/data/emcomgen/data/cub` (`data_fast_storage`), which is what jobs
 read. `train.py` rewrites each config's `dataset`/`ref_dataset` logical name
-(`cub`/`shapeworld`/`shapeworld_ref`) to its fast-storage location at runtime.
+(`cub`/`shapeworld_40`/`shapeworld`/`shapeworld_ref`) to its fast-storage
+location at runtime.
 
 ### 1. Train model (one SLURM array task)
 
@@ -139,16 +160,30 @@ Metrics are logged into `<output_root>/<experiment>/<config_stem>_seed<seed>/met
 and logged to wandb (if `wandb = true`). The relevant ones are:
 
 - `train_acc`:
-- `test`. For shapeworld, this metric is split into `{test,val}_acc` and `{test,val}_same_acc` to denote unseen and seen splits, respectively, where `{test,val}_avg_acc` averages the two.
+- `test_acc` and `test_same_acc` denote unseen and seen concepts respectively, and `test_avg_acc` averages the two.
 - `{train,test}_langts`/`{train,test}_ts`: edit-distance based topographic similarity. For Birds (`cub`), the metric is `ts`; for ShapeWorld the metric is `langts`.
 - `{train,test}_hausdorff`: Hausdorff distance based topographic similarity.
 
 There are many other metrics, most of which should be reasonably intuitive,
 though contact authors for clarifications.
 
-There are also all of the above metrics split by game type (we eval ref agents on setref, concept, etc).
-
 Mutual information and entropy are measured later (see below).
+
+#### No val split, no best-epoch selection
+
+Training runs to a fixed endpoint (`[scheduler] epochs`) and the per-epoch
+`metrics.csv` trajectory *is* the deliverable — this is open-ended language
+evolution, so there is nothing to cherry-pick a best epoch against. Consequently
+there is no `val` split, no `best_*` metric columns, and no `best_model.pt` /
+`best_lang.csv`. What gets written is the periodic `<epoch>_model.pt` /
+`<epoch>_lang.csv` snapshots (`save_interval`) plus a `final_model.pt` /
+`final_lang.csv` at the end.
+
+Nor is there cross-game-type eval. A run trains and evaluates a single game
+framing; for the concept game (`percent_novel = 1.0`) speaker and listener see
+fully disjoint targets *and* distractors, which is itself the control against
+context-dependent degenerate codes that cross-eval was there to provide. That
+takes the epoch from 13 passes over the data down to 3.
 
 ### 2. Sample language from model
 

@@ -20,7 +20,11 @@ COLORS_DICT = {v: k for k, v in enumerate(COLORS)}
 N_FEATS = len(SHAPES) + len(COLORS)
 
 
-SPLITS = ["train", "val", "val_same", "test", "test_same"]
+# Only the splits the run actually consumes. There is no val split because there
+# is no best-epoch selection: training runs to a fixed endpoint and the
+# per-epoch metrics.csv trajectory is the deliverable. `_same` splits are
+# optional (see the tolerance in `load`).
+SPLITS = ["train", "test", "test_same"]
 
 
 def get_unique_concepts(dfolder):
@@ -34,12 +38,10 @@ def get_unique_concepts(dfolder):
             # Try hdf5
             data = h5py.File(data_file.replace(".npz", ".hdf5"), "r")
 
-        if data["langs"].dtype != str:
-            langs_decoded = [lang.decode("utf-8") for lang in data["langs"]]
-        else:
-            langs_decoded = data["langs"]
-
-        split_langs[split] = langs_decoded
+        split_langs[split] = [
+            lang.decode("utf-8") if isinstance(lang, bytes) else str(lang)
+            for lang in data["langs"]
+        ]
 
     return {
         "train": set(list(split_langs["train"])),
@@ -144,17 +146,6 @@ def concepts_to_onehot(concepts):
     return concepts_onehot
 
 
-def load_other_data(this_game_type, split, dataset, fast=False, into_memory=False):
-    """Load the opposite of the current game's dataset."""
-    if this_game_type == "ref":
-        # Load concept data
-        assert "_ref" in dataset
-        other_dataset = dataset.replace("_ref", "")
-    else:
-        other_dataset = os.path.join(os.path.dirname(dataset.rstrip("/")), "shapeworld_ref")
-    return load_split(other_dataset, split, fast=fast, into_memory=into_memory)
-
-
 def load(config, fast=False):
     datas = {}
     # if config['sender']['arguments']['image_encoder'] == "PretrainedResNet18":
@@ -177,7 +168,11 @@ def load(config, fast=False):
             config['data']['dataset'],
             split,
             fast=fast,
-            into_memory=config['data']['load_shapeworld_into_memory']
+            into_memory=config['data']['load_shapeworld_into_memory'],
+            # `extract_shapes` returns per-*image* descriptors, which disagree
+            # with a subsampled (40-image) store. Only reference games consume
+            # them, and those use the separate `shapeworld_ref` dataset.
+            need_shapes=config['reference_game'],
         )
 
     langs = np.concatenate([datas[s]["langs"] for s in datas])
@@ -220,59 +215,22 @@ def load(config, fast=False):
             **dataset_kwargs,
         )
 
-    # Load other versions of datasets for eval
-    this_game_type = util.get_game_type(config)
-    for _split in ["val", "test", "val_same", "test_same"]:
-        # Load the other dataset
-        other_data = load_other_data(
-            this_game_type,
-            _split,
-            config['data']['dataset'],
-            fast=fast,
-            into_memory=config['data']['load_shapeworld_into_memory'],
-        )
-        other_data["metadata"] = get_metadata(other_data["langs"], md_vocab)[0]
-        # other_vocab is used to measure the correct concept distances
-        other_vocab = language.init_vocab(other_data["langs"])
-        # Load other concepts
-        if fast:
-            other_concepts = None
-            other_concept_distances = None
-        else:
-            other_concepts = concepts_to_onehot(other_data["concepts"])
-            other_concept_distances = util.get_pairwise_hausdorff_distances(
-                other_concepts
-            )
-
-        for game_type in ["ref", "setref", "concept"]:
-            split = f"{_split}_{game_type}"
-            if game_type == this_game_type:
-                datasets[split] = datasets[_split]
-            else:
-                datasets[split] = ShapeWorldDataset(
-                    other_data,
-                    other_vocab,
-                    augment=False,
-                    percent_novel=1.0 if game_type == "concept" else 0.0,
-                    reference_game=game_type == "ref",
-                    shapes=other_data["shapes"],
-                    concepts=other_concepts,
-                    concept_distances=other_concept_distances,
-                    metadata_vocab=md_vocab,
-                    **dataset_kwargs,
-                )
-
+    # No cross-game-type eval datasets. The run trains and evaluates a single
+    # game framing (concept, i.e. `percent_novel = 1.0`), under which the
+    # speaker and listener see fully disjoint targets *and* distractors. That
+    # disjointness is an intrinsic control against context-dependent degenerate
+    # codes, which is what the cross-eval passes were guarding against, so
+    # building 12 extra eval datasets bought nothing but I/O.
     return datasets
 
 
-def load_split(dataset, split, fast=False, into_memory=False):
+def load_split(dataset, split, fast=False, into_memory=False, need_shapes=False):
     data_file = os.path.join(dataset, f"{split}.npz")
     if os.path.exists(data_file):
         data = np.load(data_file)
     else:
         # Try hdf5
         data = h5py.File(data_file.replace(".npz", ".hdf5"), "r")
-    # Load shapes for reference games
     if fast:
         shapes = None
         concepts = None
@@ -284,7 +242,12 @@ def load_split(dataset, split, fast=False, into_memory=False):
         else:
             with gzip.open(world_file + ".gz", "r") as f:
                 worlds = json.load(f)
-        shapes = extract_shapes(worlds)
+        # `extract_shapes` is per *image*, so it only agrees with the store when
+        # the images have not been subsampled; it is consumed solely by
+        # `get_reference_game`/`shapes_to_idx`, which concept games never call.
+        # `extract_concepts` is per *game* and must always run: concepts feed
+        # `concept_distances`, which topsim uses via `dataset.concept_distance`.
+        shapes = extract_shapes(worlds) if need_shapes else None
         concepts = extract_concepts(worlds)
 
     imgs = data["imgs"]
@@ -293,10 +256,12 @@ def load_split(dataset, split, fast=False, into_memory=False):
         imgs = imgs[:]
         labels = labels[:]
 
-    if data["langs"].dtype != str:
-        langs_decoded = [lang.decode("utf-8") for lang in data["langs"]]
-    else:
-        langs_decoded = data["langs"]
+    # hdf5 hands back bytes; npz hands back numpy unicode scalars. Dispatch per
+    # element rather than on the array dtype, which reports neither cleanly.
+    langs_decoded = [
+        lang.decode("utf-8") if isinstance(lang, bytes) else str(lang)
+        for lang in data["langs"]
+    ]
 
     # Force 1D object array
     langs = np.empty(len(langs_decoded), dtype=object)
@@ -370,7 +335,10 @@ class ShapeWorldDataset(generic.ConceptDataset):
 
     @util.return_index
     def get_reference_game(self, i):
-        img = self.x[i]
+        # Copied because the re-assignment/shuffles below write in place, and
+        # with the store in memory `self.x[i]` is a view onto the shared array
+        # (see the matching note in `generic.ConceptDataset.__getitem__`).
+        img = np.array(self.x[i])
         label = self.labels[i]
         md = self.metadata[i]
 

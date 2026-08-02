@@ -80,6 +80,16 @@ class ConceptDataset:
         assert np.all(label[:midp])
         assert np.all(~label[midp:])
 
+        if self.reference_game or self.augment:
+            # The shuffles below write in place. When the store is in memory
+            # (`load_shapeworld_into_memory`), `self.x[i]` is a *view* onto the
+            # shared array, so writing through it would permanently permute the
+            # dataset -- and, worse, break copy-on-write for forked dataloader
+            # workers, which would each end up copying every row they touch.
+            # Copy the row instead; it is ~0.5 MB and costs nothing next to the
+            # forward pass.
+            img = np.array(img)
+
         if self.reference_game:
             # Choose a single random target
             if self.augment:
