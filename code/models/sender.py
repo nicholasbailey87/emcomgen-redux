@@ -488,12 +488,22 @@ class Sender(nn.Module):
         self.language_model = language_model
         self.vision_dropout = nn.Dropout(p=vision_dropout)
 
-    def forward(
-        self,
-        samples,
-        targets,
-        **kwargs
-    ):
+    def embed_images(self, samples):
+        """
+        Embed all the referent images in a batch.
+        Input size is (batch, referents, image dim 1, image dim 2, etc.)
+        We reshape to (batch_size * n_obj, *rest) to get a batch of images, then
+            send them through the computer vision model, then reshape back to the
+            shape needed for the task.
+        """
+        batch_size = samples.shape[0]
+        n_obj = samples.shape[1]
+        rest = samples.shape[2:]
+        flat_samples = samples.view(batch_size * n_obj, *rest)
+        embedded_samples = self.vision_dropout(self.feat_model(flat_samples))
+        return embedded_samples.view(batch_size, n_obj, -1)
+
+    def get_prototypes(self, samples, targets):
         if samples.size(1) % 2 != 0:
             raise NotImplementedError(
                 "The prototyper must be passed an even number of samples, "
@@ -507,51 +517,29 @@ class Sender(nn.Module):
                 "The prototyper must be passed an even number of samples, "
                 "the first n / 2 should be positive and the rest negative."
             )
-        
-        batch_size = samples.shape[0]
-        n_obj = samples.shape[1]
-        rest = samples.shape[2:]
-        flat_samples = samples.view(batch_size * n_obj, *rest)
-        embedded_samples = self.vision_dropout(self.feat_model(flat_samples))
-        embedded_samples = embedded_samples.view(batch_size, n_obj, -1)
 
-        prototypes = self.prototyper(embedded_samples, targets)
+        return self.prototyper(self.embed_images(samples), targets)
 
-        prototypes_concat = torch.cat(prototypes, 1)
+    def get_concepts(self, samples, targets):
+        return torch.cat(self.get_prototypes(samples, targets), 1)
+    
+    def forward(
+        self,
+        samples,
+        targets,
+        **kwargs
+    ):
+        # Prototype once and reuse: a second `get_prototypes` call would re-run
+        #     the vision model under a fresh `vision_dropout` mask, so the
+        #     returned concepts would not be the ones that produced the message.
+        prototypes = self.get_prototypes(samples, targets)
 
         messages = self.language_model(
             prototypes,
             **kwargs
         )
 
-        return messages, prototypes_concat
-
-    def represent(self, samples, targets):
-        """
-        No-grad collection of (representation, message) pairs for metrics.
-
-        Returns the sender's image-representation vector -- the concatenated
-        positive/negative prototypes that seed the language model, identical to
-        the ``prototypes_concat`` returned by :meth:`forward` -- together with
-        the emitted message as content token ids: the leading SOS is dropped and
-        the sequence is truncated at the first EOS, giving one python list per
-        item in the batch.
-
-        Decoding follows the ordinary forward path (Gumbel-sampled), so the
-        collected language matches what the model actually produces at
-        evaluation time; there is no separate greedy decoder (greedy generation
-        was removed along with ACRe).
-        """
-        was_training = self.training
-        self.eval()
-        try:
-            with torch.no_grad():
-                messages, prototypes_concat = self.forward(samples, targets)
-        finally:
-            self.train(was_training)
-
-        messages = trim_messages(messages.argmax(-1).cpu().tolist())
-        return prototypes_concat, messages
+        return messages, torch.cat(prototypes, 1)
 
     def reset_parameters(self):
         if hasattr(self.feat_model, 'reset_parameters'):
