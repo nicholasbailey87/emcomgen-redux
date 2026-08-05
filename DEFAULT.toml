@@ -26,15 +26,16 @@ receiver_reset_interval = 0.0
 save_interval = 10
 
 [analysis]
-# Topsim metric settings (see code/emergence.py and compute_topsim_metrics in
-# code/train.py). Topsim is computed once per epoch, on the test/test_same eval
-# passes (not on train).
-max_samples = 2000     # cap on per-image points entering one topsim computation
-sif_embedding_dim = 4  # SIF symbol-embedding dim. Emergent vocab is only ~10-20,
-                       # and the embedding is a truncated SVD whose rank is
-                       # bounded by the corpus, so keep this small (4) to avoid
-                       # exceeding the available rank.
-sif_window = 2         # co-occurrence context radius for SIF symbol embeddings
+# Settings for the six topsim variants (see code/emergence.py and
+# compute_language_metrics in code/train.py). One variant per signal set S1-S6;
+# they differ only in the signal distance, the meaning distance being cosine
+# between sender concept vectors throughout. Computed once per epoch on the
+# test/test_same eval passes (not on train), plus one pre-training baseline pass
+# per split that the reported `_adj` columns are measured against.
+max_concepts = 500     # cap on concept prototypes entering one topsim computation.
+                       # Measurement is per concept prototype, not per image, and
+                       # the soft signal distances are O(n^2) in a Python loop, so
+                       # this bounds the ~30-55 s/epoch measurement cost.
 
 [data]
 # 40 images per stored game rather than 80-100. `split_spk_lis` only ever reads

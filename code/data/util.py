@@ -1,9 +1,6 @@
 import numpy as np
 from sklearn.model_selection import train_test_split
 import torch
-import hausdorff
-import numba
-import itertools
 
 
 def stack_pos_neg(pos_imgs, neg_imgs):
@@ -114,29 +111,6 @@ def return_index(getitem):
         return res + (index,)
 
     return with_index
-
-
-@numba.jit(nopython=True, fastmath=True)
-def hamming(x, y):
-    """
-    From https://github.com/talboger/fastdist/blob/master/fastdist/fastdist.py
-    """
-    n = len(x)
-    num, denom = 0, 0
-    for i in range(n):
-        if x[i] != y[i]:
-            num += 1
-        denom += 1
-    return num / denom
-
-
-def get_pairwise_hausdorff_distances(concepts):
-    dists = {}
-    pairs = itertools.combinations_with_replacement(sorted(concepts.items()), 2)
-    for (c1, a1), (c2, a2) in pairs:
-        if (c1, c2) not in dists:
-            dists[(c1, c2)] = hausdorff.hausdorff_distance(a1, a2, distance=hamming)
-    return dists
 
 
 def get_game_type(config):

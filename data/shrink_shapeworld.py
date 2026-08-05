@@ -52,13 +52,13 @@ Usage
     python data/shrink_shapeworld.py \
         --src ../data/shapeworld --dst ../data/shapeworld_40
 
-``*_worlds.json(.gz)`` files are copied across unmodified. They are read per
-*game* by ``shapeworld.extract_concepts`` (concept -> satisfying assignments),
-which feeds the topsim concept distances and is unaffected by image
-subsampling. The per-*image* ``shapeworld.extract_shapes`` would disagree with
-the shrunk rows, so ``shapeworld.load_split`` only calls it when
-``reference_game`` is true -- and reference games use the separate
-``shapeworld_ref`` dataset, which this script is not intended for.
+``*_worlds.json(.gz)`` files are copied across unmodified, for fidelity to the
+source dataset rather than because training needs them. Their only remaining
+consumer is the per-*image* ``shapeworld.extract_shapes``, which would disagree
+with the shrunk rows -- so ``shapeworld.load_split`` calls it only when
+``reference_game`` is true, and reference games use the separate
+``shapeworld_ref`` dataset, which this script is not intended for. Concept games
+therefore never parse the world files at all.
 """
 
 import argparse

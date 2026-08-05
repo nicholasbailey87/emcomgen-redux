@@ -13,7 +13,6 @@ from pathlib import Path
 from collections import Counter, defaultdict
 
 import numpy as np
-from scipy.spatial.distance import squareform
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -74,10 +73,10 @@ def get_positive_examples(inp, y):
 
 def concept_keys_from_true_lang(true_lang_text, dataset_name):
     """
-    Map each item's ground-truth language to the concept key that indexes the
-    dataset's pairwise ``concept_distance`` table. These derivations mirror the
-    historical Hausdorff topsim: a CUB concept is its (integer) class id; a
-    shapeworld concept is the logical-form string with SOS/EOS stripped.
+    Map each item's ground-truth language to the key identifying its concept: a
+    CUB concept is its (integer) class id; a shapeworld concept is the logical-
+    form string with SOS/EOS stripped. Items sharing a key are instances of the
+    same concept and are pooled into one prototype for the topsim suite.
     """
     if dataset_name == "cub":
         return [int(t[1]) for t in true_lang_text]
@@ -90,81 +89,81 @@ def representative_message(messages):
     return list(counts.most_common(1)[0][0])
 
 
-def compute_topsim_metrics(
+def compute_language_metrics(
     messages,
-    reprs,
+    symbol_embeddings,
+    concepts,
     concept_keys,
-    dataset,
-    vocab_size,
-    sif_dim,
-    sif_window,
-    max_samples,
+    max_concepts,
 ):
     """
-    Topsim across two meaning bases (concept distance ``ts``, sender-repr cosine
-    ``reprts``) x three message distances (``lev``, ``tanimoto``, ``sif``), at
-    two granularities (per-image ``_img`` and per-concept-prototype ``_proto``).
+    The six topsim variants over concept prototypes (``emergence.topsim_suite``).
 
-    The SIF principal component is estimated on the larger image-level set and
-    reused for the prototype set, where estimating it from ~K concepts would be
-    noisy. Concept distances are vectorized via a ``K x K`` table + indexing
-    (``emergence.condensed_from_index``).
+    Measurement is per *concept prototype*, not per image. One point per concept
+    is what the chapter's signal sets are about -- a language is compositional to
+    the extent that the form of the utterance for a concept tracks that concept's
+    meaning. Pairing individual images would put many pairs at meaning distance
+    zero (same concept, different image) against a non-zero signal distance,
+    which only depresses the correlation, and the soft signal distances are
+    O(n^2) in a Python loop so 2000 images is ~2M pairs.
+
+    A concept's prototype is: the modal token sequence its instances emitted, the
+    contextual symbol embeddings from one instance that actually emitted that
+    sequence (the soft distances need embeddings paired with real symbols), and
+    the mean of its instances' concept vectors.
+
+    Concepts are capped at ``max_concepts``; capping images instead would starve
+    each concept of the instances the modal message is drawn from.
     """
-    reprs = np.asarray(reprs, dtype=np.float64)
-    n = len(messages)
-    if n > max_samples:
-        idx = np.random.choice(n, size=max_samples, replace=False)
-        messages = [messages[i] for i in idx]
-        reprs = reprs[idx]
-        concept_keys = [concept_keys[i] for i in idx]
-        n = max_samples
+    concepts = np.asarray(concepts, dtype=np.float64)
 
-    # Unique concepts + dense K x K concept-distance table (cheap: K is small).
-    unique = list(dict.fromkeys(concept_keys))
-    cpos = {c: i for i, c in enumerate(unique)}
-    K = len(unique)
-    if n < 2 or K < 2:
+    groups = defaultdict(list)
+    for i, key in enumerate(concept_keys):
+        groups[key].append(i)
+
+    keys = list(groups)
+    if len(keys) > max_concepts:
+        chosen = np.random.choice(len(keys), size=max_concepts, replace=False)
+        keys = [keys[i] for i in sorted(chosen)]
+
+    # Spearman needs at least two pairs, i.e. at least three prototypes.
+    if len(keys) < 3:
         return {}
-    concept_dist = np.zeros((K, K), dtype=np.float64)
-    for i in range(K):
-        for j in range(i + 1, K):
-            d = dataset.concept_distance(unique[i], unique[j])
-            concept_dist[i, j] = concept_dist[j, i] = d
-    item_idx = np.array([cpos[c] for c in concept_keys])
 
-    metrics = {}
+    proto_messages = []
+    proto_embeddings = []
+    proto_concepts = []
+    for key in keys:
+        idx = groups[key]
+        message = representative_message([messages[i] for i in idx])
+        source = next(i for i in idx if list(messages[i]) == message)
+        proto_messages.append(message)
+        # Embeddings are positionally aligned with the full content sequence;
+        # slice in case an EOS trimmed this message short.
+        proto_embeddings.append(np.asarray(symbol_embeddings[source])[: len(message)])
+        proto_concepts.append(concepts[idx].mean(0))
 
-    # Per-image granularity.
-    grid_img, sif_pc = emergence.topsim_grid(
-        messages,
-        reprs,
-        vocab_size,
-        concept_meaning_cond=emergence.condensed_from_index(concept_dist, item_idx),
-        sif_dim=sif_dim,
-        sif_window=sif_window,
+    return emergence.topsim_suite(
+        proto_messages, proto_embeddings, np.stack(proto_concepts)
     )
-    for k, v in grid_img.items():
-        metrics[f"{k}_img"] = v
 
-    # Per-concept-prototype granularity: one mean repr + representative message.
-    proto_reprs = np.stack([reprs[item_idx == i].mean(0) for i in range(K)])
-    proto_messages = [
-        representative_message([messages[j] for j in range(n) if item_idx[j] == i])
-        for i in range(K)
-    ]
-    grid_proto, _ = emergence.topsim_grid(
-        proto_messages,
-        proto_reprs,
-        vocab_size,
-        concept_meaning_cond=squareform(concept_dist, checks=False),
-        sif_dim=sif_dim,
-        sif_window=sif_window,
-        sif_pc=sif_pc,
-    )
-    for k, v in grid_proto.items():
-        metrics[f"{k}_proto"] = v
 
-    return metrics
+def adjusted_topsim(metrics, baseline):
+    """
+    Raw topsim minus its pre-training baseline, per variant.
+
+    The soft variants are parameterised by the sender's own symbol embeddings,
+    which are not independent of its referent embeddings, so some correlation is
+    available before any language exists. Subtracting the untrained model's
+    topsim (measured per split, per variant, per seed) is the quantitative guard
+    against reading that leakage as compositionality. ``nan`` where no baseline
+    was recorded.
+    """
+    return {
+        f"{key}_adj": metrics[key] - baseline.get(key, float("nan"))
+        for key in emergence.TOPSIM_KEYS
+        if key in metrics
+    }
 
 
 def compute_metrics_by_md(all_lang, md_vocab=None):
@@ -238,10 +237,11 @@ def run(
         The numpy random state in case anything stochastic happens during the
         run
     compute_topsim : ``bool``
-        If true, collect (representation, message, concept) triples during the
-        run and compute the vectorized topsim grid at the end. Set on the eval
-        passes only; topsim is a property of the language, so there is no point
-        computing it mid-training-pass.
+        If true, drive the sender through ``speak`` so that message, symbol
+        embeddings and concepts all come from one forward pass, collect them,
+        and compute the six topsim variants at the end. Set on the eval passes
+        only; topsim is a property of the language, so there is no point
+        computing it mid-training-pass, and the extra tensor is wasted work.
 
     Returns
     -------
@@ -262,9 +262,10 @@ def run(
 
     # Collected only when topsim is computed for this split (the eval passes).
     # Skipped otherwise to keep the train pass light.
-    all_messages = []   # emergent messages as ragged content-token-id lists
-    all_reprs = []      # sender representation vectors (prototypes_concat)
-    all_true_lang = []  # ground-truth language tokens, for concept keys
+    all_messages = []    # emergent messages as ragged content-token-id lists
+    all_symbol_embs = []  # (content length, d) contextual embedding per message
+    all_concepts = []    # sender concept vectors (positive/negative prototypes)
+    all_true_lang = []   # ground-truth language tokens, for concept keys
 
     collect = (
         compute_topsim
@@ -307,9 +308,16 @@ def run(
             elif config['copy_receiver']:
                 sender_emb = pair.sender(spk_inp, spk_y)
                 lis_scores = pair.receiver(lis_inp, sender_emb)
+            elif collect:
+                # `speak` returns message, symbol embeddings and concepts from a
+                # single forward pass. Calling the accessors separately would
+                # resample the vision dropout mask and (for the autoregressive
+                # GRU) the message, so the three would not correspond.
+                lang, symbol_embs, concepts = pair.sender.speak(spk_inp, spk_y)
+
+                lis_scores = pair.receiver(lis_inp, lang)
             else:
-                # (lang, lang_length), states = pair.sender(
-                lang, states = pair.sender(
+                lang, concepts = pair.sender(
                     spk_inp,
                     spk_y,
                 )
@@ -354,12 +362,13 @@ def run(
             # Game difficulty/other metadata indicator
             all_lang.extend(zip(lang_text, true_lang_text, per_game_acc, md.numpy()))
 
-            # Collect (representation, message, concept) for topsim. Only on the
-            # eval passes (compute_topsim); the sender path (lang + states) must
-            # have run for this to be meaningful.
+            # Collect (message, symbol embeddings, concept) for the topsim
+            # suite. Only on the eval passes (compute_topsim), where the sender
+            # was driven through `speak`.
             if collect:
                 all_messages.extend(models.sender.trim_messages(lang_i.tolist()))
-                all_reprs.extend(states.detach().cpu().float().numpy())
+                all_symbol_embs.extend(symbol_embs.detach().cpu().float().numpy())
+                all_concepts.extend(concepts.detach().cpu().float().numpy())
                 all_true_lang.extend(true_lang_text)
 
             if config['joint_training']:
@@ -410,20 +419,16 @@ def run(
     )
 
     if collect and all_messages:
-        # Vectorized topsim over the collected (representation, message, concept)
-        # triples for this eval split.
+        # The six topsim variants over the concept prototypes of this eval split.
         concept_keys = concept_keys_from_true_lang(
             all_true_lang, dataloader.dataset.name
         )
-        lang_metrics = compute_topsim_metrics(
+        lang_metrics = compute_language_metrics(
             all_messages,
-            all_reprs,
+            all_symbol_embs,
+            all_concepts,
             concept_keys,
-            dataloader.dataset,
-            vocab_size=config['sender_language_model']['vocabulary'] + 4,
-            sif_dim=config['analysis']['sif_embedding_dim'],
-            sif_window=config['analysis']['sif_window'],
-            max_samples=config['analysis']['max_samples'],
+            max_concepts=config['analysis']['max_concepts'],
         )
         metrics.update(lang_metrics)
 
@@ -580,6 +585,11 @@ if __name__ == "__main__":
     # we append to rather than rebuild, so they survive a resume.
     metrics = {}
 
+    # Per-split, per-variant topsim of the *untrained* model. Measured once, then
+    # carried in the checkpoint: recomputing it after a resume would measure a
+    # trained sender and silently destroy the adjustment.
+    topsim_baselines = {}
+
     if config.get('resume', False) and os.path.exists(checkpoint_path):
         print(f"Resuming from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, weights_only=False)
@@ -588,6 +598,13 @@ if __name__ == "__main__":
         scheduler.load_state_dict(checkpoint["scheduler_state"])
 
         start_epoch = checkpoint["epoch"]
+        topsim_baselines = checkpoint.get("topsim_baselines", {})
+        if not topsim_baselines:
+            logging.warning(
+                "Checkpoint carries no pre-training topsim baseline; adjusted "
+                "topsim will be NaN for the rest of this run. Re-measuring here "
+                "would baseline against an already-trained sender."
+            )
 
         print(f"Resumed at epoch {start_epoch}")
 
@@ -608,6 +625,23 @@ if __name__ == "__main__":
         scaler,
         config
     )
+
+    # Baseline pass: the topsim of the language before any training, which is
+    # what `adjusted_topsim` subtracts. It has to happen here, before the first
+    # `run("train", ...)`.
+    if start_epoch == 0:
+        print("Measuring pre-training topsim baseline")
+        for split in ["test", "test_same"]:
+            if split not in dataloaders:
+                continue
+            baseline_metrics, _ = run(
+                split, -1, *run_args, compute_topsim=True, force_no_train=True
+            )
+            topsim_baselines[split] = {
+                key: baseline_metrics[key]
+                for key in emergence.TOPSIM_KEYS
+                if key in baseline_metrics
+            }
 
     print("Starting to train")
 
@@ -637,6 +671,9 @@ if __name__ == "__main__":
 
             eval_metrics, eval_lang = run(
                 split, epoch, *run_args, compute_topsim=True
+            )
+            eval_metrics.update(
+                adjusted_topsim(eval_metrics, topsim_baselines.get(split, {}))
             )
             util.update_with_prefix(metrics, eval_metrics, split)
 
@@ -682,6 +719,7 @@ if __name__ == "__main__":
             {
                 "epoch": epoch + 1,  # resume at the NEXT epoch
                 "scheduler_state": scheduler.state_dict(),
+                "topsim_baselines": topsim_baselines,
             },
             checkpoint_path,
         )

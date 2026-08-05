@@ -272,7 +272,7 @@ class CUBDataset:
     ):
         self.imgs = imgs
         self.metadata = metadata
-        self.img_metadata = img_metadata  # For hausdorff
+        self.img_metadata = img_metadata  # Per-image attribute vectors
         self.classes = np.array(list(self.imgs.keys()))
         self.img_names = {c: list(i.keys()) for c, i in self.imgs.items()}
         self.length = length
@@ -291,13 +291,6 @@ class CUBDataset:
         for c, ls in self.img_names.items():
             for l in ls:
                 assert l in self.metadata, l
-
-        # Get pairwise hausdorff distances for each class
-        self.concepts = {
-            c: np.stack([self.img_metadata[n] for n in inames])
-            for c, inames in self.img_names.items()
-        }
-        self.concept_distances = util.get_pairwise_hausdorff_distances(self.concepts)
 
     @util.return_index
     def __getitem__(self, i):
@@ -409,7 +402,3 @@ class CUBDataset:
             attrs_numeric.append(attr_num_i)
 
         return attrs_numeric
-
-    def concept_distance(self, c1, c2):
-        pair = tuple(sorted((c1, c2)))
-        return self.concept_distances[pair]

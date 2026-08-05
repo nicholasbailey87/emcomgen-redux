@@ -144,30 +144,70 @@ See `DEFAULT.toml` for the full set of options and their defaults.
 
 #### Topsim & generalization from `train.py` alone
 
-In-training topographic similarity (`ts`/`langts`/`hausdorff`/`reprts`) is computed
-once per split per epoch from the model's own (utterance, meaning) pairs over that
-split, capped at `max_analysis_length=1000`. Per-split episode counts are fixed
-(`code/data/cub.py`): CUB train = 1000, CUB val/test = 200; ShapeWorld splits draw
-from the 20k-game corpus and hit the random-1000 cap. So a CUB **generalization-split**
-topsim rests on only ~200 episodes/epoch — fine for headline numbers. For
-low-variance CUB topsim, the route is `sample.py`'s 200k balanced-utterance corpus
-(optional downstream analysis, along with `acre.py`); `train.py` alone is sufficient
-for the per-epoch topsim + generalization accuracies in `metrics.csv`.
+Only two things are measured: **generalization accuracy** and **six variants of
+topographic similarity**. Both come out of `train.py`; measurement lives in
+`code/emergence.py`.
+
+Classic topsim uses one signal (message) distance — Levenshtein — which is
+sensitive to both symbol order and symbol identity, so it scores a language with
+free symbol order or with synonyms as non-compositional even when it is not.
+Instead we compute one variant per *signal set* S1–S6. They differ **only** in
+the signal distance; the meaning distance is cosine between the sender's concept
+vectors (`Sender.get_concepts`) throughout.
+
+| metric | set | signal distance | set characterised by |
+|---|---|---|---|
+| `topsim_s1` | S1 "bag of meanings" | soft MoverScore, 1-grams | free order + synonymy |
+| `topsim_s2` | S2 "meaning-block rearrangement" | soft MoverScore, 2-grams | blockwise free order + synonymy |
+| `topsim_s3` | S3 "configurational" | soft Levenshtein | strict order + synonymy |
+| `topsim_s4` | S4 "bag of symbols" | hard MoverScore, 1-grams | free order, no synonymy |
+| `topsim_s5` | S5 "asynonymous blockwise" | hard MoverScore, 2-grams | blockwise free order, no synonymy |
+| `topsim_s6` | S6 "asynonymous order-sensitive" | hard Levenshtein | strict order, no synonymy — the classic topsim |
+
+"Soft" means synonymy-tolerant: the alignment cost between two symbols is a
+function of the sender's own contextual symbol embeddings. "Hard" is the same
+function under a fixed, embedding-free ground cost. The message, its symbol
+embeddings and the concept behind it all come from a single `Sender.speak`
+forward pass — calling the accessors separately would resample the vision
+dropout mask and (for the GRU sender) the message itself, so the three would not
+correspond.
+
+Measurement is **per concept prototype**, not per image: one point per concept,
+whose message is the modal token sequence its instances emitted, whose symbol
+embeddings come from one instance that actually emitted that sequence, and whose
+concept vector is the mean over its instances. Pairing individual images would
+put many pairs at meaning distance zero (same concept, different image) against
+a non-zero signal distance, which only depresses the correlation. Concepts are
+capped at `[analysis] max_concepts` (default 500), which bounds measurement at
+roughly 30–55 s per eval pass.
+
+**Adjusted topsim.** The soft variants are parameterised by the sender's own
+symbol embeddings, which are not independent of its referent embeddings, so some
+correlation is available before any language exists. Every run therefore does one
+eval pass per split *before training starts* and records that as a baseline;
+`topsim_s{1..6}_adj` is the raw value minus that baseline. Baselines are stored
+in `checkpoint_last.pt` so a resume does not re-measure them against an
+already-trained sender.
 
 #### Metrics
 
 Metrics are logged into `<output_root>/<experiment>/<config_stem>_seed<seed>/metrics.csv`
-and logged to wandb (if `wandb = true`). The relevant ones are:
+and to wandb (if `wandb = true`). Each is prefixed with its split — `train`,
+`test` (novel concepts), `test_same` (seen concepts), and `test_avg` (the mean of
+the latter two):
 
-- `train_acc`:
-- `test_acc` and `test_same_acc` denote unseen and seen concepts respectively, and `test_avg_acc` averages the two.
-- `{train,test}_langts`/`{train,test}_ts`: edit-distance based topographic similarity. For Birds (`cub`), the metric is `ts`; for ShapeWorld the metric is `langts`.
-- `{train,test}_hausdorff`: Hausdorff distance based topographic similarity.
+- `{train,test,test_same,test_avg}_acc` — generalization accuracy. For ShapeWorld
+    there are also per-game-difficulty breakdowns, `acc_md_*`.
+- `{test,test_same,test_avg}_topsim_s1` … `_topsim_s6` — the six variants above.
+    Not computed on the train pass: topsim is a property of the language, so
+    there is nothing to gain from measuring it mid-training-pass.
+- `{test,test_same,test_avg}_topsim_s1_adj` … `_topsim_s6_adj` — the same six,
+    minus the pre-training baseline. `NaN` if no baseline was recorded.
+- `{train,test,...}_loss` — the training objective.
 
-There are many other metrics, most of which should be reasonably intuitive,
-though contact authors for clarifications.
-
-Mutual information and entropy are measured later (see below).
+A topsim value is `NaN` where Spearman is undefined: fewer than two finite pairs,
+or either the meaning or the signal side constant across all pairs. That is the
+correct result rather than an error — see the chapter's Case 1 edge case.
 
 #### No val split, no best-epoch selection
 

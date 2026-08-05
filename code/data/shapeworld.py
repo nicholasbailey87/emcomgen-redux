@@ -116,36 +116,6 @@ def extract_shapes(worlds):
     return shapes
 
 
-def extract_concepts(worlds):
-    concepts = {}
-    for game in worlds:
-        concept = game["config"]["concept"]
-        assns = game["config"]["pos"]
-        if concept not in concepts:
-            concepts[concept] = assns
-    return concepts
-
-
-def concepts_to_onehot(concepts):
-    # Assign unique one hot values
-    w2i = {}
-    for assns in concepts.values():
-        for assn in assns:
-            for tok in assn:
-                if tok not in w2i:
-                    w2i[tok] = len(w2i)
-    concepts_onehot = {}
-    for concept, assns in concepts.items():
-        assns_onehot = []
-        for assn in assns:
-            assn_onehot = np.zeros(len(w2i), dtype=np.uint8)
-            for tok in assn:
-                assn_onehot[w2i[tok]] = 1
-            assns_onehot.append(assn_onehot)
-        concepts_onehot[concept] = np.stack(assns_onehot)
-    return concepts_onehot
-
-
 def load(config, fast=False):
     datas = {}
     # if config['sender']['arguments']['image_encoder'] == "PretrainedResNet18":
@@ -181,17 +151,6 @@ def load(config, fast=False):
     # Compute vocab first
     _, md_vocab = get_metadata(langs)
 
-    # Combine concepts
-    if fast:
-        concepts = None
-        concept_distances = None
-    else:
-        concepts = {}
-        for split in datas:
-            concepts.update(datas[split]["concepts"])
-        concepts = concepts_to_onehot(concepts)
-        concept_distances = util.get_pairwise_hausdorff_distances(concepts)
-
     dataset_kwargs = {
         "n_examples": config['data']['n_examples'],
         "visfunc": generic.vis_image,
@@ -209,8 +168,6 @@ def load(config, fast=False):
             percent_novel=config['data']['percent_novel'],
             reference_game=config['reference_game'],
             shapes=datas[split]["shapes"],
-            concepts=concepts,
-            concept_distances=concept_distances,
             metadata_vocab=md_vocab,
             **dataset_kwargs,
         )
@@ -231,9 +188,13 @@ def load_split(dataset, split, fast=False, into_memory=False, need_shapes=False)
     else:
         # Try hdf5
         data = h5py.File(data_file.replace(".npz", ".hdf5"), "r")
-    if fast:
+    # `extract_shapes` is per *image*, so it only agrees with the store when the
+    # images have not been subsampled; it is consumed solely by
+    # `get_reference_game`/`shapes_to_idx`, which concept games never call. It is
+    # now the only consumer of the world files, so concept games skip parsing
+    # them altogether.
+    if fast or not need_shapes:
         shapes = None
-        concepts = None
     else:
         world_file = os.path.join(dataset, f"{split}_worlds.json")
         if os.path.exists(world_file):
@@ -242,13 +203,7 @@ def load_split(dataset, split, fast=False, into_memory=False, need_shapes=False)
         else:
             with gzip.open(world_file + ".gz", "r") as f:
                 worlds = json.load(f)
-        # `extract_shapes` is per *image*, so it only agrees with the store when
-        # the images have not been subsampled; it is consumed solely by
-        # `get_reference_game`/`shapes_to_idx`, which concept games never call.
-        # `extract_concepts` is per *game* and must always run: concepts feed
-        # `concept_distances`, which topsim uses via `dataset.concept_distance`.
-        shapes = extract_shapes(worlds) if need_shapes else None
-        concepts = extract_concepts(worlds)
+        shapes = extract_shapes(worlds)
 
     imgs = data["imgs"]
     labels = data["labels"]
@@ -272,7 +227,6 @@ def load_split(dataset, split, fast=False, into_memory=False, need_shapes=False)
         "labels": labels,
         "langs": langs,
         "shapes": shapes,
-        "concepts": concepts,
     }
 
 
@@ -392,7 +346,3 @@ class ShapeWorldDataset(generic.ConceptDataset):
                     )
                 shape_lang_idx[i, j, -1] = self.w2i[language.EOS_TOKEN]
         return shape_lang_idx, shape_lang_len
-
-    def concept_distance(self, c1, c2):
-        pair = tuple(sorted((c1, c2)))
-        return self.concept_distances[pair]

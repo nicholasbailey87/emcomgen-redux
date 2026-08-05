@@ -1,28 +1,86 @@
 """
-Tools for measuring emergence of communication.
+Measurement of the emergent language.
 
-Topsim (topographic similarity) is the Spearman correlation between pairwise
-distances in *meaning* space and pairwise distances in *message* space. The
-expensive part historically was an O(n^2) pure-Python ``pdist`` over edit
-distance; everything here is built around precomputed *condensed* pairwise
-distance vectors (the upper triangle, as returned by ``scipy``'s ``pdist`` /
-``squareform``) so the distance math stays vectorized.
+Only two things are measured in this codebase: generalisation accuracy (taken
+straight off the listener's predictions in ``train.py``) and *topographic
+similarity* (topsim) -- the Spearman correlation between pairwise distances in
+meaning space and pairwise distances in signal (message) space.
 
-Two meaning bases (``ts`` = concept distance, ``reprts`` = sender-representation
-cosine) are crossed with three message distances (``lev``, ``tanimoto``,
-``sif``) by :func:`topsim_grid`.
+Classic topsim uses a single signal distance, Levenshtein, which is sensitive
+to both the order of the symbols and their identity. A language with free
+symbol order, or one with synonyms, is therefore scored as non-compositional
+even when it is perfectly compositional. This module implements topsim as a
+*family* of six variants, one per signal set S1-S6, differing only in the
+signal distance function:
+
+    key         set  signal distance             characterised by
+    topsim_s1   S1   soft MoverScore, 1-grams    free order + synonymy
+    topsim_s2   S2   soft MoverScore, 2-grams    blockwise free order + synonymy
+    topsim_s3   S3   soft Levenshtein            strict order + synonymy
+    topsim_s4   S4   hard MoverScore, 1-grams    free order, no synonymy
+    topsim_s5   S5   hard MoverScore, 2-grams    blockwise free order, no synonymy
+    topsim_s6   S6   hard Levenshtein            strict order, no synonymy
+
+S6 is the classic topsim. "Soft" means synonymy-tolerant: the cost of aligning
+two symbols is a function of the sender's own contextual symbol embeddings
+(``Sender.speak``). "Hard" is the same function under a fixed, embedding-free
+0/1 ground cost, so only symbol identity matters.
+
+The *meaning* distance is held constant across all six: cosine distance between
+the sender's concept vectors (the output of ``Sender.get_concepts``).
+
+Reference implementations
+-------------------------
+The MoverScore variants follow ``moverscore.py`` (v1) from
+https://github.com/AIPHES/emnlp19-moverscore -- the version with n-gram support
+and ``score = 1 - emd(...)``. We take the raw transport cost ``emd(c1, c2, D)``
+as our distance, i.e. the quantity that repo subtracts from 1. IDF weighting is
+dropped (emergent languages violate Zipf's Law of Abbreviation), so the masses
+are uniform over n-gram positions.
+
+Two deliberate divergences from that reference:
+
+1. **2-gram embeddings are concatenated, not summed.** ``load_ngram`` builds an
+   n-gram vector as an IDF-weighted *sum* over the window. With IDF dropped
+   that degenerates to a plain mean, which is order-blind *within* the n-gram:
+   "AB" and "BA" would embed identically, collapsing S2 into S1 and destroying
+   the exact distinction the variant exists to draw. We concatenate the two
+   unit vectors in order and re-normalise instead, so the resulting cost is a
+   monotone function of the mean cosine similarity of the aligned constituents.
+2. **Zero ground cost on token match.** Symbol embeddings here are
+   *contextual*, so two different games emitting the same token sequence would
+   otherwise be at non-zero distance from each other, violating the Identity
+   property topsim needs. Wherever the two n-gram ids match, the ground cost is
+   overridden to 0. This applies to the soft Levenshtein substitution cost too,
+   and it is what guarantees that soft is never more expensive than hard on the
+   symbols the two languages agree about.
+
+The Levenshtein variants use ``strsimpy.weighted_levenshtein`` from
+https://github.com/luozhouyang/python-string-similarity for the soft case, and
+``rapidfuzz`` for the hard case (an exact, compiled equivalent).
+
+Message geometry in this codebase
+---------------------------------
+Both senders mask the reserved tokens (PAD/SOS/EOS/UNK) out of the content
+logits, so EOS never fires early and every message is exactly
+``message_length - 2`` content symbols. Insertions and deletions therefore
+never arise, length normalisation is a no-op (so raw edit counts are reported),
+and a 5-symbol message has only 4 two-grams.
 """
 
-import re
-from collections import Counter, defaultdict
+from collections import Counter
 
 import numpy as np
+import ot
 from scipy.spatial.distance import pdist, squareform
 from scipy.stats import spearmanr
+from strsimpy.weighted_levenshtein import WeightedLevenshtein
 
-from rapidfuzz.process import cdist as _rf_cdist
 from rapidfuzz.distance import Levenshtein as _Levenshtein
-from tiny_lang_embed import build_embeddings
+from rapidfuzz.process import cdist as _rf_cdist
+
+
+_EPS = 1e-12
 
 
 # --------------------------------------------------------------------------- #
@@ -56,333 +114,301 @@ def spearman_topsim(meaning_cond, message_cond):
 
 
 # --------------------------------------------------------------------------- #
-# Meaning-space distances                                                      #
+# Meaning-space distance (the same for all six variants)                       #
 # --------------------------------------------------------------------------- #
-def vector_condensed(vectors, metric="cosine"):
-    """Condensed pairwise distances over a stack of vectors (scipy ``pdist``)."""
+def concept_distance_condensed(concepts, metric="cosine"):
+    """
+    Condensed pairwise distances between sender concept vectors.
+
+    ``concepts`` is the output of ``Sender.get_concepts`` -- the positive and
+    negative prototypes concatenated -- one row per item.
+    """
+    concepts = np.asarray(concepts, dtype=np.float64)
+    return pdist(concepts, metric=metric)
+
+
+# --------------------------------------------------------------------------- #
+# Shared helpers                                                               #
+# --------------------------------------------------------------------------- #
+def _unit_rows(vectors):
+    """L2-normalise the rows of a 2-d array, leaving zero rows as zero."""
     vectors = np.asarray(vectors, dtype=np.float64)
-    return pdist(vectors, metric=metric)
+    norms = np.linalg.norm(vectors, axis=-1, keepdims=True)
+    return vectors / np.maximum(norms, _EPS)
 
 
-def condensed_from_index(dist_matrix, index):
+def _ngrams(seq, n):
+    """The stride-1 n-grams of ``seq`` as a list of token-id tuples."""
+    seq = [int(t) for t in seq]
+    if len(seq) < n:
+        return []
+    return [tuple(seq[k:k + n]) for k in range(len(seq) - n + 1)]
+
+
+def _ngram_vectors(unit_embeddings, n):
     """
-    Expand a small ``K x K`` concept-distance matrix to a condensed pairwise
-    vector over ``n`` items, where ``index[i]`` is the concept of item ``i``.
+    n-gram vectors for one message, from its L2-normalised symbol embeddings.
 
-    This is the fast path for concept distances: build the dense ``K x K`` table
-    once (K = number of unique concepts, typically a few hundred), then index
-    into it rather than looping over all ``n^2`` item pairs. The matrix must have
-    a zero diagonal (same concept -> zero distance).
+    For ``n == 1`` these are the unit symbol embeddings themselves. For larger
+    ``n`` the constituent unit vectors are *concatenated in order* and the
+    result re-normalised -- see the module docstring on why the reference
+    implementation's weighted sum is not usable here.
     """
-    index = np.asarray(index)
-    full = np.asarray(dist_matrix, dtype=np.float64)[np.ix_(index, index)]
-    return squareform(full, checks=False)
+    unit_embeddings = np.asarray(unit_embeddings, dtype=np.float64)
+    length, dim = unit_embeddings.shape
+    if length < n:
+        return np.zeros((0, dim * n), dtype=np.float64)
+    if n == 1:
+        return unit_embeddings
+    windows = [unit_embeddings[k:length - n + 1 + k] for k in range(n)]
+    return _unit_rows(np.concatenate(windows, axis=1))
 
 
-def lookup_condensed(keys, distance_fn):
+def _condensed_shape(n_items):
+    return n_items * (n_items - 1) // 2
+
+
+# --------------------------------------------------------------------------- #
+# S1 / S2: soft MoverScore                                                     #
+# --------------------------------------------------------------------------- #
+def _soft_mover_pair(gram_ids_a, vecs_a, gram_ids_b, vecs_b):
     """
-    Condensed pairwise distances over arbitrary keys via a Python callable.
+    Raw earth-mover transport cost between two messages' n-gram supports.
 
-    Used for concept distances that come from a precomputed lookup (e.g.
-    shapeworld's pairwise Hausdorff table). The loop is O(n^2) but does only
-    cheap dict-style lookups -- it was never the bottleneck; the edit-distance
-    message side was.
+    Follows moverscore v1: the two supports are stacked into one joint support,
+    the rows re-normalised, and the ground cost taken as the Euclidean distance
+    between those unit vectors (``sqrt(2 - 2 cos)``, monotone in cosine
+    distance). The cost is then overridden to 0 wherever the two n-gram ids
+    match, which is what preserves Identity under contextual embeddings.
     """
-    n = len(keys)
-    out = np.empty(n * (n - 1) // 2, dtype=np.float64)
+    m_a, m_b = len(gram_ids_a), len(gram_ids_b)
+    if m_a == 0 or m_b == 0:
+        # EMD between an empty measure and anything is undefined.
+        return np.nan
+
+    raw = np.concatenate([vecs_a, vecs_b], axis=0)
+    raw = raw / (np.linalg.norm(raw, axis=-1, keepdims=True) + 1e-6)
+    cost = np.sqrt(np.maximum(2.0 - 2.0 * (raw @ raw.T), 1e-30))
+
+    gram_ids = np.concatenate([gram_ids_a, gram_ids_b])
+    cost[gram_ids[:, None] == gram_ids[None, :]] = 0.0
+
+    # Uniform mass over positions (IDF is dropped -- see the module docstring).
+    # The reference's `_safe_divide` zero-guard would only rescale these by a
+    # constant, and would rescale the two sides differently when the messages
+    # differ in length, so normalise exactly instead.
+    mass_a = np.zeros(m_a + m_b, dtype=np.float64)
+    mass_a[:m_a] = 1.0 / m_a
+    mass_b = np.zeros(m_a + m_b, dtype=np.float64)
+    mass_b[m_a:] = 1.0 / m_b
+
+    return float(ot.emd2(mass_a, mass_b, np.ascontiguousarray(cost)))
+
+
+def soft_mover_condensed(token_seqs, symbol_embeddings, n=1):
+    """
+    Soft MoverScore transport cost over n-grams, condensed (``pdist`` order).
+
+    Signal distance for S1 (``n=1``, free order + synonymy) and S2 (``n=2``,
+    blockwise free order + synonymy).
+
+    Parameters
+    ----------
+    token_seqs : list of list of int
+        Emergent messages as content-token-id sequences.
+    symbol_embeddings : list of array ``(len(seq), d)``
+        The sender's contextual embedding for each emitted symbol, positionally
+        aligned with ``token_seqs``. May be passed as one ``(N, L, d)`` array
+        when all messages are the same length.
+    """
+    n_items = len(token_seqs)
+
+    # One integer id per distinct n-gram across the whole corpus, so the
+    # identity override is a cheap numpy comparison rather than tuple equality.
+    gram_vocab = {}
+    supports = []
+    for seq, emb in zip(token_seqs, symbol_embeddings):
+        grams = _ngrams(seq, n)
+        ids = np.array(
+            [gram_vocab.setdefault(g, len(gram_vocab)) for g in grams],
+            dtype=np.int64,
+        )
+        supports.append((ids, _ngram_vectors(_unit_rows(emb), n)))
+
+    out = np.empty(_condensed_shape(n_items), dtype=np.float64)
     k = 0
-    for i in range(n - 1):
-        ki = keys[i]
-        for j in range(i + 1, n):
-            out[k] = distance_fn(ki, keys[j])
+    for i in range(n_items - 1):
+        ids_i, vecs_i = supports[i]
+        for j in range(i + 1, n_items):
+            ids_j, vecs_j = supports[j]
+            out[k] = _soft_mover_pair(ids_i, vecs_i, ids_j, vecs_j)
             k += 1
     return out
 
 
 # --------------------------------------------------------------------------- #
-# Message-space distances                                                      #
+# S4 / S5: hard MoverScore                                                     #
 # --------------------------------------------------------------------------- #
-def levenshtein_condensed(token_seqs):
+def hard_mover_condensed(token_seqs, n=1):
     """
-    Length-normalized Levenshtein distance between token sequences, condensed.
+    Earth-mover transport cost over n-grams under a 0/1 ground cost, condensed.
 
-    Normalization matches the historical metric: raw edit distance divided by
-    the mean of the two sequence lengths. This per-pair rescaling changes ranks
-    (and therefore topsim), so it must be reproduced exactly, not swapped for a
-    max-length normalization.
+    Signal distance for S4 (``n=1``, free order, no synonymy) and S5 (``n=2``,
+    blockwise free order, no synonymy).
+
+    Computed in closed form. Under a 0/1 ground cost the optimal plan matches as
+    much mass as possible at zero cost, so for normalised n-gram histograms
+    ``p`` and ``q`` the transport cost is ``1 - sum_g min(p_g, q_g)``, which is
+    exactly ``0.5 * ||p - q||_1``. ``tests/test_emergence.py`` asserts this
+    against ``ot.emd2``.
     """
-    n = len(token_seqs)
-    raw = _rf_cdist(token_seqs, token_seqs, scorer=_Levenshtein.distance,
-                    dtype=np.float64)
-    lens = np.array([max(len(s), 1) for s in token_seqs], dtype=np.float64)
-    denom = (lens[:, None] + lens[None, :]) / 2.0
-    norm = raw / denom
-    return squareform(norm, checks=False)
+    n_items = len(token_seqs)
+    gram_vocab = {}
+    counts = []
+    for seq in token_seqs:
+        counter = Counter(_ngrams(seq, n))
+        for gram in counter:
+            gram_vocab.setdefault(gram, len(gram_vocab))
+        counts.append(counter)
+
+    if not gram_vocab:
+        return np.full(_condensed_shape(n_items), np.nan)
+
+    hist = np.zeros((n_items, len(gram_vocab)), dtype=np.float64)
+    for i, counter in enumerate(counts):
+        for gram, count in counter.items():
+            hist[i, gram_vocab[gram]] = count
+
+    total = hist.sum(axis=1, keepdims=True)
+    # A message with no n-grams (shorter than n) carries no mass; EMD against it
+    # is undefined, so propagate NaN rather than inventing a distance.
+    hist = np.divide(
+        hist, total, out=np.full_like(hist, np.nan), where=total > 0
+    )
+    return pdist(hist, metric="cityblock") / 2.0
 
 
-def _bag_of_symbols(token_seqs, vocab_size):
-    X = np.zeros((len(token_seqs), vocab_size), dtype=np.float64)
-    for i, s in enumerate(token_seqs):
-        for t in s:
-            if 0 <= t < vocab_size:
-                X[i, t] += 1.0
-    return X
-
-
-def tanimoto_condensed(token_seqs, vocab_size):
+# --------------------------------------------------------------------------- #
+# S3: soft Levenshtein                                                         #
+# --------------------------------------------------------------------------- #
+def soft_levenshtein_condensed(token_seqs, symbol_embeddings):
     """
-    Tanimoto (extended Jaccard) distance over bag-of-symbol count vectors.
+    Levenshtein distance with a synonymy-tolerant substitution cost, condensed.
 
-    T(a, b) = <a, b> / (|a|^2 + |b|^2 - <a, b>); distance = 1 - T. Order-
-    insensitive, complementing the order-sensitive Levenshtein distance. Two
-    empty messages are treated as identical (distance 0).
+    Signal distance for S3 (strict order + synonymy). Substituting one symbol
+    for another costs 0 when the token ids match and ``1 - cos`` between their
+    contextual embeddings otherwise; insertion and deletion cost 1 each.
+
+    Elements handed to strsimpy are ``(utterance_index, position, token_id)``
+    tuples so that the cost callback can reach the contextual embedding for that
+    specific position. That defeats strsimpy's internal ``s0i != s1j``
+    short-circuit -- which is exactly why the token-id equality check has to
+    live inside our cost function.
+
+    Note ``1 - cos <= 2 = insertion + deletion``, so substitution is never
+    dominated by a delete/insert pair and the DP stays well-formed. Messages are
+    fixed-length here, so in practice neither ever fires.
     """
-    X = _bag_of_symbols(token_seqs, vocab_size)
-    gram = X @ X.T
-    sq = np.einsum("ij,ij->i", X, X)
-    denom = sq[:, None] + sq[None, :] - gram
-    sim = np.where(denom > 0, gram / np.where(denom > 0, denom, 1.0), 1.0)
-    dist = 1.0 - sim
-    np.fill_diagonal(dist, 0.0)
-    return squareform(dist, checks=False)
+    units = [_unit_rows(emb) for emb in symbol_embeddings]
+
+    def substitution_cost(a, b):
+        if a[2] == b[2]:
+            return 0.0
+        return 1.0 - float(units[a[0]][a[1]] @ units[b[0]][b[1]])
+
+    metric = WeightedLevenshtein(
+        substitution_cost_fn=substitution_cost,
+        insertion_cost_fn=lambda element: 1.0,
+        deletion_cost_fn=lambda element: 1.0,
+    )
+
+    tagged = [
+        [(i, position, int(token)) for position, token in enumerate(seq)]
+        for i, seq in enumerate(token_seqs)
+    ]
+
+    n_items = len(token_seqs)
+    out = np.empty(_condensed_shape(n_items), dtype=np.float64)
+    k = 0
+    for i in range(n_items - 1):
+        for j in range(i + 1, n_items):
+            out[k] = metric.distance(tagged[i], tagged[j])
+            k += 1
+    return out
 
 
-def _safe_build_embeddings(token_seqs, vocab_size, embedding_dim, window):
+# --------------------------------------------------------------------------- #
+# S6: hard Levenshtein (classic topsim)                                        #
+# --------------------------------------------------------------------------- #
+def hard_levenshtein_condensed(token_seqs):
     """
-    Build per-symbol embeddings, clamping ``embedding_dim`` to the available
-    SVD rank.
+    Plain Levenshtein distance between token sequences, condensed.
 
-    ``tiny_lang_embed`` raises ``ValueError`` when ``embedding_dim`` exceeds the
-    number of available singular values, and that rank is bounded by *this*
-    corpus -- emergent vocab is tiny (~10-20) and early-training language is
-    often degenerate (a single repeated token => near rank-0 co-occurrence). We
-    parse the available count out of the error and retry, returning ``None`` if
-    the corpus cannot support even a 1-d embedding (caller emits NaN).
+    Signal distance for S6 (strict order, no synonymy) -- the classic topsim.
+    Raw edit counts, not length-normalised: messages are fixed-length in this
+    setup, so normalising by mean length is a no-op that only obscures the
+    metric. ``tests/test_emergence.py`` asserts equality against the strsimpy
+    DP that the soft variant uses.
     """
-    dim = int(embedding_dim)
-    while dim >= 1:
-        try:
-            emb = build_embeddings(
-                token_seqs, vocab_size=vocab_size, embedding_dim=dim, window=window
-            )
-            return np.stack([np.asarray(emb[t], dtype=np.float64)
-                             for t in range(vocab_size)])
-        except ValueError as exc:
-            match = re.search(r"available (\d+)", str(exc))
-            avail = int(match.group(1)) if match else dim - 1
-            new_dim = min(dim - 1, avail)
-            if new_dim >= dim:  # no progress; bail rather than loop forever
-                return None
-            dim = new_dim
-    return None
-
-
-def _first_principal_component(sentence_vectors):
-    """First right singular vector of the sentence-embedding matrix (SIF)."""
-    if sentence_vectors.shape[0] < 2:
-        return None
-    if not np.isfinite(sentence_vectors).all():
-        return None
-    if np.allclose(sentence_vectors, 0.0):
-        return None
-    # SIF (Arora et al.) removes the top singular direction without centering.
-    _, _, vt = np.linalg.svd(sentence_vectors, full_matrices=False)
-    return vt[0]
-
-
-def sif_condensed(
-    token_seqs,
-    vocab_size,
-    embedding_dim=4,
-    window=2,
-    a=1e-3,
-    pc=None,
-    return_pc=False,
-):
-    """
-    Cosine distance between SIF sentence embeddings, condensed.
-
-    Symbol embeddings come from ``tiny_lang_embed`` (count-based, deterministic).
-    Each message is the frequency-weighted average a/(a+p(w)) of its symbol
-    vectors; the first principal component is then removed. ``pc`` lets a caller
-    reuse a principal component estimated on a larger (image-level) set for a
-    smaller (concept-prototype) set, where estimating it fresh would be noisy.
-
-    Returns a condensed vector of cosine distances (NaN entries where a message
-    is empty), or all-NaN if the corpus is too degenerate to embed. When
-    ``return_pc`` is true, also returns the principal component used (or None).
-    """
-    n = len(token_seqs)
-    n_pairs = n * (n - 1) // 2
-    nan_out = np.full(n_pairs, np.nan)
-
-    counts = np.zeros(vocab_size, dtype=np.float64)
-    for s in token_seqs:
-        for t in s:
-            if 0 <= t < vocab_size:
-                counts[t] += 1.0
-    total = counts.sum()
-    if total == 0:
-        return (nan_out, None) if return_pc else nan_out
-    weights = a / (a + counts / total)  # per-symbol SIF weight
-
-    emb = _safe_build_embeddings(token_seqs, vocab_size, embedding_dim, window)
-    if emb is None:
-        return (nan_out, None) if return_pc else nan_out
-    dim = emb.shape[1]
-
-    sentences = np.zeros((n, dim), dtype=np.float64)
-    for i, s in enumerate(token_seqs):
-        toks = [t for t in s if 0 <= t < vocab_size]
-        if not toks:
-            continue  # empty message -> zero vector -> NaN cosine distances
-        weighted = emb[toks] * weights[toks][:, None]
-        sentences[i] = weighted.sum(0) / len(toks)
-
-    if pc is None:
-        pc = _first_principal_component(sentences)
-    if pc is not None:
-        sentences = sentences - np.outer(sentences @ pc, pc)
-
-    cond = pdist(sentences, metric="cosine")
-    return (cond, pc) if return_pc else cond
+    full = _rf_cdist(
+        token_seqs, token_seqs, scorer=_Levenshtein.distance, dtype=np.float64
+    )
+    return squareform(full, checks=False)
 
 
 # --------------------------------------------------------------------------- #
 # Orchestration                                                                #
 # --------------------------------------------------------------------------- #
-def topsim_grid(
-    token_seqs,
-    reprs,
-    vocab_size,
-    concept_meaning_cond=None,
-    sif_dim=4,
-    sif_window=2,
-    sif_pc=None,
-):
-    """
-    Compute the full grid of topsim values for one set of (message, repr) pairs.
+SIGNAL_SETS = ("s1", "s2", "s3", "s4", "s5", "s6")
 
-    Crosses two meaning bases -- ``ts`` (concept distance, only if
-    ``concept_meaning_cond`` is supplied) and ``reprts`` (cosine distance over
-    ``reprs``) -- with three message distances (``lev``, ``tanimoto``, ``sif``).
+TOPSIM_KEYS = tuple(f"topsim_{s}" for s in SIGNAL_SETS)
+
+
+def signal_distances(token_seqs, symbol_embeddings):
+    """
+    All six condensed signal-distance vectors, keyed by signal set.
+
+    Split out from :func:`topsim_suite` so the distances can be inspected (and
+    tested) without a meaning space.
+    """
+    return {
+        "s1": soft_mover_condensed(token_seqs, symbol_embeddings, n=1),
+        "s2": soft_mover_condensed(token_seqs, symbol_embeddings, n=2),
+        "s3": soft_levenshtein_condensed(token_seqs, symbol_embeddings),
+        "s4": hard_mover_condensed(token_seqs, n=1),
+        "s5": hard_mover_condensed(token_seqs, n=2),
+        "s6": hard_levenshtein_condensed(token_seqs),
+    }
+
+
+def topsim_suite(token_seqs, symbol_embeddings, concepts):
+    """
+    The six topsim variants for one set of (message, embeddings, concept) triples.
+
+    Each is the Spearman correlation of one signal set's distance against the
+    single meaning distance (cosine between concept vectors). Keys are named by
+    *signal set*, not by distance function, because the set is what the value
+    licenses a claim about.
 
     Parameters
     ----------
     token_seqs : list of list of int
-        Emergent messages as token-id sequences.
-    reprs : array (n, d)
-        Sender representation vectors (``prototypes_concat``), one per message.
-    vocab_size : int
-        Symbol vocabulary size (for bag-of-symbols and SIF).
-    concept_meaning_cond : array, optional
-        Precomputed condensed concept-distance vector aligned with ``token_seqs``.
-    sif_pc : array, optional
-        Principal component to reuse for the SIF distance (see ``sif_condensed``).
+        Emergent messages as content-token-id sequences.
+    symbol_embeddings : list of array ``(len(seq), d)``
+        Contextual symbol embeddings, positionally aligned with ``token_seqs``.
+    concepts : array ``(n, d_c)``
+        Sender concept vectors, one row per message.
 
     Returns
     -------
-    metrics : dict[str, float]
-        Keys ``"{base}_{msg}"`` e.g. ``"ts_lev"``, ``"reprts_sif"``.
-    sif_pc : array or None
-        The SIF principal component computed here (so a caller can reuse it).
+    dict[str, float]
+        Keys ``topsim_s1`` ... ``topsim_s6``. A value is ``nan`` where Spearman
+        is undefined (fewer than two finite pairs, or either side constant).
     """
-    message_conds = {
-        "lev": levenshtein_condensed(token_seqs),
-        "tanimoto": tanimoto_condensed(token_seqs, vocab_size),
+    meaning_cond = concept_distance_condensed(concepts)
+    return {
+        f"topsim_{name}": spearman_topsim(meaning_cond, signal_cond)
+        for name, signal_cond in signal_distances(
+            token_seqs, symbol_embeddings
+        ).items()
     }
-    sif_cond, sif_pc = sif_condensed(
-        token_seqs, vocab_size, sif_dim, sif_window, pc=sif_pc, return_pc=True
-    )
-    message_conds["sif"] = sif_cond
-
-    meaning_conds = {"reprts": vector_condensed(reprs, metric="cosine")}
-    if concept_meaning_cond is not None:
-        meaning_conds["ts"] = np.asarray(concept_meaning_cond, dtype=np.float64)
-
-    metrics = {}
-    for base, mean_cond in meaning_conds.items():
-        for msg, msg_cond in message_conds.items():
-            metrics[f"{base}_{msg}"] = spearman_topsim(mean_cond, msg_cond)
-    return metrics, sif_pc
-
-
-# --------------------------------------------------------------------------- #
-# Other (enumerable) compositionality measures -- unchanged                    #
-# --------------------------------------------------------------------------- #
-def normalize(ctr):
-    total = sum(ctr.values())
-    return Counter({k: v / total for k, v in ctr.items()})
-
-
-def context_independence(concepts, messages):
-    r"""
-    Measure context independence between concepts c and messages m.
-
-    Let p_cm(c | m) be the conditional probability of context c given message m and
-    p_mc(m | c) be the condiational probability of message m given context c
-    (we can estimate these by simply enumerating).
-
-    Then for any concept c, we define the "ideal" message m^c as argmax_m
-    p_cm(c | m) (i.e., whichever message has the highest conditional
-    probability that we are referring to concept c).
-
-    Then,
-
-    CI(concepts, messages) = 1 / len(concepts) \sum_c p_mc(m^c | c) * p_cm(c | m^c).
-    """
-    p_cm = defaultdict(Counter)
-    p_mc = defaultdict(Counter)
-
-    for c, m in zip(concepts, messages):
-        # I.e., given message m, conditional probability of c.
-        p_cm[m][c] += 1
-        p_mc[c][m] += 1
-
-    p_cm = {k: normalize(v) for k, v in p_cm.items()}
-    p_mc = {k: normalize(v) for k, v in p_mc.items()}
-
-    # Find ideal messages
-    unique_concepts = list(set(concepts))
-    unique_messages = list(set(messages))
-    cis = []
-
-    for c in unique_concepts:
-        mc = None
-        best_p_cm = 0.0
-        for m in unique_messages:
-            this_p_cm = p_cm[m][c]
-            if this_p_cm > best_p_cm:
-                mc = m
-                best_p_cm = this_p_cm
-        if mc is None:
-            raise RuntimeError(f"Couldn't find ideal concept for {c}")
-
-        ci = p_mc[c][mc] * p_cm[mc][c]
-
-        cis.append(ci)
-
-    return np.mean(cis)
-
-
-def mutual_information(concepts, messages):
-    r"""
-    Measure mutual information between concepts c and messages m (assuming
-    enumerability)
-    """
-    from sklearn.metrics import normalized_mutual_info_score
-
-    # Assign int values
-    c2i = {}
-    m2i = {}
-
-    for c, m in zip(concepts, messages):
-        if c not in c2i:
-            c2i[c] = len(c2i)
-        if m not in m2i:
-            m2i[m] = len(m2i)
-
-    cis = [c2i[c] for c in concepts]
-    mis = [m2i[m] for m in messages]
-
-    return normalized_mutual_info_score(cis, mis)
