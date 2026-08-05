@@ -216,8 +216,8 @@ class SenderGRULM(nn.Module):
             prototypes alone, this speaker is autoregressive: each embedding
             depends on the symbols sampled before it, so embeddings and
             message only correspond when they come from the *same* call.
-            `forward` and `embeddings` each discard one half of this, so any
-            analysis needing the two to be paired must call this directly.
+            `forward` discards the embeddings, so any analysis needing the two
+            to be paired must call this directly (as `Sender.speak` does).
 
         Returns:
             lang_tensor: (batch, message_length, vocabulary + 4)
@@ -316,18 +316,6 @@ class SenderGRULM(nn.Module):
             commented upon in the original paper).
         """
         return self.decode(prototypes, return_states=False)[0]
-
-    def embeddings(
-        self,
-        prototypes
-    ):
-        """
-        The recurrent state behind each content token, analogous to
-            `SenderTransformerLM.embeddings`. Note the analogy is not exact:
-            see `decode` on why these will not match a message obtained from
-            a separate `forward` call.
-        """
-        return self.decode(prototypes)[1]
 
     def reset_parameters(self):
         self.init_h.reset_parameters()
@@ -470,9 +458,8 @@ class SenderTransformerLM(nn.Module):
             single pass. Mirrors `SenderGRULM.decode`.
 
         This speaker is not autoregressive, so unlike the GRU the embeddings
-            here do not depend on which symbols were sampled and `embeddings`
-            can be called on its own. This method exists so that callers can
-            treat the two speakers identically.
+            here do not depend on which symbols were sampled. This method
+            exists so that callers can treat the two speakers identically.
 
         Returns:
             onehot: (batch, message_length, vocabulary + 4)
@@ -594,12 +581,6 @@ class Sender(nn.Module):
 
         return self.prototyper(self.embed_images(samples), targets)
 
-    def get_concepts(self, samples, targets):
-        return torch.cat(self.get_prototypes(samples, targets), 1)
-
-    def get_symbol_embeddings(self, prototypes):
-        return self.language_model.embeddings(prototypes)
-
     def speak(self, samples, targets):
         """
         Produce a message, the symbol embeddings behind it, and the concepts
@@ -608,10 +589,9 @@ class Sender(nn.Module):
         This is what compositionality analysis needs: the soft signal
             distances compare symbol embeddings between symbols that were
             actually emitted, and semantic distance is measured between the
-            concepts, so all three must come from the same forward pass. The
-            separate `get_concepts` / `get_symbol_embeddings` accessors each
-            re-run the speaker, which would resample both the vision dropout
-            mask and (for the GRU speaker) the message itself.
+            concepts, so all three must come from the same forward pass.
+            Fetching them through separate calls would resample both the
+            vision dropout mask and (for the GRU speaker) the message itself.
 
         Returns:
             messages: (batch, message_length, vocabulary + 4)

@@ -4,7 +4,6 @@ from pathlib import Path
 import torch
 from PIL import Image
 import pandas as pd
-from collections import Counter
 
 
 from . import util
@@ -14,53 +13,13 @@ from . import image_util as iu
 IMAGE_SIZE = 224
 LOAD_INTO_MEMORY = True
 
-# TODO: verify this works before deleting the commented stuff below
+# CUB classes are 1-indexed. Classes 101-150 used to be held out as a val split;
+# there is no val split any more (no best-epoch selection), so they are unused.
 TRAIN_CLASSES = range(1, 101)
-VAL_CLASSES = range(101, 151)
 TEST_CLASSES = range(151, 201)
 
-# FIXME - this is slightly incorrect since CUB classes are 1-indexed.
-# TRAIN_CLASSES = range(100)
-# VAL_CLASSES = range(100, 150)
-# TEST_CLASSES = range(150, 200)
-
 TRAIN_CLASSES_DEBUG = range(4)
-VAL_CLASSES_DEBUG = range(4, 8)
 TEST_CLASSES_DEBUG = range(8, 12)
-
-
-def load_attr_dict(cub_path):
-    fpath = str(Path(cub_path) / "attributes.txt")
-    attr_df = pd.read_csv(
-        fpath,
-        header=None,
-        sep=" ",
-        names=["attr_id", "attr_name"],
-        usecols=["attr_name"],
-    )
-    # attr_id is 1-indexed but we want 0 index
-    attrs = attr_df["attr_name"]
-
-    attr_type_dict = {}
-    attr_type_val_count_dict = Counter()
-    attr_val_dict = {}
-
-    for attr_i, attr in enumerate(attrs):
-        attr_type, attr_val = attr.split("::")
-
-        if attr_type not in attr_type_dict:
-            attr_type_dict[attr_type] = len(attr_type_dict)
-
-        attr_type_n = attr_type_dict[attr_type]
-
-        attr_type_val_count = attr_type_val_count_dict[attr_type]
-
-        # (which index, what value)
-        attr_val_dict[attr_i] = (attr_type_n, attr_type_val_count)
-
-        attr_type_val_count_dict[attr_type] += 1
-
-    return attr_val_dict
 
 
 def load_class_metadata(cub_path):
@@ -173,8 +132,6 @@ def load(config):
     else:
         md = class_md
 
-    attr_dict = load_attr_dict(config['data']['dataset'])
-
     tloader = iu.TransformLoader(IMAGE_SIZE)
     train_transform = tloader.get_composed_transform(
         aug=True,
@@ -187,7 +144,7 @@ def load(config):
         to_pil=True,
     )
 
-    def to_dset(classes, train=False, percent_novel=None, reference_game=None):
+    def to_dset(classes, train=False):
         if train:
             tr = train_transform
             length = 1000
@@ -198,72 +155,47 @@ def load(config):
         if config['debug']:
             length = length // 10
 
-        if percent_novel is None:
-            percent_novel = config['data']['percent_novel']
-        if reference_game is None:
-            reference_game = config['reference_game']
-
         subset = {k: v for k, v in imgs.items() if k in classes}
         return CUBDataset(
             subset,
             md,
-            img_md,
-            attr_dict,
             transform=tr,
             n_examples=config['data']['n_examples'],
             length=length,
-            reference_game=reference_game,
-            percent_novel=percent_novel,
+            reference_game=config['reference_game'],
+            percent_novel=config['data']['percent_novel'],
         )
 
     if config['debug']:
         classes = {
             "train": TRAIN_CLASSES_DEBUG,
-            "val": VAL_CLASSES_DEBUG,
             "test": TEST_CLASSES_DEBUG,
         }
     else:
         classes = {
             "train": TRAIN_CLASSES,
-            "val": VAL_CLASSES,
             "test": TEST_CLASSES,
         }
 
-    datasets = {
+    # Only the splits `train.py` consumes. There is no val split (no best-epoch
+    # selection) and no cross-game-type eval datasets: the run trains and
+    # evaluates a single game framing, so the `<split>_<game_type>` grid that
+    # used to be built here was never read. See the matching note in
+    # `shapeworld.load`.
+    return {
         "train": to_dset(classes["train"], train=True),
-        "val": to_dset(classes["val"], train=False),
         "test": to_dset(classes["test"], train=False),
     }
-
-    # Load other splits
-    this_game_type = util.get_game_type(config)
-    for _split in ["val", "test"]:
-        for game_type in ["ref", "setref", "concept"]:
-            split = f"{_split}_{game_type}"
-            if game_type == this_game_type:
-                datasets[split] = datasets[_split]
-            else:
-                datasets[split] = to_dset(
-                    classes[_split],
-                    percent_novel=1.0 if game_type == "concept" else 0.0,
-                    reference_game=game_type == "ref",
-                    train=False,
-                )
-
-    return datasets
 
 
 class CUBDataset:
     MAX_N_EXAMPLES = 20
     name = "cub"
-    meaning_distance_fn = "hamming"
 
     def __init__(
         self,
         imgs,
         metadata,
-        img_metadata,
-        attr_dict,
         n_examples=None,
         transform=None,
         length=1000,
@@ -272,15 +204,12 @@ class CUBDataset:
     ):
         self.imgs = imgs
         self.metadata = metadata
-        self.img_metadata = img_metadata  # Per-image attribute vectors
         self.classes = np.array(list(self.imgs.keys()))
         self.img_names = {c: list(i.keys()) for c, i in self.imgs.items()}
         self.length = length
         self.transform = transform
         self.reference_game = reference_game
         self.n_feats = (3, IMAGE_SIZE, IMAGE_SIZE)
-        self.attr_dict = attr_dict
-        self.n_attr_types = max(t[0] for t in self.attr_dict.values()) + 1
         if n_examples is None:
             self.n_examples = self.MAX_N_EXAMPLES
         else:
@@ -382,23 +311,3 @@ class CUBDataset:
             else:
                 texts.append(toks)
         return texts
-
-    def attr_to_numeric(self, attrs):
-        """
-        Convert the length-312 one-hot attributes to standard numeric
-        attributes
-        """
-        batch_size = len(attrs)
-        n_attrs = attrs[0].shape[0]
-        assert n_attrs == len(self.attr_dict)
-        attrs_numeric = []
-
-        for i in range(batch_size):
-            attr_num_i = np.zeros(self.n_attr_types, dtype=np.int64)
-            for j in range(n_attrs):
-                if attrs[i][j]:
-                    attr_type_i, attr_val = self.attr_dict[j]
-                    attr_num_i[attr_type_i] = attr_val
-            attrs_numeric.append(attr_num_i)
-
-        return attrs_numeric

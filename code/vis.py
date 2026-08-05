@@ -5,8 +5,6 @@ Visualize communication
 
 import os
 from jinja2 import Template
-from PIL import Image
-import numpy as np
 
 
 def sanitize(x):

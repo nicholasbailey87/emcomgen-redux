@@ -1,5 +1,3 @@
-import numpy as np
-from sklearn.model_selection import train_test_split
 import torch
 
 
@@ -50,75 +48,9 @@ def split_spk_lis(inp, y, n_examples, percent_novel=1.0):
     return spk_inp, spk_label, lis_inp, lis_label
 
 
-def train_test_split_pt(*tensors, test_size=0.2):
-    """
-    Pytorch train test split
-    """
-    first = tensors[0]
-    if isinstance(test_size, float):
-        test_size = int(first.shape[1] * test_size)
-    perm = torch.randperm(first.shape[1])
-
-    train_perm = []
-    test_perm = []
-    for t in tensors:
-        t_perm = t[:, perm]
-        train_perm.append(t_perm[:, test_size:].contiguous())
-        test_perm.append(t_perm[:, :test_size].contiguous())
-
-    return train_perm, test_perm
-
-
-def train_val_test_split(data, val_size=0.1, test_size=0.1, random_state=None):
-    """
-    Split data into train, validation, and test splits
-    Parameters
-    ----------
-    data : ``np.Array``
-        Data of shape (n_data, 2), first column is ``x``, second column is ``y``
-    val_size : ``float``, optional (default: 0.1)
-        % to reserve for validation
-    test_size : ``float``, optional (default: 0.1)
-        % to reserve for test
-    random_state : ``np.random.RandomState``, optional (default: None)
-        If specified, random state for reproducibility
-    """
-    idx = np.arange(data["imgs"].shape[0])
-    idx_train, idx_valtest = train_test_split(
-        idx, test_size=val_size + test_size, random_state=random_state, shuffle=True
-    )
-    idx_val, idx_test = train_test_split(
-        idx_valtest,
-        test_size=test_size / (val_size + test_size),
-        random_state=random_state,
-        shuffle=True,
-    )
-    splits = []
-    for idx_split in (idx_train, idx_val, idx_test):
-        splits.append(
-            {
-                "imgs": data["imgs"][idx_split],
-                "labels": data["labels"][idx_split],
-                "langs": data["langs"][idx_split],
-            }
-        )
-    return splits
-
-
 def return_index(getitem):
     def with_index(self, index):
         res = getitem(self, index)
         return res + (index,)
 
     return with_index
-
-
-def get_game_type(config):
-    if config['reference_game']:
-        return "ref"
-    elif config['data']['percent_novel'] == 0.0:
-        return "setref"
-    elif config['data']['percent_novel'] == 1.0:
-        return "concept"
-    else:
-        return None

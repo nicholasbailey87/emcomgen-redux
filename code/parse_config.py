@@ -1,4 +1,3 @@
-from collections import defaultdict
 from pathlib import Path
 import warnings
 import toml
@@ -48,8 +47,6 @@ class SafeDict(dict):
 def validate_config(config: dict) -> bool:
     """
     Check that the config doesn't contradict itself and has the necessary arguments.
-
-    Based on some lines in code/io_util.py
     """
 
     if config['use_lang'] and (config['copy_receiver'] or config['receiver_only']):
@@ -65,6 +62,14 @@ def validate_config(config: dict) -> bool:
     if config['reference_game_xent'] and not config['reference_game']:
         raise InvalidConfig(
             "reference_game_xent=true requires reference_game=true"
+        )
+
+    # There is no joint-training objective in this codebase. This used to be
+    # checked once per batch inside the training loop; rejecting the config up
+    # front fails in the same cases, but before any work is done.
+    if config['joint_training']:
+        raise InvalidConfig(
+            "`joint_training` is not implemented and must be false."
         )
     
     if (

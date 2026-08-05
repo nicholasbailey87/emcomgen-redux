@@ -2,11 +2,8 @@
 Train an RNN decoder to make binary predictions;
 then train an RNN language model to generate sequences
 """
-from typing import List, Union
-
 from torch.amp import GradScaler, autocast
 
-import sys
 import os
 from pathlib import Path
 
@@ -15,7 +12,6 @@ from collections import Counter, defaultdict
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
 
 import models
 import models.backbone
@@ -28,7 +24,6 @@ import vis
 import emergence
 
 import pandas as pd
-# import io_util
 
 # Logging
 import logging
@@ -51,24 +46,6 @@ def get_true_lang(
     spk_inp, spk_y, lis_inp, lis_y, true_lang, md, idx = batch
     true_lang_text = dataset.to_text(true_lang, join=join)
     return true_lang_text
-
-
-def get_positive_examples(inp, y):
-    """
-    inp -> batch_size x n_examples x feat_size
-    y -> batch_size x y
-
-    output
-    """
-    where_zero = np.where(y.sum(1) == 0)[0]
-    y[where_zero] = 1
-    occur_rows, occur_cols = np.where(y)
-    row_indices, occur_col_indices = np.unique(occur_rows, return_index=True)
-    assert (row_indices == np.arange(len(row_indices))).all()
-    assert len(occur_col_indices) == len(y)
-    col_indices = occur_cols[occur_col_indices]
-    sel = inp[row_indices, col_indices]
-    return sel
 
 
 def concept_keys_from_true_lang(true_lang_text, dataset_name):
@@ -371,10 +348,6 @@ def run(
                 all_concepts.extend(concepts.detach().cpu().float().numpy())
                 all_true_lang.extend(true_lang_text)
 
-            if config['joint_training']:
-                class DoNotUse(Exception): pass
-                raise DoNotUse("This should never happen as joint_training should always be false!")
-
             if training:
                 scaler.scale(this_loss / config['optimiser']['accumulator_steps']).backward()
 
@@ -474,8 +447,6 @@ def clean_language(all_lang_df):
     all_lang_df["lang"] = all_lang_df["lang"].apply(clean_lang)
     all_lang_df["true_lang"] = all_lang_df["true_lang"].apply(clean_true_lang)
 
-class NoArguments(Exception):
-    pass
 
 if __name__ == "__main__":
     import argparse
@@ -538,8 +509,7 @@ if __name__ == "__main__":
     dataloaders = data.loader.load_dataloaders(config)
     model_config = models.builder.build_models(dataloaders, config)
     scaler = GradScaler()
-    
-    # TODO: remove this as it's never used
+
     training_examples = len(dataloaders['train'].dataset)
     epochs = config['scheduler']['epochs']
     warmup_epochs = min(config['scheduler']['warm_up_epochs'], epochs)
@@ -696,11 +666,6 @@ if __name__ == "__main__":
             torch.save(model_config['pair'].state_dict(), model_fname)
             if config['use_lang']:
                 lang.to_csv(os.path.join(exp_dir, f"{epoch}_lang.csv"), index=False)
-
-        # if args.wandb:
-        #     import wandb
-
-        #     wandb.log(metrics)
 
         # Append this epoch's row to metrics.csv (write the header only for a new
         # file). Appending — rather than rewriting from an in-memory list — is

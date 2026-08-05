@@ -27,28 +27,6 @@ N_FEATS = len(SHAPES) + len(COLORS)
 SPLITS = ["train", "test", "test_same"]
 
 
-def get_unique_concepts(dfolder):
-    split_langs = {}
-
-    for split in ["train", "val", "test"]:
-        data_file = os.path.join(dfolder, f"{split}.npz")
-        if os.path.exists(data_file):
-            data = np.load(data_file)
-        else:
-            # Try hdf5
-            data = h5py.File(data_file.replace(".npz", ".hdf5"), "r")
-
-        split_langs[split] = [
-            lang.decode("utf-8") if isinstance(lang, bytes) else str(lang)
-            for lang in data["langs"]
-        ]
-
-    return {
-        "train": set(list(split_langs["train"])),
-        "test": set(list(split_langs["val"]) + list(split_langs["test"])),
-    }
-
-
 def _concept_to_lf(concept):
     """
     Parse concept. Since fixed recursion we don't have to worry about
@@ -78,21 +56,6 @@ def concept_to_lf(concept, split=True):
     if split:
         concept = concept.split(" ")
     return _concept_to_lf(concept)
-
-
-def lf_to_concept(lf):
-    if isinstance(lf, str):
-        return lf
-    if len(lf) == 1:  # Primitive
-        return lf_to_concept(lf[0])
-    elif len(lf) == 2:
-        assert lf[0] == "not"
-        arg_concept = lf_to_concept(lf[1])
-        return f"{lf[0]} {arg_concept}"
-    elif len(lf) == 3:
-        l_concept = lf_to_concept(lf[1])
-        r_concept = lf_to_concept(lf[2])
-        return f"{l_concept} {lf[0]} {r_concept}"
 
 
 def extract_shapes(worlds):

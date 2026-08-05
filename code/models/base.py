@@ -10,5 +10,3 @@ class Pair(nn.Module):
         super().__init__()
         self.sender = sender
         self.receiver = receiver
-        self.bce_criterion = nn.BCEWithLogitsLoss()
-        self.xent_criterion = nn.CrossEntropyLoss()

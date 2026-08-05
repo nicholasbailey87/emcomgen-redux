@@ -27,7 +27,7 @@ two symbols is a function of the sender's own contextual symbol embeddings
 0/1 ground cost, so only symbol identity matters.
 
 The *meaning* distance is held constant across all six: cosine distance between
-the sender's concept vectors (the output of ``Sender.get_concepts``).
+the sender's concept vectors (the third output of ``Sender.speak``).
 
 Reference implementations
 -------------------------
@@ -120,7 +120,7 @@ def concept_distance_condensed(concepts, metric="cosine"):
     """
     Condensed pairwise distances between sender concept vectors.
 
-    ``concepts`` is the output of ``Sender.get_concepts`` -- the positive and
+    ``concepts`` is the third output of ``Sender.speak`` -- the positive and
     negative prototypes concatenated -- one row per item.
     """
     concepts = np.asarray(concepts, dtype=np.float64)

@@ -1,6 +1,6 @@
 import torch
 from torchvision import transforms
-from PIL import Image, ImageEnhance
+from PIL import ImageEnhance
 
 
 transformtypedict = dict(
