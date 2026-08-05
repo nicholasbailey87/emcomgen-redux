@@ -73,7 +73,7 @@ tail -f experiments/transformer/logs/transformer_*.o
 ```
 
 Results land under `<output_root>/<experiment>/<config_stem>_seed<seed>/`
-(e.g. `~/archive/results/transformer/transformer_seed0/metrics.csv`), with the
+(e.g. `~/archive/results/emcomgen/transformer/transformer_seed0/metrics.csv`), with the
 topographic-similarity and generalization columns described below.
 
 `./scripts/run_experiment.sh` takes
@@ -88,7 +88,7 @@ everything from scratch (passing `--no_resume` to `train.py`).
 {
     "data_slow_storage": "~/archive/data",
     "data_fast_storage": "~/sharedscratch/data",
-    "output_root": "~/archive/results"
+    "output_root": "~/archive/results/emcomgen"
 }
 ```
 
