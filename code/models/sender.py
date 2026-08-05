@@ -203,16 +203,29 @@ class SenderGRULM(nn.Module):
 
         self.reset_parameters()
 
-    def forward(
+    def decode(
         self,
         prototypes,
-        **kwargs
+        return_states=True
     ):
         """
-        We don't include options for greedy or epsilon-greedy generation as
-            the former is only used in the parts of the code that relate to
-            ACRe and the latter are by default not used (and are not
-            commented upon in the original paper).
+        Run the decoding loop once, returning both the message and the symbol
+            embeddings that produced it.
+
+        Unlike `SenderTransformerLM`, whose embeddings are a function of the
+            prototypes alone, this speaker is autoregressive: each embedding
+            depends on the symbols sampled before it, so embeddings and
+            message only correspond when they come from the *same* call.
+            `forward` and `embeddings` each discard one half of this, so any
+            analysis needing the two to be paired must call this directly.
+
+        Returns:
+            lang_tensor: (batch, message_length, vocabulary + 4)
+            symbol_embeddings: (batch, message_length - 2, d_model *
+                directions), one dense contextual vector per content symbol,
+                taken before the vocabulary projection and sampling, or None
+                when `return_states` is False. Stacking them is a copy the
+                training path has no use for, so `forward` opts out.
         """
         batch_size = prototypes[0].size(0)
         device = prototypes[0].device
@@ -227,6 +240,7 @@ class SenderGRULM(nn.Module):
         )
 
         lang = []
+        symbol_embeddings = []
 
         # Create and add SOS token
         sos_onehot = torch.zeros(
@@ -244,8 +258,11 @@ class SenderGRULM(nn.Module):
         for i in range(self.message_length - 2):
 
             gru_out, states = self.gru(gru_in, states)
-            
-            logits = self.outputs2vocab(gru_out[:, -1, :]) # Shape: (B, V)
+
+            step_embedding = gru_out[:, -1, :] # Shape: (B, D * Dir)
+            symbol_embeddings.append(step_embedding)
+
+            logits = self.outputs2vocab(step_embedding) # Shape: (B, V)
 
             if self.batch_norm_logits:
                 # This must come before the uniform weight mixing
@@ -280,9 +297,37 @@ class SenderGRULM(nn.Module):
         lang.append(eos_onehot)
 
         # Concatenate
-        lang_tensor = torch.cat(lang, 1) 
+        lang_tensor = torch.cat(lang, 1)
 
-        return lang_tensor
+        return (
+            lang_tensor,
+            torch.stack(symbol_embeddings, 1) if return_states else None
+        )
+
+    def forward(
+        self,
+        prototypes,
+        **kwargs
+    ):
+        """
+        We don't include options for greedy or epsilon-greedy generation as
+            the former is only used in the parts of the code that relate to
+            ACRe and the latter are by default not used (and are not
+            commented upon in the original paper).
+        """
+        return self.decode(prototypes, return_states=False)[0]
+
+    def embeddings(
+        self,
+        prototypes
+    ):
+        """
+        The recurrent state behind each content token, analogous to
+            `SenderTransformerLM.embeddings`. Note the analogy is not exact:
+            see `decode` on why these will not match a message obtained from
+            a separate `forward` call.
+        """
+        return self.decode(prototypes)[1]
 
     def reset_parameters(self):
         self.init_h.reset_parameters()
@@ -392,13 +437,11 @@ class SenderTransformerLM(nn.Module):
 
         self.reset_parameters()
 
-    def forward(
+    def embeddings(
         self,
-        prototypes,
-        **kwargs
+        prototypes
     ):
         batch_size = prototypes[0].size(0)
-        device = prototypes[0].device
 
         stack_prototypes = torch.stack(prototypes, 1) # To sequence
 
@@ -416,9 +459,33 @@ class SenderTransformerLM(nn.Module):
             normed_query, normed_prototypes, normed_prototypes
         ) # (batch, self.content_length, self.d_model)
 
-        outputs = self.transformer(initial_sequence)
+        return self.transformer(initial_sequence)
 
-        logits = self.outputs2vocab(outputs)
+    def decode(
+        self,
+        prototypes
+    ):
+        """
+        Produce a message and the symbol embeddings that produced it, in a
+            single pass. Mirrors `SenderGRULM.decode`.
+
+        This speaker is not autoregressive, so unlike the GRU the embeddings
+            here do not depend on which symbols were sampled and `embeddings`
+            can be called on its own. This method exists so that callers can
+            treat the two speakers identically.
+
+        Returns:
+            onehot: (batch, message_length, vocabulary + 4)
+            symbol_embeddings: (batch, message_length - 2, d_model), one
+                dense contextual vector per content symbol, taken before the
+                vocabulary projection and sampling
+        """
+        batch_size = prototypes[0].size(0)
+        device = prototypes[0].device
+
+        symbol_embeddings = self.embeddings(prototypes)
+
+        logits = self.outputs2vocab(symbol_embeddings)
 
         if self.batch_norm_logits:
             # This must come before the uniform weight mixing
@@ -448,7 +515,14 @@ class SenderTransformerLM(nn.Module):
 
         onehot = torch.cat([sos_onehot, onehot_content, eos_onehot], dim=1)
 
-        return onehot # (batch, message_length, vocabulary)
+        return onehot, symbol_embeddings
+
+    def forward(
+        self,
+        prototypes,
+        **kwargs
+    ):
+        return self.decode(prototypes)[0] # (batch, message_length, vocabulary)
 
     def reset_parameters(self):
         nn.init.normal_(self.query, mean=0.0, std=1.0)
@@ -522,7 +596,35 @@ class Sender(nn.Module):
 
     def get_concepts(self, samples, targets):
         return torch.cat(self.get_prototypes(samples, targets), 1)
-    
+
+    def get_symbol_embeddings(self, prototypes):
+        return self.language_model.embeddings(prototypes)
+
+    def speak(self, samples, targets):
+        """
+        Produce a message, the symbol embeddings behind it, and the concepts
+            that prompted it, all from a single pass.
+
+        This is what compositionality analysis needs: the soft signal
+            distances compare symbol embeddings between symbols that were
+            actually emitted, and semantic distance is measured between the
+            concepts, so all three must come from the same forward pass. The
+            separate `get_concepts` / `get_symbol_embeddings` accessors each
+            re-run the speaker, which would resample both the vision dropout
+            mask and (for the GRU speaker) the message itself.
+
+        Returns:
+            messages: (batch, message_length, vocabulary + 4)
+            symbol_embeddings: (batch, message_length - 2, embedding size),
+                one dense contextual vector per content symbol, positionally
+                aligned with the content symbols of `messages`, i.e. with the
+                output of `trim_messages`
+            concepts: (batch, 2 * referent embedding size)
+        """
+        prototypes = self.get_prototypes(samples, targets)
+        messages, symbol_embeddings = self.language_model.decode(prototypes)
+        return messages, symbol_embeddings, torch.cat(prototypes, 1)
+
     def forward(
         self,
         samples,
