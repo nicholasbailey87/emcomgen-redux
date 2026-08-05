@@ -205,6 +205,10 @@ the latter two):
     minus the pre-training baseline. `NaN` if no baseline was recorded.
 - `{train,test,...}_loss` — the training objective.
 
+Two columns are unprefixed: `epoch`, and `timestamp` — the wall-clock time
+(ISO-8601, local) at which that epoch's row was written, for reading a run's pace
+off the CSV afterwards.
+
 A topsim value is `NaN` where Spearman is undefined: fewer than two finite pairs,
 or either the meaning or the signal side constant across all pairs. That is the
 correct result rather than an error — see the chapter's Case 1 edge case.

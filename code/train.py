@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from collections import Counter, defaultdict
+from datetime import datetime
 
 import numpy as np
 import torch
@@ -666,6 +667,10 @@ if __name__ == "__main__":
             torch.save(model_config['pair'].state_dict(), model_fname)
             if config['use_lang']:
                 lang.to_csv(os.path.join(exp_dir, f"{epoch}_lang.csv"), index=False)
+
+        # Wall-clock time the epoch finished, matching vit's `timestamp` column,
+        # so a run's pace can be read off metrics.csv after the fact.
+        metrics["timestamp"] = datetime.now().isoformat()
 
         # Append this epoch's row to metrics.csv (write the header only for a new
         # file). Appending — rather than rewriting from an in-memory list — is
