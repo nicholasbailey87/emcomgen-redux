@@ -60,7 +60,12 @@ range_test = false
 [sender]
 class = "Sender"
 feature_model = "Conv4"
-vision_dropout = 0.1
+vision_dropout = 0.0    # On per-image embeddings, before pooling. jayelm's
+                        # speaker has no dropout here, and it would stack a
+                        # second regulariser on the same pathway.
+prototype_dropout = 0.5 # On the pooled concept vectors, before the language
+                        # model. This is where jayelm's single speaker-side
+                        # `--dropout` sits (at 0.1 in their runs).
 prototyper = "AveragePrototyper"
 language_model = "SenderGRULM"
 

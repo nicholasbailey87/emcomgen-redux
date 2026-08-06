@@ -47,7 +47,8 @@ def build_models(dataloaders, config):
         feat_model = sender_feature_model,
         prototyper = sender_prototyper,
         language_model = sender_language_model,
-        vision_dropout = config['sender']['vision_dropout']
+        vision_dropout = config['sender']['vision_dropout'],
+        prototype_dropout = config['sender']['prototype_dropout']
     )
 
     # Set up receiver

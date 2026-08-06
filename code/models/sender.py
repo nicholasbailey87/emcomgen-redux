@@ -576,7 +576,8 @@ class Sender(nn.Module):
         feat_model: nn.Module,
         prototyper: nn.Module,
         language_model: nn.Module,
-        vision_dropout: float= 0.5
+        vision_dropout: float= 0.5,
+        prototype_dropout: float= 0.5
     ):
         """
         An agent that will receive one or more positive examples of a concept and
@@ -588,7 +589,13 @@ class Sender(nn.Module):
             prototyper: The module used to create prototypes from positive and
                 negative examples of referents
             language_model: The module used to create utterances based on prototypes
-            dropout: Dropout probability between the `feat_model` and `prototyper`
+            vision_dropout: Dropout probability between the `feat_model` and the
+                `prototyper`, i.e. on per-image embeddings, before pooling
+            prototype_dropout: Dropout probability between the `prototyper` and
+                the `language_model`, i.e. on the pooled concept vectors. This
+                is where jayelm's single `--dropout` sits (on the speaker side);
+                dropping features before the pool is much weaker, since the
+                average over n/2 examples largely restores them.
         """
         super().__init__()
         self.feat_model = feat_model
@@ -596,6 +603,7 @@ class Sender(nn.Module):
         self.prototyper = prototyper
         self.language_model = language_model
         self.vision_dropout = nn.Dropout(p=vision_dropout)
+        self.prototype_dropout = nn.Dropout(p=prototype_dropout)
 
     def embed_images(self, samples):
         """
@@ -627,7 +635,11 @@ class Sender(nn.Module):
                 "the first n / 2 should be positive and the rest negative."
             )
 
-        return self.prototyper(self.embed_images(samples), targets)
+        prototypes = self.prototyper(self.embed_images(samples), targets)
+
+        # Applied per prototype rather than to the concatenation, which is the
+        #     same thing: dropout masks each element independently.
+        return tuple(self.prototype_dropout(p) for p in prototypes)
 
     def speak(self, samples, targets):
         """

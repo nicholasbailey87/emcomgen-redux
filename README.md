@@ -124,6 +124,12 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
     two must match)
 - `[sender_language_model] vocabulary`: vocab size of the agents
 - `[data] n_examples`: number of examples given to agents
+- `[sender] prototype_dropout` / `[sender] vision_dropout`: dropout on the pooled
+    concept vectors (between prototyper and language model) and on the per-image
+    embeddings (between vision model and prototyper) respectively. The former is
+    the stronger regulariser and is where jayelm's single speaker-side
+    `--dropout` sits; dropping pre-pool features is largely undone by the
+    average over n/2 examples.
 - `[sender_language_model] uniform_weight`: uniform noise on the gumbel-softmax
     policy, and the only live exploration knob. Applied **on the train pass
     only** — the eval passes (and the pre-training topsim baseline) measure the
