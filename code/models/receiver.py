@@ -7,6 +7,12 @@ import torch.nn as nn
 
 import broccoli
 
+# Cross-attention dropout for `TransformerCrossAttentionComparer`. A fixed
+#     architecture constant, not a tunable: `receiver_comparer.dropout` is
+#     reserved for regularising the comparison inputs in both comparers.
+MSA_DROPOUT = 0.1
+
+
 class BilinearGRUComparer(nn.Module):
     def __init__(
         self,
@@ -55,6 +61,14 @@ class BilinearGRUComparer(nn.Module):
         self.referent_embedding_size = referent_embedding_size
         self.token_embedding_size = kwargs["token_embedding_size"]
         self.d_model = kwargs["d_model"]
+        # `dropout` means exactly one thing across both comparers: mask *both*
+        #     operands of the comparison, i.e. the pooled message embedding and
+        #     the incoming referent embeddings. It is the listener's only
+        #     regulariser and the counterpart of the sender's
+        #     `prototype_dropout`; like it, it sits where there is no averaging
+        #     left downstream to restore the masked units. Module internals are
+        #     fixed constants below, so raising this knob never silently
+        #     rewires the architecture.
         self.dropout = nn.Dropout(p=kwargs["dropout"])
         self.bidirectional = kwargs["bidirectional"]
         self.layers = kwargs["layers"]
@@ -65,7 +79,13 @@ class BilinearGRUComparer(nn.Module):
             num_layers=self.layers,
             bias=True,
             batch_first=True,
-            dropout=kwargs["dropout"],
+            # Fixed at 0.0 to match jayelm, whose listener GRU takes no dropout
+            #     argument at all (`rnn.py:21`). Inert either way while
+            #     `layers = 1` — PyTorch only applies this *between* layers —
+            #     but wiring the knob in here meant it would switch on
+            #     unannounced the moment anyone raised `layers`. Zero also
+            #     silences PyTorch's warning about that combination.
+            dropout=0.0,
             bidirectional=self.bidirectional
         )
 
@@ -96,7 +116,31 @@ class BilinearGRUComparer(nn.Module):
         """
         token_embeddings, _ = self.gru(messages) # (b, seq, directions * d_model)
 
-        # XXX: Getting the sequence embedding like this could be suboptimal for unidirectional GRU if sequences are padded at the end
+        # Taking timestep -1 gives the state after the GRU has consumed the
+        #     last *slot*, not the last real token. That is correct here only
+        #     because our messages are never padded: `mask_reserved_tokens`
+        #     puts PAD/SOS/EOS/UNK at -inf so the sender cannot emit EOS
+        #     mid-message, and `SenderGRULM.decode` always builds
+        #     SOS + (message_length - 2) content symbols + EOS. Every message
+        #     is therefore exactly `message_length` long and position -1 is
+        #     always the real EOS.
+        #
+        # This diverges from jayelm, whose speaker *does* sample EOS early and
+        #     tracks a per-example `lang_length`, leaving shorter messages
+        #     padded at the end; their listener has to `pack_padded_sequence`
+        #     to avoid exactly the failure this comment used to warn about.
+        #
+        # So the assumption is dormant, not satisfied by design elsewhere. It
+        #     breaks the moment either of these changes:
+        #       - EOS is dropped from the reserved mask to let the sender
+        #         choose message length (the more faithful reproduction), at
+        #         which point this reads post-EOS junk;
+        #       - anything feeds padded language to the receiver, e.g. an
+        #         ACRe-style eval replaying sampled messages. Nothing does
+        #         today; every call site takes `lang` straight from the sender.
+        #     The bidirectional branch has the mirror exposure: it reads the
+        #     backward pass at position 0, which under end-padding is the state
+        #     after that pass has run *through* the padding first.
         if self.bidirectional:
             final_state_of_forward_pass = token_embeddings[:, -1, :self.d_model]
             final_state_of_backward_pass = token_embeddings[:, 0, self.d_model:]
@@ -113,6 +157,13 @@ class BilinearGRUComparer(nn.Module):
         
         message_embeddings = self.dropout(message_embeddings)
         projected = self.bilinear(message_embeddings)
+
+        # Both operands of the comparison are regularised, not just the
+        #     message. The score is a dot product, so dropping units of one
+        #     side only lets the listener lean on whichever side is left
+        #     intact; masking both forces the bilinear map to be robust in the
+        #     referent basis as well as the message basis.
+        referents = self.dropout(referents)
 
         scores = torch.einsum("ijh,ih->ij", (referents, projected)) # (batch, n_objects)
 
@@ -145,6 +196,13 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.utility_tokens = kwargs["utility_tokens"]
         self.bidirectional = kwargs["bidirectional"]
         self.stochastic_depth = 0.1 if int(self.layers // 2) > 1 else 0.0
+
+        # Same meaning as in `BilinearGRUComparer`: mask both operands of the
+        #     comparison. Applied to each input as it arrives, before the
+        #     adapters, which is the only point at which the two are
+        #     symmetrically placed. Attention dropout is a fixed constant
+        #     (see `MSA_DROPOUT`) rather than this knob.
+        self.input_dropout = nn.Dropout(p=self.dropout)
 
         self.referent_adapter = nn.Linear(
             self.referent_embedding_size,
@@ -180,7 +238,15 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.cross_attention = broccoli.transformer.MHAttention(
             self.d_model,
             self.heads,
-            dropout=self.dropout,
+            # Architecture internals, deliberately not `self.dropout` — that
+            #     knob is the listener's regulariser on the comparison inputs,
+            #     and should not double as an attention-internals setting.
+            #     jayelm has no transformer listener to match, so this is
+            #     standard practice, alongside the stochastic depth above.
+            #     broccoli gates it on `self.training` (`transformer.py:344`),
+            #     so it does not leak into eval the way a bare
+            #     `F.scaled_dot_product_attention(dropout_p=...)` would.
+            dropout=MSA_DROPOUT,
             causal=False,
             seq_len=self.message_length,
             scaling="d",
@@ -223,6 +289,10 @@ class TransformerCrossAttentionComparer(nn.Module):
 
         Returns a batch of scores, of shape (batch_size, n_obj)
         """
+        # Both operands masked, symmetrically, before their adapters.
+        referents = self.input_dropout(referents)
+        messages = self.input_dropout(messages)
+
         referents = self.referent_adapter(referents)
         normed_referents = self.referent_layer_norm(referents)
         messages = self.message_adapter(messages)
@@ -244,12 +314,22 @@ class TransformerCrossAttentionComparer(nn.Module):
 
 
 class Receiver(nn.Module):
-    def __init__(self, feature_model, token_embedding_module, comparer, vision_dropout):
+    def __init__(self, feature_model, token_embedding_module, comparer):
+        """
+        Note there is no `vision_dropout` here, unlike `Sender`. The listener's
+            regularisation lives entirely in the comparer, which masks the
+            referent and message embeddings equally off a single `dropout`.
+            A dropout here would land on the same tensor the comparer masks,
+            with nothing but a reshape between the two, so the pair would
+            silently compose into one mask at a rate neither knob names.
+            `Sender.vision_dropout` is not redundant in the same way: the
+            prototyper pools between it and `prototype_dropout`, which is
+            exactly what makes the pre-pool mask the weaker of the two.
+        """
         super().__init__()
         self.feature_model = feature_model
         self.token_embedding = token_embedding_module
         self.comparer = comparer
-        self.vision_dropout = nn.Dropout(p=vision_dropout)
 
     def forward(self, referents, messages):
         batch_size = referents.shape[0]
@@ -259,7 +339,6 @@ class Receiver(nn.Module):
         # Embed the referents
         referents_flat = referents.view(batch_size * n_obj, *rest)
         embedded_referents = self.feature_model(referents_flat)
-        embedded_referents = self.vision_dropout(embedded_referents)
         embedded_referents = embedded_referents.view(batch_size, n_obj, -1)
 
         # Embed the messages

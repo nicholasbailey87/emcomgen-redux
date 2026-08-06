@@ -130,6 +130,21 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
     the stronger regulariser and is where jayelm's single speaker-side
     `--dropout` sits; dropping pre-pool features is largely undone by the
     average over n/2 examples.
+- `[receiver_comparer] dropout`: the listener's **only** dropout, and the
+    counterpart of the sender's `prototype_dropout`. Applied equally to both
+    operands of the comparison — the pooled message embedding and the incoming
+    referent embeddings — and defaults to `0.5` to match the sender. There is
+    deliberately no `[receiver] vision_dropout`: it would mask the same tensor
+    as the referent side of this knob, with nothing but a reshape between them,
+    so the two would compose into one mask at a rate neither knob names. The
+    sender keeps its `vision_dropout` because the prototyper pools between the
+    two masks there. It affects **only** those two inputs: module internals are
+    fixed constants, so raising it never silently rewires the architecture. The
+    listener GRU's inter-layer dropout is pinned to `0.0` (jayelm's listener GRU
+    takes no dropout argument), and the cross-attention comparer's attention
+    dropout to `MSA_DROPOUT = 0.1`. For reference, jayelm regularised both agents with a
+    single `--dropout` at `0.1`, on the listener's vision pathway only, with
+    nothing at all on its language pathway.
 - `[sender_language_model] uniform_weight`: uniform noise on the gumbel-softmax
     policy, and the only live exploration knob. Applied **on the train pass
     only** — the eval passes (and the pre-training topsim baseline) measure the

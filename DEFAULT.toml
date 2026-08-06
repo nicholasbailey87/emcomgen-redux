@@ -98,7 +98,11 @@ utility_tokens = 4 # Only applies to Transformer language models
 class = "Receiver"
 feature_model = "Conv4"
 comparer = "BilinearGRUComparer"
-vision_dropout = 0.1
+# No `vision_dropout` here, unlike [sender]: it would mask the same tensor as
+#     the referent side of `receiver_comparer.dropout`, with nothing but a
+#     reshape between them, so the two would compose into a single mask at a
+#     rate neither knob names. The listener's regularisation is the one
+#     `receiver_comparer.dropout` below.
 
 [receiver_feature_model]
 d_model = 16 # Only applies to Transformer vision models
@@ -109,7 +113,14 @@ utility_tokens = 0 # Only applies to Transformer vision models
 [receiver_comparer]
 token_embedding_size = 500
 d_model = 1024
-dropout = 0.1
+dropout = 0.5 # The listener's only dropout, applied equally to both operands
+              # of the comparison: the pooled message embedding and the
+              # incoming referent embeddings. Counterpart to the sender's
+              # `prototype_dropout`, and set to match it — the literature says
+              # listeners want at least as much regularisation as speakers for
+              # compositional languages to emerge, and jayelm's single
+              # `--dropout` (0.1) gave both agents the same weak setting. Also
+              # passed to `nn.GRU(dropout=)`, which is inert while `layers = 1`.
 layers = 1
 bidirectional = false
 message_length = 7 # Only applies to Transformer comparers. Should be the same as sender_language_model.message_length

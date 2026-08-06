@@ -26,7 +26,6 @@ utility_tokens = 0 # Only applies to Transformer vision models
 
 [receiver]
 feature_model = "ViT2"
-vision_dropout = 0.1
 
 [receiver_feature_model]
 d_model = 32 # Only applies to Transformer vision models

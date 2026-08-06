@@ -86,8 +86,7 @@ def build_models(dataloaders, config):
     receiver_ = receiver_class(
         feature_model = receiver_feature_model,
         token_embedding_module=receiver_token_embedding_module,
-        comparer = receiver_comparer,
-        vision_dropout = config['receiver']['vision_dropout']
+        comparer = receiver_comparer
     )
 
     pair = base.Pair(sender_, receiver_)
