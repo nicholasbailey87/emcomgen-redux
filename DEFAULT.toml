@@ -76,8 +76,12 @@ d_model = 1024
 vocabulary = 14
 message_length = 7 # max message length. note this includes sos/eos token, i.e. the true length is this - 2
 uniform_weight = 0.1
-softmax_temperature = 1.0
-exploration_temperature = 1.0
+tau = 1.0                     # Gumbel-softmax tau. Gradient shaping only:
+                              # the hard forward sample is an argmax and so
+                              # is invariant to it. jayelm's `--tau`.
+exploration_temperature = 1.0 # Divides the log-probs before sampling.
+                              # jayelm's `--softmax_temp`; unused there and
+                              # here, `uniform_weight` is the live knob.
 batch_norm_logits = false
 dropout = 0.1
 layers = 1
@@ -123,6 +127,9 @@ accumulator_steps = 1
 feature_model = "ResNet18"
 
 [birds.sender_language_model]
+# jayelm's run_cub.sh passes no --uniform_weight, so the CUB runs explored
+# with the argparse default of 0.0 rather than ShapeWorld's 0.1.
+uniform_weight = 0.0
 vocabulary = 20
 message_length = 10 # max message length. note this includes sos/eos token, i.e. the true length is this - 2
 

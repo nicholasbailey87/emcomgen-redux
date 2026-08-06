@@ -8,7 +8,6 @@ Speaker models. This includes speakers with a GRU-based language model as
 """
 
 import warnings
-import math
 
 import torch
 import torch.nn as nn
@@ -61,39 +60,79 @@ def batch_norm_logits(module: nn.BatchNorm1d, logits: torch.Tensor) -> torch.Ten
     logits = module(einops.rearrange(logits, 'b l c -> b c l'))
     return einops.rearrange(logits, 'b c l -> b l c')
 
+def mask_reserved_tokens(logits: torch.Tensor) -> torch.Tensor:
+    """
+    Set the four reserved tokens (PAD/SOS/EOS/UNK) to -inf so they can never be
+        emitted mid-message. SOS and EOS are attached by the caller instead, so
+        messages are fixed-length.
+
+    Out of place, because this now runs directly on the output of the vocabulary
+        projection (or of batch norm), and writing -inf into that in place would
+        be modifying a tensor autograd still needs.
+
+    Runs before the exploration noise so that the uniform mixture is spread over
+        the emittable tokens only — see `flatten_logit_distribution`.
+
+    Args:
+        logits: (..., vocabulary + 4), reserved tokens first
+
+    Returns:
+        A tensor of the same shape with the reserved positions set to -inf
+    """
+    reserved = torch.zeros_like(logits, dtype=torch.bool)
+    reserved[..., :4] = True
+    return logits.masked_fill(reserved, -float("inf"))
+
+
 def flatten_logit_distribution(
     logits: torch.Tensor,
     uniform_weight: float
 ) -> torch.Tensor:
     """
-    Returns a weighted average of 
+    Returns a weighted average of
+
+    The uniform component is spread over the emittable tokens only, i.e. those
+        not already masked to -inf by `mask_reserved_tokens`. Spreading it over
+        all `vocabulary + 4` slots and masking afterwards would throw away the
+        4/(V+4) of it that landed on reserved tokens, so a nominal weight of
+        0.1 would deliver 0.078. Masked positions stay masked.
 
     Args:
         logits: some provided unnormalised log probabilities
         uniform_weight: the relative weight to give the uniform distribution
             when mixing it in to the provided logits
-    
+
     Returns:
         A torch.Tensor of logits where the absolute differences between
             logits is reduced - i..e. a less "certain" distribution
     """
+    emittable = torch.isfinite(logits)
     normalised_logits = F.log_softmax(logits, dim=-1)
+
     # Make a uniform distribution, but in the log space
-    uniform_log_probs = torch.full_like(
-        normalised_logits,
-        -np.log(logits.shape[-1])
-    )
-    
-    # Mix the log distributions, like log( w * uniform + (1-w) * model )
+    uniform_log_probs = -torch.log(
+        emittable.sum(-1, keepdim=True).to(logits.dtype)
+    ).expand_as(logits)
+
+    # Mix the log distributions, like log( w * uniform + (1-w) * model ).
+    # Masked entries are -inf in both components, and `logsumexp` of two -inf
+    #     backpropagates NaN, so they are mixed as a finite placeholder and the
+    #     mask is restored afterwards. `torch.where` routes the gradient to the
+    #     selected branch only, so the placeholder never reaches the speaker.
+    placeholder = torch.zeros_like(logits)
     combined_logits = torch.stack(
         [
-            uniform_log_probs + np.log(uniform_weight),
-            normalised_logits + np.log(1 - uniform_weight),
+            torch.where(emittable, uniform_log_probs, placeholder)
+            + np.log(uniform_weight),
+            torch.where(emittable, normalised_logits, placeholder)
+            + np.log(1 - uniform_weight),
         ],
         dim=-1,
     )
 
-    return torch.logsumexp(combined_logits, dim=-1)
+    return torch.where(
+        emittable, torch.logsumexp(combined_logits, dim=-1), logits
+    )
 
 
 class AveragePrototyper(nn.Module):
@@ -162,7 +201,7 @@ class SenderGRULM(nn.Module):
         self.d_model = kwargs["d_model"]
         self.vocabulary = kwargs["vocabulary"]
         self.message_length = kwargs["message_length"]
-        self.softmax_temperature = kwargs["softmax_temperature"]
+        self.tau = kwargs["tau"]  # Gumbel-softmax tau, as in jayelm
         self.exploration_temperature = kwargs["exploration_temperature"]
         self.uniform_weight = kwargs["uniform_weight"]
         self.batch_norm_logits = kwargs["batch_norm_logits"]
@@ -268,21 +307,30 @@ class SenderGRULM(nn.Module):
                 # This must come before the uniform weight mixing
                 #     as it would otherwise mess up the distribution
                 logits = self.batch_norm(logits)
-            
-            if self.uniform_weight > 0.0:
-                logits = flatten_logit_distribution(logits, self.uniform_weight)
 
-            logits = logits / self.exploration_temperature
-            
-            # Remove probability mass from reserved tokens
-            # Probability mass there should atrophy anyway as it won't have gradient(?)
-            logits[:, :4] = -float('inf')
+            # Masking comes first so that the uniform mixture below is spread
+            #     over the emittable tokens only.
+            logits = mask_reserved_tokens(logits)
+
+            # Exploration is a training-time device only, so that the eval
+            #     passes measure the learned policy rather than a deliberately
+            #     noised one. Mirrors jayelm's emergent-generalization, which
+            #     zeroes `uniform_weight` and resets `softmax_temp` to 1.0
+            #     whenever the split is not `train`.
+            if self.training:
+                if self.uniform_weight > 0.0:
+                    logits = flatten_logit_distribution(logits, self.uniform_weight)
+
+                logits = logits / self.exploration_temperature
 
             # 5. Gumbel-Softmax (hard=True)
-            # This handles the noise addition + argmax + straight-through gradient
+            # This handles the noise addition + argmax + straight-through gradient.
+            # Note `tau` rescales the *soft* sample only: the hard forward sample
+            #     is an argmax and so is invariant to it. It is a gradient knob,
+            #     not an exploration knob — `uniform_weight` is the latter.
             predicted_onehot = F.gumbel_softmax(
                 logits,
-                tau=self.softmax_temperature,
+                tau=self.tau,
                 hard=True,
                 dim=-1
             )
@@ -342,9 +390,8 @@ class SenderTransformerLM(nn.Module):
         self.token_embedding_size = kwargs["token_embedding_size"]
         self.d_model = kwargs["d_model"]
         self.vocabulary = kwargs["vocabulary"]
-        self.max_entropy = math.log(self.vocabulary)
         self.message_length = kwargs["message_length"]
-        self.softmax_temperature = kwargs["softmax_temperature"]
+        self.tau = kwargs["tau"]  # Gumbel-softmax tau, as in jayelm
         self.exploration_temperature = kwargs["exploration_temperature"]
         self.uniform_weight = kwargs["uniform_weight"]
         self.batch_norm_logits = kwargs["batch_norm_logits"]
@@ -478,19 +525,20 @@ class SenderTransformerLM(nn.Module):
             # This must come before the uniform weight mixing
             #     as it would otherwise mess up the distribution
             logits = batch_norm_logits(self.batch_norm, logits)
-            
-        if self.uniform_weight > 0.0:
-            logits = flatten_logit_distribution(logits, self.uniform_weight)
 
-        logits = logits / self.exploration_temperature
-        
-        # Remove probability mass from reserved tokens
-        # Probability mass there should atrophy anyway as it won't have gradient(?)
-        logits[:, :, :4] = -float('inf')
+        # Mask first, then explore, training-time only — as in
+        #     `SenderGRULM.decode`, see the notes there.
+        logits = mask_reserved_tokens(logits)
+
+        if self.training:
+            if self.uniform_weight > 0.0:
+                logits = flatten_logit_distribution(logits, self.uniform_weight)
+
+            logits = logits / self.exploration_temperature
 
         onehot_content = F.gumbel_softmax(
             logits,
-            tau=self.softmax_temperature,
+            tau=self.tau,
             hard=True,
             dim=-1
         )

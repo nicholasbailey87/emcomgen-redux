@@ -124,7 +124,21 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
     two must match)
 - `[sender_language_model] vocabulary`: vocab size of the agents
 - `[data] n_examples`: number of examples given to agents
-- `[sender_language_model] uniform_weight`: uniform noise on the gumbel-softmax policy
+- `[sender_language_model] uniform_weight`: uniform noise on the gumbel-softmax
+    policy, and the only live exploration knob. Applied **on the train pass
+    only** — the eval passes (and the pre-training topsim baseline) measure the
+    learned policy, as in jayelm, who zeroes it whenever the split is not
+    `train`. `0.1` for ShapeWorld and `0.0` for CUB, matching `run_sw.sh` /
+    `run_cub.sh`.
+- `[sender_language_model] tau`: gumbel-softmax tau (jayelm's `--tau`). This
+    shapes the straight-through *gradient* only: the hard forward sample is an
+    argmax, so it is invariant to tau. Raising it does not buy exploration, it
+    just flattens the surrogate gradient. `1.0` everywhere, GRU and Transformer
+    alike, so the two speakers differ only in architecture.
+- `[sender_language_model] exploration_temperature`: divides the log-probs before
+    sampling (jayelm's `--softmax_temp`). Train-pass only, like `uniform_weight`.
+    `1.0` everywhere, i.e. off — kept for parity with upstream, which also never
+    used it in a published run.
 - `wandb = true`: activate wandb logging (run `wandb init` yourself)
 
 Two extra sections drive the launcher (the `[experiment]` and `[slurm]` keys):
