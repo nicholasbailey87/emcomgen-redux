@@ -18,16 +18,27 @@ receiver_reset_interval = 0.0
 save_interval = 10
 
 [analysis]
-# Settings for the six topsim variants (see code/emergence.py and
-# compute_language_metrics in code/train.py). One variant per signal set S1-S6;
-# they differ only in the signal distance, the meaning distance being cosine
-# between sender concept vectors throughout. Computed once per epoch on the
-# test/test_same eval passes (not on train), plus one pre-training baseline pass
-# per split that the reported `_adj` columns are measured against.
+# Settings for the topsim report (see code/emergence.py and
+# compute_language_metrics in code/train.py). One variant per signal set S1-S6,
+# differing only in the signal distance; each is read against two meaning
+# distances -- cosine between sender concept vectors (`topsim_*`) and word-level
+# edit distance between the ground-truth logical forms (`topsim_gt_*`). Computed
+# once per epoch on the test/test_same eval passes, not on train.
+#
+# The three soft variants (S1-S3) are additionally reported as `_static`, which
+# recomputes them on per-token mean embeddings. Only the soft variants read the
+# sender's symbol embeddings, and only they can therefore report a correlation
+# that came from the meaning space rather than from the language; `_static`
+# leaves their synonymy tolerance intact and removes that channel. It replaces an
+# adjustment against a pre-training baseline pass, which read ~0 for every
+# variant and so bounded nothing: the leakage it existed to catch is created by
+# training. See `emergence.topsim_report`.
 max_concepts = 500     # cap on concept prototypes entering one topsim computation.
                        # Measurement is per concept prototype, not per image, and
                        # the soft signal distances are O(n^2) in a Python loop, so
-                       # this bounds the ~30-55 s/epoch measurement cost.
+                       # this bounds the measurement cost. The `_static` control
+                       # roughly doubles it; dropping the pre-training baseline
+                       # pass gives most of that back.
 
 [data]
 # 40 images per stored game rather than 80-100. `split_spk_lis` only ever reads

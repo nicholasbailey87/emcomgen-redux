@@ -3,7 +3,7 @@ Tests for the six topsim variants in code/emergence.py.
 
 Runnable without pytest:  python tests/test_emergence.py
 
-Three things are checked here. First, that each of the six signal distances is a
+Four things are checked here. First, that each of the six signal distances is a
 *valid signal distance function* in the chapter's sense: Identity (an utterance
 is at distance zero from itself) and Smoothness (in expectation the distance is
 monotone in the number of corrupting symbol substitutions). Second, that the
@@ -13,6 +13,14 @@ they stand in for -- ``strsimpy`` for Levenshtein and ``ot.emd2`` for the movers
 that the suite actually discriminates the signal sets it claims to: three
 hand-built toy languages, differing only in symbol order freedom and synonymy,
 are scored the way the chapter says they should be.
+
+Fourth, the two guards on how a reading may be interpreted. The ``_static``
+control has to remove the correlation a soft variant reports on a language that
+carries no information at all, *and* leave a genuinely compositional language
+untouched -- a control that only did the first would subtract away real results.
+And the ``topsim_gt_`` family, measured against the ground-truth logical forms
+rather than the sender's own concept vectors, has to notice a sender that has
+collapsed onto a subset of the visual features.
 """
 
 import os
@@ -406,6 +414,184 @@ def test_toy_synonymy_keeps_soft_and_loses_hard():
         assert hard_value < soft_value - 0.3, (
             f"topsim_{hard} = {hard_value:.3f} vs topsim_{soft} = {soft_value:.3f}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# The `_static` leakage control and the ground-truth meaning space              #
+# --------------------------------------------------------------------------- #
+def _leaky_corpus(rng, n=120, d_concept=64, d_model=48):
+    """
+    A provably holistic language whose embeddings encode only the concept.
+
+    Tokens are drawn independently of the meaning, so nothing about a message
+    says anything about what it refers to and every variant should read 0. The
+    embeddings, though, are a smooth deterministic function of the concept
+    vector alone -- the worst case of what ``SenderGRULM`` does when it seeds
+    its hidden state from ``init_h(concept)``.
+    """
+    concepts = rng.randn(n, d_concept)
+    hidden = np.tanh(concepts @ (rng.randn(d_concept, d_model) / np.sqrt(d_concept)))
+    embs = np.stack(
+        [np.tanh(hidden @ (rng.randn(d_model, d_model) / np.sqrt(d_model)))
+         for _ in range(LENGTH)],
+        axis=1,
+    )
+    seqs = rng.randint(FIRST_SYMBOL, FIRST_SYMBOL + 14, size=(n, LENGTH)).tolist()
+    return seqs, list(embs), concepts
+
+
+def test_soft_variants_leak_the_meaning_space_without_the_control():
+    """
+    The failure `_static` exists to catch: on a language that says nothing, the
+    soft variants still report a correlation, because their signal distance is
+    a function of embeddings that are themselves a function of the concept.
+    """
+    seqs, embs, concepts = _leaky_corpus(np.random.RandomState(11))
+    suite = E.topsim_suite(seqs, embs, concepts)
+
+    for key in ("topsim_s2", "topsim_s3"):
+        assert suite[key] > 0.2, (
+            f"{key} = {suite[key]:.3f}; expected the uncontrolled soft variant "
+            f"to report leakage on a holistic language"
+        )
+    for key in ("topsim_s4", "topsim_s5", "topsim_s6"):
+        assert abs(suite[key]) < 0.1, (
+            f"{key} = {suite[key]:.3f}; hard variants see only token identities "
+            f"and cannot leak"
+        )
+
+
+def test_static_control_removes_the_leak():
+    """Decontextualising the embeddings takes the soft variants back to zero."""
+    seqs, embs, concepts = _leaky_corpus(np.random.RandomState(11))
+    report = E.topsim_report(seqs, embs, concepts)
+
+    for s in E.SOFT_SIGNAL_SETS:
+        assert abs(report[f"topsim_{s}_static"]) < 0.1, (
+            f"topsim_{s}_static = {report[f'topsim_{s}_static']:.3f} should be "
+            f"~0 on a holistic language"
+        )
+
+
+def test_static_control_leaves_a_real_language_alone():
+    """
+    The control must cost nothing when there is nothing to control for. These
+    toy embeddings are already a context-free lookup table, so decontextualising
+    is the identity and `_static` must reproduce the raw value exactly.
+
+    This is the property a permutation null does not have: permuting messages
+    between concepts while each utterance keeps its embeddings leaves the
+    embeddings encoding their original tokens, which in a compositional language
+    still track the meaning, so such a control absorbs the real signal.
+    """
+    rng = np.random.RandomState(8)
+    seqs, embs, concepts = _toy_language(rng, synonyms=True)
+    report = E.topsim_report(seqs, embs, concepts)
+
+    for s in E.SOFT_SIGNAL_SETS:
+        assert np.isclose(report[f"topsim_{s}"], report[f"topsim_{s}_static"]), (
+            f"topsim_{s} = {report[f'topsim_{s}']:.3f} but _static = "
+            f"{report[f'topsim_{s}_static']:.3f}"
+        )
+        assert report[f"topsim_{s}_static"] > 0.9
+
+
+def test_decontextualised_embeddings_are_constant_per_token():
+    seqs = [[4, 5, 6, 4, 5], [5, 4, 7, 7, 6], [6, 6, 4, 5, 7]]
+    rng = np.random.RandomState(12)
+    embs = [rng.randn(LENGTH, 8) for _ in seqs]
+    static = E.decontextualised_embeddings(seqs, embs)
+
+    seen = {}
+    for seq, table in zip(seqs, static):
+        for position, token in enumerate(seq):
+            if token in seen:
+                assert np.allclose(seen[token], table[position]), (
+                    f"token {token} has two different static embeddings"
+                )
+            seen[token] = table[position]
+
+    # And the value is the mean over every occurrence.
+    occurrences = [
+        emb[position]
+        for seq, emb in zip(seqs, embs)
+        for position, token in enumerate(seq)
+        if token == 4
+    ]
+    assert np.allclose(seen[4], np.mean(occurrences, axis=0))
+
+
+def test_ground_truth_meaning_space_sees_a_collapsed_sender():
+    """
+    A sender that has collapsed onto one visual feature scores well against its
+    own concept vectors -- it faithfully encodes what it represents -- and worse
+    against the ground-truth logical forms, which know about the feature it
+    dropped. Catching that gap is the point of the `topsim_gt_` family.
+    """
+    rng = np.random.RandomState(13)
+    n_colours, n_shapes, dim = 6, 5, 32
+    colour_vectors = rng.randn(n_colours, dim)
+
+    # One symbol per colour, embedded by a fixed projection of the colour it
+    # names, as a trained sender's symbol geometry would be. The soft variants
+    # need the embedding space to mirror the meaning space for *some* reason;
+    # positioning symbols by what they are used for is the honest one.
+    symbol_table = np.zeros((FIRST_SYMBOL + n_colours, 16))
+    symbol_table[FIRST_SYMBOL:] = colour_vectors @ rng.randn(dim, 16)
+
+    formulas, concepts, seqs, embs = [], [], [], []
+    for colour in range(n_colours):
+        for shape in range(n_shapes):
+            formulas.append(f"and c{colour} s{shape}")
+            # The sender's own representation has lost the shape entirely: two
+            # concepts of the same colour are the same point in its space.
+            concepts.append(colour_vectors[colour])
+            message = [FIRST_SYMBOL + colour] * LENGTH
+            seqs.append(message)
+            embs.append(symbol_table[message] + 0.01 * rng.randn(LENGTH, 16))
+
+    report = E.topsim_report(seqs, embs, np.stack(concepts), formulas=formulas)
+    assert set(report) == set(E.REPORT_KEYS)
+
+    for s in E.SOFT_SIGNAL_SETS:
+        own = report[f"topsim_{s}"]
+        ground_truth = report[f"topsim_gt_{s}"]
+        assert own > 0.5, f"topsim_{s} = {own:.3f} should be high on the sender's own space"
+        assert ground_truth < own - 0.15, (
+            f"topsim_gt_{s} = {ground_truth:.3f} should trail topsim_{s} = {own:.3f}"
+        )
+        # Nothing here is leaked: the embeddings are a function of the token.
+        assert np.isclose(report[f"topsim_{s}_static"], own, atol=0.01)
+
+    # The hard variants cannot tell the two meaning spaces apart here -- their
+    # signal distance is binary (same colour or not), which says as much about
+    # one space as the other. It is the soft variants that separate them.
+    for s in ("s4", "s5", "s6"):
+        assert abs(report[f"topsim_{s}"] - report[f"topsim_gt_{s}"]) < 0.05
+
+
+def test_formula_distance_is_word_level_not_character_level():
+    """
+    Two formulas differing in one word are at distance 1, however many
+    characters that word contains -- this is the paper's concept Edit distance.
+    """
+    from scipy.spatial.distance import squareform
+
+    formulas = ["and red triangle", "and red circle", "or blue triangle"]
+    full = squareform(E.formula_distance_condensed(formulas))
+    assert full[0, 1] == 1.0, "one differing word is one edit"
+    assert full[0, 2] == 2.0, "two differing words are two edits"
+    assert full[0, 0] == 0.0
+
+
+def test_report_omits_ground_truth_keys_without_formulas():
+    rng = np.random.RandomState(14)
+    seqs, embs, concepts = _toy_language(rng)
+    report = E.topsim_report(seqs, embs, concepts)
+    assert not any(key.startswith("topsim_gt_") for key in report)
+    assert set(report) == set(E.TOPSIM_KEYS) | {
+        f"topsim_{s}_static" for s in E.SOFT_SIGNAL_SETS
+    }
 
 
 if __name__ == "__main__":

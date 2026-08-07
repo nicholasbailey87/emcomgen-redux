@@ -73,9 +73,10 @@ def compute_language_metrics(
     concepts,
     concept_keys,
     max_concepts,
+    ground_truth_meaning,
 ):
     """
-    The six topsim variants over concept prototypes (``emergence.topsim_suite``).
+    The topsim report over concept prototypes (``emergence.topsim_report``).
 
     Measurement is per *concept prototype*, not per image. One point per concept
     is what the chapter's signal sets are about -- a language is compositional to
@@ -86,12 +87,19 @@ def compute_language_metrics(
     O(n^2) in a Python loop so 2000 images is ~2M pairs.
 
     A concept's prototype is: the modal token sequence its instances emitted, the
-    contextual symbol embeddings from one instance that actually emitted that
-    sequence (the soft distances need embeddings paired with real symbols), and
-    the mean of its instances' concept vectors.
+    mean of the contextual symbol embeddings of *every* instance that emitted
+    that sequence (the soft distances need embeddings paired with real symbols,
+    and averaging over the instances that emitted them rather than taking one
+    arbitrary instance is what keeps a single epoch's reading stable), and the
+    mean of its instances' concept vectors.
 
     Concepts are capped at ``max_concepts``; capping images instead would starve
     each concept of the instances the modal message is drawn from.
+
+    ``ground_truth_meaning`` says whether the concept keys are logical forms, in
+    which case the ``topsim_gt_`` family is reported against them too. CUB keys
+    are bare class ids, which have no internal structure to take a word-level
+    edit distance over.
     """
     concepts = np.asarray(concepts, dtype=np.float64)
 
@@ -114,34 +122,26 @@ def compute_language_metrics(
     for key in keys:
         idx = groups[key]
         message = representative_message([messages[i] for i in idx])
-        source = next(i for i in idx if list(messages[i]) == message)
+        # Every source emitted `message`, so these all have the same length and
+        # stack cleanly. Embeddings are positionally aligned with the full
+        # content sequence; slice in case an EOS trimmed this message short.
+        # `emergence` re-normalises, so the mean needs no rescaling here.
+        sources = [i for i in idx if list(messages[i]) == message]
         proto_messages.append(message)
-        # Embeddings are positionally aligned with the full content sequence;
-        # slice in case an EOS trimmed this message short.
-        proto_embeddings.append(np.asarray(symbol_embeddings[source])[: len(message)])
+        proto_embeddings.append(
+            np.stack([
+                np.asarray(symbol_embeddings[i])[: len(message)]
+                for i in sources
+            ]).mean(0)
+        )
         proto_concepts.append(concepts[idx].mean(0))
 
-    return emergence.topsim_suite(
-        proto_messages, proto_embeddings, np.stack(proto_concepts)
+    return emergence.topsim_report(
+        proto_messages,
+        proto_embeddings,
+        np.stack(proto_concepts),
+        formulas=keys if ground_truth_meaning else None,
     )
-
-
-def adjusted_topsim(metrics, baseline):
-    """
-    Raw topsim minus its pre-training baseline, per variant.
-
-    The soft variants are parameterised by the sender's own symbol embeddings,
-    which are not independent of its referent embeddings, so some correlation is
-    available before any language exists. Subtracting the untrained model's
-    topsim (measured per split, per variant, per seed) is the quantitative guard
-    against reading that leakage as compositionality. ``nan`` where no baseline
-    was recorded.
-    """
-    return {
-        f"{key}_adj": metrics[key] - baseline.get(key, float("nan"))
-        for key in emergence.TOPSIM_KEYS
-        if key in metrics
-    }
 
 
 def compute_metrics_by_md(all_lang, md_vocab=None):
@@ -186,7 +186,6 @@ def run(
     # args,
     config,
     random_state=None,
-    force_no_train=False,
     compute_topsim=False,
 ):
     """
@@ -217,9 +216,9 @@ def run(
     compute_topsim : ``bool``
         If true, drive the sender through ``speak`` so that message, symbol
         embeddings and concepts all come from one forward pass, collect them,
-        and compute the six topsim variants at the end. Set on the eval passes
-        only; topsim is a property of the language, so there is no point
-        computing it mid-training-pass, and the extra tensor is wasted work.
+        and compute the topsim report at the end. Set on the eval passes only;
+        topsim is a property of the language, so there is no point computing it
+        mid-training-pass, and the extra tensor is wasted work.
 
     Returns
     -------
@@ -229,7 +228,7 @@ def run(
     """
     bce_criterion = nn.BCEWithLogitsLoss()
     xent_criterion = nn.CrossEntropyLoss()
-    training = (split == "train") and not force_no_train
+    training = split == "train"
     dataloader = dataloaders[split]
     torch.set_grad_enabled(training)
     pair.train(mode=training)
@@ -393,7 +392,7 @@ def run(
     )
 
     if collect and all_messages:
-        # The six topsim variants over the concept prototypes of this eval split.
+        # The topsim report over the concept prototypes of this eval split.
         concept_keys = concept_keys_from_true_lang(
             all_true_lang, dataloader.dataset.name
         )
@@ -403,6 +402,7 @@ def run(
             all_concepts,
             concept_keys,
             max_concepts=config['analysis']['max_concepts'],
+            ground_truth_meaning=dataloader.dataset.name != "cub",
         )
         metrics.update(lang_metrics)
 
@@ -556,11 +556,6 @@ if __name__ == "__main__":
     # we append to rather than rebuild, so they survive a resume.
     metrics = {}
 
-    # Per-split, per-variant topsim of the *untrained* model. Measured once, then
-    # carried in the checkpoint: recomputing it after a resume would measure a
-    # trained sender and silently destroy the adjustment.
-    topsim_baselines = {}
-
     if config.get('resume', False) and os.path.exists(checkpoint_path):
         print(f"Resuming from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, weights_only=False)
@@ -569,13 +564,6 @@ if __name__ == "__main__":
         scheduler.load_state_dict(checkpoint["scheduler_state"])
 
         start_epoch = checkpoint["epoch"]
-        topsim_baselines = checkpoint.get("topsim_baselines", {})
-        if not topsim_baselines:
-            logging.warning(
-                "Checkpoint carries no pre-training topsim baseline; adjusted "
-                "topsim will be NaN for the rest of this run. Re-measuring here "
-                "would baseline against an already-trained sender."
-            )
 
         print(f"Resumed at epoch {start_epoch}")
 
@@ -596,23 +584,6 @@ if __name__ == "__main__":
         scaler,
         config
     )
-
-    # Baseline pass: the topsim of the language before any training, which is
-    # what `adjusted_topsim` subtracts. It has to happen here, before the first
-    # `run("train", ...)`.
-    if start_epoch == 0:
-        print("Measuring pre-training topsim baseline")
-        for split in ["test", "test_same"]:
-            if split not in dataloaders:
-                continue
-            baseline_metrics, _ = run(
-                split, -1, *run_args, compute_topsim=True, force_no_train=True
-            )
-            topsim_baselines[split] = {
-                key: baseline_metrics[key]
-                for key in emergence.TOPSIM_KEYS
-                if key in baseline_metrics
-            }
 
     print("Starting to train")
 
@@ -642,9 +613,6 @@ if __name__ == "__main__":
 
             eval_metrics, eval_lang = run(
                 split, epoch, *run_args, compute_topsim=True
-            )
-            eval_metrics.update(
-                adjusted_topsim(eval_metrics, topsim_baselines.get(split, {}))
             )
             util.update_with_prefix(metrics, eval_metrics, split)
 
@@ -689,7 +657,6 @@ if __name__ == "__main__":
             {
                 "epoch": epoch + 1,  # resume at the NEXT epoch
                 "scheduler_state": scheduler.state_dict(),
-                "topsim_baselines": topsim_baselines,
             },
             checkpoint_path,
         )

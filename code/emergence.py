@@ -26,8 +26,25 @@ two symbols is a function of the sender's own contextual symbol embeddings
 (``Sender.speak``). "Hard" is the same function under a fixed, embedding-free
 0/1 ground cost, so only symbol identity matters.
 
-The *meaning* distance is held constant across all six: cosine distance between
-the sender's concept vectors (the third output of ``Sender.speak``).
+The *meaning* distance is held constant across all six within one reading, and
+``topsim_report`` takes two readings, against two meaning spaces:
+
+    prefix       meaning distance
+    topsim_      cosine between the sender's concept vectors (the third output
+                 of ``Sender.speak``) -- the chapter's semantic distance
+    topsim_gt_   word-level edit distance between the ground-truth logical
+                 forms -- the concept distance of the original paper, so
+                 ``topsim_gt_s6`` is comparable to its reported rho
+
+The first asks whether the language tracks what the sender represents; the
+second, whether it tracks the concepts. They come apart when the sender has
+collapsed onto a subset of the visual features, and only the second notices.
+
+The three soft variants are additionally reported as ``_static``: recomputed on
+per-token mean embeddings, which strips the sender's contextual embeddings of
+their sensitivity to the concept being described while leaving their sensitivity
+to synonymy intact. Without it a soft variant can score well on a language that
+says nothing at all -- see ``decontextualised_embeddings`` and ``topsim_report``.
 
 Reference implementations
 -------------------------
@@ -114,7 +131,7 @@ def spearman_topsim(meaning_cond, message_cond):
 
 
 # --------------------------------------------------------------------------- #
-# Meaning-space distance (the same for all six variants)                       #
+# Meaning-space distances (the same six signal distances are read against each) #
 # --------------------------------------------------------------------------- #
 def concept_distance_condensed(concepts, metric="cosine"):
     """
@@ -125,6 +142,38 @@ def concept_distance_condensed(concepts, metric="cosine"):
     """
     concepts = np.asarray(concepts, dtype=np.float64)
     return pdist(concepts, metric=metric)
+
+
+def formula_distance_condensed(formulas):
+    """
+    Condensed word-level edit distance between ground-truth concept formulas.
+
+    The second meaning space, and the one that is not the sender's own: each
+    concept is its logical form (``"and red triangle"``), and the distance is
+    the Levenshtein distance over *words*, not characters. This is the
+    ``Edit`` concept distance of Mu & Goodman (2021), so ``topsim_gt_s6`` --
+    hard Levenshtein on messages against this -- is the variant directly
+    comparable to the topographic rho they report.
+
+    Reading the same six signal distances against both meaning spaces is what
+    separates two things the cosine space alone conflates: a language that
+    tracks the concepts, and a language that tracks whatever the sender happens
+    to represent. A sender that has collapsed onto one visual feature scores
+    well on the cosine space for faithfully encoding that feature, and only the
+    ground-truth space shows the collapse.
+
+    Words are interned to integers so the compiled ``rapidfuzz`` path can be
+    used; it is exact on any sequence of hashables.
+    """
+    vocabulary = {}
+    encoded = [
+        [vocabulary.setdefault(word, len(vocabulary)) for word in formula.split()]
+        for formula in formulas
+    ]
+    full = _rf_cdist(
+        encoded, encoded, scorer=_Levenshtein.distance, dtype=np.float64
+    )
+    return squareform(full, checks=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -361,7 +410,31 @@ def hard_levenshtein_condensed(token_seqs):
 # --------------------------------------------------------------------------- #
 SIGNAL_SETS = ("s1", "s2", "s3", "s4", "s5", "s6")
 
+# The synonymy-tolerant half. Only these read the sender's symbol embeddings,
+# so only these can leak the meaning space into the signal distance, and only
+# these get a `_static` control.
+SOFT_SIGNAL_SETS = ("s1", "s2", "s3")
+
+# Against the sender's own concept vectors (cosine)...
 TOPSIM_KEYS = tuple(f"topsim_{s}" for s in SIGNAL_SETS)
+# ...and against the ground-truth logical forms (word-level edit distance).
+TOPSIM_GT_KEYS = tuple(f"topsim_gt_{s}" for s in SIGNAL_SETS)
+
+# Every column `topsim_report` can emit.
+REPORT_KEYS = TOPSIM_KEYS + TOPSIM_GT_KEYS + tuple(
+    f"{prefix}_{s}_static"
+    for prefix in ("topsim", "topsim_gt")
+    for s in SOFT_SIGNAL_SETS
+)
+
+
+def soft_signal_distances(token_seqs, symbol_embeddings):
+    """The three embedding-parameterised signal distances, keyed by signal set."""
+    return {
+        "s1": soft_mover_condensed(token_seqs, symbol_embeddings, n=1),
+        "s2": soft_mover_condensed(token_seqs, symbol_embeddings, n=2),
+        "s3": soft_levenshtein_condensed(token_seqs, symbol_embeddings),
+    }
 
 
 def signal_distances(token_seqs, symbol_embeddings):
@@ -372,9 +445,7 @@ def signal_distances(token_seqs, symbol_embeddings):
     tested) without a meaning space.
     """
     return {
-        "s1": soft_mover_condensed(token_seqs, symbol_embeddings, n=1),
-        "s2": soft_mover_condensed(token_seqs, symbol_embeddings, n=2),
-        "s3": soft_levenshtein_condensed(token_seqs, symbol_embeddings),
+        **soft_signal_distances(token_seqs, symbol_embeddings),
         "s4": hard_mover_condensed(token_seqs, n=1),
         "s5": hard_mover_condensed(token_seqs, n=2),
         "s6": hard_levenshtein_condensed(token_seqs),
@@ -405,10 +476,124 @@ def topsim_suite(token_seqs, symbol_embeddings, concepts):
         Keys ``topsim_s1`` ... ``topsim_s6``. A value is ``nan`` where Spearman
         is undefined (fewer than two finite pairs, or either side constant).
     """
-    meaning_cond = concept_distance_condensed(concepts)
+    return _correlate(
+        signal_distances(token_seqs, symbol_embeddings),
+        concept_distance_condensed(concepts),
+        "topsim",
+    )
+
+
+def _correlate(signal_conds, meaning_cond, prefix, suffix=""):
+    """One meaning distance against a set of signal distances."""
     return {
-        f"topsim_{name}": spearman_topsim(meaning_cond, signal_cond)
-        for name, signal_cond in signal_distances(
-            token_seqs, symbol_embeddings
-        ).items()
+        f"{prefix}_{name}{suffix}": spearman_topsim(meaning_cond, signal_cond)
+        for name, signal_cond in signal_conds.items()
     }
+
+
+def decontextualised_embeddings(token_seqs, symbol_embeddings):
+    """
+    Each symbol's contextual embedding replaced by the corpus mean for its id.
+
+    The soft signal distances are parameterised by the sender's *contextual*
+    symbol embeddings, which differ from a fixed lookup table in two ways at
+    once. They tolerate synonymy, which is the point. They are also sensitive
+    to the concept being described, which is not: ``SenderGRULM`` initialises
+    its hidden state from the concept vector, and the SOS input is a constant,
+    so the embedding behind the *first* content symbol of every message is a
+    function of the concept alone with no token in it at all. A soft variant
+    can therefore read a correlation straight out of the meaning space without
+    the language taking any part.
+
+    Averaging every occurrence of a token id into one vector removes exactly
+    that second sensitivity and keeps the first. What survives is a
+    non-contextual embedding table learned from the sender's own usage: two
+    tokens used for similar meanings still sit close together, so synonymy is
+    still detected, but no single symbol carries the concept it was emitted
+    for. The soft variants recomputed on these are reported as ``_static``,
+    and the raw-minus-static gap is the contextuality the chapter names as the
+    thing a soft-versus-hard gap cannot by itself rule out.
+    """
+    totals, counts = {}, Counter()
+    dim = None
+    for seq, embedding in zip(token_seqs, symbol_embeddings):
+        embedding = np.asarray(embedding, dtype=np.float64)
+        dim = embedding.shape[-1]
+        for position, token in enumerate(seq):
+            token = int(token)
+            if token in totals:
+                totals[token] += embedding[position]
+            else:
+                totals[token] = embedding[position].copy()
+            counts[token] += 1
+
+    table = {token: totals[token] / counts[token] for token in totals}
+    return [
+        np.stack([table[int(token)] for token in seq])
+        if len(seq) else np.zeros((0, dim), dtype=np.float64)
+        for seq in token_seqs
+    ]
+
+
+def topsim_report(token_seqs, symbol_embeddings, concepts, formulas=None):
+    """
+    The six variants against both meaning spaces, plus the leakage control.
+
+    Keys, per meaning space (``topsim_`` for the sender's concept vectors,
+    ``topsim_gt_`` for the ground-truth logical forms):
+
+    ``sX``
+        The raw correlation, as :func:`topsim_suite` computes it.
+    ``sX_static`` (soft variants only, i.e. S1-S3)
+        The same, with the sender's contextual symbol embeddings replaced by
+        their per-token corpus means -- see
+        :func:`decontextualised_embeddings`. This is the defensible reading of
+        a soft variant: still synonymy-tolerant, but with no channel by which
+        the concept can reach the signal distance except through the symbols
+        actually emitted. ``raw - static`` is the contextuality inflation.
+        The hard variants need no such control; they see nothing but token
+        identities, so there is no leakage for them to suffer.
+
+    This replaces an adjustment against the *untrained* model's topsim. That
+    baseline could not bound the leakage, because the leakage is created by
+    training: an untrained ``SenderGRULM`` has a random ``init_h`` and a
+    saturating tanh which between them destroy the concept signal, so the
+    baseline read ~0 for every variant while the trained model did not.
+
+    A permutation null -- reassigning messages between concepts -- was tried
+    and rejected for this job. Permuting the messages while each utterance
+    keeps its own embeddings does not decouple form from meaning, because the
+    embeddings still encode the tokens they were originally emitted with, and
+    in a compositional language those track the concept. On a perfectly
+    compositional toy language such a control reports ~0.6 for S1 and S3 and
+    would subtract away most of a true reading.
+
+    Parameters
+    ----------
+    token_seqs, symbol_embeddings, concepts
+        As :func:`topsim_suite`.
+    formulas : list of str, optional
+        Ground-truth logical form per utterance. When given, the ``topsim_gt_``
+        family is reported alongside; see :func:`formula_distance_condensed`.
+        Omit for datasets whose concepts have no logical form (CUB).
+
+    Returns
+    -------
+    dict[str, float]
+        A subset of :data:`REPORT_KEYS` -- the ``topsim_gt_`` keys are absent
+        when ``formulas`` is ``None``.
+    """
+    real = signal_distances(token_seqs, symbol_embeddings)
+    static = soft_signal_distances(
+        token_seqs, decontextualised_embeddings(token_seqs, symbol_embeddings)
+    )
+
+    meanings = {"topsim": concept_distance_condensed(concepts)}
+    if formulas is not None:
+        meanings["topsim_gt"] = formula_distance_condensed(formulas)
+
+    report = {}
+    for prefix, meaning_cond in meanings.items():
+        report.update(_correlate(real, meaning_cond, prefix))
+        report.update(_correlate(static, meaning_cond, prefix, "_static"))
+    return report
