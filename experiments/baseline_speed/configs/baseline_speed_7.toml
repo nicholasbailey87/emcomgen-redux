@@ -1,0 +1,36 @@
+# baseline_speed_3 with jayelm's dropout values restored.
+#
+# Runs 2 and 3 both left shape at chance for all 100 epochs (train and
+# test_same alike, so this is a failure to fit rather than to generalise),
+# while colour reached 0.94-0.99. The one knob at 0.5 in both, and a 5x
+# departure from jayelm's single `--dropout 0.1`, is the dropout pair. Shape
+# in ShapeWorld is a low-SNR feature after the prototyper averages 10 images
+# with the object at varying positions; colour is not. A 0.5 mask on the
+# pooled vector therefore costs shape far more than colour. This puts both
+# back to 0.1 and changes nothing else against baseline_speed_3.
+
+name = "baseline_speed" # experiment name - should be the same as file name
+
+[data]
+n_workers = 4
+
+[sender]
+prototype_dropout = 0.1
+
+[receiver_comparer]
+dropout = 0.1
+
+[optimiser]
+lr = 1e-3
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24
