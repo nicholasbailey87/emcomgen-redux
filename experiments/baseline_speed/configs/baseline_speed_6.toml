@@ -45,7 +45,7 @@ lr_schedule_shape = "ascent"
 cool_point_multiplier = 1.0 # with "ascent", DEFAULT.toml documents this as a flat line
 
 [experiment]
-repeats = 5
+repeats = 1
 
 [slurm]
 time = "24:00:00"

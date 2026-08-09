@@ -24,7 +24,7 @@ dropout = 0.1
 epochs = 100
 
 [experiment]
-repeats = 5
+repeats = 1
 
 [slurm]
 time = "24:00:00"
