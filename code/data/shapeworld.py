@@ -130,6 +130,15 @@ def load(config, fast=False):
             augment=split == "train",
             percent_novel=config['data']['percent_novel'],
             reference_game=config['reference_game'],
+            # Training-time only. Eval is never silhouetted, so the reported
+            # numbers stay comparable to the paper's and to the `probe_shape.py`
+            # sweep, which measures the sender on un-augmented images.
+            silhouette_p_sender=(
+                config['data']['silhouette_p_sender'] if split == "train" else 0.0
+            ),
+            silhouette_p_receiver=(
+                config['data']['silhouette_p_receiver'] if split == "train" else 0.0
+            ),
             shapes=datas[split]["shapes"],
             metadata_vocab=md_vocab,
             **dataset_kwargs,
@@ -286,8 +295,14 @@ class ShapeWorldDataset(generic.ConceptDataset):
         if self.image_size is not None and self.image_size != img.shape[2]:
             img = F.interpolate(img, (self.image_size, self.image_size))
 
-        splits = util.split_spk_lis(img, label, self.n_examples, percent_novel=0.0)
-        return splits + (lang, md)
+        spk_inp, spk_label, lis_inp, lis_label = util.split_spk_lis(
+            img, label, self.n_examples, percent_novel=0.0
+        )
+        # `percent_novel = 0.0` hands back the *same* tensor for both agents;
+        # `silhouette` returns a new one, so an independent roll per agent is
+        # still safe here.
+        spk_inp, lis_inp = self._apply_silhouette(spk_inp, lis_inp)
+        return (spk_inp, spk_label, lis_inp, lis_label, lang, md)
 
     def __getitem__(self, i):
         if self.reference_game:

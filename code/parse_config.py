@@ -82,6 +82,11 @@ def validate_config(config: dict) -> bool:
             "`receiver_comparer` message length."            
         )
     
+    for key in ('silhouette_p_sender', 'silhouette_p_receiver'):
+        p = config['data'][key]
+        if not 0.0 <= p <= 1.0:
+            raise InvalidConfig(f"`{key}` must be in [0, 1], got {p}.")
+
     if 'dataset' not in config['data']:
         raise InvalidConfig(
             "Config TOML must specify ```\n['data']\ndataset = ...```."

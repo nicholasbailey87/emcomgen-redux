@@ -21,6 +21,44 @@ def vis_image(inp, overwrite=True, **kwargs):
     return img_html
 
 
+# Rec.601 luma weights, i.e. what a grayscale conversion would apply.
+_LUMA = torch.tensor([0.299, 0.587, 0.114])
+
+
+def silhouette(imgs):
+    """
+    Render each image as a white-on-black silhouette of its object.
+
+    ShapeWorld's six colours (red, blue, green, yellow, white, gray) sit at six
+    distinct luma values -- roughly 29, 76, 128, 150, 226, 255 -- so a plain
+    grayscale conversion does not remove colour, it re-encodes it as a single
+    scalar that one conv filter can threshold. Thresholding does remove it: with
+    a single object on a black ground every colour renders identically, so the
+    mutual information between colour and pixels is zero by construction rather
+    than by hoping two distributions overlap.
+
+    The threshold is half of each image's own peak luma. A fixed threshold would
+    not do, because blue peaks at 0.114 while white peaks at 1.0; taking it
+    relative to the peak binarises both, and puts the cut below the anti-aliased
+    edge pixels either way.
+
+    `imgs` is (n, C, H, W) with a black background. dtype and range are
+    preserved, so uint8 images come back in {0, 255} and float images in
+    {0.0, 1.0}. Returns a new tensor; the input is left untouched.
+    """
+    if imgs.shape[1] != 3:
+        raise ValueError(f"expected 3 channels, got shape {tuple(imgs.shape)}")
+
+    luma = (imgs.float() * _LUMA.to(imgs.device).view(1, 3, 1, 1)).sum(1)
+    # Per image, so that a dim object binarises the same way a bright one does.
+    peak = luma.amax(dim=(1, 2), keepdim=True)
+    # An all-black image has peak 0 and must stay black rather than turn white.
+    on = (luma > peak / 2) & (peak > 0)
+
+    on_value = 255 if not imgs.dtype.is_floating_point else 1.0
+    return (on.unsqueeze(1) * on_value).to(imgs.dtype).expand_as(imgs).contiguous()
+
+
 class ConceptDataset:
     def __init__(
         self,
@@ -33,6 +71,8 @@ class ConceptDataset:
         name=None,
         visfunc=vis_image,
         image_size=None,
+        silhouette_p_sender=0.0,
+        silhouette_p_receiver=0.0,
         **kwargs,
     ):
         self.x = data["x"]
@@ -54,6 +94,8 @@ class ConceptDataset:
         self.vis_input = visfunc
         self.reference_game = reference_game
         self.percent_novel = percent_novel
+        self.silhouette_p_sender = silhouette_p_sender
+        self.silhouette_p_receiver = silhouette_p_receiver
         assert self.n_examples % 2 == 0
         # Assign the rest of the kwargs
         for name, val in kwargs.items():
@@ -63,6 +105,27 @@ class ConceptDataset:
 
     def __len__(self):
         return len(self.lang_raw)
+
+    def _apply_silhouette(self, spk_inp, lis_inp):
+        """
+        Silhouette each agent's whole view, or neither, per game.
+
+        The roll is per *game*, not per image: with 10 targets in a set, rolling
+        per image would leave ~(1-p) x 10 of them coloured and the colour cue
+        recoverable from the set, which is not the intervention. Silhouetting
+        the whole view is what makes shape the only available cue.
+
+        The two rolls are independent, so the pair of rates selects the regime:
+        (0, p) silhouettes only the receiver, (p, 0) only the sender, (p, p)
+        either or both. Each agent's view is a full side of the game, so one
+        roll already covers both polarities and, in the concept game, the
+        disjoint half that agent sees.
+        """
+        if self.silhouette_p_sender and np.random.rand() < self.silhouette_p_sender:
+            spk_inp = silhouette(spk_inp)
+        if self.silhouette_p_receiver and np.random.rand() < self.silhouette_p_receiver:
+            lis_inp = silhouette(lis_inp)
+        return spk_inp, lis_inp
 
     @util.return_index
     def __getitem__(self, i):
@@ -111,10 +174,11 @@ class ConceptDataset:
         if self.image_size is not None and self.image_size != img.shape[2]:
             img = F.interpolate(img, (self.image_size, self.image_size))
 
-        splits = util.split_spk_lis(
+        spk_inp, spk_label, lis_inp, lis_label = util.split_spk_lis(
             img, label, self.n_examples, percent_novel=self.percent_novel
         )
-        return splits + (lang, md)
+        spk_inp, lis_inp = self._apply_silhouette(spk_inp, lis_inp)
+        return (spk_inp, spk_label, lis_inp, lis_label, lang, md)
 
     def to_text(self, idxs, join=True):
         texts = []

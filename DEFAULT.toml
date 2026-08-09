@@ -53,6 +53,26 @@ percent_novel = 1.0
 n_examples = 20 # number of examples seen by agents, including distractors
 n_workers = 0
 
+# Probability of rendering an agent's whole view as white-on-black silhouettes,
+# per game, at training time only. This attacks the colour-only local minimum
+# the paper reports (~83% accuracy, appendix A.1): with the six colours sitting
+# at six distinct luma values, only thresholding actually removes colour.
+#
+# The receiver is the side to constrain. Silhouetting the *sender* teaches it
+# shape-from-silhouette, which is not the shape-from-colour-image competence
+# that eval requires and `probe_shape.py` measures, and it shifts the sender's
+# input distribution out from under that probe. Silhouetting the receiver
+# leaves the sender's inputs alone but makes colour messages unrewardable, so
+# the shape gradient still reaches the sender's vision model through the
+# channel. It also denies the receiver the option of clustering its own set by
+# colour and treating the message as a coarse pointer.
+#
+# Cost: a colour concept needs both agents to see colour, so it is answerable
+# only (1 - p) of the time. Setting both rates to p makes that (1 - p)^2 --
+# strictly worse ceiling for the same shape pressure.
+silhouette_p_sender = 0.0
+silhouette_p_receiver = 0.5
+
 [optimiser]
 class = "AdamW"
 accumulator_steps = 4
@@ -143,6 +163,13 @@ utility_tokens = 0 # Only applies to Transformer comparers
 [birds.data]
 dataset = "../data/cub"
 ref_dataset = "../data/cub"
+# Off for CUB, and `cub.py` does not thread these through in any case. The
+# colour-only minimum is ShapeWorld-specific (the paper says so explicitly), and
+# CUB species genuinely depend on plumage colour, so removing it would lower the
+# ceiling with no shortcut to break. Thresholding a photograph would also
+# destroy texture and pattern, not just colour.
+silhouette_p_sender = 0.0
+silhouette_p_receiver = 0.0
 batch_size = 16
 n_workers = 4
 n_examples = 10 # number of examples seen by agents, including distractors

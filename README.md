@@ -53,6 +53,47 @@ The unmodified `shapeworld` and `shapeworld_ref` datasets are only needed for
 reference-game runs and downstream analysis (`acre.py`); concept-game training
 does not read them.
 
+#### Silhouette augmentation (ShapeWorld only)
+
+The paper reports that ShapeWorld setref and concept games converge to a
+colour-only local minimum at ~83% accuracy (appendix A.1). That number is not a
+coincidence: `app:hard` samples 1/3 of a conjunction's distractors so they fail
+only the shape conjunct, i.e. they are colour-matched to the target, and a
+colour-only policy therefore scores 10 targets plus 2/3 of 10 distractors =
+16.67/20 = 83.3%. One third hard negatives does not close the shortcut off.
+
+`data.silhouette_p_receiver` (default `0.5`) renders an agent's whole view as
+white-on-black silhouettes with that probability, per game, at training time
+only. Thresholding is what removes colour — a plain grayscale conversion does
+not, since the six colours sit at six distinct luma values (blue 29 through
+white 255) that a single conv filter can separate.
+
+The receiver is the side to constrain. Silhouetting the *sender* would teach it
+shape-from-silhouette, which is not the shape-from-colour-image competence that
+eval requires and that `probe_shape.py` measures, and it would shift the
+sender's input distribution out from under that probe. Silhouetting the receiver
+leaves the sender's inputs untouched but makes a colour message unrewardable, so
+the shape gradient still reaches the sender's vision model through the channel.
+It also denies the receiver the option of clustering its own set by colour and
+treating the message as a coarse pointer.
+
+`data.silhouette_p_sender` (default `0.0`) is the same knob for the other side,
+so the pair selects the regime: `(0, p)` receiver-only, `(p, 0)` sender-only,
+`(p, p)` either or both. A colour concept needs *both* agents to see colour, so
+it is answerable `(1 - p)` of the time under the first two and `(1 - p)^2` under
+the third — the symmetric setting pays a worse ceiling for the same shape
+pressure.
+
+The roll is per game rather than per image: with 10 targets in a set, rolling
+per image would leave ~`(1-p) x 10` of them coloured and the colour cue still
+recoverable from the set.
+
+Eval is never silhouetted, so reported numbers stay comparable to the paper's
+and to the `probe_shape.py` sweep. Both rates are `0.0` for CUB — the minimum is
+ShapeWorld-specific, species genuinely depend on plumage colour, and
+thresholding a photograph would destroy texture and pattern rather than isolate
+colour.
+
 ## Running experiments
 
 ### Quickstart (SLURM array jobs)
