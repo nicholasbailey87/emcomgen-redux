@@ -1,0 +1,44 @@
+# Rung 5: rung 3 with a Transformer sender vision model.
+#
+# Sized against Conv4/Conv6 rather than against the existing (unrunnable)
+# transformer configs, which used d_model 32 / heads 4 -> head_dim 8 against
+# broccoli's axial-RoPE floor of 32 for a 2D source. head_dim is 32 exactly
+# here, which is that floor, so heads is pinned to 4 by d_model = 128.
+#
+#   layers  params    x Conv6 (187,200)  x Conv4 (113,088)
+#        1  235,857               1.26              2.09
+#        2  351,578               1.88              3.11
+#        4  583,020               3.11              5.16
+#
+# True parity is unreachable at any usable depth: the patch projection, the
+# absolute position embedding over the 17x17 patch grid and the SequencePool
+# head come to 120,136 parameters before the first layer exists, which is
+# already 0.64 x Conv6, and each layer then costs 115,721. Four layers at 3.1x
+# Conv6 is the compromise; it is the shallowest depth at which the stack is
+# worth calling a transformer.
+#
+# ff_ratio = 1 (against DEFAULT's 2) puts the feedforward inner size at 128.
+
+name = "ablation"
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+
+[sender_feature_model]
+d_model = 128
+heads = 4    # head_dim = 32, broccoli's 2D RoPE minimum
+layers = 4
+ff_ratio = 1
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

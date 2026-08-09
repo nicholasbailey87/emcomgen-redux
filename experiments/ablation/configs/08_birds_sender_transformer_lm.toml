@@ -1,0 +1,48 @@
+# Rung 8: rung 6 with a Transformer sender language model.
+#
+# Same pinning as rung 7 -- token_embedding_size and d_model are both forced to
+# the sender vision model's 384 -- but here that width is wide enough for
+# parity with the GRU speaker (5,511,928 parameters at this referent width):
+#
+#   layers      params   x GRU
+#        4   4,751,292    0.86
+#        5   5,786,565    1.05
+#        6   6,821,838    1.24
+#
+# 5 layers, at 1.05x, is taken.
+
+name = "ablation"
+
+[data]
+dataset = "../data/cub"
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+language_model = "SenderTransformerLM"
+
+[sender_feature_model]
+d_model = 384
+heads = 12   # head_dim = 32, broccoli's 2D RoPE minimum
+layers = 9
+ff_ratio = 1
+
+[sender_language_model]
+# Both must equal sender_feature_model.d_model -- see rung 7.
+token_embedding_size = 384
+d_model = 384
+heads = 12
+layers = 5
+ff_ratio = 1
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

@@ -1,0 +1,23 @@
+# Rung 3: rung 1 with the attention prototyper.
+#
+# Replaces the mean over positive/negative examples with broccoli's
+# `SequencePool` attention pooling, one instance per polarity. Everything else
+# is rung 1. The prototyper is sized from the sender's feature model, so at
+# Conv4's 1024-d output this adds 2 x 1025 = 2,050 parameters.
+
+name = "ablation"
+
+[sender]
+prototyper = "AttentionPrototyper"
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

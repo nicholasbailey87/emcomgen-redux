@@ -1,0 +1,23 @@
+# Rung 2: CUB at the DEFAULT.toml birds settings, unmodified.
+#
+# Naming the dataset is the only change needed. `parse_config.get_config`
+# switches to the `[birds.*]` family off the *name* of the dataset directory,
+# which brings in ResNet18 for both agents, batch_size 16, n_examples 10,
+# vocabulary 20, message_length 10, uniform_weight 0.0 and accumulator_steps 1.
+
+name = "ablation"
+
+[data]
+dataset = "../data/cub"
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

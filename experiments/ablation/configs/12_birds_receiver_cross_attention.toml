@@ -1,0 +1,66 @@
+# Rung 12: rung 10 with `TransformerCrossAttentionComparer` on the receiver.
+#
+# Same reasoning and the same shape as rung 11 -- the module's width is
+# independent of the 384-d referents it is reading, so nothing has to change
+# for CUB. Against the `BilinearGRUComparer` plus token embedding it replaces
+# (5,093,088 parameters at 384-d referents):
+#
+#   d_model  heads  layers      params   x GRU comparer
+#       256      8       8   4,190,985             0.82
+#       256      8      10   5,112,595             1.00
+#       256      8      12   6,034,205             1.18
+#
+# `message_length` comes from the birds defaults (10, against ShapeWorld's 7)
+# and is validated against `sender_language_model.message_length` in both
+# `parse_config.validate_config` and `build_models`, so it is left alone.
+
+name = "ablation"
+
+[data]
+dataset = "../data/cub"
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+language_model = "SenderTransformerLM"
+
+[sender_feature_model]
+d_model = 384
+heads = 12   # head_dim = 32, broccoli's 2D RoPE minimum
+layers = 9
+ff_ratio = 1
+
+[sender_language_model]
+token_embedding_size = 384
+d_model = 384
+heads = 12
+layers = 5
+ff_ratio = 1
+
+[receiver]
+feature_model = "ViT2"
+comparer = "TransformerCrossAttentionComparer"
+
+[receiver_feature_model]
+d_model = 384
+heads = 12
+layers = 9
+ff_ratio = 1
+
+[receiver_comparer]
+d_model = 256
+heads = 8    # head_dim = 32
+layers = 10
+ff_ratio = 1
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

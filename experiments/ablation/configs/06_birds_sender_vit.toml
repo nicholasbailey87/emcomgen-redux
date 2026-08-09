@@ -1,0 +1,47 @@
+# Rung 6: rung 4 with a Transformer sender vision model.
+#
+# ResNet18 is 11,176,512 parameters, which is a large enough budget that
+# parity is actually attainable here, unlike on ShapeWorld. Holding head_dim
+# at 32 and ff_ratio at 1 as in rung 5, and sweeping width against depth:
+#
+#   d_model  heads  layers      params   x ResNet18
+#       256      8      21  11,090,677         0.99
+#       384     12       9  11,535,113         1.03
+#       512     16       4  10,443,612         0.93
+#
+# 384 x 9 is taken: 21 layers over a 289-token grid is a lot of depth for the
+# same budget, and 4 layers is barely a stack. It is also close to ViT-Small's
+# proportions, though with 12 heads rather than 6 because head_dim is pinned.
+#
+# This width matters beyond this rung: `SenderTransformerLM` layer-norms the
+# incoming prototypes at its own d_model and separately requires
+# token_embedding_size == referent_embedding_size, so the sender's vision width
+# *is* the sender's language-model width. 384 is what makes rung 8 able to
+# reach GRU parity.
+
+name = "ablation"
+
+[data]
+dataset = "../data/cub"
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+
+[sender_feature_model]
+d_model = 384
+heads = 12   # head_dim = 32, broccoli's 2D RoPE minimum
+layers = 9
+ff_ratio = 1
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

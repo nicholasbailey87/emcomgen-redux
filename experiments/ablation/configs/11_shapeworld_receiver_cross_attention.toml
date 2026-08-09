@@ -1,0 +1,73 @@
+# Rung 11: rung 9 with `TransformerCrossAttentionComparer` on the receiver.
+#
+# Parity is reachable here, and cleanly. Unlike the sender's language model,
+# this module's d_model is free of every vision width in the run: it adapts the
+# referents (`referent_adapter`) and the message (`message_adapter`) into its
+# own space, so width can be chosen purely to hit the budget.
+#
+# The target is the `BilinearGRUComparer` it replaces plus the receiver's token
+# embedding, since `token_embedding_size` sizes both -- 4,827,944 parameters at
+# rung 9's 128-d referents. Holding head_dim at 32 and ff_ratio at 1:
+#
+#   d_model  heads  layers      params   x GRU comparer
+#       256      8       8   4,121,681             0.85
+#       256      8      10   5,043,291             1.04
+#       256      8      12   5,964,901             1.24
+#       384     12       4   4,986,045             1.03
+#
+# 256 x 10 is taken over 384 x 4 because `layers` is split inside the module --
+# `encoding` gets layers - layers//2 and `fusion` gets layers//2 -- so 4 layers
+# would leave a 2-layer message encoder and a 2-layer fusion block, and
+# `stochastic_depth` is suppressed entirely below layers//2 > 1. At 10 it is a
+# 5-layer encoder over the message and a 5-layer fusion over the referent set.
+#
+# `token_embedding_size` stays at DEFAULT's 500, so the comparison against the
+# GRU comparer is like for like on the embedding table.
+
+name = "ablation"
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+language_model = "SenderTransformerLM"
+
+[sender_feature_model]
+d_model = 128
+heads = 4    # head_dim = 32, broccoli's 2D RoPE minimum
+layers = 4
+ff_ratio = 1
+
+[sender_language_model]
+token_embedding_size = 128
+d_model = 128
+heads = 4
+layers = 4
+ff_ratio = 1
+
+[receiver]
+feature_model = "ViT2"
+comparer = "TransformerCrossAttentionComparer"
+
+[receiver_feature_model]
+d_model = 128
+heads = 4
+layers = 4
+ff_ratio = 1
+
+[receiver_comparer]
+d_model = 256
+heads = 8    # head_dim = 32
+layers = 10
+ff_ratio = 1
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

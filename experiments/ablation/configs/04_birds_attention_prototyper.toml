@@ -1,0 +1,24 @@
+# Rung 4: rung 2 with the attention prototyper.
+#
+# The CUB counterpart of rung 3. ResNet18 emits 512-d, so the prototyper adds
+# 2 x 513 = 1,026 parameters here.
+
+name = "ablation"
+
+[data]
+dataset = "../data/cub"
+
+[sender]
+prototyper = "AttentionPrototyper"
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

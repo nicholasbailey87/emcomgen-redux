@@ -1,0 +1,26 @@
+# Rung 1: ShapeWorld at the DEFAULT.toml settings, unmodified.
+#
+# Conv4 sender + Conv4 receiver, AveragePrototyper, SenderGRULM,
+# BilinearGRUComparer. This is the reference point every other rung is measured
+# against, so it deliberately overrides nothing.
+#
+# `epochs` and `repeats` below are not overrides: scripts/job_utils.py reads
+# both straight out of this file rather than out of the merged config, so every
+# config in an experiment must carry them even when they restate the default.
+# `[slurm]` is read from the *first* config in the folder only (sorted by
+# filename), so the block here governs the whole array -- it is sized for the
+# heaviest job in the set, which is rung 12.
+
+name = "ablation"
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24
