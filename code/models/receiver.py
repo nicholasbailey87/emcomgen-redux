@@ -7,10 +7,16 @@ import torch.nn as nn
 
 import broccoli
 
-# Cross-attention dropout for `TransformerCrossAttentionComparer`. A fixed
-#     architecture constant, not a tunable: `receiver_comparer.dropout` is
-#     reserved for regularising the comparison inputs in both comparers.
-MSA_DROPOUT = 0.1
+from . import model_util
+
+# Every broccoli module below is constructed with its full argument list, even
+#     where an argument is being set to the value it would have defaulted to.
+#     broccoli's defaults are not a stable interface: between 27.1.1 and 30.1.0
+#     `TransformerEncoder` flipped from `pre_norm=True, post_norm=False` to the
+#     reverse, which would have silently inverted the architecture of every
+#     model here on a `pip install`, with no error and no diff in this repo.
+#     Arguments that are inert under the current settings are still set, so
+#     that a future default change cannot quietly make them live.
 
 
 class BilinearGRUComparer(nn.Module):
@@ -195,13 +201,38 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.heads = kwargs["heads"]
         self.utility_tokens = kwargs["utility_tokens"]
         self.bidirectional = kwargs["bidirectional"]
-        self.stochastic_depth = 0.1 if int(self.layers // 2) > 1 else 0.0
+        self.ff_ratio = kwargs["ff_ratio"]
+        self.cross_attention_dropout = kwargs["cross_attention_dropout"]
+        self.positional_heads = kwargs["positional_heads"]
+        self.activation = model_util.get_activation(kwargs["activation"])
+        self.absolute_position_embedding = kwargs["absolute_position_embedding"]
+        self.relative_position_embedding = kwargs["relative_position_embedding"]
+        self.pre_norm = kwargs["pre_norm"]
+        self.post_norm = kwargs["post_norm"]
+        self.return_bos_tokens = kwargs["return_bos_tokens"]
+        self.knocking_heads = kwargs["knocking_heads"]
+        self.depthwise_linear_stochastic_depth = kwargs[
+            "depthwise_linear_stochastic_depth"
+        ]
+        self.ff_inner_dropout = kwargs["ff_inner_dropout"]
+        self.ff_outer_dropout = kwargs["ff_outer_dropout"]
+        self.self_attention_dropout = kwargs["self_attention_dropout"]
+        self.alpha = kwargs["alpha"]
+        self.beta = kwargs["beta"]
+        # Suppressed unless the fusion stack is deep enough for a depth ramp to
+        #     mean anything: `depthwise_linear_stochastic_depth` spreads the
+        #     rate linearly across layers, so a one-layer stack would get a
+        #     single rate of 0.0 regardless and a two-layer stack only half the
+        #     configured rate on its second block.
+        self.stochastic_depth = (
+            kwargs["stochastic_depth"] if int(self.layers // 2) > 1 else 0.0
+        )
 
         # Same meaning as in `BilinearGRUComparer`: mask both operands of the
         #     comparison. Applied to each input as it arrives, before the
         #     adapters, which is the only point at which the two are
-        #     symmetrically placed. Attention dropout is a fixed constant
-        #     (see `MSA_DROPOUT`) rather than this knob.
+        #     symmetrically placed. Attention dropout is a separate setting
+        #     (`receiver_comparer.cross_attention_dropout`) rather than this knob.
         self.input_dropout = nn.Dropout(p=self.dropout)
 
         self.referent_adapter = nn.Linear(
@@ -221,18 +252,41 @@ class TransformerCrossAttentionComparer(nn.Module):
             self.d_model,
             self.layers - (self.layers // 2),
             self.heads,
-            absolute_position_embedding=True,
-            relative_position_embedding=True,
+            absolute_position_embedding=self.absolute_position_embedding,
+            relative_position_embedding=self.relative_position_embedding,
+            positional_heads=self.positional_heads,
+            # Derived from the data, not configured separately: this block
+            #     reads the message, so its source is the message length.
             source_size=(self.message_length,),
-            ff_ratio=2,
-            activation = broccoli.activation.SwiGLU,
+            ff_ratio=self.ff_ratio,
+            ff_inner_size=None, # inert: `ff_ratio` sizes the block instead
+            activation=self.activation,
+            activation_kwargs=None,
+            ff_linear_module_up=None,
+            ff_linear_module_down=None,
+            # Not configurable, and pinned rather than promoted: broccoli's
+            # `FeedforwardBlock` uses this only as a fallback --
+            # `inner_dropout if inner_dropout is not None else dropout` -- and
+            # `TransformerEncoder` always forwards `ff_inner_dropout` and
+            # `ff_outer_dropout`, which default to 0.0 rather than None. So this
+            # argument can never take effect, and TOML has no way to write the
+            # None that would let it. Use the inner/outer knobs instead.
+            ff_dropout=0.0,
+            ff_inner_dropout=self.ff_inner_dropout,
+            ff_outer_dropout=self.ff_outer_dropout,
+            msa_dropout=self.self_attention_dropout,
             stochastic_depth=self.stochastic_depth,
+            depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
             causal=not self.bidirectional,
+            linear_module=nn.Linear,
             bos_tokens=self.utility_tokens,
-            return_bos_tokens=False,
-            pre_norm=False,
-            post_norm=True,
+            knocking_heads=self.knocking_heads,
+            return_bos_tokens=self.return_bos_tokens,
+            pre_norm=self.pre_norm,
+            post_norm=self.post_norm,
             msa_scaling="d",
+            alpha=self.alpha,
+            beta=self.beta,
         )
 
         self.cross_attention = broccoli.transformer.MHAttention(
@@ -240,15 +294,28 @@ class TransformerCrossAttentionComparer(nn.Module):
             self.heads,
             # Architecture internals, deliberately not `self.dropout` — that
             #     knob is the listener's regulariser on the comparison inputs,
-            #     and should not double as an attention-internals setting.
-            #     jayelm has no transformer listener to match, so this is
-            #     standard practice, alongside the stochastic depth above.
-            #     broccoli gates it on `self.training` (`transformer.py:344`),
-            #     so it does not leak into eval the way a bare
+            #     and should not double as an attention-internals setting. The
+            #     speaker's cross-attention takes the identically named key, so
+            #     both agents' attention is regularised on the same terms.
+            #     broccoli gates it on `self.training` (the `dropout_p`
+            #     argument in `MHAttention.forward`), so it does not leak into
+            #     eval the way a bare
             #     `F.scaled_dot_product_attention(dropout_p=...)` would.
-            dropout=MSA_DROPOUT,
+            dropout=self.cross_attention_dropout,
             causal=False,
             seq_len=self.message_length,
+            linear_module=nn.Linear,
+            bos_tokens=0,
+            knocking_heads=False,
+            # No positional information here: the message side already carries
+            #     it from `self.encoding`, and the referent side is an
+            #     unordered set. `positional_heads` is inert while
+            #     `rotary_embedding` is None, but is pinned anyway — note that
+            #     broccoli defaults it to 0.25 on `MHAttention` and 0.5 on
+            #     `TransformerEncoder`, so the two are not interchangeable.
+            rotary_embedding=None,
+            positional_heads=0.25,
+            source_size=None,
             scaling="d",
         )
 
@@ -260,18 +327,47 @@ class TransformerCrossAttentionComparer(nn.Module):
             self.d_model,
             int(self.layers // 2),
             self.heads,
+            # Not configurable, unlike the same arguments on `self.encoding`
+            #     above. This block has no position embeddings of its own by
+            #     construction: it consumes the cross-attention output, which
+            #     already carries position from the encoder upstream, and it
+            #     runs over the referent set, which has no order to embed.
+            #     Turning either on here would need a `source_size` for the
+            #     referent axis, which is a property of the game rather than
+            #     of this module.
             absolute_position_embedding=False,
             relative_position_embedding=False,
-            source_size=(self.message_length,),
-            ff_ratio=2,
-            activation = broccoli.activation.SwiGLU,
+            positional_heads=self.positional_heads, # inert while both are False
+            source_size=None,
+            ff_ratio=self.ff_ratio,
+            ff_inner_size=None, # inert: `ff_ratio` sizes the block instead
+            activation=self.activation,
+            activation_kwargs=None,
+            ff_linear_module_up=None,
+            ff_linear_module_down=None,
+            # Not configurable, and pinned rather than promoted: broccoli's
+            # `FeedforwardBlock` uses this only as a fallback --
+            # `inner_dropout if inner_dropout is not None else dropout` -- and
+            # `TransformerEncoder` always forwards `ff_inner_dropout` and
+            # `ff_outer_dropout`, which default to 0.0 rather than None. So this
+            # argument can never take effect, and TOML has no way to write the
+            # None that would let it. Use the inner/outer knobs instead.
+            ff_dropout=0.0,
+            ff_inner_dropout=self.ff_inner_dropout,
+            ff_outer_dropout=self.ff_outer_dropout,
+            msa_dropout=self.self_attention_dropout,
             stochastic_depth=self.stochastic_depth,
+            depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
             causal=False,
+            linear_module=nn.Linear,
             bos_tokens=self.utility_tokens,
-            return_bos_tokens=False,
-            pre_norm=False,
-            post_norm=True,
+            knocking_heads=self.knocking_heads,
+            return_bos_tokens=self.return_bos_tokens,
+            pre_norm=self.pre_norm,
+            post_norm=self.post_norm,
             msa_scaling="d",
+            alpha=self.alpha,
+            beta=self.beta,
         )
 
         self.decision = nn.Linear(self.d_model, 1, bias=True)

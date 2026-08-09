@@ -9,8 +9,10 @@ import torch.nn.functional as F
 from torch.nn.utils.weight_norm import WeightNorm
 import torchvision.models as models
 
-from broccoli.activation import SwiGLU
+from broccoli.activation import ReLU
 from broccoli.vit import ViT, SequencePoolClassificationHead
+
+from ..model_util import get_activation
 
 class ViT2(nn.Module):
     def __init__(
@@ -31,13 +33,32 @@ class ViT2(nn.Module):
         self.pooling_kernel_stride = int(self.pooling_kernel_size / 2)
         self.pooling_padding = self.pooling_kernel_stride
 
+        # As in `receiver.py` and `sender.py`, every broccoli argument is set
+        #     explicitly, including the inert ones, because broccoli's defaults
+        #     have changed underneath this repository before. See the note at
+        #     the top of `receiver.py`.
         self.backbone = ViT(
             input_size=n_feats[1:],
             image_classes=self.d_model, # Just return an overall embedding
             in_channels=n_feats[0],
             initial_batch_norm=True,
+            # The whole `cnn_*` group is inert while `cnn` is False: broccoli
+            #     swaps in an Identity and the image goes straight to pooling.
+            #     Pinned so that flipping `cnn` on is a deliberate act with
+            #     visible settings, rather than silently adopting defaults.
             cnn=False,
-            pooling_type="concat",
+            cnn_out_channels=16,
+            cnn_kernel_size=3,
+            cnn_kernel_stride=1,
+            cnn_padding="same",
+            cnn_kernel_dilation=1,
+            cnn_kernel_groups=1,
+            cnn_activation=ReLU,
+            cnn_activation_kwargs=None,
+            cnn_dropout=0.,
+            pooling_type=kwargs["pooling_type"],
+            # Derived from the image size, not configured: these size the patch
+            #     grid, and so the transformer's source_size, from the data.
             pooling_kernel_size=self.pooling_kernel_size,
             pooling_kernel_stride=self.pooling_kernel_stride,
             pooling_padding=self.pooling_padding,
@@ -45,26 +66,58 @@ class ViT2(nn.Module):
             transformer_initial_ff_residual_path=False, # So that d_model can be as small as we like
             transformer_initial_ff_linear_module_up=None,
             transformer_initial_ff_linear_module_down=None,
+            # None means "fall back to the corresponding `transformer_ff_*`
+            #     value", which is 0. in each case — not "no dropout arg".
+            transformer_initial_ff_dropout=None,
+            transformer_initial_ff_inner_dropout=None,
+            transformer_initial_ff_outer_dropout=None,
+            transformer_ff_linear_module_up=None,
             transformer_ff_linear_module_down=None,
-            transformer_pre_norm=False,
-            transformer_post_norm=True,
-            transformer_absolute_position_embedding=True,
-            transformer_relative_position_embedding=True,
+            transformer_pre_norm=kwargs["pre_norm"],
+            transformer_post_norm=kwargs["post_norm"],
+            transformer_absolute_position_embedding=kwargs[
+                "absolute_position_embedding"
+            ],
+            transformer_relative_position_embedding=kwargs[
+                "relative_position_embedding"
+            ],
+            # Live: with relative position embedding on, this decides how many
+            #     heads receive axial RoPE.
+            transformer_positional_heads=kwargs["positional_heads"],
             transformer_embedding_size=self.d_model,
             transformer_layers=kwargs["layers"],
             transformer_heads=kwargs["heads"],
-            transformer_ff_ratio=2,
+            transformer_ff_ratio=kwargs["ff_ratio"],
+            transformer_ff_inner_size=None, # inert: `ff_ratio` sizes the block
             transformer_bos_tokens=kwargs["utility_tokens"],
-            transformer_return_bos_tokens=False,
-            transformer_activation=SwiGLU,
+            transformer_knocking_heads=kwargs["knocking_heads"],
+            transformer_return_bos_tokens=kwargs["return_bos_tokens"],
+            transformer_activation=get_activation(kwargs["activation"]),
             transformer_activation_kwargs=None,
+            transformer_msa_scaling="d",
+            # Not configurable, and pinned rather than promoted: broccoli's
+            # `FeedforwardBlock` uses this only as a fallback --
+            # `inner_dropout if inner_dropout is not None else dropout` -- and
+            # `TransformerEncoder` always forwards `ff_inner_dropout` and
+            # `ff_outer_dropout`, which default to 0.0 rather than None. So this
+            # argument can never take effect, and TOML has no way to write the
+            # None that would let it. Use the inner/outer knobs instead.
             transformer_ff_dropout=0.,
-            transformer_msa_dropout=0.,
-            transformer_stochastic_depth=0.1,
-            batch_norm_logits=True,
+            transformer_ff_inner_dropout=kwargs["ff_inner_dropout"],
+            transformer_ff_outer_dropout=kwargs["ff_outer_dropout"],
+            transformer_msa_dropout=kwargs["self_attention_dropout"],
+            transformer_stochastic_depth=kwargs["stochastic_depth"],
+            transformer_depthwise_linear_stochastic_depth=kwargs[
+                "depthwise_linear_stochastic_depth"
+            ],
+            batch_norm_logits=kwargs["batch_norm_logits"],
             logit_projection_layer=nn.Linear,
             linear_module=nn.Linear,
             head=SequencePoolClassificationHead,
+            # Residual branch scaling. broccoli moved away from deepnorm at
+            #     30.0.0, and 1.0 is the no-scaling identity either way.
+            alpha=kwargs["alpha"],
+            beta=kwargs["beta"],
         )
         self.final_feat_dim = self.d_model
 

@@ -21,6 +21,8 @@ import data.language
 
 import broccoli
 
+from . import model_util
+
 
 def trim_messages(token_id_rows):
     """
@@ -400,6 +402,25 @@ class SenderTransformerLM(nn.Module):
         self.bidirectional = kwargs["bidirectional"]
         self.heads = kwargs["heads"]
         self.utility_tokens = kwargs["utility_tokens"]
+        self.ff_ratio = kwargs["ff_ratio"]
+        self.stochastic_depth = kwargs["stochastic_depth"]
+        self.positional_heads = kwargs["positional_heads"]
+        self.activation = model_util.get_activation(kwargs["activation"])
+        self.absolute_position_embedding = kwargs["absolute_position_embedding"]
+        self.relative_position_embedding = kwargs["relative_position_embedding"]
+        self.pre_norm = kwargs["pre_norm"]
+        self.post_norm = kwargs["post_norm"]
+        self.return_bos_tokens = kwargs["return_bos_tokens"]
+        self.knocking_heads = kwargs["knocking_heads"]
+        self.depthwise_linear_stochastic_depth = kwargs[
+            "depthwise_linear_stochastic_depth"
+        ]
+        self.ff_inner_dropout = kwargs["ff_inner_dropout"]
+        self.ff_outer_dropout = kwargs["ff_outer_dropout"]
+        self.self_attention_dropout = kwargs["self_attention_dropout"]
+        self.cross_attention_dropout = kwargs["cross_attention_dropout"]
+        self.alpha = kwargs["alpha"]
+        self.beta = kwargs["beta"]
 
         if self.referent_embedding_size != self.token_embedding_size:
             raise NotImplementedError(
@@ -429,12 +450,32 @@ class SenderTransformerLM(nn.Module):
         self.query_layer_norm = nn.LayerNorm(self.d_model)
         self.referent_layer_norm = nn.LayerNorm(self.d_model)
 
+        # As in `receiver.py`, every broccoli argument is set explicitly, including
+        #     the inert ones, because broccoli's defaults have changed underneath
+        #     this repository before. See the note at the top of that module.
         self.cross_attention = broccoli.transformer.MHAttention(
             self.d_model,
             self.heads,
-            dropout=self.dropout,
+            # Attention internals get their own setting, never the speaker's
+            #     `dropout`, which regularises the prototypes going in. This
+            #     used to read `self.dropout` while the listener's matching
+            #     cross-attention took a separate constant, so raising the
+            #     speaker's input regularisation silently rewired its attention
+            #     and the two agents were regularised on different terms.
+            dropout=self.cross_attention_dropout,
             causal=False, # Whole image informs whole initial message
             seq_len=self.content_length,
+            linear_module=nn.Linear,
+            bos_tokens=0,
+            knocking_heads=False,
+            # No positional information here: the query carries its own order
+            #     and the prototypes are an unordered pair. `positional_heads`
+            #     is inert while `rotary_embedding` is None, but is pinned
+            #     anyway — broccoli defaults it to 0.25 on `MHAttention` and
+            #     0.5 on `TransformerEncoder`, so the two are not the same.
+            rotary_embedding=None,
+            positional_heads=0.25,
+            source_size=None,
             scaling="d",
         )
 
@@ -443,21 +484,41 @@ class SenderTransformerLM(nn.Module):
             self.d_model,
             self.layers,
             self.heads,
-            absolute_position_embedding=True,
-            relative_position_embedding=True,
+            absolute_position_embedding=self.absolute_position_embedding,
+            relative_position_embedding=self.relative_position_embedding,
+            positional_heads=self.positional_heads,
+            # Derived, not configured: the sequence this block runs over is the
+            #     message minus its SOS and EOS tokens.
             source_size=(self.content_length,),
-            ff_ratio=2,
-            activation=broccoli.activation.SwiGLU,
+            ff_ratio=self.ff_ratio,
+            ff_inner_size=None, # inert: `ff_ratio` sizes the block instead
+            activation=self.activation,
             activation_kwargs=None,
-            ff_dropout=0.,
-            msa_dropout=0.,
-            stochastic_depth=0.2,
+            ff_linear_module_up=None,
+            ff_linear_module_down=None,
+            # Not configurable, and pinned rather than promoted: broccoli's
+            # `FeedforwardBlock` uses this only as a fallback --
+            # `inner_dropout if inner_dropout is not None else dropout` -- and
+            # `TransformerEncoder` always forwards `ff_inner_dropout` and
+            # `ff_outer_dropout`, which default to 0.0 rather than None. So this
+            # argument can never take effect, and TOML has no way to write the
+            # None that would let it. Use the inner/outer knobs instead.
+            ff_dropout=0.0,
+            ff_inner_dropout=self.ff_inner_dropout,
+            ff_outer_dropout=self.ff_outer_dropout,
+            msa_dropout=self.self_attention_dropout,
+            stochastic_depth=self.stochastic_depth,
+            depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
             causal = not self.bidirectional,
+            linear_module=nn.Linear,
             bos_tokens=self.utility_tokens,
-            return_bos_tokens=False,
-            pre_norm=False,
-            post_norm=True,
+            knocking_heads=self.knocking_heads,
+            return_bos_tokens=self.return_bos_tokens,
+            pre_norm=self.pre_norm,
+            post_norm=self.post_norm,
             msa_scaling="d",
+            alpha=self.alpha,
+            beta=self.beta,
         )
 
         self.outputs2vocab = nn.Linear(

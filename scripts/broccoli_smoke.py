@@ -11,6 +11,7 @@ receiver.py, vision.py, builder.py, train.py) with tiny dims on CPU. It does NOT
 need data, SLURM, or CUDA.
 """
 import sys, traceback
+import importlib.metadata
 import torch
 import torch.nn as nn
 
@@ -33,6 +34,22 @@ import gradboard.cycles
 from gradboard.scheduler import PASS
 from gradboard.optimiser import get_optimiser
 
+# Checked before anything else runs. The checks below only exercise the *kwarg
+#     surface*, which did not change when broccoli went 27.1.1 -> 30.1.0 --
+#     they passed on both versions while the architecture underneath them
+#     changed. Only a version check catches that, so a drifted environment
+#     fails here rather than on the cluster.
+EXPECTED_VERSIONS = {"broccoli-ml": "30.1.0", "gradboard": "17.0.0"}
+
+for _package, _expected in EXPECTED_VERSIONS.items():
+    _installed = importlib.metadata.version(_package)
+    if _installed != _expected:
+        sys.exit(
+            f"FATAL: {_package} is {_installed}, expected {_expected}.\n"
+            f"       The environment does not match requirements.txt. "
+            f"Reinstall before running anything."
+        )
+
 D, H, L, SEQ = 32, 4, 2, 8
 
 # --- vision.py: ViT2 (the heaviest kwarg surface) ---
@@ -40,7 +57,14 @@ def build_vit2():
     from models.backbone.vision import ViT2
     # d_model/heads kept generous: the new broccoli rotary embedding needs a
     # head dim large enough to rotate all positions (tiny dims fail in rope).
-    m = ViT2(n_feats=(3, 64, 64), d_model=64, layers=L, heads=2, utility_tokens=1)
+    from parse_config import get_config
+    # Built from DEFAULT.toml rather than a hand-written kwarg list, so that
+    # adding a config key cannot silently break this check.
+    settings = dict(get_config()["sender_feature_model"])
+    # d_model/heads are overridden: 2D axial RoPE concatenates freqs per
+    # spatial axis and so needs head_dim >= 32, which the defaults do not give.
+    settings.update(d_model=64, heads=2, layers=L, utility_tokens=1)
+    m = ViT2(n_feats=(3, 64, 64), **settings)
     x = torch.randn(2, 3, 64, 64)
     return m(x)
 check("vision.ViT2 construct+forward", build_vit2)

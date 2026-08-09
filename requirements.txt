@@ -1,5 +1,23 @@
-broccoli-ml @ git+https://github.com/nicholasbailey87/broccoli.git@neovit
-gradboard @ git+https://github.com/nicholasbailey87/gradboard.git@neovit
+# broccoli-ml and gradboard are pinned to commit SHAs, not branches. A branch
+# ref is not a pin: `neovit` was used for both, and broccoli's was
+# fast-forwarded onto main, taking it from 27.1.1 to 30.1.0. That added a Q/K
+# RMSNorm and an output RMSNorm to every attention and feedforward block, and
+# flipped the `pre_norm`/`post_norm` defaults. The result was the cluster and
+# the local venv running different architectures off this same file, and
+# checkpoints that cannot be resumed across the boundary (the new `out_norm`
+# entries are missing keys under a strict load).
+#
+# broccoli-ml 30.1.0 (rollback: 27.1.1 = d50d2e8689659947cade11c06000c1bc70bc019b)
+broccoli-ml @ git+https://github.com/nicholasbailey87/broccoli.git@33d6f21642f754f841a5adbc27ff331b191a4e90
+# gradboard 17.0.0 -- where `neovit` already pointed; main is ahead at 17.1.1
+gradboard @ git+https://github.com/nicholasbailey87/gradboard.git@ae464db502c1bfcaee2181b040bfd41acf475359
+
+# torch and torchvision were previously absent from this file entirely. These
+# are the versions the cluster runs, which is where results are produced; the
+# cluster's `+cu130` local version segment still satisfies these specifiers.
+torch==2.9.0
+torchvision==0.24.0
+
 click==8.3.0
 colorama==0.4.6
 einops==0.8.1

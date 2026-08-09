@@ -105,6 +105,38 @@ d_model = 16 # Only applies to Transformer vision models
 layers = 4 # Only applies to Transformer vision models
 heads = 4 # Only applies to Transformer vision models
 utility_tokens = 0 # Only applies to Transformer vision models
+# Architecture settings that used to be hardcoded in the model classes, and so
+# were neither recorded in a run's `args.json` nor sweepable. Every value here
+# is the one that was previously hardcoded, so promoting them changed nothing.
+#
+# Not everything broccoli accepts is exposed. Arguments that select a *class*
+# (`linear_module`, `head`, `logit_projection_layer`) stay in Python, since TOML
+# cannot hold one; `activation` is the exception, via the name -> class map in
+# `models/model_util.py`. Arguments determined by the data or by the surrounding
+# code -- `source_size`, `input_size`, `in_channels`, the pooling kernel
+# geometry -- are derived rather than configured. The `cnn_*` group is inert
+# while `cnn` is False and stays in Python too.
+ff_ratio = 2 # Only applies to Transformer vision models
+stochastic_depth = 0.1 # Only applies to Transformer vision models
+depthwise_linear_stochastic_depth = true # ramp the rate linearly over depth
+positional_heads = 0.5 # fraction of heads receiving axial RoPE
+activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
+absolute_position_embedding = true
+relative_position_embedding = true
+# `pre_norm` and `post_norm` are coupled and must be flipped together: broccoli
+# rejects a transformer that is both, so setting `pre_norm = true` without also
+# setting `post_norm = false` raises at construction rather than picking one.
+pre_norm = false
+post_norm = true
+return_bos_tokens = false
+knocking_heads = false
+pooling_type = "concat" # max, average or concat
+batch_norm_logits = true
+ff_inner_dropout = 0.0
+ff_outer_dropout = 0.0
+self_attention_dropout = 0.0
+alpha = 1.0 # residual branch scaling; 1.0 is the no-scaling identity
+beta = 1.0
 
 [sender_language_model]
 token_embedding_size = 500
@@ -124,6 +156,29 @@ layers = 1
 bidirectional = false
 heads = 4 # Heads per layer - only applies to Transformer language models
 utility_tokens = 4 # Only applies to Transformer language models
+# See [sender_feature_model] for what these are and why they are here. Note
+# `batch_norm_logits` above is this section's own, and applies to the vocabulary
+# logits rather than to a vision model's.
+ff_ratio = 2 # Only applies to Transformer language models
+stochastic_depth = 0.2 # Only applies to Transformer language models
+depthwise_linear_stochastic_depth = true
+positional_heads = 0.5
+activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
+absolute_position_embedding = true
+relative_position_embedding = true
+pre_norm = false
+post_norm = true
+return_bos_tokens = false
+knocking_heads = false
+ff_inner_dropout = 0.0
+ff_outer_dropout = 0.0
+# See [receiver_comparer] for what these two are. The speaker's cross-attention
+# reads the prototypes; its self-attention is the Transformer stack over the
+# emerging message.
+self_attention_dropout = 0.0
+cross_attention_dropout = 0.0
+alpha = 1.0
+beta = 1.0
 
 [receiver]
 class = "Receiver"
@@ -140,6 +195,25 @@ d_model = 16 # Only applies to Transformer vision models
 layers = 4 # Only applies to Transformer vision models
 heads = 4 # Only applies to Transformer vision models
 utility_tokens = 0 # Only applies to Transformer vision models
+# See [sender_feature_model] for what these are and why they are here.
+ff_ratio = 2 # Only applies to Transformer vision models
+stochastic_depth = 0.1 # Only applies to Transformer vision models
+depthwise_linear_stochastic_depth = true
+positional_heads = 0.5
+activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
+absolute_position_embedding = true
+relative_position_embedding = true
+pre_norm = false
+post_norm = true
+return_bos_tokens = false
+knocking_heads = false
+pooling_type = "concat" # max, average or concat
+batch_norm_logits = true
+ff_inner_dropout = 0.0
+ff_outer_dropout = 0.0
+self_attention_dropout = 0.0
+alpha = 1.0
+beta = 1.0
 
 [receiver_comparer]
 token_embedding_size = 500
@@ -157,6 +231,38 @@ bidirectional = false
 message_length = 7 # Only applies to Transformer comparers. Should be the same as sender_language_model.message_length
 heads = 4 # Only applies to Transformer comparers
 utility_tokens = 0 # Only applies to Transformer comparers
+ff_ratio = 2 # Only applies to Transformer comparers
+stochastic_depth = 0.1 # Only applies to Transformer comparers. Suppressed
+                       # entirely when the fusion stack is shallower than two
+                       # layers -- see `TransformerCrossAttentionComparer`.
+# Attention dropout. Named per attention type, and kept strictly separate from
+# the `dropout` above, which regularises the two operands of the comparison
+# rather than anything inside a module. `self_attention_dropout` reaches every
+# TransformerEncoder block; `cross_attention_dropout` reaches the single
+# MHAttention that compares message against referents. The speaker carries the
+# same two keys with the same meanings, so both agents are regularised on the
+# same terms. Note broccoli's attention-pooling layer (`SequencePool`, used by
+# `AttentionPrototyper` and the ViT head) takes no dropout argument at all, so
+# it is not covered by either key.
+cross_attention_dropout = 0.0 # Only applies to Transformer comparers
+# See [sender_feature_model] for what these are and why they are here. The
+# position-embedding settings drive the comparer's message encoder only. Its
+# fusion block has none by construction -- it reads the cross-attention output,
+# which already carries position, over a referent set that has no order.
+depthwise_linear_stochastic_depth = true
+positional_heads = 0.5
+activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
+absolute_position_embedding = true
+relative_position_embedding = true
+pre_norm = false
+post_norm = true
+return_bos_tokens = false
+knocking_heads = false
+ff_inner_dropout = 0.0
+ff_outer_dropout = 0.0
+self_attention_dropout = 0.0
+alpha = 1.0
+beta = 1.0
 
 # ====== Defaults for the CUB birds data set below here ======
 
