@@ -116,6 +116,7 @@ tail -f experiments/transformer/logs/transformer_*.o
 Results land under `<output_root>/<experiment>/<config_stem>_seed<seed>/`
 (e.g. `~/archive/results/emcomgen/transformer/transformer_seed0/metrics.csv`), with the
 topographic-similarity and generalization columns described below.
+`experiments/README.md` is the per-column reference for that CSV.
 
 `./scripts/run_experiment.sh` takes
 `<experiment> [max_concurrent] [partition] [--rerun] [--gpu-type T]` (defaults:
@@ -228,8 +229,8 @@ Classic topsim uses one signal (message) distance — Levenshtein — which is
 sensitive to both symbol order and symbol identity, so it scores a language with
 free symbol order or with synonyms as non-compositional even when it is not.
 Instead we compute one variant per *signal set* S1–S6. They differ **only** in
-the signal distance; the meaning distance is cosine between the sender's concept
-vectors (`Sender.get_concepts`) throughout.
+the signal distance; within one reading the meaning distance is held constant
+across all six (see **Two meaning spaces** below).
 
 | metric | set | signal distance | set characterised by |
 |---|---|---|---|
@@ -250,36 +251,79 @@ correspond.
 
 Measurement is **per concept prototype**, not per image: one point per concept,
 whose message is the modal token sequence its instances emitted, whose symbol
-embeddings come from one instance that actually emitted that sequence, and whose
-concept vector is the mean over its instances. Pairing individual images would
-put many pairs at meaning distance zero (same concept, different image) against
-a non-zero signal distance, which only depresses the correlation. Concepts are
+embeddings are the mean over *every* instance that emitted that sequence
+(averaging rather than picking one arbitrary instance is what keeps a single
+epoch's reading stable), and whose concept vector is the mean over its
+instances. Pairing individual images would put many pairs at meaning distance
+zero (same concept, different image) against a non-zero signal distance, which
+only depresses the correlation. Concepts are
 capped at `[analysis] max_concepts` (default 500), which bounds measurement at
 roughly 30–55 s per eval pass.
 
-**Adjusted topsim.** The soft variants are parameterised by the sender's own
-symbol embeddings, which are not independent of its referent embeddings, so some
-correlation is available before any language exists. Every run therefore does one
-eval pass per split *before training starts* and records that as a baseline;
-`topsim_s{1..6}_adj` is the raw value minus that baseline. Baselines are stored
-in `checkpoint_last.pt` so a resume does not re-measure them against an
-already-trained sender.
+**Two meaning spaces.** The same six signal distances are read against two
+meaning distances, and both families are reported:
+
+| prefix | meaning distance | question it answers |
+|---|---|---|
+| `topsim_` | cosine between the sender's concept vectors (the third output of `Sender.speak`) | does the language track what the sender *represents*? |
+| `topsim_gt_` | word-level edit distance between the ground-truth logical forms | does the language track the *concepts*? |
+
+They come apart when the sender has collapsed onto a subset of the visual
+features: the cosine space scores it well for faithfully encoding whatever it
+kept, and only the ground-truth space notices the collapse. `topsim_gt_s6` —
+hard Levenshtein against the `Edit` concept distance — is the variant directly
+comparable to the topographic rho reported by Mu & Goodman (2021). The
+`topsim_gt_` family needs concept keys with internal structure, so it is emitted
+for ShapeWorld but not for CUB, whose keys are bare class ids.
+
+**`_static`: the leakage control.** The soft variants are parameterised by the
+sender's *contextual* symbol embeddings, which differ from a fixed lookup table
+in two ways at once. They tolerate synonymy, which is the point. They are also
+sensitive to the concept being described, which is not: `SenderGRULM` initialises
+its hidden state from the concept vector and its SOS input is constant, so the
+embedding behind the *first* content symbol is a function of the concept alone,
+with no token in it. A soft variant can therefore read a correlation straight out
+of the meaning space without the language taking any part.
+
+So each soft variant is reported twice: raw, and as `_static` — recomputed with
+every symbol's embedding replaced by the corpus mean for its token id. That
+strips the concept sensitivity while leaving synonymy tolerance intact, and
+`raw − static` is the contextuality inflation. The hard variants see nothing but
+token identities, so they have no leakage to control and no `_static` form.
+
+This replaces an earlier adjustment against the *untrained* model's topsim
+(`topsim_s{1..6}_adj`, still present in CSVs from before the change). That
+baseline could not bound the leakage, because training is what creates it: an
+untrained `SenderGRULM` has a random `init_h` and a saturating tanh, which
+between them read ≈0 on every variant. `_adj` and `_static` are not
+interchangeable and should not be pooled.
 
 #### Metrics
 
-Metrics are logged into `<output_root>/<experiment>/<config_stem>_seed<seed>/metrics.csv`
-and to wandb (if `wandb = true`). Each is prefixed with its split — `train`,
-`test` (novel concepts), `test_same` (seen concepts), and `test_avg` (the mean of
-the latter two):
+Metrics are logged into `<output_root>/<experiment>/<config_stem>_seed<seed>/metrics.csv`,
+one row per epoch, appended as the epoch finishes so earlier rows survive a
+resume. Each is prefixed with its split — `train`, `test` (novel concepts),
+`test_same` (seen concepts), and `test_avg` (the mean of the latter two):
 
 - `{train,test,test_same,test_avg}_acc` — generalization accuracy. For ShapeWorld
-    there are also per-game-difficulty breakdowns, `acc_md_*`.
-- `{test,test_same,test_avg}_topsim_s1` … `_topsim_s6` — the six variants above.
-    Not computed on the train pass: topsim is a property of the language, so
-    there is nothing to gain from measuring it mid-training-pass.
-- `{test,test_same,test_avg}_topsim_s1_adj` … `_topsim_s6_adj` — the same six,
-    minus the pre-training baseline. `NaN` if no baseline was recorded.
-- `{train,test,...}_loss` — the training objective.
+    there are also per-concept-type breakdowns, `acc_md_*` (`md_color`,
+    `md_and_color_shape`, …), keyed by the logical type of the concept the game
+    is about.
+- `{test,test_same,test_avg}_topsim_s1` … `_topsim_s6` — the six variants above,
+    against the sender's concept vectors. Not computed on the train pass: topsim
+    is a property of the language, so there is nothing to gain from measuring it
+    mid-training-pass.
+- `{test,test_same,test_avg}_topsim_gt_s1` … `_topsim_gt_s6` — the same six
+    against the ground-truth logical forms. ShapeWorld only.
+- `{test,test_same,test_avg}_topsim{,_gt}_s1_static` … `_s3_static` — the three
+    soft variants under the decontextualised embeddings. Soft variants only.
+- `{train,test,...}_loss` — the training objective. `_combined_loss` is a
+    duplicate of it, kept only so older analysis scripts keep working.
+
+`test_avg` is the unweighted mean of `test` and `test_same` for the same metric,
+applied to every eval metric including topsim — so it is a mean of two Spearman
+rhos, not a rho over the pooled data. `test_same` is optional; where a dataset
+ships no such split those columns are absent and `test_avg` equals `test`.
 
 Two columns are unprefixed: `epoch`, and `timestamp` — the wall-clock time
 (ISO-8601, local) at which that epoch's row was written, for reading a run's pace
