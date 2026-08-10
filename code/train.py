@@ -244,12 +244,15 @@ def run(
     all_concepts = []    # sender concept vectors (positive/negative prototypes)
     all_true_lang = []   # ground-truth language tokens, for concept keys
 
-    collect = (
-        compute_topsim
-        and config['use_lang']
+    # Whether the sender's language model runs at all this pass, and so whether
+    # there is a message (and an exploration gain) to report on.
+    speaking = (
+        config['use_lang']
         and not config['receiver_only']
         and not config['copy_receiver']
     )
+
+    collect = compute_topsim and speaking
 
     if training:
         optimizer.zero_grad()
@@ -371,6 +374,19 @@ def run(
                 combined_loss=this_loss.item()
             )
 
+            # The speaker recalibrates its exploration gain once per batch, on
+            # the train pass only. Logging it is how the channel stops being an
+            # invisible property of the architecture: `exploration_gain` says
+            # what scale this speaker needed, `realised_survival` says whether
+            # the calibration actually landed on `token_exploration_rate`.
+            if training and speaking:
+                language_model = pair.sender.language_model
+                stats.update(
+                    exploration_gain=language_model.exploration_gain.item(),
+                    realised_survival=language_model.realised_survival,
+                    batch_size=batch_size,
+                )
+
         if training:
             if batch_i % config['optimiser']['log_interval'] == 0:
                 log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats)
@@ -390,6 +406,15 @@ def run(
         all_lang,
         columns=["lang", "true_lang", "acc", "md"],
     )
+
+    # How much the language compresses. A speaker that has learned to say
+    # something reuses messages across instances of a concept; one whose channel
+    # is too noisy to learn through emits a near-unique message every game, so
+    # this reads close to 1.0 while accuracy sits at chance.
+    if speaking and len(all_lang) > 0:
+        metrics["unique_message_fraction"] = (
+            all_lang["lang"].nunique() / len(all_lang)
+        )
 
     if collect and all_messages:
         # The topsim report over the concept prototypes of this eval split.

@@ -7,14 +7,13 @@ Speaker models. This includes speakers with a GRU-based language model as
     equal or greater compositionality.
 """
 
+import math
 import warnings
 
 import torch
 import torch.nn as nn
 import numpy as np
 from torch.nn import functional as F
-
-import einops
 
 import data
 import data.language
@@ -47,20 +46,44 @@ def trim_messages(token_id_rows):
     return trimmed
 
 
-def batch_norm_logits(module: nn.BatchNorm1d, logits: torch.Tensor) -> torch.Tensor:
+def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
     """
-    Applies nn.BatchNorm1d to vocabulary logits that are arranged in a
-        sequence like (batch, seq, vocabulary)
-    
+    Normalise the *emittable* vocabulary logits to zero mean and unit variance,
+        per example and per position.
+
+    Only the last `vocabulary` columns are normalised. The leading four reserved
+        slots (PAD/SOS/EOS/UNK) are concatenated back untouched: they are masked
+        to -inf immediately afterwards so their values are irrelevant, but they
+        must not be allowed to pollute the mean and standard deviation of the
+        tokens that can actually be emitted.
+
+    This replaces an `nn.BatchNorm1d` over the same columns. LayerNorm is the
+        right normaliser here because the property wanted is that every speaker
+        arrives at the exploration gain with logits of comparable *magnitude*,
+        and LayerNorm delivers that per example rather than on average over a
+        batch. It is also position-invariant for both speakers by construction
+        (BatchNorm annihilated per-position offsets in the GRU, which sees one
+        position per call, but preserved them in the Transformer, which sees all
+        of them at once), has no running statistics so train and eval agree, and
+        does not couple to `accumulator_steps`.
+
+    Functional rather than a module, so that the affine parameters are
+        structurally absent rather than merely disabled, and nothing is added to
+        the `state_dict`. Without affine the transform is argmax-preserving, so
+        it changes no eval-time message.
+
     Args:
-        module: The nn.BatchNorm1d module
-        logits: Tensor of shape (Batch, Length, Vocab)
-        
+        logits: (..., vocabulary + 4), reserved tokens first
+        vocabulary: number of emittable tokens
+
     Returns:
-        Tensor of shape (Batch, Length, Vocab)
+        A tensor of the same shape, with the emittable slice normalised
     """
-    logits = module(einops.rearrange(logits, 'b l c -> b c l'))
-    return einops.rearrange(logits, 'b c l -> b l c')
+    return torch.cat(
+        [logits[..., :4], F.layer_norm(logits[..., 4:], (vocabulary,))],
+        dim=-1,
+    )
+
 
 def mask_reserved_tokens(logits: torch.Tensor) -> torch.Tensor:
     """
@@ -137,6 +160,202 @@ def flatten_logit_distribution(
     )
 
 
+# The exploration gain is an EMA over per-batch solves, smoothed in log space
+#     because gains are multiplicative. The clamp is a backstop only: a run that
+#     pins to either end has something wrong upstream of the channel.
+EXPLORATION_GAIN_MOMENTUM = 0.01
+EXPLORATION_GAIN_MIN = 1e-2
+EXPLORATION_GAIN_MAX = 1e4
+
+
+def mean_winning_probability(
+    logits: torch.Tensor,
+    gain: float,
+    uniform_weight: float,
+) -> torch.Tensor:
+    """
+    The fraction of symbols that survive the Gumbel noise, averaged over slots.
+
+    `F.gumbel_softmax(logits, hard=True)` emits `argmax(logits + g)` with
+        `g ~ Gumbel(0, 1)`, and by the Gumbel-max identity the probability that
+        slot's arg-max is unchanged by the noise is exactly the winning token's
+        softmax probability. So survival can be read straight off a softmax: no
+        Monte Carlo over noise draws, no assumed logit distribution, and no
+        seed. `tests/test_exploration.py` pins the identity.
+
+    Applies the real sampling pipeline in the real order — gain first, then the
+        uniform mixture — so that the mixture's bounds hold. Mixing first and
+        scaling afterwards destroys them.
+
+    Args:
+        logits: (..., vocabulary + 4), reserved tokens already masked to -inf
+        gain: the multiplier applied before mixing
+        uniform_weight: as in `flatten_logit_distribution`
+
+    Returns:
+        A scalar tensor, the mean over all slots of the winning token's
+            post-mixing probability
+    """
+    scaled = logits * gain
+    if uniform_weight > 0.0:
+        scaled = flatten_logit_distribution(scaled, uniform_weight)
+    return scaled.softmax(-1).max(-1).values.mean()
+
+
+def calibrate_exploration_gain(
+    logits: torch.Tensor,
+    token_exploration_rate: float,
+    uniform_weight: float,
+    iterations: int = 25,
+    lo: float = EXPLORATION_GAIN_MIN,
+    hi: float = EXPLORATION_GAIN_MAX,
+) -> torch.Tensor:
+    """
+    Solve for the logit gain at which the expected fraction of symbols flipped
+        by the Gumbel noise equals `token_exploration_rate`.
+
+    This is what turns exploration from an accident of architecture into a
+        stated number. The Gumbel noise has a fixed standard deviation of 1.283,
+        so channel fidelity is set entirely by the scale of the speaker's
+        logits — which varied by two orders of magnitude across an
+        architecture ladder, from a channel that passed 99% of symbols to one
+        that passed 24%. Normalising the logits fixes their magnitude; this
+        fixes what that magnitude buys.
+
+    Why a runtime solve rather than a closed form: survival depends on the
+        *shape* of each logit vector, not only on its scale, so even
+        normalised speakers realise different rates at a common gain. Why
+        bisection rather than learning it: the largest move of any
+        gradient-updated 1-D speaker parameter over 90 epochs was 0.12, against
+        an AdamW ceiling of 1.49, so a learnable gain cannot travel far enough
+        to matter. Why not `tau`: it divides *after* the noise, so the hard
+        sample is invariant to it — it is a gradient-estimator knob only.
+
+    Mean winning probability is monotone increasing in the gain, so plain
+        bisection on `log(gain)` is valid. Each trial runs the real pipeline via
+        `mean_winning_probability`, which calls `flatten_logit_distribution`
+        itself, so the calibration and the sampler cannot drift apart.
+
+    Args:
+        logits: detached, normalised, reserved-masked logits, (..., vocabulary + 4)
+        token_exploration_rate: target fraction of symbols flipped by the noise
+        uniform_weight: as in `flatten_logit_distribution`
+        iterations: bisection steps
+        lo, hi: bracket for the gain
+
+    Returns:
+        A scalar tensor holding the solved gain
+    """
+    target = 1.0 - token_exploration_rate
+
+    lo_log, hi_log = math.log(lo), math.log(hi)
+    for _ in range(iterations):
+        mid_log = 0.5 * (lo_log + hi_log)
+        realised = mean_winning_probability(
+            logits, math.exp(mid_log), uniform_weight
+        )
+        if realised < target:
+            lo_log = mid_log
+        else:
+            hi_log = mid_log
+
+    return torch.as_tensor(
+        math.exp(0.5 * (lo_log + hi_log)),
+        dtype=logits.dtype,
+        device=logits.device,
+    )
+
+
+def exploration_rate_floor(uniform_weight: float, vocabulary: int) -> float:
+    """
+    The smallest token exploration rate the uniform mixture can realise.
+
+    Mixing caps a slot's winner at `1 - w + w/V` however sharp the underlying
+        logits are, so at least `w * (1 - 1/V)` of symbols are flipped no matter
+        what the gain does. That is a permanent corruption rate, and it is
+        intended: irreducible late-training exploration is the point.
+    """
+    return uniform_weight * (1.0 - 1.0 / vocabulary)
+
+
+def check_exploration_rate_floor(
+    token_exploration_rate: float,
+    uniform_weight: float,
+    vocabulary: int,
+) -> None:
+    """
+    Warn when the requested exploration rate is below what the uniform mixture
+        allows, in which case the calibration will pin at the bracket's top and
+        the realised rate will sit at the floor rather than at the request.
+    """
+    floor = exploration_rate_floor(uniform_weight, vocabulary)
+    if token_exploration_rate < floor:
+        warnings.warn(
+            f"`token_exploration_rate` of {token_exploration_rate} is below "
+            f"the floor of {floor:.4f} imposed by `uniform_weight` "
+            f"({uniform_weight}) at a vocabulary of {vocabulary}: uniform "
+            f"mixing caps a slot's winning probability at 1 - w + w/V, so at "
+            f"least w * (1 - 1/V) of symbols are flipped whatever the gain is. "
+            f"The request is unreachable and the realised rate will sit at the "
+            f"floor. Lower `uniform_weight` to go below it."
+        )
+
+
+@torch.no_grad()
+def update_exploration_gain(speaker: nn.Module, logits: torch.Tensor) -> None:
+    """
+    Recalibrate a speaker's `exploration_gain` buffer from one batch of logits.
+
+    Called once per decode, after sampling, on the train pass only. The gain
+        used for *this* decode is therefore the buffer's value from before the
+        update, which is the only option for the autoregressive speaker: it
+        cannot know its later positions' logits before sampling the earlier
+        ones.
+
+    The first update sets the buffer outright, so that batch one is not sampled
+        at a gain of 1.0; later ones are an EMA in log space, since gains
+        compose multiplicatively. The calibration is a per-batch statistic and
+        so carries batch-to-batch noise — the EMA is what smooths it. If the
+        `exploration_gain` trace in metrics.csv looks jittery, lower
+        `EXPLORATION_GAIN_MOMENTUM` rather than raising the bisection count.
+
+    Args:
+        speaker: a speaker carrying `exploration_gain`, `exploration_gain_updates`,
+            `token_exploration_rate` and `uniform_weight`
+        logits: normalised, reserved-masked logits for every position of the
+            batch, (..., vocabulary + 4). Detached and promoted to float32 here,
+            since `train.py` runs the forward pass under autocast.
+    """
+    logits = logits.detach().float()
+
+    solved = calibrate_exploration_gain(
+        logits,
+        speaker.token_exploration_rate,
+        speaker.uniform_weight,
+    )
+
+    if speaker.exploration_gain_updates == 0:
+        gain = solved
+    else:
+        momentum = EXPLORATION_GAIN_MOMENTUM
+        gain = torch.exp(
+            (1.0 - momentum) * torch.log(speaker.exploration_gain.float())
+            + momentum * torch.log(solved)
+        )
+
+    gain = gain.clamp(EXPLORATION_GAIN_MIN, EXPLORATION_GAIN_MAX)
+
+    speaker.exploration_gain.copy_(gain)
+    speaker.exploration_gain_updates += 1
+
+    # Reported per epoch as `realised_survival`, and read at the gain the buffer
+    #     actually holds rather than at the freshly solved one, so that it
+    #     confirms the EMA has converged rather than restating the target.
+    speaker.realised_survival = mean_winning_probability(
+        logits, speaker.exploration_gain.item(), speaker.uniform_weight
+    ).item()
+
+
 class AveragePrototyper(nn.Module):
 
     def __init__(self, *args, **kwargs):
@@ -204,14 +423,27 @@ class SenderGRULM(nn.Module):
         self.vocabulary = kwargs["vocabulary"]
         self.message_length = kwargs["message_length"]
         self.tau = kwargs["tau"]  # Gumbel-softmax tau, as in jayelm
-        self.exploration_temperature = kwargs["exploration_temperature"]
+        self.token_exploration_rate = kwargs["token_exploration_rate"]
         self.uniform_weight = kwargs["uniform_weight"]
-        self.batch_norm_logits = kwargs["batch_norm_logits"]
+        self.layer_norm_logits = kwargs["layer_norm_logits"]
         self.dropout = kwargs["dropout"]
         self.layers = kwargs["layers"]
         self.bidirectional = kwargs["bidirectional"]
         self.directions = 2 if self.bidirectional else 1
-        
+
+        check_exploration_rate_floor(
+            self.token_exploration_rate, self.uniform_weight, self.vocabulary
+        )
+
+        # Buffers, not parameters: the gain is set by calibration, never by
+        #     gradient, and it has to survive checkpoint and resume.
+        self.register_buffer("exploration_gain", torch.tensor(1.0))
+        self.register_buffer(
+            "exploration_gain_updates", torch.tensor(0, dtype=torch.long)
+        )
+        # Not state: a per-batch diagnostic, read by `train.py` for metrics.csv.
+        self.realised_survival = float("nan")
+
         self.gru = nn.GRU(
             self.token_embedding_size,
             self.d_model,
@@ -226,11 +458,6 @@ class SenderGRULM(nn.Module):
             self.d_model * self.directions,
             self.vocabulary + 4 # +4 for PAD, SOS, EOS, UNK
         )
-
-        if self.batch_norm_logits:
-            self.batch_norm = nn.BatchNorm1d(self.vocabulary + 4) # +4 for PAD, SOS, EOS, UNK
-        else:
-            self.batch_norm = None
 
         self.init_h = nn.Linear(
             2 * referent_embedding_size, 
@@ -282,6 +509,9 @@ class SenderGRULM(nn.Module):
 
         lang = []
         symbol_embeddings = []
+        # Pre-gain logits for every position, kept so the exploration gain can
+        #     be recalibrated once per batch rather than once per position.
+        calibration_logits = []
 
         # Create and add SOS token
         sos_onehot = torch.zeros(
@@ -305,10 +535,11 @@ class SenderGRULM(nn.Module):
 
             logits = self.outputs2vocab(step_embedding) # Shape: (B, V)
 
-            if self.batch_norm_logits:
-                # This must come before the uniform weight mixing
-                #     as it would otherwise mess up the distribution
-                logits = self.batch_norm(logits)
+            if self.layer_norm_logits:
+                # This must come before the gain and the uniform weight mixing:
+                #     it is what fixes the magnitude the gain is calibrated
+                #     against, and it would otherwise mess up the mixture.
+                logits = layer_norm_logits(logits, self.vocabulary)
 
             # Masking comes first so that the uniform mixture below is spread
             #     over the emittable tokens only.
@@ -317,29 +548,54 @@ class SenderGRULM(nn.Module):
             # Exploration is a training-time device only, so that the eval
             #     passes measure the learned policy rather than a deliberately
             #     noised one. Mirrors jayelm's emergent-generalization, which
-            #     zeroes `uniform_weight` and resets `softmax_temp` to 1.0
-            #     whenever the split is not `train`.
+            #     zeroes `uniform_weight` whenever the split is not `train`.
             if self.training:
+                calibration_logits.append(logits.detach())
+
+                # Gain first, mixture second. The gain sets how much of the
+                #     fixed 1.283-sd Gumbel noise the logits stand up to, and
+                #     is calibrated below to deliver
+                #     `token_exploration_rate`. Scaling *after* the mixture
+                #     would undo the bounds the mixture exists to impose.
+                #
+                # Cloned because `update_exploration_gain` writes the buffer in
+                #     place at the end of the decode, and autograd rejects a
+                #     saved tensor that has been mutated since. Cloning keeps
+                #     that on the device, where `.item()` would sync.
+                logits = logits * self.exploration_gain.clone()
+
                 if self.uniform_weight > 0.0:
                     logits = flatten_logit_distribution(logits, self.uniform_weight)
 
-                logits = logits / self.exploration_temperature
-
-            # 5. Gumbel-Softmax (hard=True)
-            # This handles the noise addition + argmax + straight-through gradient.
-            # Note `tau` rescales the *soft* sample only: the hard forward sample
-            #     is an argmax and so is invariant to it. It is a gradient knob,
-            #     not an exploration knob — `uniform_weight` is the latter.
-            predicted_onehot = F.gumbel_softmax(
-                logits,
-                tau=self.tau,
-                hard=True,
-                dim=-1
-            )
+                # 5. Gumbel-Softmax (hard=True)
+                # This handles `argmax(logits + noise)` + straight-through gradient.
+                # Note `tau` rescales the *soft* sample only: the hard forward sample
+                #     is an argmax and so is invariant to it. It is a gradient knob,
+                #     not an exploration knob — `exploration_gain` is the latter,
+                #     and `uniform_weight` puts a floor under it.
+                predicted_onehot = F.gumbel_softmax(
+                    logits,
+                    tau=self.tau,
+                    hard=True,
+                    dim=-1
+                )
+            else:
+                # Greedy autoregressive decoding: eval measures the policy, so
+                #     no noise, no mixture, no gain. The reserved tokens are
+                #     -inf, so the argmax can never select one.
+                predicted_onehot = F.one_hot(
+                    logits.argmax(-1), self.vocabulary + 4
+                ).to(logits.dtype)
 
             # 6. Prepare next input
             lang.append(predicted_onehot.unsqueeze(1))
             gru_in = (predicted_onehot.unsqueeze(1)) @ self.token_embedding.weight # (B, 1, D)
+
+        # One recalibration per batch, after sampling, on the pooled logits of
+        #     every position. Doing it per position instead would recalibrate
+        #     five times a batch and read each position's statistics alone.
+        if self.training:
+            update_exploration_gain(self, torch.stack(calibration_logits, 1))
 
         # Add final EOS token
         eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 4, device=device)
@@ -372,8 +628,6 @@ class SenderGRULM(nn.Module):
         self.gru.reset_parameters()
         self.outputs2vocab.reset_parameters()
         self.token_embedding.reset_parameters()
-        if self.batch_norm is not None:
-            self.batch_norm.reset_parameters()
 
 
 class SenderTransformerLM(nn.Module):
@@ -394,9 +648,9 @@ class SenderTransformerLM(nn.Module):
         self.vocabulary = kwargs["vocabulary"]
         self.message_length = kwargs["message_length"]
         self.tau = kwargs["tau"]  # Gumbel-softmax tau, as in jayelm
-        self.exploration_temperature = kwargs["exploration_temperature"]
+        self.token_exploration_rate = kwargs["token_exploration_rate"]
         self.uniform_weight = kwargs["uniform_weight"]
-        self.batch_norm_logits = kwargs["batch_norm_logits"]
+        self.layer_norm_logits = kwargs["layer_norm_logits"]
         self.dropout = kwargs["dropout"]
         self.layers = kwargs["layers"]
         self.bidirectional = kwargs["bidirectional"]
@@ -421,6 +675,19 @@ class SenderTransformerLM(nn.Module):
         self.cross_attention_dropout = kwargs["cross_attention_dropout"]
         self.alpha = kwargs["alpha"]
         self.beta = kwargs["beta"]
+
+        check_exploration_rate_floor(
+            self.token_exploration_rate, self.uniform_weight, self.vocabulary
+        )
+
+        # Buffers, not parameters: the gain is set by calibration, never by
+        #     gradient, and it has to survive checkpoint and resume.
+        self.register_buffer("exploration_gain", torch.tensor(1.0))
+        self.register_buffer(
+            "exploration_gain_updates", torch.tensor(0, dtype=torch.long)
+        )
+        # Not state: a per-batch diagnostic, read by `train.py` for metrics.csv.
+        self.realised_survival = float("nan")
 
         if self.referent_embedding_size != self.token_embedding_size:
             raise NotImplementedError(
@@ -526,11 +793,6 @@ class SenderTransformerLM(nn.Module):
             self.vocabulary + 4 # +4 for PAD, SOS, EOS, UNK
         )
 
-        if self.batch_norm_logits:
-            self.batch_norm = nn.BatchNorm1d(self.vocabulary + 4) # +4 for PAD, SOS, EOS, UNK
-        else:
-            self.batch_norm = None
-
         self.reset_parameters()
 
     def embeddings(
@@ -582,27 +844,41 @@ class SenderTransformerLM(nn.Module):
 
         logits = self.outputs2vocab(symbol_embeddings)
 
-        if self.batch_norm_logits:
-            # This must come before the uniform weight mixing
-            #     as it would otherwise mess up the distribution
-            logits = batch_norm_logits(self.batch_norm, logits)
+        if self.layer_norm_logits:
+            # This must come before the gain and the uniform weight mixing —
+            #     as in `SenderGRULM.decode`, see the notes there.
+            logits = layer_norm_logits(logits, self.vocabulary)
 
         # Mask first, then explore, training-time only — as in
         #     `SenderGRULM.decode`, see the notes there.
         logits = mask_reserved_tokens(logits)
 
         if self.training:
+            calibration_logits = logits.detach()
+
+            # Gain first, mixture second, and cloned so the in-place buffer
+            #     update below does not invalidate it; see `SenderGRULM.decode`.
+            logits = logits * self.exploration_gain.clone()
+
             if self.uniform_weight > 0.0:
                 logits = flatten_logit_distribution(logits, self.uniform_weight)
 
-            logits = logits / self.exploration_temperature
+            onehot_content = F.gumbel_softmax(
+                logits,
+                tau=self.tau,
+                hard=True,
+                dim=-1
+            )
 
-        onehot_content = F.gumbel_softmax(
-            logits,
-            tau=self.tau,
-            hard=True,
-            dim=-1
-        )
+            # This speaker emits every position in one shot, so its logits are
+            #     already pooled over positions.
+            update_exploration_gain(self, calibration_logits)
+        else:
+            # Greedy: eval measures the policy. The reserved tokens are -inf,
+            #     so the argmax can never select one.
+            onehot_content = F.one_hot(
+                logits.argmax(-1), self.vocabulary + 4
+            ).to(logits.dtype)
 
         sos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 4, device=device)
         sos_onehot[:, 0, data.language.SOS_IDX] = 1.0
@@ -627,8 +903,6 @@ class SenderTransformerLM(nn.Module):
         self.cross_attention.reset_parameters()
         self.transformer.reset_parameters()
         self.outputs2vocab.reset_parameters()
-        if self.batch_norm is not None:
-            self.batch_norm.reset_parameters()
 
 
 class Sender(nn.Module):

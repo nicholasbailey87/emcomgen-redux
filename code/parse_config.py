@@ -82,6 +82,16 @@ def validate_config(config: dict) -> bool:
             "`receiver_comparer` message length."            
         )
     
+    # Checked here rather than left to the speaker's constructor: `SafeDict`
+    # only warns on a missing key and hands back None, which would fail
+    # confusingly deep inside the calibration instead of at parse time.
+    rate = config['sender_language_model'].get('token_exploration_rate')
+    if rate is None or not 0.0 < rate < 1.0:
+        raise InvalidConfig(
+            "`sender_language_model.token_exploration_rate` must be present "
+            f"and in (0, 1), got {rate}."
+        )
+
     for key in ('silhouette_p_sender', 'silhouette_p_receiver'):
         p = config['data'][key]
         if not 0.0 <= p <= 1.0:

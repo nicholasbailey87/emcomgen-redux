@@ -16,6 +16,12 @@ n_workers = 4
 prototype_dropout = 0.1
 
 [sender_language_model]
+# Left at what this run used, but note that `uniform_weight` no longer means
+# what it did when this was written. It is now a bounds knob rather than the
+# exploration knob: 0.2 caps a slot's winner at 0.807 and so puts a floor of
+# 0.19 under `token_exploration_rate`, four times the intended 0.1. This config
+# is parked outside `configs/` and does not run; anything rebuilt from it should
+# set `token_exploration_rate` and drop this.
 uniform_weight = 0.2
 
 [receiver_comparer]
