@@ -411,6 +411,70 @@ def test_gain_does_not_move_during_eval(build):
 
 
 @pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+def test_first_update_takes_the_solve_outright(build):
+    """
+    The momentum is `max(1 / (t + 1), floor)`, so the first update has momentum
+    1.0 and adopts the solved gain rather than blending it with the buffer's
+    initial 1.0. That used to be an explicit `updates == 0` branch; it now falls
+    out of the schedule, so pin it — a speaker that blended on batch one would
+    sample its first batch through a badly mis-scaled channel.
+
+    `realised_survival` is read at the post-update gain on the same batch that
+    was solved from, so it lands exactly on the target if and only if the buffer
+    took the solve whole. Any blend towards 1.0 leaves the gain too low and the
+    survival visibly under target.
+    """
+    torch.manual_seed(0)
+    speaker = build(token_exploration_rate=0.1).train()
+
+    assert speaker.exploration_gain.item() == pytest.approx(1.0)
+    speaker.decode(_prototypes(speaker))
+
+    assert speaker.exploration_gain_updates.item() == 1
+    assert speaker.realised_survival == pytest.approx(0.9, abs=0.005)
+
+
+@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+def test_momentum_floor_bounds_the_response_time(build):
+    """
+    Once the cumulative-average warm-up has decayed past the floor, the buffer
+    must still follow a moving target. Drives `update_exploration_gain` directly
+    with logits whose spread changes abruptly — the required gain is inversely
+    proportional to it — and checks the gain has caught up.
+
+    The loop length is expressed in time constants rather than batches, so this
+    pins the update rule (an EMA at the configured floor converges), not the
+    floor's value. The floor is a tuning knob: what it should be is a question
+    for the `realised_survival` trace of a real run, not for a test. See the
+    note on `EXPLORATION_GAIN_MOMENTUM` for why it currently sits at 0.1.
+
+    Driven at the function rather than through `decode` because LayerNorm makes
+    the speaker's output scale-invariant, so no change to its inputs can move
+    the solved gain.
+    """
+    torch.manual_seed(0)
+    speaker = build(token_exploration_rate=0.1).train()
+    vocabulary = speaker.vocabulary
+
+    def logits(spread, seed):
+        generator = torch.Generator().manual_seed(seed)
+        raw = spread * torch.randn(32, 5, vocabulary + 4, generator=generator)
+        return S.mask_reserved_tokens(raw)
+
+    for step in range(30):
+        S.update_exploration_gain(speaker, logits(1.0, step))
+    before = speaker.exploration_gain.item()
+
+    # Ten time constants at the floor is ample for a step change to land.
+    for step in range(int(10 / S.EXPLORATION_GAIN_MOMENTUM)):
+        S.update_exploration_gain(speaker, logits(8.0, 1000 + step))
+    after = speaker.exploration_gain.item()
+
+    assert after < before / 4, f"gain barely moved: {before:.3f} -> {after:.3f}"
+    assert speaker.realised_survival == pytest.approx(0.9, abs=0.02)
+
+
+@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
 def test_training_converges_on_the_requested_rate(build):
     """
     End to end, through the speaker rather than the helper: after enough batches

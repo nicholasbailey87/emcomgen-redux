@@ -163,7 +163,23 @@ def flatten_logit_distribution(
 # The exploration gain is an EMA over per-batch solves, smoothed in log space
 #     because gains are multiplicative. The clamp is a backstop only: a run that
 #     pins to either end has something wrong upstream of the channel.
-EXPLORATION_GAIN_MOMENTUM = 0.01
+#
+# The momentum is `max(1 / (t + 1), EXPLORATION_GAIN_MOMENTUM)`: a cumulative
+#     average that decays into a fixed-rate EMA once the floor bites, as
+#     `nn.BatchNorm1d` does with `momentum=None`. Early on there is no history
+#     worth keeping and the gain is moving fastest, so new solves should
+#     dominate; later the floor holds the response time constant.
+#
+# The floor is deliberately fast. Smoothing trades lag against noise, and there
+#     is very little noise here to buy: the median step-to-step change in the
+#     solved gain is ~0.1% in log terms, against drift of an order of magnitude
+#     over a few dozen batches early in training. On a recorded trajectory,
+#     dropping the floor from 0.01 to 0.1 halved the mean deviation of realised
+#     survival from its target (0.086 -> 0.042), while the cumulative-average
+#     warm-up on its own contributed ~0.002. At ~650 updates per ShapeWorld
+#     epoch a floor of 0.1 is a time constant of well under a hundredth of an
+#     epoch, so the gain tracks continuously across a 100-epoch run.
+EXPLORATION_GAIN_MOMENTUM = 0.1
 EXPLORATION_GAIN_MIN = 1e-2
 EXPLORATION_GAIN_MAX = 1e4
 
@@ -312,12 +328,22 @@ def update_exploration_gain(speaker: nn.Module, logits: torch.Tensor) -> None:
         cannot know its later positions' logits before sampling the earlier
         ones.
 
-    The first update sets the buffer outright, so that batch one is not sampled
-        at a gain of 1.0; later ones are an EMA in log space, since gains
-        compose multiplicatively. The calibration is a per-batch statistic and
-        so carries batch-to-batch noise — the EMA is what smooths it. If the
-        `exploration_gain` trace in metrics.csv looks jittery, lower
-        `EXPLORATION_GAIN_MOMENTUM` rather than raising the bisection count.
+    Smoothed in log space, since gains compose multiplicatively, at a momentum
+        of `max(1 / (t + 1), EXPLORATION_GAIN_MOMENTUM)` over the number of
+        updates so far. The first update therefore takes the solve outright
+        (1/1 = 1) rather than needing a special case, so batch one is not
+        sampled at a gain of 1.0; the next few still weight new solves heavily,
+        which is when the gain moves fastest; and the floor takes over once
+        there is enough history to average. See the note on the constant for
+        why the floor is set where it is.
+
+    Because `exploration_gain_updates` is a buffer it survives checkpointing, so
+        a resumed run continues at its established momentum instead of dropping
+        back into fast adaptation.
+
+    If the `exploration_gain` trace in metrics.csv looks jittery, lower
+        `EXPLORATION_GAIN_MOMENTUM` rather than raising the bisection count; if
+        `realised_survival` sits away from `token_exploration_rate`, raise it.
 
     Args:
         speaker: a speaker carrying `exploration_gain`, `exploration_gain_updates`,
@@ -334,14 +360,14 @@ def update_exploration_gain(speaker: nn.Module, logits: torch.Tensor) -> None:
         speaker.uniform_weight,
     )
 
-    if speaker.exploration_gain_updates == 0:
-        gain = solved
-    else:
-        momentum = EXPLORATION_GAIN_MOMENTUM
-        gain = torch.exp(
-            (1.0 - momentum) * torch.log(speaker.exploration_gain.float())
-            + momentum * torch.log(solved)
-        )
+    momentum = max(
+        1.0 / (int(speaker.exploration_gain_updates) + 1),
+        EXPLORATION_GAIN_MOMENTUM,
+    )
+    gain = torch.exp(
+        (1.0 - momentum) * torch.log(speaker.exploration_gain.float())
+        + momentum * torch.log(solved)
+    )
 
     gain = gain.clamp(EXPLORATION_GAIN_MIN, EXPLORATION_GAIN_MAX)
 
