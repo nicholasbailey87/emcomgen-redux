@@ -11,7 +11,7 @@ name = "ablation"
 dataset = "../data/cub"
 
 [optimiser]
-lr = 1e-4
+lr = 1e-3
 weight_decay = 0.05
 
 [scheduler]
@@ -28,3 +28,9 @@ time = "24:00:00"
 cpus_per_task = 6
 gpus_per_task = 1
 mem_gb = 24
+
+[receiver_comparer]
+dropout = 0.5
+
+[sender]
+prototype_dropout = 0.5
