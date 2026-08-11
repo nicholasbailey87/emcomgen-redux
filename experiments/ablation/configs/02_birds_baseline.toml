@@ -10,8 +10,14 @@ name = "ablation"
 [data]
 dataset = "../data/cub"
 
+[optimiser]
+lr = 1e-4
+weight_decay = 0.05
+
 [scheduler]
-epochs = 100
+lr_schedule_shape = "half_cosine"
+cool_point_multiplier = 0.0167
+warm_up_epochs = 5
 
 [experiment]
 repeats = 1
