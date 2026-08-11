@@ -14,7 +14,6 @@
 name = "ablation"
 
 [optimiser]
-lr = 1e-3
 weight_decay = 0.05
 
 [scheduler]
