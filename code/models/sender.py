@@ -382,6 +382,26 @@ def update_exploration_gain(speaker: nn.Module, logits: torch.Tensor) -> None:
     ).item()
 
 
+def reset_exploration_state(speaker: nn.Module) -> None:
+    """
+    Return a speaker's calibration buffers to their constructed values.
+
+    `exploration_gain` is solved against the *scale of this speaker's logits*,
+        so it is only meaningful for the weights that produced it. Re-drawing
+        the weights and keeping the gain would sample the first batches after a
+        reset at a fidelity calibrated for a speaker that no longer exists, and
+        `exploration_gain_updates` would keep the EMA at its slow late-training
+        momentum rather than letting it re-adapt (see `update_exploration_gain`).
+
+    Called from both speakers' `reset_parameters`, including the one `__init__`
+        runs, where it is a no-op restating the values just registered.
+    """
+    with torch.no_grad():
+        speaker.exploration_gain.fill_(1.0)
+        speaker.exploration_gain_updates.zero_()
+    speaker.realised_survival = float("nan")
+
+
 class AveragePrototyper(nn.Module):
 
     def __init__(self, *args, **kwargs):
@@ -654,6 +674,7 @@ class SenderGRULM(nn.Module):
         self.gru.reset_parameters()
         self.outputs2vocab.reset_parameters()
         self.token_embedding.reset_parameters()
+        reset_exploration_state(self)
 
 
 class SenderTransformerLM(nn.Module):
@@ -929,6 +950,7 @@ class SenderTransformerLM(nn.Module):
         self.cross_attention.reset_parameters()
         self.transformer.reset_parameters()
         self.outputs2vocab.reset_parameters()
+        reset_exploration_state(self)
 
 
 class Sender(nn.Module):
@@ -1045,7 +1067,11 @@ class Sender(nn.Module):
         return messages, torch.cat(prototypes, 1)
 
     def reset_parameters(self):
-        if hasattr(self.feat_model, 'reset_parameters'):
-            self.feat_model.reset_parameters()
+        # No `hasattr` guard, matching `Receiver.reset_parameters`. The guard
+        #     existed for `ViT2`, which had no `reset_parameters`; it now does,
+        #     and every other feature model already did. A guard here turns a
+        #     missing method into a silently skipped backbone rather than an
+        #     error, which is how the speaker's ViT went unreset.
+        self.feat_model.reset_parameters()
         self.prototyper.reset_parameters()
         self.language_model.reset_parameters()

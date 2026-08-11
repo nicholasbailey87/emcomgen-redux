@@ -175,6 +175,66 @@ def log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats):
     logging.info(f"Epoch {epoch} [{data_i}/{data_total} ({pct}%)] {meter_str}")
 
 
+# The submodules gradients are clipped over, in place of one norm across the
+#     whole pair. `torch.nn.utils.clip_grad_norm_` scales every gradient by the
+#     single factor `max_norm / total_norm`, so a global call hands every module
+#     a coefficient set by whichever module dominates the norm -- and the
+#     listener's comparer dominates it heavily (~90% of the squared norm at
+#     init, against ~0% for the speaker's vision model, whose gradient reaches
+#     it through the whole language model and the straight-through Gumbel
+#     sample). The coefficient then carries the comparer's batch-to-batch
+#     fluctuation into every other module, which is noise added to gradients
+#     that are already the weakest in the pair.
+#
+# Clipping per module makes each coefficient depend only on that module's own
+#     gradient. It does not change the *ratio* between modules -- a uniform
+#     rescale never did, and AdamW normalises per coordinate anyway -- what it
+#     removes is the cross-module noise coupling.
+#
+# The groups partition the pair; `_OTHER` catches anything a future
+#     architecture adds, so no parameter can silently go unclipped.
+CLIP_GROUPS = (
+    ("sender_vision", lambda pair: pair.sender.feat_model),
+    ("sender_prototyper", lambda pair: pair.sender.prototyper),
+    ("sender_language_model", lambda pair: pair.sender.language_model),
+    ("receiver_vision", lambda pair: pair.receiver.feature_model),
+    ("receiver_token_embedding", lambda pair: pair.receiver.token_embedding),
+    ("receiver_comparer", lambda pair: pair.receiver.comparer),
+)
+
+
+def clip_gradients(pair, max_norm):
+    """
+    Clip each submodule's gradients to `max_norm` independently.
+
+    Args:
+        pair: the sender/receiver `Pair`, with gradients already unscaled
+        max_norm: the per-module ceiling, `[optimiser] clip_grad_norm`
+
+    Returns:
+        A dict of module name -> that module's gradient norm *before* clipping,
+            for logging. Every group is reported, including ones that did not
+            reach the ceiling.
+    """
+    grouped = set()
+    norms = {}
+
+    for name, select in CLIP_GROUPS:
+        module = select(pair)
+        grouped.update(id(p) for p in module.parameters())
+        params = [p for p in module.parameters() if p.grad is not None]
+        if params:
+            norms[name] = torch.nn.utils.clip_grad_norm_(params, max_norm).item()
+
+    ungrouped = [
+        p for p in pair.parameters() if id(p) not in grouped and p.grad is not None
+    ]
+    if ungrouped:
+        norms["other"] = torch.nn.utils.clip_grad_norm_(ungrouped, max_norm).item()
+
+    return norms
+
+
 def run(
     split,
     epoch,
@@ -357,10 +417,7 @@ def run(
                 if (batch_i + 1) % config['optimiser']['accumulator_steps'] == 0:
                     # Unscale then clip, per https://docs.pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        pair.parameters(),
-                        config['optimiser']['clip_grad_norm']
-                    )
+                    clip_gradients(pair, config['optimiser']['clip_grad_norm'])
                     scaler.step(optimizer)
                     scaler.update()
                     scheduler.step(this_loss.item())
@@ -394,7 +451,7 @@ def run(
     if training and not backpropped:
         # Unscale then clip, per https://docs.pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(pair.parameters(), config['optimiser']['clip_grad_norm'])
+        clip_gradients(pair, config['optimiser']['clip_grad_norm'])
         scaler.step(optimizer)
         scaler.update()
         scheduler.step(this_loss.item())

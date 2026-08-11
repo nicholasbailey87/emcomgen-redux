@@ -124,6 +124,20 @@ class ViT2(nn.Module):
     def forward(self, x):
         return self.backbone(x)
 
+    def reset_parameters(self):
+        """
+        Delegate to broccoli's `ViT`, which resets its own encoder and head.
+
+        Without this, `Receiver.reset_parameters` raises `AttributeError` for
+            any rung using a ViT listener, and `Sender.reset_parameters` --
+            which guards on `hasattr` -- silently left the whole speaker
+            backbone untouched instead. Every other feature model here defines
+            the method, so its absence was the odd one out rather than a
+            deliberate opt-out.
+        """
+        self.backbone.reset_parameters()
+
+
 class Identity(nn.Module):
     def __init__(self):
         super(Identity, self).__init__()
@@ -294,8 +308,20 @@ class ConvBlock(nn.Module):
         return out
 
     def reset_parameters(self):
+        # Reproduce construction exactly, which is PyTorch's own initialisation
+        #     followed by `init_layer` overriding the weights -- `__init__`
+        #     builds the layers (so `nn.Conv2d.__init__` seeds weight *and*
+        #     bias) and only then calls this method. Going straight to
+        #     `init_layer` skipped the conv biases, which it does not touch, and
+        #     the BatchNorm running statistics, which are buffers rather than
+        #     parameters. Both were then carried across a reset.
+        # `parametrized_layers` also holds the ReLU and (when pooling) the
+        #     MaxPool2d, neither of which has parameters or a
+        #     `reset_parameters`, so select the two types that do rather than
+        #     excluding types one at a time.
         for layer in self.parametrized_layers:
-            if not isinstance(layer, nn.MaxPool2d):
+            if isinstance(layer, (nn.Conv2d, nn.BatchNorm2d)):
+                layer.reset_parameters()
                 init_layer(layer)
 
 
@@ -597,7 +623,16 @@ class ResNet(nn.Module):
                 indim = list_of_out_dims[i]
 
         if flatten:
-            avgpool = nn.AvgPool2d(7)
+            # Adaptive rather than `AvgPool2d(7)`, which hardcodes a 224px input.
+            #     Below that the pooling window is larger than the feature map
+            #     and the forward pass errors; above it a single 7x7 window
+            #     silently *crops* the map rather than pooling it (at 320px the
+            #     map is 10x10 and three rows and columns are discarded), which
+            #     also leaves `final_feat_dim` wrong. Numerically identical at
+            #     224, where the map is exactly 7x7. This matches torchvision's
+            #     `resnet18`, which is otherwise this network exactly: same
+            #     layout, same stride placement, same fan-out init.
+            avgpool = nn.AdaptiveAvgPool2d((1, 1))
             trunk.append(avgpool)
             trunk.append(Flatten())
             self.final_feat_dim = indim
@@ -611,9 +646,30 @@ class ResNet(nn.Module):
         return out
 
     def reset_parameters(self):
-        for module in self.trunk:
-            if hasattr(module, "reset_parameters"):
-                module.reset_parameters()
+        """
+        Re-initialise every layer exactly as `__init__` did.
+
+        This used to walk `self.trunk` and call `reset_parameters()` on anything
+            that had one. `SimpleBlock` defines no such method, so the eight
+            residual blocks -- 11.1M of the 11.18M parameters -- were skipped
+            entirely, and the two layers that *were* reached (the stem conv and
+            BN) got PyTorch's defaults, which for `Conv2d` is kaiming *uniform*
+            rather than the fan-out normal `init_layer` applies at construction.
+            One tensor of sixty was reset, with the wrong distribution.
+
+        Recursing over `self.modules()` reaches the blocks, and going through
+            `init_layer` keeps a reset indistinguishable from a fresh build.
+
+        BatchNorm running statistics are buffers rather than parameters, so they
+            are reset too: leaving them would carry the pre-reset feature
+            distribution across the reset, which is not what
+            `receiver_reset_interval` is asking for.
+        """
+        for module in self.modules():
+            if isinstance(module, (nn.Conv2d, nn.BatchNorm2d)):
+                init_layer(module)
+            if isinstance(module, nn.BatchNorm2d):
+                module.reset_running_stats()
 
 # def Conv6():
 #     return ConvNet(6)

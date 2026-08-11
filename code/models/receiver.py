@@ -403,6 +403,13 @@ class TransformerCrossAttentionComparer(nn.Module):
         return scores.squeeze(-1) # (batch, n_objects)
 
     def reset_parameters(self):
+        # The two adapters and the referent norm were missing here, so a reset
+        #     listener kept the projections that map referents and messages into
+        #     `d_model` -- i.e. most of what it had learned about its inputs --
+        #     while everything downstream of them was re-drawn.
+        self.referent_adapter.reset_parameters()
+        self.referent_layer_norm.reset_parameters()
+        self.message_adapter.reset_parameters()
         self.encoding.reset_parameters()
         self.fusion.reset_parameters()
         self.cross_attention.reset_parameters()
