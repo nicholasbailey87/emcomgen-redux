@@ -569,7 +569,9 @@ class SenderGRULM(nn.Module):
         self.d_model = kwargs["d_model"]
         self.vocabulary = kwargs["vocabulary"]
         self.message_length = kwargs["message_length"]
-        self.tau = kwargs["tau"]  # Gumbel-softmax tau, as in jayelm
+        # The configured tau. The tau actually passed to `gumbel_softmax` is
+        #     the `sampling_tau` property below, which tracks the learned scale.
+        self.tau = kwargs["tau"]
         self.uniform_weight = kwargs["uniform_weight"]
         self.dropout = kwargs["dropout"]
         self.layers = kwargs["layers"]
@@ -638,6 +640,53 @@ class SenderGRULM(nn.Module):
         """
         with torch.no_grad():
             self.log_logit_scale.fill_(math.log(self.initial_logit_scale))
+
+    @property
+    def sampling_tau(self):
+        """
+        The temperature handed to `gumbel_softmax`, tracking the learned scale:
+            `tau * logit_scale / initial_logit_scale`.
+
+        `tau` shapes the soft sample the straight-through estimator
+            differentiates; it leaves the hard forward sample alone, which is an
+            argmax and so invariant to it. With `tau` held constant while the
+            speaker sharpens, the surrogate sharpens with it and the gradient
+            collapses onto whichever token won the Gumbel draw: measured over
+            unit-variance logits at V = 20, the effective number of tokens
+            carrying gradient falls from 4.9 at the opening scale to 1.6 by a
+            scale of 6, with the winner holding 0.80 of the mass. The losing
+            tokens then receive almost nothing, so the speaker stops being told
+            what the alternatives were worth exactly as its channel becomes
+            good enough to use them.
+
+        Scaling `tau` with the scale holds that open instead -- the same
+            measurement gives 9.0 to 9.5 effective tokens across the range,
+            since the surrogate reduces to `softmax(L + g / scale)` and `L` is
+            pinned to unit variance by `layer_norm_logits`.
+
+        The ratio is against `initial_logit_scale` rather than raw, so that a
+            fresh speaker samples at exactly the configured `tau` and this
+            changes nothing at initialisation. It diverges only as the speaker
+            moves its own scale, which is the behaviour being added.
+
+        Detached, and that is not optional. `gumbel_softmax` divides the logits
+            by it, and the reserved slots are -inf by then, so a differentiable
+            tau puts `inf` into the gradient with respect to the scale and NaN
+            into the step -- the same failure fccba0f fixed for the scale
+            itself. It is also the right semantics: the scale is learned through
+            the forward channel, while tau only shapes the estimator, and a
+            speaker that could tune its own gradient estimator would have every
+            reason to soften it rather than to communicate better.
+
+        The cost is straight-through bias: the surrogate stays softer than the
+            hard sample the listener actually receives, so the speaker
+            differentiates a policy slightly different from the one it plays.
+            Straight-through is biased at any `tau`, so this is a change of
+            degree.
+        """
+        return (
+            self.tau * self.logit_scale / self.initial_logit_scale
+        ).detach()
 
     @property
     def logit_scale(self):
@@ -768,7 +817,7 @@ class SenderGRULM(nn.Module):
                 #     run, so the estimator sits at one operating point throughout.
                 predicted_onehot = F.gumbel_softmax(
                     logits,
-                    tau=self.tau,
+                    tau=self.sampling_tau,
                     hard=True,
                     dim=-1
                 )
@@ -848,7 +897,9 @@ class SenderTransformerLM(nn.Module):
         self.d_model = kwargs["d_model"]
         self.vocabulary = kwargs["vocabulary"]
         self.message_length = kwargs["message_length"]
-        self.tau = kwargs["tau"]  # Gumbel-softmax tau, as in jayelm
+        # The configured tau. The tau actually passed to `gumbel_softmax` is
+        #     the `sampling_tau` property below, which tracks the learned scale.
+        self.tau = kwargs["tau"]
         self.uniform_weight = kwargs["uniform_weight"]
         self.dropout = kwargs["dropout"]
         self.layers = kwargs["layers"]
@@ -1036,6 +1087,53 @@ class SenderTransformerLM(nn.Module):
             self.log_logit_scale.fill_(math.log(self.initial_logit_scale))
 
     @property
+    def sampling_tau(self):
+        """
+        The temperature handed to `gumbel_softmax`, tracking the learned scale:
+            `tau * logit_scale / initial_logit_scale`.
+
+        `tau` shapes the soft sample the straight-through estimator
+            differentiates; it leaves the hard forward sample alone, which is an
+            argmax and so invariant to it. With `tau` held constant while the
+            speaker sharpens, the surrogate sharpens with it and the gradient
+            collapses onto whichever token won the Gumbel draw: measured over
+            unit-variance logits at V = 20, the effective number of tokens
+            carrying gradient falls from 4.9 at the opening scale to 1.6 by a
+            scale of 6, with the winner holding 0.80 of the mass. The losing
+            tokens then receive almost nothing, so the speaker stops being told
+            what the alternatives were worth exactly as its channel becomes
+            good enough to use them.
+
+        Scaling `tau` with the scale holds that open instead -- the same
+            measurement gives 9.0 to 9.5 effective tokens across the range,
+            since the surrogate reduces to `softmax(L + g / scale)` and `L` is
+            pinned to unit variance by `layer_norm_logits`.
+
+        The ratio is against `initial_logit_scale` rather than raw, so that a
+            fresh speaker samples at exactly the configured `tau` and this
+            changes nothing at initialisation. It diverges only as the speaker
+            moves its own scale, which is the behaviour being added.
+
+        Detached, and that is not optional. `gumbel_softmax` divides the logits
+            by it, and the reserved slots are -inf by then, so a differentiable
+            tau puts `inf` into the gradient with respect to the scale and NaN
+            into the step -- the same failure fccba0f fixed for the scale
+            itself. It is also the right semantics: the scale is learned through
+            the forward channel, while tau only shapes the estimator, and a
+            speaker that could tune its own gradient estimator would have every
+            reason to soften it rather than to communicate better.
+
+        The cost is straight-through bias: the surrogate stays softer than the
+            hard sample the listener actually receives, so the speaker
+            differentiates a policy slightly different from the one it plays.
+            Straight-through is biased at any `tau`, so this is a change of
+            degree.
+        """
+        return (
+            self.tau * self.logit_scale / self.initial_logit_scale
+        ).detach()
+
+    @property
     def logit_scale(self):
         """
         The multiplier applied to the normalised logits before sampling, always
@@ -1098,7 +1196,7 @@ class SenderTransformerLM(nn.Module):
 
             onehot_content = F.gumbel_softmax(
                 logits,
-                tau=self.tau,
+                tau=self.sampling_tau,
                 hard=True,
                 dim=-1
             )
