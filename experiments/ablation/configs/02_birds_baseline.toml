@@ -42,5 +42,5 @@ mem_gb = 24
 # scales with it: 57 epochs at chance here against ShapeWorld's 11. That leaves
 # roughly 2,700 usable optimiser steps to train a from-scratch ResNet18, which
 # is the underfitting visible in the birds run's flat train accuracy.
-init_energy = 0.77
+init_energy = 0.9
 uniform_weight = 0.1

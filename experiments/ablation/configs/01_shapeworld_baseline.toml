@@ -53,7 +53,7 @@ mem_gb = 24
 # the same span and both series breaking together. 0.77 opens below that
 # threshold while staying well clear of the ~0.6 floor under which the
 # premature-sharpening failure this scheme exists to prevent comes back.
-init_energy = 0.77
+init_energy = 0.9
 # The paper's appendix A.1 credits a 90%-logits / 10%-uniform mixture with
 # breaking the colour-only local minimum, and bs6 ran at 0.1 as well.
 # DEFAULT.toml's 0.02 is 5x below both.

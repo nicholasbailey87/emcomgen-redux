@@ -156,7 +156,7 @@ message_length = 7 # max message length. note this includes sos/eos token, i.e. 
 # V is `vocabulary` above, the emittable tokens only: the four reserved slots
 # (PAD/SOS/EOS/UNK) are masked to -inf before the mixture, which is spread over
 # the finite entries, so these divide by 14 rather than by 18.
-uniform_weight = 0.02
+uniform_weight = 0.1
 #
 # `init_energy` is the *starting point*, and the range the speaker can move
 # through. It is the fraction of the maximum possible entropy that a freshly
