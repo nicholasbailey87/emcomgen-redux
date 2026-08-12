@@ -68,10 +68,14 @@ ENERGY_SCALE_MIN = 1e-3
 ENERGY_SCALE_MAX = 1e3
 
 
-def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
+def layer_norm_logits(
+    logits: torch.Tensor,
+    vocabulary: int,
+    weight: torch.Tensor = None,
+) -> torch.Tensor:
     """
     Normalise the *emittable* vocabulary logits to zero mean and unit variance,
-        per example and per position.
+        per example and per position, then apply a learned per-token gain.
 
     Only the last `vocabulary` columns are normalised. The leading four reserved
         slots (PAD/SOS/EOS/UNK) are concatenated back untouched: they are masked
@@ -89,10 +93,37 @@ def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
         of them at once), has no running statistics so train and eval agree, and
         does not couple to `accumulator_steps`.
 
-    Functional rather than a module, so that the affine parameters are
-        structurally absent rather than merely disabled, and nothing is added to
-        the `state_dict`. Without affine the transform is argmax-preserving, so
-        it changes no eval-time message.
+    `weight` is LayerNorm's gamma, owned by the calling speaker and passed in;
+        there is deliberately no `bias`. The two are not interchangeable, and
+        which side of the normaliser a parameter sits on is the whole point:
+
+        - A *pre-norm* per-token bias -- `outputs2vocab.bias`, which both
+          speakers used to carry -- is divided by the incoming standard
+          deviation along with everything else, so its influence shrinks as the
+          speaker's own logits grow. It is diluted by learning.
+        - A *post-norm* beta is added after that division. Nothing dilutes it,
+          so an input-independent token preference installed there survives at
+          full strength however much the speaker learns. That is a free route to
+          the single-message language these runs keep collapsing into
+          (`test_unique_message_fraction` of 0.005 across 200 games), so beta
+          stays off and `outputs2vocab` is now built with `bias=False`. The
+          speaker keeps exactly one parameterisation of a token prior, and it is
+          this one.
+
+    Gamma is initialised to ones, so a fresh speaker is normalised exactly as
+        before and `logit_scale` still resolves the opening sharpness from
+        `init_energy` alone. What it adds is a route the speaker did not
+        previously have. LayerNorm pins the variance and `logit_scale` is a
+        constant, so sharpness was reachable only by *reshaping* the normalised
+        distribution -- measured at 55 epochs on birds before survival moved at
+        all, while `logit_spread` grew fourfold and the normaliser divided every
+        bit of it back out. Gamma can scale, so that route is now direct.
+
+    Note this costs the argmax-preservation the un-affine transform had: a
+        per-token gain can reorder tokens, so eval-time messages are no longer
+        invariant to it. That is intended -- adapting the speaker's token
+        preferences to the listener's is the point -- but it does mean gamma is
+        state, and it enters the `state_dict`.
 
     `eps` is 1e-12 rather than the 1e-5 default, and that is load-bearing.
         `F.layer_norm` divides by `sqrt(var + eps)`, so scale invariance holds
@@ -122,6 +153,7 @@ def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
     Args:
         logits: (..., vocabulary + 4), reserved tokens first
         vocabulary: number of emittable tokens
+        weight: (vocabulary,) learned gain, or None for the plain normaliser
 
     Returns:
         A tensor of the same shape, with the emittable slice normalised
@@ -129,7 +161,12 @@ def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
     return torch.cat(
         [
             logits[..., :4],
-            F.layer_norm(logits[..., 4:], (vocabulary,), eps=LAYER_NORM_EPS),
+            F.layer_norm(
+                logits[..., 4:],
+                (vocabulary,),
+                weight=weight,
+                eps=LAYER_NORM_EPS,
+            ),
         ],
         dim=-1,
     )
@@ -565,10 +602,20 @@ class SenderGRULM(nn.Module):
             bidirectional=self.bidirectional
         )
 
+        # `bias=False`: the speaker's one token prior is `logit_affine` below,
+        #     which sits after the normaliser. See `layer_norm_logits` for why
+        #     the two sides are not interchangeable.
         self.outputs2vocab = nn.Linear(
             self.d_model * self.directions,
-            self.vocabulary + 4 # +4 for PAD, SOS, EOS, UNK
+            self.vocabulary + 4, # +4 for PAD, SOS, EOS, UNK
+            bias=False,
         )
+
+        # LayerNorm's gamma over the emittable tokens, ones at initialisation so
+        #     a fresh speaker is normalised exactly as it was before this
+        #     existed. Reserved slots are excluded: they are masked to -inf
+        #     straight afterwards, so a gain on them would be meaningless.
+        self.logit_affine = nn.Parameter(torch.ones(self.vocabulary))
 
         self.init_h = nn.Linear(
             2 * referent_embedding_size, 
@@ -657,7 +704,9 @@ class SenderGRULM(nn.Module):
             # This must come before the scale and the uniform weight mixing: it
             #     is what fixes the magnitude the scale is expressed against,
             #     and it would otherwise mess up the mixture.
-            logits = layer_norm_logits(logits, self.vocabulary)
+            logits = layer_norm_logits(
+                logits, self.vocabulary, weight=self.logit_affine
+            )
 
             # Masking comes first so that the uniform mixture below is spread
             #     over the emittable tokens only.
@@ -747,6 +796,7 @@ class SenderGRULM(nn.Module):
         self.gru.reset_parameters()
         self.outputs2vocab.reset_parameters()
         self.token_embedding.reset_parameters()
+        nn.init.ones_(self.logit_affine)
         self.realised_survival = float("nan")
         self.logit_spread = float("nan")
 
@@ -910,10 +960,14 @@ class SenderTransformerLM(nn.Module):
             beta=self.beta,
         )
 
+        # `bias=False` and `logit_affine` as in `SenderGRULM`, see there.
         self.outputs2vocab = nn.Linear(
             self.d_model,
-            self.vocabulary + 4 # +4 for PAD, SOS, EOS, UNK
+            self.vocabulary + 4, # +4 for PAD, SOS, EOS, UNK
+            bias=False,
         )
+
+        self.logit_affine = nn.Parameter(torch.ones(self.vocabulary))
 
         self.reset_parameters()
 
@@ -974,7 +1028,9 @@ class SenderTransformerLM(nn.Module):
 
         # This must come before the scale and the uniform weight mixing — as in
         #     `SenderGRULM.decode`, see the notes there.
-        logits = layer_norm_logits(logits, self.vocabulary)
+        logits = layer_norm_logits(
+            logits, self.vocabulary, weight=self.logit_affine
+        )
 
         # Mask first, then explore, training-time only — as in
         #     `SenderGRULM.decode`, see the notes there.
@@ -1031,6 +1087,7 @@ class SenderTransformerLM(nn.Module):
         self.cross_attention.reset_parameters()
         self.transformer.reset_parameters()
         self.outputs2vocab.reset_parameters()
+        nn.init.ones_(self.logit_affine)
         self.realised_survival = float("nan")
         self.logit_spread = float("nan")
 
