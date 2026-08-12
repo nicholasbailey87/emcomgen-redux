@@ -1,9 +1,19 @@
-# Rung 2: CUB at the DEFAULT.toml birds settings, unmodified.
+# Rung 2: CUB with the GRU/CNN baseline agents.
 #
-# Naming the dataset is the only change needed. `parse_config.get_config`
-# switches to the `[birds.*]` family off the *name* of the dataset directory,
-# which brings in ResNet18 for both agents, batch_size 16, n_examples 10,
-# vocabulary 20, message_length 10, uniform_weight 0.0 and accumulator_steps 1.
+# Naming the dataset is the only structural change needed.
+# `parse_config.get_config` switches to the `[birds.*]` family off the *name* of
+# the dataset directory, which brings in ResNet18 for both agents, batch_size
+# 16, n_examples 10, vocabulary 20, message_length 10, no silhouetting and
+# accumulator_steps 1.
+#
+# The blocks below still bind for birds: `get_config` merges the `[birds.*]`
+# family into the defaults *first* and applies this file's own blocks *after*,
+# so a key set here wins over the family. `[birds.sender_language_model]` sets
+# only `vocabulary` and `message_length`, and both survive the merge below.
+#
+# Overrides are kept in step with rung 1 so the two datasets differ in their
+# data and their agents' vision models, not in their optimiser or their channel.
+# See 01_shapeworld_baseline.toml for the reasoning behind each.
 
 name = "ablation"
 
@@ -11,7 +21,7 @@ name = "ablation"
 dataset = "../data/cub"
 
 [optimiser]
-weight_decay = 0.05
+weight_decay = 0.0
 
 [scheduler]
 epochs = 100
@@ -25,8 +35,12 @@ cpus_per_task = 6
 gpus_per_task = 1
 mem_gb = 24
 
-[receiver_comparer]
-dropout = 0.5
-
-[sender]
-prototype_dropout = 0.5
+[sender_language_model]
+# Birds needs this more than ShapeWorld does, not less. At the same
+# `init_energy` a larger vocabulary opens on a worse channel -- 0.190 realised
+# survival at V = 20 against ShapeWorld's 0.324 at V = 14 -- and the dead span
+# scales with it: 57 epochs at chance here against ShapeWorld's 11. That leaves
+# roughly 2,700 usable optimiser steps to train a from-scratch ResNet18, which
+# is the underfitting visible in the birds run's flat train accuracy.
+init_energy = 0.77
+uniform_weight = 0.1

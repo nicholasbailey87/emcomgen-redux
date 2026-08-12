@@ -1,8 +1,10 @@
-# Rung 1: ShapeWorld at the DEFAULT.toml settings, unmodified.
+# Rung 1: ShapeWorld with the GRU/CNN baseline agents.
 #
 # Conv4 sender + Conv4 receiver, AveragePrototyper, SenderGRULM,
 # BilinearGRUComparer. This is the reference point every other rung is measured
-# against, so it deliberately overrides nothing.
+# against, so it overrides as little as it can: only the settings where
+# DEFAULT.toml currently disagrees with
+# emergent_generalization_neurips21.tex. Each block below says which.
 #
 # `epochs` and `repeats` below are not overrides: scripts/job_utils.py reads
 # both straight out of this file rather than out of the merged config, so every
@@ -10,11 +12,20 @@
 # `[slurm]` is read from the *first* config in the folder only (sorted by
 # filename), so the block here governs the whole array -- it is sized for the
 # heaviest job in the set, which is rung 12.
+#
+# Note the speaker/listener dropout overrides that used to be here are gone.
+# They set both to 0.5 against DEFAULT.toml's 0.1, which is jayelm's value and
+# the one bs6 ran; deleting them inherits 0.1 rather than restating it.
 
 name = "ablation"
 
 [optimiser]
-weight_decay = 0.05
+# jayelm uses plain Adam with no decay, and bs6 -- the only run so far to reach
+# the paper's ShapeWorld numbers -- set this to 0.0 explicitly. At 0.0 AdamW and
+# Adam are the same optimiser, so this also removes any need to override
+# `class`. The 0.05 it replaces was 5x DEFAULT.toml's own 0.01, applied to runs
+# that could not fit their training set.
+weight_decay = 0.0
 
 [scheduler]
 epochs = 100
@@ -28,8 +39,22 @@ cpus_per_task = 6
 gpus_per_task = 1
 mem_gb = 24
 
-[receiver_comparer]
-dropout = 0.5
-
-[sender]
-prototype_dropout = 0.5
+[sender_language_model]
+# Both settings here govern the channel, and every other quantity in the run is
+# measured through it, so these come before anything else is worth tuning.
+#
+# `init_energy`: DEFAULT.toml's 0.9 is derived in `logit_scale`
+# (code/models/sender.py) from a single birds trajectory in which "accuracy left
+# chance on the way back up at around 0.82-0.85" retained entropy. That
+# observation locates the entropy at which the channel becomes usable, and 0.9
+# sits above it -- so a run must first sharpen *down* past 0.85 before it can
+# learn anything at all. Measured cost of starting there: 11 epochs at chance on
+# ShapeWorld and 57 on birds, with `train_realised_survival` flat across exactly
+# the same span and both series breaking together. 0.77 opens below that
+# threshold while staying well clear of the ~0.6 floor under which the
+# premature-sharpening failure this scheme exists to prevent comes back.
+init_energy = 0.77
+# The paper's appendix A.1 credits a 90%-logits / 10%-uniform mixture with
+# breaking the colour-only local minimum, and bs6 ran at 0.1 as well.
+# DEFAULT.toml's 0.02 is 5x below both.
+uniform_weight = 0.1
