@@ -143,39 +143,55 @@ token_embedding_size = 500
 d_model = 1024
 vocabulary = 14
 message_length = 7 # max message length. note this includes sos/eos token, i.e. the true length is this - 2
+# There are exactly two exploration controls, and they do different jobs.
+#
+# `uniform_weight` (w) is the *ceiling* on fidelity, and so the floor under
+# exploration. Mixing caps a slot's winner at `1 - w + w/V` however sharp the
+# logits are, so at least `w * (1 - 1/V)` of symbols are flipped no matter what
+# -- 0.0186 at w = 0.02, V = 14. That is a permanent per-symbol corruption rate
+# training cannot reduce, which is the point: it keeps late training from
+# committing the channel entirely. This is jayelm's `--uniform_weight`, and its
+# role here is the one it has there.
+#
+# V is `vocabulary` above, the emittable tokens only: the four reserved slots
+# (PAD/SOS/EOS/UNK) are masked to -inf before the mixture, which is spread over
+# the finite entries, so these divide by 14 rather than by 18.
 uniform_weight = 0.02
-# The *expected* fraction of symbols the Gumbel noise flips, and the exploration
-# knob. It is calibrated at runtime rather than assumed: the noise has a fixed
-# standard deviation of 1.283, so fidelity is set by the scale of the speaker's
-# logits, and a bisection each batch solves for the logit gain that delivers this
-# rate (see `calibrate_exploration_gain`). Reported per epoch as
-# `exploration_gain` and `realised_survival`.
 #
-# `uniform_weight` (w) puts a hard floor of `w * (1 - 1/V)` under it -- 0.0186 at
-# w = 0.02, V = 14 -- because mixing caps a slot's winner at `1 - w + w/V`
-# whatever the gain does. A request below the floor warns at construction.
+# `logit_scale_coefficient` (c) is the *operating point*, and the range the
+# speaker can move through. The emittable logits are normalised to unit variance
+# and then multiplied by `c * ln(V)`, which is what they are worth against the
+# Gumbel noise's fixed 1.283 standard deviation. See `logit_scale` in
+# `models/sender.py` for why the vocabulary term is there and why the scale is a
+# constant rather than something solved per batch.
 #
-# V here is `vocabulary` above, the emittable tokens only: the four reserved
-# slots (PAD/SOS/EOS/UNK) are masked to -inf before the mixture, which is spread
-# over the finite entries, so these divide by 14 rather than by 18.
+# At 0.66 the scale is 1.74 here and 1.98 for birds, and a freshly initialised
+# speaker flips ~50% of its symbols. It can work its way down to the
+# `uniform_weight` floor by learning a peaked distribution, and that trajectory
+# is what `realised_survival` reports each epoch. Raising c narrows the range and
+# starts the speaker closer to a clean channel; lowering it makes early
+# exploration heavier and can leave the ceiling too noisy to communicate through.
 #
-# The target is a *mean*, and confidence is strongly skewed, so a mean of 0.90
-# survival means the median slot sits at 0.98 and a p10 tail at 0.57:
-# exploration concentrates on the slots the model is unsure about, which is the
-# behaviour wanted.
-token_exploration_rate = 0.1
+# Note the target is a *mean* over slots and confidence is skewed, so a mean
+# survival hides a wide spread: exploration concentrates on the slots the model
+# is unsure about, which is the behaviour wanted.
+logit_scale_coefficient = 0.66
 tau = 1.0                     # Gumbel-softmax tau. Gradient shaping only:
                               # the hard forward sample is an argmax and so
-                              # is invariant to it. jayelm's `--tau`.
-layer_norm_logits = true
+                              # is invariant to it. jayelm's `--tau`. With a
+                              # constant scale the ratio between the two is
+                              # fixed, so the straight-through estimator sits at
+                              # one operating point for the whole run.
 dropout = 0.1
 layers = 1
 bidirectional = false
 heads = 4 # Heads per layer - only applies to Transformer language models
 utility_tokens = 4 # Only applies to Transformer language models
-# See [sender_feature_model] for what these are and why they are here. Note
-# `layer_norm_logits` above is this section's own, and applies to the vocabulary
-# logits rather than to a vision model's `batch_norm_logits`.
+# See [sender_feature_model] for what these are and why they are here. Note the
+# vocabulary logits are always layer-normalised before sampling and there is no
+# knob for it: `logit_scale_coefficient` above is calibrated against unit
+# variance, so the two are a pair. That is unrelated to a vision model's
+# `batch_norm_logits`, which is broccoli's own.
 ff_ratio = 2 # Only applies to Transformer language models
 stochastic_depth = 0.2 # Only applies to Transformer language models
 depthwise_linear_stochastic_depth = true
@@ -304,22 +320,29 @@ accumulator_steps = 1
 feature_model = "ResNet18"
 
 [birds.sender_language_model]
-# No `uniform_weight` override here, unlike jayelm's run_cub.sh, which passes no
-# --uniform_weight and so explored CUB with the argparse default of 0.0. Copying
-# that used to be the only thing holding the two datasets' channels apart: under
-# the old scheme the mixture *was* the exploration knob, so ShapeWorld's 0.1
-# capped its winner at 0.907 whatever the logits did, while birds at 0.0 had no
-# cap and its fidelity floated with whatever scale the architecture happened to
-# produce -- 0.24 for the ViT sender, and it would have been ~1.0 for a Conv4
-# one. Uncalibrated in both directions, i.e. a difference in the channel rather
-# than in the task.
+# Neither exploration knob is overridden here, and both are doing work.
 #
-# `token_exploration_rate` now fixes that, and would do so with the override
-# still in place. What dropping it buys is the *floor*: birds gets the same
-# irreducible `w * (1 - 1/V)` corruption ShapeWorld gets -- w the
-# `uniform_weight` above, V the `vocabulary` below, so 0.019 here against
-# ShapeWorld's 0.0186 -- where `uniform_weight = 0.0` would leave it free to
-# drive its channel arbitrarily close to noiseless late in training.
+# No `uniform_weight` override, unlike jayelm's run_cub.sh, which passes no
+# --uniform_weight and so explored CUB with the argparse default of 0.0. That
+# left birds with no ceiling at all: its fidelity floated with whatever scale the
+# architecture happened to produce -- 0.24 for the ViT sender, ~1.0 for a Conv4
+# one -- so the two datasets differed in their channel rather than in their task.
+# Inheriting w = 0.02 gives birds the same irreducible `w * (1 - 1/V)` corruption
+# ShapeWorld gets: 0.019 here against ShapeWorld's 0.0186.
+#
+# No `logit_scale_coefficient` override either, and that is the point of the
+# `ln(V)` term in `logit_scale`. The larger vocabulary below means a winning
+# symbol must beat the largest of 20 Gumbel draws rather than 14, so the same
+# coefficient resolves to a larger scale -- 1.98 against ShapeWorld's 1.74 --
+# and both datasets start their speakers at the same fraction of symbols
+# flipped. A shared bare constant would not do that: it would leave birds
+# exploring measurably harder at initialisation purely because its vocabulary is
+# bigger.
+#
+# Note the two datasets are still not identical at the message level, and cannot
+# be: the same per-symbol rate over 8 content tokens here versus 5 on ShapeWorld
+# corrupts a larger share of whole messages. `message_length` is the knob that
+# governs that, not these.
 vocabulary = 20
 message_length = 10 # max message length. note this includes sos/eos token, i.e. the true length is this - 2
 

@@ -1,47 +1,49 @@
 """
-Tests for the calibrated Gumbel exploration channel in code/models/sender.py.
+Tests for the Gumbel exploration channel in code/models/sender.py.
 
 Runnable without pytest:  python tests/test_exploration.py
 
 `F.gumbel_softmax(logits, hard=True)` emits `argmax(logits + g)` with
 `g ~ Gumbel(0,1)`, whose standard deviation is a fixed 1.283. That noise floor
 does not move, so how many symbols survive the channel is set entirely by the
-scale of the speaker's logits -- which, before this, was an accident of the
-architecture: one arm of a ladder passed 99% of its symbols and another 24%,
-with nothing in the config saying so. The point of the machinery under test is
-to make that a stated number, identical across speakers.
+scale of the speaker's logits -- which, before any of this, was an accident of
+the architecture: one arm of a ladder passed 99% of its symbols and another 24%,
+with nothing in the config saying so.
 
-Six things have to hold for it to be that.
+Two mechanisms fix that between them, and the tests are organised around which
+does what.
 
-The calibration has to *land*, across logit distributions of wildly different
-scale and sharpness -- scale-invariance is the entire claim, so a sharp and a
-flat distribution are checked at every setting.
+`layer_norm_logits` pins the emittable logits to unit variance per example and
+per position, so every speaker arrives at the channel with logits of the same
+magnitude whatever its architecture did. **That** is what makes exploration
+comparable across arms, and it is checked directly: two logit tensors differing
+by a factor of a hundred must reach the same rate.
 
-It rests on the Gumbel-max identity, that a slot's survival probability is
-exactly its winning token's softmax probability. That is what makes the solve
-exact and free of Monte Carlo, so it is pinned against actual sampling here.
+`logit_scale` then says what that unit is worth, as the constant `c * ln(V)`.
+The vocabulary term is not cosmetic -- a winner must beat the largest of `V`
+Gumbel draws and `E[max g] = ln V + gamma`, so without it the same coefficient
+would mean a different channel for ShapeWorld's V=14 than for CUB's V=20. It is
+a constant rather than a per-batch solve against a requested rate, because
+solving on top of LayerNorm also pins the speaker's *shape*: it overwrites the
+speaker's own confidence in both directions, hardest at initialisation, where
+forcing high fidelity onto a speaker whose argmax is nearly input-independent
+means emitting one message for every input from the first batch.
 
-The uniform mixture's bounds have to survive the ordering. Gain multiplies
-*before* mixing; the reverse order destroys them, which is checked so that a
-future reordering regresses loudly rather than silently.
+So the contract is a starting point and a range, not a target. What a speaker
+actually achieves is `realised_survival`, and it is expected to move over a run.
 
-Eval has to be greedy and deterministic, and invariant to every train-time knob.
-Both speakers used to call `gumbel_softmax` unconditionally, so every reported
-accuracy and topsim was measured through the noisy channel rather than on the
-policy.
-
-The gain is a buffer, not a parameter, so it has to survive a checkpoint
-round-trip and stay put during eval.
-
-And the normaliser has to be position-invariant. BatchNorm was not: it
-annihilated per-position offsets in the GRU, which sees one position per call,
-while preserving them in the Transformer, which sees them all at once. That
-asymmetry is exactly what LayerNorm removes.
+The rest is unchanged and still has to hold. The Gumbel-max identity, that a
+slot's survival probability is exactly its winning token's softmax probability,
+is what lets survival be measured off a softmax with no Monte Carlo. The uniform
+mixture's bounds have to survive the ordering -- the scale multiplies *before*
+mixing, and the reverse destroys them. Eval has to be greedy, deterministic and
+invariant to every train-time knob. And the normaliser has to be
+position-invariant, which BatchNorm was not.
 """
 
+import math
 import os
 import sys
-import warnings
 
 import pytest
 import torch
@@ -68,8 +70,8 @@ def _logit_shapes(vocabulary, seed=0):
     The named extremes matter most: `sharp` stands for the Conv4 speaker, whose
     unnormalised logits reached a standard deviation of 159 and a channel that
     passed 99% of symbols, and `flat` for the post-norm Transformer speaker,
-    pinned near 1.0 and passing 33%. If the calibration is scale-invariant it
-    has to bring both to the same rate.
+    pinned near 1.0 and passing 33%. LayerNorm has to bring both to the same
+    rate -- see `test_layer_norm_makes_exploration_scale_invariant`.
     """
     generator = torch.Generator().manual_seed(seed)
     base = torch.randn(64, 5, vocabulary + 4, generator=generator)
@@ -113,55 +115,169 @@ def _prototypes(speaker, batch_size=32, seed=0):
     )
 
 
-# -------------------------------------------------------------- 1. round-trip
+# ------------------------------------------------- 1. the scale is V-aware --
 
-def test_calibration_round_trip():
+def test_logit_scale_resolves_against_the_vocabulary():
     """
-    The solved gain delivers the requested rate, whatever the logits looked
-    like going in. This is the whole contract: `token_exploration_rate` is a
-    number the config states rather than a number the architecture happens to
-    produce.
+    `c * ln(V)`, and the two values the shipped datasets actually use. Pinned
+    numerically because these are quoted in DEFAULT.toml and the README.
     """
-    for rate in (0.05, 0.1, 0.2):
-        for uniform_weight in (0.0, 0.02):
-            for vocabulary in (14, 20):
-                for name, raw in _logit_shapes(vocabulary).items():
-                    logits = _masked(raw)
-                    gain = S.calibrate_exploration_gain(
-                        logits, rate, uniform_weight
-                    )
-                    realised = S.mean_winning_probability(
-                        logits, gain.item(), uniform_weight
-                    ).item()
-                    assert abs(realised - (1.0 - rate)) < 0.005, (
-                        f"{name} logits, V={vocabulary}, w={uniform_weight}, "
-                        f"rate={rate}: realised {realised:.4f} at gain "
-                        f"{gain.item():.3f}"
-                    )
+    assert S.logit_scale(0.66, 14) == pytest.approx(1.742, abs=0.001)
+    assert S.logit_scale(0.66, 20) == pytest.approx(1.977, abs=0.001)
+
+    # Monotone in both arguments, and a bare coefficient is recovered at V = e.
+    assert S.logit_scale(0.66, 20) > S.logit_scale(0.66, 14)
+    assert S.logit_scale(1.0, math.e) == pytest.approx(1.0)
 
 
-def test_calibration_is_scale_invariant():
+@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+def test_speaker_resolves_its_scale_from_its_own_vocabulary(build):
     """
-    Two speakers whose logits differ only by a constant factor -- the actual
-    difference between the arms of the ladder -- end up at the same rate, by
-    landing on gains that differ by the reciprocal of that factor.
+    The scale is a plain float resolved at construction, not a buffer and not
+    something a training step can move.
     """
-    logits = _masked(_logit_shapes(14)["typical"])
+    speaker = build()
+    assert speaker.logit_scale == pytest.approx(
+        S.logit_scale(
+            get_config()["sender_language_model"]["logit_scale_coefficient"],
+            speaker.vocabulary,
+        )
+    )
+    assert isinstance(speaker.logit_scale, float)
 
-    gain_one = S.calibrate_exploration_gain(logits, 0.1, 0.02).item()
-    gain_hundred = S.calibrate_exploration_gain(logits * 100.0, 0.1, 0.02).item()
-
-    assert abs(gain_one / gain_hundred - 100.0) / 100.0 < 0.02
+    birds = build(vocabulary=20)
+    assert birds.logit_scale > speaker.logit_scale
 
 
-# ---------------------------------------------------------- 2. Gumbel-max id
+def test_initial_operating_point_is_vocabulary_invariant():
+    """
+    The point of the `ln(V)` term. A freshly initialised speaker -- whose
+    normalised logits are near enough i.i.d. normal -- must flip roughly the
+    same fraction of its symbols whatever its vocabulary size, because the
+    scale grows with the noise floor it has to clear.
+
+    Without the term this fails loudly: at a flat scale of 2.0 the same speaker
+    flips 50% of its symbols at V=14 and 76% at V=128, which would be a
+    difference in the channel masquerading as a difference between datasets.
+    """
+    coefficient = 0.66
+    rates = {}
+    for vocabulary in (8, 14, 20, 32, 64):
+        generator = torch.Generator().manual_seed(0)
+        raw = torch.randn(4096, vocabulary + 4, generator=generator)
+        logits = _masked(raw)
+        survival = S.mean_winning_probability(
+            logits, S.logit_scale(coefficient, vocabulary), 0.0
+        ).item()
+        rates[vocabulary] = 1.0 - survival
+
+    # Tight where it matters: the two vocabularies the shipped datasets use.
+    assert abs(rates[14] - rates[20]) < 0.02, rates
+
+    # Looser across a 8x range of vocabulary, where the log fit is approximate.
+    assert max(rates.values()) - min(rates.values()) < 0.06, (
+        f"initial rate varies with V: {rates}"
+    )
+
+    # And the level is the one DEFAULT.toml documents: a speaker that starts
+    # genuinely uncertain, with room to earn confidence.
+    for vocabulary, rate in rates.items():
+        assert 0.40 < rate < 0.62, f"V={vocabulary} starts at {rate:.3f}"
+
+    # The control: drop the vocabulary term and the invariance goes away.
+    flat = {}
+    for vocabulary in (14, 64):
+        generator = torch.Generator().manual_seed(0)
+        logits = _masked(torch.randn(4096, vocabulary + 4, generator=generator))
+        flat[vocabulary] = 1.0 - S.mean_winning_probability(logits, 2.0, 0.0).item()
+    assert flat[64] - flat[14] > 0.1, flat
+
+
+# ------------------------------- 2. LayerNorm is what equalises the ladder --
+
+def test_layer_norm_makes_exploration_scale_invariant():
+    """
+    The claim the per-batch calibration used to make, now made by the
+    normaliser: two speakers whose raw logits differ by a constant factor --
+    the actual difference between the arms of the ladder -- reach the same
+    channel, because the factor is divided out before the scale is applied.
+
+    This is why the solve is redundant. There is nothing left for it to adapt
+    to except the *shape* of the logits, which is the speaker's own policy.
+    """
+    raw = _logit_shapes(14)["typical"]
+    scale = S.logit_scale(0.66, 14)
+
+    def survival(logits):
+        return S.mean_winning_probability(_masked(logits), scale, 0.02).item()
+
+    baseline = survival(raw)
+    for factor in (0.1, 1.0, 10.0, 1e3, 1e5):
+        assert abs(survival(raw * factor) - baseline) < 3e-4, factor
+
+    # The named extremes of the real ladder, end to end. `flat` is sd 0.05,
+    # which is where the eps floor below starts to be visible at all.
+    shapes = _logit_shapes(14)
+    realised = {
+        name: survival(logits)
+        for name, logits in shapes.items()
+        if name in ("sharp", "flat", "typical")
+    }
+    assert max(realised.values()) - min(realised.values()) < 2e-3, realised
+
+
+def test_scale_invariance_stops_at_the_layer_norm_epsilon():
+    """
+    Where the claim above runs out, pinned so it is a known limit rather than a
+    surprise. `F.layer_norm` divides by `sqrt(var + eps)` with `eps = 1e-5`, so
+    a speaker whose logits collapse towards that variance is normalised by
+    something increasingly unlike its own spread, and `logit_scale` -- a
+    constant -- cannot absorb it the way the per-batch solve could.
+
+    Three orders of magnitude clear of the real ladder, whose logits ran from a
+    standard deviation of 1 to 159. It is pinned because a future change to the
+    normaliser (or to `eps`) should move this deliberately, not silently.
+    """
+    raw = _logit_shapes(14)["typical"]
+    scale = S.logit_scale(0.66, 14)
+
+    def survival(logits):
+        return S.mean_winning_probability(_masked(logits), scale, 0.02).item()
+
+    baseline = survival(raw)  # incoming sd ~1.0
+
+    assert abs(survival(raw * 0.1) - baseline) < 1e-3      # sd 0.1: fine
+    assert abs(survival(raw * 0.01) - baseline) > 5e-3     # sd 0.01: visible
+    assert abs(survival(raw * 0.001) - baseline) > 0.1     # sd 0.001: gone
+
+    # And it only bites downwards: there is no upper limit.
+    assert abs(survival(raw * 1e6) - baseline) < 3e-4
+
+
+def test_shape_still_moves_the_channel():
+    """
+    The other half of the same point: LayerNorm removes *scale* and only scale.
+    A speaker that concentrates its mass gets a cleaner channel at the same
+    setting, and that is the finding `realised_survival` exists to report --
+    the thing the calibration used to erase.
+    """
+    scale = S.logit_scale(0.66, 14)
+    shapes = _logit_shapes(14)
+
+    typical = S.mean_winning_probability(_masked(shapes["typical"]), scale, 0.02)
+    peaked = S.mean_winning_probability(_masked(shapes["peaked"]), scale, 0.02)
+
+    assert peaked.item() > typical.item() + 0.1
+
+
+# ---------------------------------------------------------- 3. Gumbel-max id
 
 def test_gumbel_max_identity():
     """
-    The assumption the calibration rests on: the probability that the noise
-    leaves a slot's argmax alone is exactly the winning token's softmax
-    probability. If this were only approximate, the solve would need a Monte
-    Carlo over noise draws and a seed to be reproducible.
+    The assumption `mean_winning_probability` rests on: the probability that the
+    noise leaves a slot's argmax alone is exactly the winning token's softmax
+    probability. If this were only approximate, measuring survival would need a
+    Monte Carlo over noise draws and a seed to be reproducible.
     """
     torch.manual_seed(0)
     logits = _masked(_logit_shapes(14, seed=3)["typical"])
@@ -183,18 +299,18 @@ def test_gumbel_max_identity():
     tolerance = 3.0 * (expected * (1 - expected) / draws).sqrt() + 1e-3
     assert (empirical - expected).abs().le(tolerance).float().mean() > 0.99
 
-    # And in aggregate, which is the quantity the calibration actually targets.
+    # And in aggregate, which is the quantity actually reported.
     assert abs(empirical.mean().item() - expected.mean().item()) < 0.005
 
 
-# ---------------------------------------------------------------- 3. bounds
+# ---------------------------------------------------------------- 4. bounds
 
-def test_mixing_bounds_hold_when_gain_comes_first():
+def test_mixing_bounds_hold_when_scale_comes_first():
     """
     Mixing caps a slot's winner at `1 - w + w/V` and floors its losers at `w/V`.
     Those bounds are the permanent exploration floor -- 1.86% of symbols flipped
     at w = 0.02, V = 14, which training cannot reduce -- so they have to hold
-    however large the gain gets.
+    however large the scale gets.
     """
     vocabulary, uniform_weight = 14, 0.02
     cap = 1.0 - uniform_weight + uniform_weight / vocabulary
@@ -218,7 +334,7 @@ def test_mixing_bounds_hold_when_gain_comes_first():
     assert probabilities[..., :4].abs().max().item() == 0.0
 
 
-def test_mixing_bounds_break_when_gain_comes_second():
+def test_mixing_bounds_break_when_scale_comes_second():
     """
     The previous ordering -- mix, then scale -- measured p_min 0.00000 and
     p_max 1.00000, i.e. it destroyed exactly the bounds the mixture exists to
@@ -237,32 +353,31 @@ def test_mixing_bounds_break_when_gain_comes_second():
     assert probabilities.min().item() < floor
 
 
-# --------------------------------------------------------- 4. floor warning
-
-def test_rate_below_floor_warns():
+def test_uniform_weight_is_the_ceiling_on_fidelity():
     """
-    At w = 0.02 and V = 14 the mixture alone flips 1.86% of symbols, so a
-    request for 1% is unreachable and would otherwise be silently missed.
+    `uniform_weight` is the one knob a speaker cannot out-learn. However peaked
+    its logits and however large the scale, survival saturates at `1 - w + w/V`,
+    so `w * (1 - 1/V)` of symbols are always flipped -- the property that keeps
+    late training from committing the channel entirely.
     """
-    with pytest.warns(UserWarning, match="below"):
-        S.check_exploration_rate_floor(0.01, 0.02, 14)
+    vocabulary, uniform_weight = 20, 0.02
+    cap = 1.0 - uniform_weight + uniform_weight / vocabulary
 
-    assert abs(S.exploration_rate_floor(0.02, 14) - 0.0186) < 1e-4
-    assert abs(S.exploration_rate_floor(0.02, 20) - 0.019) < 1e-4
+    logits = _masked(_logit_shapes(vocabulary, seed=2)["peaked"])
+    for scale in (10.0, 1e3, 1e5):
+        survival = S.mean_winning_probability(logits, scale, uniform_weight).item()
+        assert survival <= cap + 1e-6, f"scale {scale}: {survival}"
+
+    # It binds rather than merely bounding, and the residual is the documented
+    # 0.019 for birds.
+    assert survival == pytest.approx(cap, abs=1e-4)
+    assert 1.0 - cap == pytest.approx(0.019, abs=1e-4)
+
+    # With no mixture there is no ceiling, which is jayelm's CUB setting.
+    assert S.mean_winning_probability(logits, 1e5, 0.0).item() > cap
 
 
-def test_rate_above_floor_does_not_warn():
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        S.check_exploration_rate_floor(0.1, 0.02, 14)
-
-
-def test_speaker_construction_warns_below_floor():
-    with pytest.warns(UserWarning, match="below"):
-        _gru_speaker(token_exploration_rate=0.01, uniform_weight=0.02)
-
-
-# --------------------------------------------------- 5/6. eval is the policy
+# --------------------------------------------------- 5. eval is the policy --
 
 def _decode_message(speaker, prototypes):
     return speaker.decode(prototypes)[0].argmax(-1)
@@ -299,8 +414,7 @@ def _greedy_reference(speaker, prototypes):
     """Recompute the greedy message straight from the logits, independently."""
     if isinstance(speaker, S.SenderTransformerLM):
         logits = speaker.outputs2vocab(speaker.embeddings(prototypes))
-        if speaker.layer_norm_logits:
-            logits = S.layer_norm_logits(logits, speaker.vocabulary)
+        logits = S.layer_norm_logits(logits, speaker.vocabulary)
         return S.mask_reserved_tokens(logits).argmax(-1)
 
     # The GRU is autoregressive, so the reference has to run the loop too.
@@ -319,8 +433,7 @@ def _greedy_reference(speaker, prototypes):
     for _ in range(speaker.message_length - 2):
         gru_out, states = speaker.gru(gru_in, states)
         logits = speaker.outputs2vocab(gru_out[:, -1, :])
-        if speaker.layer_norm_logits:
-            logits = S.layer_norm_logits(logits, speaker.vocabulary)
+        logits = S.layer_norm_logits(logits, speaker.vocabulary)
         logits = S.mask_reserved_tokens(logits)
         chosen = logits.argmax(-1)
         tokens.append(chosen)
@@ -347,6 +460,8 @@ def test_eval_is_invariant_to_the_training_knobs(build):
         for attribute, value in (
             ("uniform_weight", 0.5),
             ("tau", 7.0),
+            ("logit_scale", 137.0),
+            ("logit_scale", 0.001),
         ):
             original = getattr(speaker, attribute)
             setattr(speaker, attribute, value)
@@ -355,149 +470,79 @@ def test_eval_is_invariant_to_the_training_knobs(build):
             )
             setattr(speaker, attribute, original)
 
-        speaker.exploration_gain.fill_(137.0)
-        assert torch.equal(_decode_message(speaker, prototypes), reference)
 
-
-# ------------------------------------------------------------ 7. buffer state
+# ------------------------------------ 6. survival is measured, not targeted --
 
 @pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
-def test_gain_buffer_survives_a_state_dict_round_trip(build):
+def test_realised_survival_reports_the_channel_in_use(build):
+    """
+    `realised_survival` is a measurement at the fixed scale, so raising the
+    scale must raise it. Under the calibration this was flat by construction --
+    it restated `1 - token_exploration_rate` whatever the speaker did -- which
+    is precisely the diagnostic that was lost.
+    """
     torch.manual_seed(0)
-    speaker = build()
+    speaker = build().train()
     prototypes = _prototypes(speaker)
 
-    speaker.train()
-    for _ in range(3):
-        speaker.decode(prototypes)
+    assert math.isnan(speaker.realised_survival)
 
-    assert speaker.exploration_gain_updates.item() == 3
-    # The first update sets the buffer outright, so batch one is not sampled at
-    # a gain of 1.0.
-    assert speaker.exploration_gain.item() != 1.0
-    assert 1e-2 <= speaker.exploration_gain.item() <= 1e4
-
-    trained_gain = speaker.exploration_gain.item()
-
-    restored = build()
-    assert restored.exploration_gain.item() == 1.0
-    restored.load_state_dict(speaker.state_dict())
-    assert restored.exploration_gain.item() == trained_gain
-    assert restored.exploration_gain_updates.item() == 3
-
-    # No affine LayerNorm parameters and no BatchNorm running statistics reached
-    # the checkpoint.
-    assert not any("batch_norm" in key for key in speaker.state_dict())
-
-
-@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
-def test_gain_does_not_move_during_eval(build):
-    torch.manual_seed(0)
-    speaker = build()
-    prototypes = _prototypes(speaker)
-
-    speaker.train()
     speaker.decode(prototypes)
-    gain = speaker.exploration_gain.item()
-    updates = speaker.exploration_gain_updates.item()
+    baseline = speaker.realised_survival
+    assert 0.0 < baseline < 1.0
+
+    speaker.logit_scale *= 20.0
+    speaker.decode(prototypes)
+    assert speaker.realised_survival > baseline + 0.1
+
+    # A freshly initialised speaker starts genuinely uncertain, with room to
+    # earn confidence rather than beginning at its own ceiling.
+    fresh = build().train()
+    fresh.decode(_prototypes(fresh))
+    assert 0.35 < fresh.realised_survival < 0.70, fresh.realised_survival
+
+
+@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+def test_survival_does_not_move_during_eval(build):
+    """Eval samples nothing, so it measures nothing."""
+    torch.manual_seed(0)
+    speaker = build().train()
+    prototypes = _prototypes(speaker)
+
+    speaker.decode(prototypes)
+    trained = speaker.realised_survival
 
     speaker.eval()
     with torch.no_grad():
         for _ in range(3):
             speaker.decode(prototypes)
 
-    assert speaker.exploration_gain.item() == gain
-    assert speaker.exploration_gain_updates.item() == updates
+    assert speaker.realised_survival == trained
 
 
 @pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
-def test_first_update_takes_the_solve_outright(build):
+def test_no_calibration_state_reaches_the_checkpoint(build):
     """
-    The momentum is `max(1 / (t + 1), floor)`, so the first update has momentum
-    1.0 and adopts the solved gain rather than blending it with the buffer's
-    initial 1.0. That used to be an explicit `updates == 0` branch; it now falls
-    out of the schedule, so pin it — a speaker that blended on batch one would
-    sample its first batch through a badly mis-scaled channel.
-
-    `realised_survival` is read at the post-update gain on the same batch that
-    was solved from, so it lands exactly on the target if and only if the buffer
-    took the solve whole. Any blend towards 1.0 leaves the gain too low and the
-    survival visibly under target.
+    The scale is a constant, so nothing about exploration is checkpointed. Also
+    guards the two normalisers that were removed on the way here: no BatchNorm
+    running statistics and no affine LayerNorm parameters on the logits.
     """
-    torch.manual_seed(0)
-    speaker = build(token_exploration_rate=0.1).train()
-
-    assert speaker.exploration_gain.item() == pytest.approx(1.0)
+    speaker = build()
+    speaker.train()
     speaker.decode(_prototypes(speaker))
 
-    assert speaker.exploration_gain_updates.item() == 1
-    assert speaker.realised_survival == pytest.approx(0.9, abs=0.005)
+    keys = list(speaker.state_dict())
+    assert not any("exploration" in key for key in keys), keys
+    assert not any("batch_norm" in key for key in keys), keys
+
+    # And a round trip does not need it: two speakers sharing a state_dict
+    # sample through the same channel.
+    restored = build()
+    restored.load_state_dict(speaker.state_dict())
+    assert restored.logit_scale == speaker.logit_scale
 
 
-@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
-def test_momentum_floor_bounds_the_response_time(build):
-    """
-    Once the cumulative-average warm-up has decayed past the floor, the buffer
-    must still follow a moving target. Drives `update_exploration_gain` directly
-    with logits whose spread changes abruptly — the required gain is inversely
-    proportional to it — and checks the gain has caught up.
-
-    The loop length is expressed in time constants rather than batches, so this
-    pins the update rule (an EMA at the configured floor converges), not the
-    floor's value. The floor is a tuning knob: what it should be is a question
-    for the `realised_survival` trace of a real run, not for a test. See the
-    note on `EXPLORATION_GAIN_MOMENTUM` for why it currently sits at 0.1.
-
-    Driven at the function rather than through `decode` because LayerNorm makes
-    the speaker's output scale-invariant, so no change to its inputs can move
-    the solved gain.
-    """
-    torch.manual_seed(0)
-    speaker = build(token_exploration_rate=0.1).train()
-    vocabulary = speaker.vocabulary
-
-    def logits(spread, seed):
-        generator = torch.Generator().manual_seed(seed)
-        raw = spread * torch.randn(32, 5, vocabulary + 4, generator=generator)
-        return S.mask_reserved_tokens(raw)
-
-    for step in range(30):
-        S.update_exploration_gain(speaker, logits(1.0, step))
-    before = speaker.exploration_gain.item()
-
-    # Ten time constants at the floor is ample for a step change to land.
-    for step in range(int(10 / S.EXPLORATION_GAIN_MOMENTUM)):
-        S.update_exploration_gain(speaker, logits(8.0, 1000 + step))
-    after = speaker.exploration_gain.item()
-
-    assert after < before / 4, f"gain barely moved: {before:.3f} -> {after:.3f}"
-    assert speaker.realised_survival == pytest.approx(0.9, abs=0.02)
-
-
-@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
-def test_training_converges_on_the_requested_rate(build):
-    """
-    End to end, through the speaker rather than the helper: after enough batches
-    for the EMA to settle, the channel a speaker is actually sampling through
-    passes `1 - token_exploration_rate` of its symbols.
-    """
-    torch.manual_seed(0)
-    speaker = build(token_exploration_rate=0.1).train()
-
-    realised = []
-    for step in range(60):
-        speaker.decode(_prototypes(speaker, seed=step))
-        realised.append(speaker.realised_survival)
-
-    # `realised_survival` is a single-batch statistic and jitters by a couple of
-    # points; the log-space EMA is what smooths the gain itself, so the settled
-    # rate is read over the tail rather than off one batch.
-    settled = sum(realised[-10:]) / 10
-    assert abs(settled - 0.9) < 0.02, f"settled at {settled:.4f}"
-    assert 1e-2 < speaker.exploration_gain.item() < 1e4
-
-
-# ------------------------------------------------- 8. position invariance --
+# ------------------------------------------------- 7. position invariance --
 
 @pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
 def test_layer_norm_is_position_invariant(build):
@@ -523,8 +568,8 @@ def test_layer_norm_is_position_invariant(build):
     assert torch.allclose(plain, shifted, atol=1e-4)
     assert torch.allclose(plain, rescaled, atol=1e-4)
 
-    # Every slot arrives at the same magnitude, which is what the gain is
-    # calibrated against.
+    # Every slot arrives at the same magnitude, which is what `logit_scale` is
+    # expressed against.
     per_slot_sd = plain.std(-1, unbiased=False)
     assert (per_slot_sd - 1.0).abs().max().item() < 1e-3
 
@@ -557,6 +602,22 @@ def test_layer_norm_is_position_invariant(build):
 
     assert torch.allclose(normed, normed_shifted, atol=1e-4)
     assert (normed.std(-1, unbiased=False) - 1.0).abs().max().item() < 1e-3
+
+
+# ------------------------------------------------------------ 8. the config --
+
+def test_config_rejects_a_missing_or_invalid_coefficient():
+    """
+    `SafeDict` only warns on a missing key and hands back None, which would fail
+    confusingly deep inside the decode, so `parse_config` checks it up front.
+    """
+    import parse_config
+
+    for bad in (None, 0.0, -1.0):
+        config = get_config()
+        config["sender_language_model"]["logit_scale_coefficient"] = bad
+        with pytest.raises(parse_config.InvalidConfig, match="logit_scale_coefficient"):
+            parse_config.validate_config(config)
 
 
 if __name__ == "__main__":

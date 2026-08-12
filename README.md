@@ -187,46 +187,51 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
     dropout to `MSA_DROPOUT = 0.1`. For reference, jayelm regularised both agents with a
     single `--dropout` at `0.1`, on the listener's vision pathway only, with
     nothing at all on its language pathway.
-- `[sender_language_model] token_exploration_rate`: the exploration knob, stated
-    as the **expected fraction of symbols the Gumbel noise flips**. `0.1`
-    everywhere, ShapeWorld and CUB alike. It is *calibrated*, not assumed:
+There are exactly **two** exploration controls, and they do different jobs. The
+emittable logits are always layer-normalised to unit variance per example and
+per position before sampling — there is no knob for that, because both controls
+below are expressed against it. (LayerNorm replaced a `batch_norm_logits` here;
+the identically-named keys in the two `*_feature_model` sections are broccoli's
+own and are unrelated. It is ~2.6× tighter on the criterion that matters, is
+position-invariant for both speakers, has no running statistics so train and
+eval agree, and does not couple to `accumulator_steps`. Without an affine it is
+argmax-preserving, so it changes no eval-time message.)
+
+- `[sender_language_model] logit_scale_coefficient`: the **operating point**, and
+    the range the speaker can move through. `0.66` everywhere. The normalised
+    logits are multiplied by `c * ln(V)` before sampling, train-pass only.
     `F.gumbel_softmax(..., hard=True)` emits `argmax(logits + g)` with
-    `g ~ Gumbel(0,1)`, whose standard deviation is a fixed 1.283, so channel
-    fidelity is set entirely by the scale of the speaker's logits — which
-    varied by two orders of magnitude across an architecture ladder, giving one
-    arm a 0.99-fidelity channel and another 0.24. Each training batch bisects
-    for the logit gain that hits the requested rate (`exploration_gain`, an EMA
-    buffer) and the result is logged per epoch alongside the `realised_survival`
-    it achieved. Applied **on the train pass only**: eval decodes greedily, so
-    it measures the learned policy. Note the target is a *mean* over slots and
-    confidence is skewed, so 0.1 means a median slot at 0.98 and a p10 tail at
-    0.57 — exploration concentrates where the model is unsure.
-- `[sender_language_model] uniform_weight`: weight of the uniform component
-    mixed into the policy before sampling, train-pass only. Now a *bounds* knob
-    rather than the exploration knob: it caps a slot's winner at `1 - w + w/V`
-    and floors its losers at `w/V`, so it puts a hard floor of `w * (1 - 1/V)`
-    under `token_exploration_rate` — 0.0186 at the default `0.02` and `V = 14`.
-    `V` is `vocabulary`, counting the emittable tokens only: the four reserved
-    slots are masked before the mixture, which is spread over what is left, so
-    these divide by 14 rather than by 18.
-    That floor is a permanent per-symbol corruption rate that training cannot
-    reduce, which is the point: it keeps late training from committing the
-    channel entirely. Requesting a rate below the floor warns at construction.
-- `[sender_language_model] layer_norm_logits`: normalise the emittable
-    vocabulary logits per example and per position before sampling. `true`.
-    This is what fixes the magnitude the gain is calibrated against, so the gain
-    cannot drift to compensate for a collapsing logit scale. Replaces a
-    `batch_norm_logits` here (the identically-named keys in the two
-    `*_feature_model` sections are broccoli's own and are unrelated): LayerNorm
-    is ~2.6× tighter on the criterion that matters, is position-invariant for
-    both speakers, has no running statistics so train and eval agree, and does
-    not couple to `accumulator_steps`.
+    `g ~ Gumbel(0,1)`, whose standard deviation is a fixed 1.283, so what
+    survives the noise is set by how big the logits are against it — and
+    LayerNorm is what makes that comparable across architectures whose raw logit
+    scales varied by two orders of magnitude. The `ln(V)` term is there because
+    a winner must beat the largest of `V` Gumbel draws and `E[max g] = ln V + γ`,
+    so the noise floor grows with the vocabulary while LayerNorm holds the logits
+    at O(1); it resolves to `1.74` at ShapeWorld's `V = 14` and `1.98` at CUB's
+    `V = 20`, putting both at the same initial fidelity. A freshly initialised
+    speaker flips ~50% of its symbols and works its way down toward the
+    `uniform_weight` floor by learning a peaked distribution. **This is a
+    constant, not a target**: what a speaker actually achieves is reported as
+    `realised_survival` and is expected to move over a run.
+- `[sender_language_model] uniform_weight`: the **ceiling** on fidelity, and so
+    the floor under exploration. Weight of the uniform component mixed into the
+    policy before sampling, train-pass only. It caps a slot's winner at
+    `1 - w + w/V` and floors its losers at `w/V`, so at least `w * (1 - 1/V)` of
+    symbols are flipped however sharp the logits get — 0.0186 at the default
+    `0.02` and `V = 14`. `V` is `vocabulary`, counting the emittable tokens only:
+    the four reserved slots are masked before the mixture, which is spread over
+    what is left, so these divide by 14 rather than by 18. That floor is a
+    permanent per-symbol corruption rate that training cannot reduce, which is
+    the point: it keeps late training from committing the channel entirely. This
+    is jayelm's `--uniform_weight` doing the job it does there.
 - `[sender_language_model] tau`: gumbel-softmax tau (jayelm's `--tau`). This
     shapes the straight-through *gradient* only: the hard forward sample is an
     argmax, so it is invariant to tau. Raising it does not buy exploration, it
     just flattens the surrogate gradient. `1.0` everywhere, GRU and Transformer
-    alike, so the two speakers differ only in architecture. Leave it there:
-    compensating it for the exploration gain only collapses the gradient.
+    alike, so the two speakers differ only in architecture. Because the scale is
+    now a constant, the ratio between the two is fixed for a whole run and the
+    estimator sits at one operating point throughout — that was worth arranging
+    deliberately when the scale moved batch to batch.
 - `wandb = true`: activate wandb logging (run `wandb init` yourself)
 
 Two extra sections drive the launcher (the `[experiment]` and `[slurm]` keys):
@@ -344,14 +349,17 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     soft variants under the decontextualised embeddings. Soft variants only.
 - `{train,test,...}_loss` — the training objective. `_combined_loss` is a
     duplicate of it, kept only so older analysis scripts keep working.
-- `train_exploration_gain` — the speaker's calibrated logit gain (the EMA
-    buffer). This is the scale diagnostic, and the direct readout of how far
-    apart two architectures' channels really are. Train pass only, since that is
-    the only pass that calibrates. If it pins at either end of `[1e-2, 1e4]`,
-    something upstream of the channel is wrong.
-- `train_realised_survival` — the mean winning-token probability at the gain
-    actually in use. Confirms the calibration converged; it should sit at
-    `1 - token_exploration_rate`.
+- `train_realised_survival` — the mean winning-token probability at the fixed
+    `logit_scale`, i.e. the fraction of symbols surviving the noise. Train pass
+    only, since that is the only pass that samples. This is the channel
+    diagnostic and the direct readout of how far apart two architectures'
+    channels really are: the scale is identical across speakers, so what this
+    reports is what each speaker's own logit *shape* buys it. It is a finding,
+    not a target — expect it to start near 0.5 and climb as the speaker learns a
+    peaked distribution, bounded above by the `uniform_weight` ceiling of
+    `1 - w + w/V`. Flat at ~0.5 for many epochs means the speaker is learning no
+    confidence; pinned at the ceiling early means the channel has nothing left to
+    explore with.
 - `{train,test,test_same,test_avg}_unique_message_fraction` — distinct messages
     over messages emitted. A language that is doing work compresses: healthy
     runs sit around 0.30–0.40, while runs whose channel is too noisy to learn

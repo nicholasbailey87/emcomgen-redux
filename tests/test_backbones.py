@@ -286,24 +286,25 @@ def test_agent_reset_parameters_covers_every_parameter():
         assert not stale, f"{name}: {len(stale)} tensors not reset: {stale[:5]}"
 
 
-def test_reset_parameters_returns_the_speaker_to_uncalibrated_exploration():
+def test_reset_parameters_clears_the_speakers_measured_survival():
     """
-    `exploration_gain` is solved against the scale of a speaker's logits, so it
-    is meaningless for freshly drawn weights, and `exploration_gain_updates`
-    would otherwise hold the EMA at its slow late-training momentum.
+    `realised_survival` is measured off the logits a particular set of weights
+    produced, so it is meaningless for freshly drawn ones and must not be
+    carried across a reset into the first epoch of a re-initialised speaker.
+
+    The `logit_scale` it was measured at is deliberately *not* reset: it is a
+    constant resolved from the config and the vocabulary, so it does not depend
+    on the weights and there is nothing about it to restore.
     """
     _, pair = _pair("../data/cub", BIRDS_FEATS, "cub")
     speaker = pair.sender.language_model
-    with torch.no_grad():
-        speaker.exploration_gain.fill_(37.0)
-        speaker.exploration_gain_updates.fill_(5000)
     speaker.realised_survival = 0.5
+    scale = speaker.logit_scale
 
     pair.sender.reset_parameters()
 
-    assert speaker.exploration_gain.item() == 1.0
-    assert int(speaker.exploration_gain_updates) == 0
     assert math.isnan(speaker.realised_survival)
+    assert speaker.logit_scale == scale
 
 
 def test_cross_attention_comparer_reset_covers_its_adapters():

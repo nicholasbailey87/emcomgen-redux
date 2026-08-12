@@ -431,16 +431,15 @@ def run(
                 combined_loss=this_loss.item()
             )
 
-            # The speaker recalibrates its exploration gain once per batch, on
-            # the train pass only. Logging it is how the channel stops being an
-            # invisible property of the architecture: `exploration_gain` says
-            # what scale this speaker needed, `realised_survival` says whether
-            # the calibration actually landed on `token_exploration_rate`.
+            # The speaker measures its channel fidelity once per batch, on the
+            # train pass only. Logging it is how the channel stops being an
+            # invisible property of the architecture: at a fixed `logit_scale`
+            # this reports what each speaker's own logit *shape* buys it, so it
+            # is a finding rather than a restatement of a target, and it is
+            # expected to climb over a run as the speaker grows confident.
             if training and speaking:
-                language_model = pair.sender.language_model
                 stats.update(
-                    exploration_gain=language_model.exploration_gain.item(),
-                    realised_survival=language_model.realised_survival,
+                    realised_survival=pair.sender.language_model.realised_survival,
                     batch_size=batch_size,
                 )
 
