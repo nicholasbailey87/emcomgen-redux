@@ -725,11 +725,11 @@ class SenderGRULM(nn.Module):
             # This must come before the scale and the uniform weight mixing: it
             #     is what fixes the magnitude the scale is expressed against,
             #     and it would otherwise mess up the mixture.
-            logits = layer_norm_logits(logits, self.vocabulary)
+            normalised = layer_norm_logits(logits, self.vocabulary)
 
             # Masking comes first so that the uniform mixture below is spread
             #     over the emittable tokens only.
-            logits = mask_reserved_tokens(logits)
+            logits = mask_reserved_tokens(normalised)
 
             # Exploration is a training-time device only, so that the eval
             #     passes measure the learned policy rather than a deliberately
@@ -742,7 +742,18 @@ class SenderGRULM(nn.Module):
                 #     fixed 1.283-sd Gumbel noise the logits stand up to.
                 #     Scaling *after* the mixture would undo the bounds the
                 #     mixture exists to impose.
-                logits = logits * self.logit_scale
+                # Scale the *unmasked* logits and re-mask, rather than
+                #     multiplying the masked tensor. `d(logits * scale)/d(scale)`
+                #     is the logits themselves, so scaling after the mask sends
+                #     -inf into the gradient w.r.t. the scale; the upstream
+                #     gradient at those slots is zero, and `-inf * 0` is NaN. The
+                #     AMP `GradScaler` reads that as an overflow and skips the
+                #     step -- every step, so the whole pair sits frozen at
+                #     initialisation. Invisible in the loss, which just idles;
+                #     `logit_spread` bit-identical across epochs is the tell.
+                #     Harmless while the scale was a constant, since there was no
+                #     gradient path to it at all.
+                logits = mask_reserved_tokens(normalised * self.logit_scale)
 
                 if self.uniform_weight > 0.0:
                     logits = flatten_logit_distribution(logits, self.uniform_weight)
@@ -1068,17 +1079,19 @@ class SenderTransformerLM(nn.Module):
 
         # This must come before the scale and the uniform weight mixing — as in
         #     `SenderGRULM.decode`, see the notes there.
-        logits = layer_norm_logits(logits, self.vocabulary)
+        normalised = layer_norm_logits(logits, self.vocabulary)
 
         # Mask first, then explore, training-time only — as in
         #     `SenderGRULM.decode`, see the notes there.
-        logits = mask_reserved_tokens(logits)
+        logits = mask_reserved_tokens(normalised)
 
         if self.training:
             survival_logits = logits.detach()
 
-            # Scale first, mixture second; see `SenderGRULM.decode`.
-            logits = logits * self.logit_scale
+            # Scale first, mixture second, and scale the unmasked logits so
+            #     that -inf stays out of the gradient w.r.t. the scale; see
+            #     `SenderGRULM.decode` for what that costs if you get it wrong.
+            logits = mask_reserved_tokens(normalised * self.logit_scale)
 
             if self.uniform_weight > 0.0:
                 logits = flatten_logit_distribution(logits, self.uniform_weight)
