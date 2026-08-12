@@ -9,6 +9,7 @@ Speaker models. This includes speakers with a GRU-based language model as
 
 import math
 import warnings
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -52,6 +53,19 @@ def trim_messages(token_id_rows):
 #     LayerNorm anyway, and a genuinely constant logit vector still yields zeros
 #     rather than NaN. See the note in `layer_norm_logits`.
 LAYER_NORM_EPS = 1e-12
+
+# The bisection in `logit_scale`. The sample is drawn once from a fixed seed and
+#     reused at every step, so the solve is deterministic and reproducible across
+#     machines, and exactly monotone in the scale. 2^16 samples put the resolved
+#     scale within about 0.5% of its large-sample limit, which is far inside the
+#     precision anyone reasons about the operating point to. The bracket spans
+#     six orders of magnitude and is searched geometrically; 48 steps close it to
+#     better than one part in 10^4.
+ENERGY_SOLVE_SAMPLES = 65536
+ENERGY_SOLVE_SEED = 0
+ENERGY_SOLVE_STEPS = 48
+ENERGY_SCALE_MIN = 1e-3
+ENERGY_SCALE_MAX = 1e3
 
 
 def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
@@ -121,51 +135,220 @@ def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
     )
 
 
-def logit_scale(coefficient: float, vocabulary: int) -> float:
+def initial_logit_sample(vocabulary: int) -> torch.Tensor:
     """
-    The constant the normalised logits are multiplied by before sampling.
+    A fixed draw of the logits a *freshly initialised* speaker produces.
+
+    After `layer_norm_logits` the emittable logits are zero mean and unit
+        variance, and at initialisation they are also i.i.d. standard normal:
+        random weights put the referent through a linear projection whose rows
+        are independent, so nothing correlates the vocabulary dimension yet.
+        This is the one place in the scheme where the Gaussian assumption is a
+        fact about the model rather than a proxy for one — which is why the
+        operating point is defined at initialisation and not anywhere later.
+
+    Drawn once from a fixed seed and reused across the whole bisection in
+        `logit_scale`, so the solve is deterministic (the same config always
+        resolves to the same scale, on any machine) and exactly monotone in the
+        scale, which is what makes bisection valid.
+
+    Args:
+        vocabulary: number of emittable tokens
+
+    Returns:
+        A (samples, vocabulary) tensor of standard normal logits
+    """
+    generator = torch.Generator().manual_seed(ENERGY_SOLVE_SEED)
+    return torch.randn(
+        ENERGY_SOLVE_SAMPLES, vocabulary, generator=generator
+    )
+
+
+def initial_energy(
+    scale: float,
+    vocabulary: int,
+    uniform_weight: float,
+    sample: Optional[torch.Tensor] = None,
+) -> float:
+    """
+    The fraction of the maximum possible entropy a fresh speaker's per-position
+        distribution retains, once scaled and uniform-mixed.
+
+    `H(p) / log2(V)`, so 1.0 is a uniform speaker that has committed to nothing
+        and 0.0 is one that emits a single token with certainty. This is the
+        quantity `init_energy` names, and `logit_scale` inverts.
+
+    Args:
+        scale: the multiplier applied to the normalised logits
+        vocabulary: number of emittable tokens
+        uniform_weight: as in `flatten_logit_distribution`
+        sample: reuse a draw from `initial_logit_sample`, rather than taking a
+            fresh one — the bisection passes the same sample at every step
+
+    Returns:
+        The retained entropy fraction, in [0, 1]
+    """
+    if sample is None:
+        sample = initial_logit_sample(vocabulary)
+
+    probabilities = torch.softmax(scale * sample, dim=-1)
+    probabilities = (
+        (1.0 - uniform_weight) * probabilities + uniform_weight / vocabulary
+    )
+    entropy = -(
+        probabilities * probabilities.clamp_min(1e-30).log2()
+    ).sum(-1).mean()
+
+    return (entropy / math.log2(vocabulary)).item()
+
+
+def logit_scale(
+    init_energy: float, vocabulary: int, uniform_weight: float
+) -> float:
+    """
+    The constant the normalised logits are multiplied by before sampling,
+        resolved so that a fresh speaker retains `init_energy` of its maximum
+        entropy.
 
     This is the exploration control. `F.gumbel_softmax(..., hard=True)` emits
         `argmax(logits + g)` with `g ~ Gumbel(0, 1)`, whose standard deviation is
-        a fixed 1.283, so what fraction of symbols survive the noise is set by
-        the size of the logits relative to that. `layer_norm_logits` pins them to
-        unit variance for every speaker, and this then says what that unit is
-        worth.
+        a fixed 1.283, so how much of the speaker's distribution survives the
+        noise is set by the size of the logits relative to that. LayerNorm pins
+        them to unit variance for every speaker, and this says what that unit is
+        worth. Larger scale, sharper distribution, less entropy.
 
-    Why `ln(vocabulary)` and not a bare constant: a symbol survives only if its
-        logit margin beats the largest of `V` independent Gumbel draws, and
-        `E[max_i g_i] = ln V + gamma`. So the noise a winner must clear grows
-        logarithmically in the vocabulary while LayerNorm holds the logits at
-        O(1) regardless of it. Without the `ln V` term the same coefficient would
-        mean materially different channels for ShapeWorld and birds: at a flat
-        scale of 2.0 a freshly initialised speaker flips 50% of its symbols at
-        V=14 and 56% at V=20, and 76% by V=128.
+    ---
+    Why entropy, and why at initialisation
+    ---
 
-    With the term, the coefficient that fixes a given initial operating point is
-        near enough constant -- within ~3% over V = 14..128, though V=8 wants
-        ~8% less -- so `coefficient` is the only free parameter. At the default
-        0.66 the scale is 1.74 for ShapeWorld's V=14 and 1.98 for birds' V=20,
-        and both start a fresh speaker at ~54% of symbols flipped.
+    The point of a noisy channel here is not fidelity, it is *bootstrapping*. A
+        fresh speaker's argmax is very nearly input-independent — it has learned
+        nothing, so its preferred token barely varies with the referent. If that
+        argmax is transmitted reliably, the speaker emits one message for every
+        input, confidently, from the first batch, and the listener co-adapts to
+        that degenerate language before the speaker's embeddings are worth
+        grounding anything on. High entropy at the start is what prevents this:
+        near-random messages carry no premature structure to co-adapt to, and
+        the pair sharpens together as the embeddings become worth using.
 
-    Why a constant at all, rather than a per-batch solve against a requested
-        rate: LayerNorm already equalises logit *scale* across architectures,
-        which was the problem the solve existed for. Solving on top of it also
-        pins the *shape* — it overwrites the speaker's own confidence in both
-        directions to hold a target — and it does so hardest at initialisation,
-        where a speaker's argmax is nearly input-independent and forcing 90%
-        fidelity onto it means emitting one message for every input, confidently,
-        from the first batch. A constant leaves the speaker free to start
-        uncertain and earn confidence by learning a peaked distribution.
+    So the knob is deliberately expressed as *entropy retained*, not as channel
+        capacity or as a symbol error rate. Both of those were tried and both
+        mislead:
+
+        - Capacity (mutual information over its maximum) runs the wrong way
+          round. High capacity means a sharp, low-entropy speaker, i.e. *less*
+          room to bootstrap — so a config asking for "80% capacity" is asking
+          for the opposite of what it sounds like.
+        - "Fraction of symbols flipped" presupposes a correct symbol. At
+          initialisation there is no correct symbol: argmax is not an intended
+          message, it is an accident of the initialisation. Counting departures
+          from it as errors imports a notion of correctness that does not exist
+          yet.
+
+    Entropy has neither problem. It is a property of the distribution alone, it
+        needs no reference symbol, and it runs the way intuition does: higher
+        means flatter means more room to explore.
+
+    ---
+    Why a numerical solve, and why no `ln(V)` term
+    ---
+
+    An earlier version of this used a closed form, `coefficient * ln(V)`, on the
+        argument that a winner must beat the largest of `V` Gumbel draws and
+        `E[max_i g_i] = ln V + gamma`. That is the right correction for holding a
+        *survival rate* constant across vocabularies, but it badly overshoots for
+        holding *entropy* constant. Measured over V = 8..256, the scale that
+        holds entropy fixed varies only 1.2-1.4x, while `scale / ln(V)` varies
+        about 2x — so dividing by `ln(V)` introduces roughly four times more
+        vocabulary dependence than it removes. The residual really is
+        logarithmic, but with a much smaller coefficient: at 80% retained,
+        `scale ~= 0.87 + 0.12 * ln(V)` fits to about 2% over that range.
+
+    Rather than fit that, the scale is solved for numerically. It costs one
+        bisection at construction, it is exact for any `(V, w)` instead of
+        approximate over the range someone happened to check, and it puts the
+        design decision itself in the config rather than a coefficient that
+        encodes it. `initial_logit_sample` makes the solve deterministic.
+
+    ---
+    What the other end is
+    ---
+
+    `uniform_weight` (w) owns the trained end: mixing caps a slot's winner at
+        `1 - w + w/V` however sharp the logits get, which at w = 0.02 is a floor
+        of about 0.05 on retained entropy. The two knobs barely interact. Mixing
+        only matters when some token holds much more than `w/V`, so at the flat
+        end this scale is the whole story and `uniform_weight` changes nothing
+        measurable; at the sharp end the cap binds and the scale stops mattering.
+
+    Where a run actually lands between the two is a finding, reported by
+        `realised_survival` and `logit_spread`, not a design input. Do not
+        calibrate this against an assumed trained shape — that number is
+        unmeasured, `uniform_weight` already bounds it, and letting it into the
+        chain sets the operating point from a guess.
+
+    ---
+    Rederiving the default
+    ---
+
+    Reference points, for birds (V=20, w=0.02), all computable from
+        `initial_energy` above:
+
+        retained entropy   0.94   0.90   0.85   0.77   0.62   0.57
+        scale              0.64   0.84   1.05   1.37   1.99   2.23
+        argmax probability 0.14   0.19   0.23   0.31   0.45   0.49
+
+    The default of 0.9 is set from the one trajectory that has been measured. A
+        birds run started at 0.62 retained (the `ln V` scheme's 0.66
+        coefficient), and then *flattened itself* for 35 epochs, reaching about
+        0.94 retained, before accuracy left chance on the way back up at around
+        0.82-0.85. Read as a policy that is annealing rather than one that is
+        stuck, the descent is a cost: the run spent 35 epochs travelling to an
+        entropy it could have been started at. 0.9 starts it near where it
+        chose to go, and short of the 0.94 extreme, where messages carry so
+        little that there may be nothing for the listener to learn from.
+
+    That is a design decision taken from a single run, not a derived bound, and
+        it should be revisited when there are more. What is *not* a free choice
+        is the direction: lower than about 0.6 reproduces the premature-sharpening
+        failure this scheme exists to avoid.
 
     Args:
-        coefficient: `logit_scale_coefficient` from the config
+        init_energy: `sender_language_model.init_energy` from the config,
+            a fraction in (0, 1] — 0.9 means "retain 90% of maximum entropy"
         vocabulary: number of emittable tokens
+        uniform_weight: as in `flatten_logit_distribution`
 
     Returns:
         The multiplier, a plain float — it is a constant, so unlike the gain it
             replaced there is no buffer and nothing to checkpoint.
     """
-    return coefficient * math.log(vocabulary)
+    sample = initial_logit_sample(vocabulary)
+
+    floor = initial_energy(
+        ENERGY_SCALE_MAX, vocabulary, uniform_weight, sample
+    )
+    if init_energy < floor:
+        warnings.warn(
+            f"`init_energy` of {init_energy} is below the floor of "
+            f"{floor:.4f} imposed by `uniform_weight` of {uniform_weight} at a "
+            f"vocabulary of {vocabulary}. The scale will pin at "
+            f"{ENERGY_SCALE_MAX} and the speaker will start at the floor "
+            f"rather than at the requested entropy. Lower `uniform_weight` to "
+            f"ask for less."
+        )
+
+    low, high = ENERGY_SCALE_MIN, ENERGY_SCALE_MAX
+    for _ in range(ENERGY_SOLVE_STEPS):
+        middle = math.sqrt(low * high)
+        if initial_energy(middle, vocabulary, uniform_weight, sample) > (
+            init_energy
+        ):
+            low = middle
+        else:
+            high = middle
+
+    return math.sqrt(low * high)
 
 
 def mask_reserved_tokens(logits: torch.Tensor) -> torch.Tensor:
@@ -359,7 +542,7 @@ class SenderGRULM(nn.Module):
         # A constant, resolved once: nothing about it is learned or calibrated,
         #     so there is no buffer here and nothing enters the `state_dict`.
         self.logit_scale = logit_scale(
-            kwargs["logit_scale_coefficient"], self.vocabulary
+            kwargs["init_energy"], self.vocabulary, self.uniform_weight
         )
 
         # Not state: per-batch diagnostics, read by `train.py` for metrics.csv.
@@ -615,7 +798,7 @@ class SenderTransformerLM(nn.Module):
         # A constant, resolved once: nothing about it is learned or calibrated,
         #     so there is no buffer here and nothing enters the `state_dict`.
         self.logit_scale = logit_scale(
-            kwargs["logit_scale_coefficient"], self.vocabulary
+            kwargs["init_energy"], self.vocabulary, self.uniform_weight
         )
 
         # Not state: per-batch diagnostics, read by `train.py` for metrics.csv.

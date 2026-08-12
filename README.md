@@ -197,22 +197,35 @@ position-invariant for both speakers, has no running statistics so train and
 eval agree, and does not couple to `accumulator_steps`. Without an affine it is
 argmax-preserving, so it changes no eval-time message.)
 
-- `[sender_language_model] logit_scale_coefficient`: the **operating point**, and
-    the range the speaker can move through. `0.66` everywhere. The normalised
-    logits are multiplied by `c * ln(V)` before sampling, train-pass only.
-    `F.gumbel_softmax(..., hard=True)` emits `argmax(logits + g)` with
-    `g ~ Gumbel(0,1)`, whose standard deviation is a fixed 1.283, so what
-    survives the noise is set by how big the logits are against it — and
-    LayerNorm is what makes that comparable across architectures whose raw logit
-    scales varied by two orders of magnitude. The `ln(V)` term is there because
-    a winner must beat the largest of `V` Gumbel draws and `E[max g] = ln V + γ`,
-    so the noise floor grows with the vocabulary while LayerNorm holds the logits
-    at O(1); it resolves to `1.74` at ShapeWorld's `V = 14` and `1.98` at CUB's
-    `V = 20`, putting both at the same initial fidelity. A freshly initialised
-    speaker flips ~50% of its symbols and works its way down toward the
-    `uniform_weight` floor by learning a peaked distribution. **This is a
-    constant, not a target**: what a speaker actually achieves is reported as
-    `realised_survival` and is expected to move over a run.
+- `[sender_language_model] init_energy`: the **starting point**, and the range
+    the speaker can move through. `0.9` everywhere. It is the fraction of maximum
+    entropy a *freshly initialised* speaker's per-position distribution retains —
+    `H(p) / log2(V)`, so `1.0` is a speaker that emits uniformly at random and
+    `0.0` one that emits a single token with certainty. A fraction, not a
+    percentage.
+
+    It is not the scale itself. `logit_scale` in `models/sender.py` solves once
+    at construction, by bisection against a fixed sample, for the multiplier that
+    delivers this entropy at a given `vocabulary` and `uniform_weight`: `0.802` at
+    ShapeWorld's `V = 14`, `0.839` at CUB's `V = 20`. Asking for entropy rather
+    than a scale is what makes the two datasets comparable — an earlier
+    `c * ln(V)` form over-corrected for vocabulary by about four times.
+
+    Why entropy rather than a symbol error rate or a channel capacity: at
+    initialisation there is no correct symbol to have an error rate *against*
+    (argmax is an accident of the init, not an intended message), and capacity
+    runs backwards, since a high-capacity channel is a sharp one with less room
+    to explore. The reason to start high is bootstrapping — a fresh speaker's
+    argmax barely varies with its input, so a low-entropy start means it emits
+    near enough one message for everything, confidently, from the first batch,
+    and the listener co-adapts to that before the speaker's embeddings are worth
+    grounding on.
+
+    **This is a starting point, not a target**: what a speaker actually does is
+    reported as `realised_survival` and `logit_spread`, and is expected to move
+    over a run — including *downwards* in fidelity early on, which is the
+    speaker annealing itself rather than a fault. `logit_scale`'s docstring
+    carries the derivation and the reference points to rederive `0.9` from.
 - `[sender_language_model] uniform_weight`: the **ceiling** on fidelity, and so
     the floor under exploration. Weight of the uniform component mixed into the
     policy before sampling, train-pass only. It caps a slot's winner at

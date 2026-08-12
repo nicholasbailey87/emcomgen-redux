@@ -85,11 +85,12 @@ def validate_config(config: dict) -> bool:
     # Checked here rather than left to the speaker's constructor: `SafeDict`
     # only warns on a missing key and hands back None, which would fail
     # confusingly deep inside the decode instead of at parse time.
-    coefficient = config['sender_language_model'].get('logit_scale_coefficient')
-    if coefficient is None or not coefficient > 0.0:
+    init_energy = config['sender_language_model'].get('init_energy')
+    if init_energy is None or not 0.0 < init_energy <= 1.0:
         raise InvalidConfig(
-            "`sender_language_model.logit_scale_coefficient` must be present "
-            f"and positive, got {coefficient}."
+            "`sender_language_model.init_energy` must be present and in "
+            f"(0, 1] — it is a fraction of maximum entropy, not a percentage "
+            f"— got {init_energy}."
         )
 
     for key in ('silhouette_p_sender', 'silhouette_p_receiver'):

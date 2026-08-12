@@ -115,19 +115,63 @@ def _prototypes(speaker, batch_size=32, seed=0):
     )
 
 
-# ------------------------------------------------- 1. the scale is V-aware --
+# ------------------------------------ 1. the scale is solved, not stated --
 
-def test_logit_scale_resolves_against_the_vocabulary():
+def test_logit_scale_resolves_the_requested_entropy():
     """
-    `c * ln(V)`, and the two values the shipped datasets actually use. Pinned
-    numerically because these are quoted in DEFAULT.toml and the README.
+    The solve inverts `initial_energy`, and the two scales the shipped datasets
+    actually use. Pinned numerically because these are quoted in DEFAULT.toml
+    and the README.
     """
-    assert S.logit_scale(0.66, 14) == pytest.approx(1.742, abs=0.001)
-    assert S.logit_scale(0.66, 20) == pytest.approx(1.977, abs=0.001)
+    assert S.logit_scale(0.9, 14, 0.02) == pytest.approx(0.802, abs=0.002)
+    assert S.logit_scale(0.9, 20, 0.02) == pytest.approx(0.839, abs=0.002)
 
-    # Monotone in both arguments, and a bare coefficient is recovered at V = e.
-    assert S.logit_scale(0.66, 20) > S.logit_scale(0.66, 14)
-    assert S.logit_scale(1.0, math.e) == pytest.approx(1.0)
+    # It is an inverse, so it must round-trip at whatever it returns.
+    for energy in (0.5, 0.7, 0.9, 0.99):
+        for vocabulary in (8, 14, 20, 64):
+            scale = S.logit_scale(energy, vocabulary, 0.02)
+            assert S.initial_energy(scale, vocabulary, 0.02) == pytest.approx(
+                energy, abs=0.002
+            ), (energy, vocabulary)
+
+    # Monotone: asking for more entropy means a smaller scale.
+    scales = [S.logit_scale(e, 20, 0.02) for e in (0.5, 0.7, 0.9, 0.99)]
+    assert scales == sorted(scales, reverse=True), scales
+
+
+def test_the_solve_is_deterministic():
+    """
+    The resolved scale must not depend on global RNG state, or two runs of the
+    same config would get different channels and nobody would think to look
+    here. `initial_logit_sample` owns its own generator for this reason.
+    """
+    torch.manual_seed(1234)
+    first = S.logit_scale(0.9, 20, 0.02)
+    torch.manual_seed(999)
+    _ = torch.randn(1000)
+    second = S.logit_scale(0.9, 20, 0.02)
+
+    assert first == second
+
+
+def test_uniform_weight_floors_the_achievable_entropy():
+    """
+    `uniform_weight` owns the sharp end: mixing caps a slot's winner at
+    `1 - w + w/V`, so there is entropy no scale can remove. Asking for less than
+    that is a config error the speaker cannot honour, and it warns rather than
+    silently starting somewhere else.
+    """
+    floor = S.initial_energy(S.ENERGY_SCALE_MAX, 20, 0.02)
+    assert 0.04 < floor < 0.06, floor
+
+    with pytest.warns(UserWarning, match="below the floor"):
+        S.logit_scale(floor / 2, 20, 0.02)
+
+    # And the two knobs barely interact at the flat end, which is why the
+    # default can be reasoned about without reference to `uniform_weight`.
+    assert S.initial_energy(0.84, 20, 0.02) == pytest.approx(
+        S.initial_energy(0.84, 20, 0.0), abs=0.01
+    )
 
 
 @pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
@@ -139,58 +183,83 @@ def test_speaker_resolves_its_scale_from_its_own_vocabulary(build):
     speaker = build()
     assert speaker.logit_scale == pytest.approx(
         S.logit_scale(
-            get_config()["sender_language_model"]["logit_scale_coefficient"],
+            get_config()["sender_language_model"]["init_energy"],
             speaker.vocabulary,
+            speaker.uniform_weight,
         )
     )
     assert isinstance(speaker.logit_scale, float)
 
+    # A bigger vocabulary needs a bigger scale to hold the same entropy.
     birds = build(vocabulary=20)
     assert birds.logit_scale > speaker.logit_scale
 
 
-def test_initial_operating_point_is_vocabulary_invariant():
+def test_the_documented_reference_points_still_hold():
     """
-    The point of the `ln(V)` term. A freshly initialised speaker -- whose
-    normalised logits are near enough i.i.d. normal -- must flip roughly the
-    same fraction of its symbols whatever its vocabulary size, because the
-    scale grows with the noise floor it has to clear.
+    `logit_scale`'s "Rederiving the default" section is a table, and numbers in
+    comments rot. This recomputes it. The default of 0.9 is set from where a
+    measured birds run went, so the mapping from entropy to what an observer
+    actually sees in metrics.csv -- `realised_survival` -- is the thing that
+    must not drift.
+    """
+    V = 20                                          # birds
+    expected = {                                    # entropy -> argmax prob
+        0.94: 0.143,
+        0.90: 0.185,
+        0.85: 0.234,
+        0.77: 0.310,
+        0.62: 0.445,
+        0.57: 0.489,
+    }
 
-    Without the term this fails loudly: at a flat scale of 2.0 the same speaker
-    flips 50% of its symbols at V=14 and 76% at V=128, which would be a
-    difference in the channel masquerading as a difference between datasets.
+    for energy, argmax_probability in expected.items():
+        scale = S.logit_scale(energy, V, 0.02)
+        generator = torch.Generator().manual_seed(0)
+        logits = _masked(torch.randn(100000, V + 4, generator=generator))
+        survival = S.mean_winning_probability(logits, scale, 0.02).item()
+        assert survival == pytest.approx(argmax_probability, abs=0.015), (
+            f"{energy} retained should show as survival ~{argmax_probability}, "
+            f"got {survival:.3f}"
+        )
+
+    # The default sits between where the measured run started and the extreme
+    # it flattened itself to. Both bounds are load-bearing: below the first is
+    # the premature-sharpening failure the scheme exists to avoid, above the
+    # second the messages may carry too little for the listener to learn from.
+    assert 0.62 < 0.9 < 0.94
+
+
+def test_initial_entropy_is_vocabulary_invariant():
     """
-    coefficient = 0.66
-    rates = {}
+    The point of solving rather than stating a scale. Two speakers with
+    different vocabularies must start equally uncommitted, or a difference in
+    the channel would masquerade as a difference between datasets.
+
+    The control is the `c * ln(V)` form this replaced: it was derived to hold a
+    *survival rate* constant, and over-corrects badly for entropy.
+    """
+    energy = get_config()["sender_language_model"]["init_energy"]
+
+    realised = {}
     for vocabulary in (8, 14, 20, 32, 64):
-        generator = torch.Generator().manual_seed(0)
-        raw = torch.randn(4096, vocabulary + 4, generator=generator)
-        logits = _masked(raw)
-        survival = S.mean_winning_probability(
-            logits, S.logit_scale(coefficient, vocabulary), 0.0
-        ).item()
-        rates[vocabulary] = 1.0 - survival
+        scale = S.logit_scale(energy, vocabulary, 0.02)
+        realised[vocabulary] = S.initial_energy(scale, vocabulary, 0.02)
 
-    # Tight where it matters: the two vocabularies the shipped datasets use.
-    assert abs(rates[14] - rates[20]) < 0.02, rates
+    for vocabulary, value in realised.items():
+        assert value == pytest.approx(energy, abs=0.002), (
+            f"V={vocabulary} starts at {value:.4f}, asked for {energy}"
+        )
 
-    # Looser across a 8x range of vocabulary, where the log fit is approximate.
-    assert max(rates.values()) - min(rates.values()) < 0.06, (
-        f"initial rate varies with V: {rates}"
-    )
-
-    # And the level is the one DEFAULT.toml documents: a speaker that starts
-    # genuinely uncertain, with room to earn confidence.
-    for vocabulary, rate in rates.items():
-        assert 0.40 < rate < 0.62, f"V={vocabulary} starts at {rate:.3f}"
-
-    # The control: drop the vocabulary term and the invariance goes away.
-    flat = {}
-    for vocabulary in (14, 64):
-        generator = torch.Generator().manual_seed(0)
-        logits = _masked(torch.randn(4096, vocabulary + 4, generator=generator))
-        flat[vocabulary] = 1.0 - S.mean_winning_probability(logits, 2.0, 0.0).item()
-    assert flat[64] - flat[14] > 0.1, flat
+    # The control: a fixed `c * ln(V)` drifts across the same range, and by
+    # much more than the solve's residual.
+    fitted = {
+        vocabulary: S.initial_energy(
+            0.28 * math.log(vocabulary), vocabulary, 0.02
+        )
+        for vocabulary in (8, 64)
+    }
+    assert abs(fitted[64] - fitted[8]) > 0.05, fitted
 
 
 # ------------------------------- 2. LayerNorm is what equalises the ladder --
@@ -206,7 +275,7 @@ def test_layer_norm_makes_exploration_scale_invariant():
     to except the *shape* of the logits, which is the speaker's own policy.
     """
     raw = _logit_shapes(14)["typical"]
-    scale = S.logit_scale(0.66, 14)
+    scale = S.logit_scale(0.9, 14, 0.02)
 
     def survival(logits):
         return S.mean_winning_probability(_masked(logits), scale, 0.02).item()
@@ -241,7 +310,7 @@ def test_scale_invariance_survives_a_collapsing_logit_scale():
     collapse is absorbed four orders further out.
     """
     raw = _logit_shapes(14)["typical"]          # incoming sd ~1.0
-    scale = S.logit_scale(0.66, 14)
+    scale = S.logit_scale(0.9, 14, 0.02)
 
     def survival(logits):
         return S.mean_winning_probability(_masked(logits), scale, 0.02).item()
@@ -269,7 +338,7 @@ def test_shape_still_moves_the_channel():
     setting, and that is the finding `realised_survival` exists to report --
     the thing the calibration used to erase.
     """
-    scale = S.logit_scale(0.66, 14)
+    scale = S.logit_scale(0.9, 14, 0.02)
     shapes = _logit_shapes(14)
 
     typical = S.mean_winning_probability(_masked(shapes["typical"]), scale, 0.02)
@@ -504,10 +573,12 @@ def test_realised_survival_reports_the_channel_in_use(build):
     assert speaker.realised_survival > baseline + 0.1
 
     # A freshly initialised speaker starts genuinely uncertain, with room to
-    # earn confidence rather than beginning at its own ceiling.
+    # earn confidence rather than beginning at its own ceiling. At the default
+    # `init_energy` of 0.9 that is an argmax it holds about a fifth of the time
+    # -- see the reference table in `logit_scale`.
     fresh = build().train()
     fresh.decode(_prototypes(fresh))
-    assert 0.35 < fresh.realised_survival < 0.70, fresh.realised_survival
+    assert 0.12 < fresh.realised_survival < 0.32, fresh.realised_survival
 
 
 @pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
@@ -652,17 +723,21 @@ def test_layer_norm_is_position_invariant(build):
 
 # ------------------------------------------------------------ 8. the config --
 
-def test_config_rejects_a_missing_or_invalid_coefficient():
+def test_config_rejects_a_missing_or_invalid_init_energy():
     """
     `SafeDict` only warns on a missing key and hands back None, which would fail
     confusingly deep inside the decode, so `parse_config` checks it up front.
+
+    The upper bound matters as much as the lower one: `init_energy` is a
+    fraction of maximum entropy, so anyone who reads it as a percentage and
+    writes `90` must be told, not quietly given a scale of 0.001.
     """
     import parse_config
 
-    for bad in (None, 0.0, -1.0):
+    for bad in (None, 0.0, -1.0, 1.5, 90):
         config = get_config()
-        config["sender_language_model"]["logit_scale_coefficient"] = bad
-        with pytest.raises(parse_config.InvalidConfig, match="logit_scale_coefficient"):
+        config["sender_language_model"]["init_energy"] = bad
+        with pytest.raises(parse_config.InvalidConfig, match="init_energy"):
             parse_config.validate_config(config)
 
 

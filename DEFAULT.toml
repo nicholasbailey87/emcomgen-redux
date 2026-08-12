@@ -158,24 +158,43 @@ message_length = 7 # max message length. note this includes sos/eos token, i.e. 
 # the finite entries, so these divide by 14 rather than by 18.
 uniform_weight = 0.02
 #
-# `logit_scale_coefficient` (c) is the *operating point*, and the range the
-# speaker can move through. The emittable logits are normalised to unit variance
-# and then multiplied by `c * ln(V)`, which is what they are worth against the
-# Gumbel noise's fixed 1.283 standard deviation. See `logit_scale` in
-# `models/sender.py` for why the vocabulary term is there and why the scale is a
-# constant rather than something solved per batch.
+# `init_energy` is the *starting point*, and the range the speaker can move
+# through. It is the fraction of the maximum possible entropy that a freshly
+# initialised speaker's per-position distribution retains: 1.0 is a speaker that
+# has committed to nothing and emits uniformly at random, 0.0 one that emits a
+# single token with certainty. A fraction, not a percentage.
 #
-# At 0.66 the scale is 1.74 here and 1.98 for birds, and a freshly initialised
-# speaker flips ~50% of its symbols. It can work its way down to the
-# `uniform_weight` floor by learning a peaked distribution, and that trajectory
-# is what `realised_survival` reports each epoch. Raising c narrows the range and
-# starts the speaker closer to a clean channel; lowering it makes early
-# exploration heavier and can leave the ceiling too noisy to communicate through.
+# It is not the scale itself. The emittable logits are normalised to unit
+# variance, and `logit_scale` in `models/sender.py` solves once at construction
+# for the multiplier that delivers this entropy at this `vocabulary` and this
+# `uniform_weight`. At 0.9 that is a scale of 0.802 here and 0.839 for birds,
+# and an argmax the speaker holds with probability 0.22 and 0.18 respectively.
 #
-# Note the target is a *mean* over slots and confidence is skewed, so a mean
-# survival hides a wide spread: exploration concentrates on the slots the model
-# is unsure about, which is the behaviour wanted.
-logit_scale_coefficient = 0.66
+# Why entropy rather than a symbol error rate or a channel capacity: at
+# initialisation there is no correct symbol to have an error rate against --
+# argmax is an accident of the initialisation, not an intended message -- and
+# capacity runs backwards, since a high-capacity channel is a *sharp* one with
+# less room to explore. Entropy needs no reference symbol and runs the way
+# intuition does. `logit_scale`'s docstring carries the full argument.
+#
+# The reason to start high is bootstrapping. A fresh speaker's argmax barely
+# varies with its input, so a low-entropy start means it emits near enough one
+# message for everything, confidently, from the first batch -- and the listener
+# co-adapts to that degenerate language before the speaker's embeddings are
+# worth grounding anything on. Near-random messages carry no premature structure
+# to co-adapt to.
+#
+# 0.9 is a design decision, not a derived bound, and it is set from one measured
+# run: a birds run started at 0.62 retained, flattened *itself* to ~0.94 over 35
+# epochs, and left chance accuracy on the way back up at ~0.82-0.85. That
+# descent is a cost, so start near where it chose to go. Revisit it when there
+# are more runs. `logit_scale` records the reference points to rederive from.
+#
+# `realised_survival` and `logit_spread` report each epoch where a run actually
+# went. Note survival is a *mean* over slots and confidence is skewed, so it
+# hides a wide spread: exploration concentrates on the slots the speaker is
+# unsure about, which is the behaviour wanted.
+init_energy = 0.9
 tau = 1.0                     # Gumbel-softmax tau. Gradient shaping only:
                               # the hard forward sample is an argmax and so
                               # is invariant to it. jayelm's `--tau`. With a
@@ -189,7 +208,7 @@ heads = 4 # Heads per layer - only applies to Transformer language models
 utility_tokens = 4 # Only applies to Transformer language models
 # See [sender_feature_model] for what these are and why they are here. Note the
 # vocabulary logits are always layer-normalised before sampling and there is no
-# knob for it: `logit_scale_coefficient` above is calibrated against unit
+# knob for it: `init_energy` above is resolved against unit
 # variance, so the two are a pair. That is unrelated to a vision model's
 # `batch_norm_logits`, which is broccoli's own.
 ff_ratio = 2 # Only applies to Transformer language models
@@ -330,19 +349,19 @@ feature_model = "ResNet18"
 # Inheriting w = 0.02 gives birds the same irreducible `w * (1 - 1/V)` corruption
 # ShapeWorld gets: 0.019 here against ShapeWorld's 0.0186.
 #
-# No `logit_scale_coefficient` override either, and that is the point of the
-# `ln(V)` term in `logit_scale`. The larger vocabulary below means a winning
-# symbol must beat the largest of 20 Gumbel draws rather than 14, so the same
-# coefficient resolves to a larger scale -- 1.98 against ShapeWorld's 1.74 --
-# and both datasets start their speakers at the same fraction of symbols
-# flipped. A shared bare constant would not do that: it would leave birds
-# exploring measurably harder at initialisation purely because its vocabulary is
-# bigger.
+# No `init_energy` override either, and that is the point of solving for the
+# scale rather than stating one. Both datasets ask for the same *entropy*, and
+# `logit_scale` resolves whatever multiplier each vocabulary needs to deliver it
+# -- 0.839 here against ShapeWorld's 0.802 -- so the two start their speakers
+# equally uncommitted rather than differing in their channel because one has a
+# bigger vocabulary. A shared bare scale would not do that, and neither did the
+# `c * ln(V)` form this replaced, which over-corrected for vocabulary by roughly
+# four times.
 #
 # Note the two datasets are still not identical at the message level, and cannot
-# be: the same per-symbol rate over 8 content tokens here versus 5 on ShapeWorld
-# corrupts a larger share of whole messages. `message_length` is the knob that
-# governs that, not these.
+# be: the same per-symbol entropy over 8 content tokens here versus 5 on
+# ShapeWorld makes a whole message here harder to pin down. `message_length` is
+# the knob that governs that, not these.
 vocabulary = 20
 message_length = 10 # max message length. note this includes sos/eos token, i.e. the true length is this - 2
 
