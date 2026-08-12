@@ -46,6 +46,14 @@ def trim_messages(token_id_rows):
     return trimmed
 
 
+# Well below `F.layer_norm`'s 1e-5 default, so that the normaliser keeps
+#     normalising as a speaker's logit scale collapses rather than handing the
+#     channel a quietly weaker scale. Safe in fp32, which is where autocast runs
+#     LayerNorm anyway, and a genuinely constant logit vector still yields zeros
+#     rather than NaN. See the note in `layer_norm_logits`.
+LAYER_NORM_EPS = 1e-12
+
+
 def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
     """
     Normalise the *emittable* vocabulary logits to zero mean and unit variance,
@@ -72,18 +80,30 @@ def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
         the `state_dict`. Without affine the transform is argmax-preserving, so
         it changes no eval-time message.
 
-    One limit worth knowing, since `logit_scale` is expressed against this and
-        cannot compensate for it the way the per-batch solve it replaced could.
-        `F.layer_norm` divides by `sqrt(var + eps)` with `eps = 1e-5`, so scale
-        invariance holds only while the incoming variance is large against that.
-        Measured on the fixtures: rescaling a speaker's raw logits by anything
-        from 0.1 to 1e5 moves realised survival by <3e-4, but at an incoming
-        standard deviation of 0.01 it moves by 0.02 and at 0.001 by 0.30. The
-        observed range across the real ladder was a standard deviation of 1 to
-        159, so this is three orders of magnitude clear of binding — but a
-        speaker whose logits genuinely collapsed would get a quietly weaker
-        channel rather than an error. `tests/test_exploration.py` pins both the
-        invariance and where it stops.
+    `eps` is 1e-12 rather than the 1e-5 default, and that is load-bearing.
+        `F.layer_norm` divides by `sqrt(var + eps)`, so scale invariance holds
+        only while the incoming variance is large against `eps`; below that the
+        normaliser quietly stops normalising and the emittable logits come out
+        *smaller* than unit variance. Since `logit_scale` is a constant it
+        cannot absorb that, where the per-batch solve it replaced could and
+        silently did.
+
+    This is not hypothetical, and the headroom is much smaller than the raw
+        logit scales quoted in 1510a55 suggest. A freshly built GRU speaker
+        emits pre-norm logits with a standard deviation of ~0.24, not the 1 to
+        159 measured on unnormalised ladder arms, and at the 1e-5 default the
+        normaliser starts giving out below ~0.01 — a margin of roughly 24x, not
+        the three orders of magnitude previously claimed here. Shrinking that
+        speaker's output layer 1000x drops realised survival from 0.43 to 0.09;
+        a channel that noisy then starves the gradient that would restore the
+        logits, so it runs away. Observed on a birds run whose
+        `realised_survival` fell 0.47 -> 0.17 over 22 epochs.
+
+    At 1e-12 the same 1000x collapse leaves survival at 0.43, unchanged to four
+        decimal places, and the normaliser holds down to a standard deviation of
+        ~1e-6. `tests/test_exploration.py` pins both the invariance and where it
+        finally stops. `logit_spread` in metrics.csv is the column that makes a
+        collapse visible rather than something inferred after the fact.
 
     Args:
         logits: (..., vocabulary + 4), reserved tokens first
@@ -93,7 +113,10 @@ def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
         A tensor of the same shape, with the emittable slice normalised
     """
     return torch.cat(
-        [logits[..., :4], F.layer_norm(logits[..., 4:], (vocabulary,))],
+        [
+            logits[..., :4],
+            F.layer_norm(logits[..., 4:], (vocabulary,), eps=LAYER_NORM_EPS),
+        ],
         dim=-1,
     )
 
@@ -339,8 +362,15 @@ class SenderGRULM(nn.Module):
             kwargs["logit_scale_coefficient"], self.vocabulary
         )
 
-        # Not state: a per-batch diagnostic, read by `train.py` for metrics.csv.
+        # Not state: per-batch diagnostics, read by `train.py` for metrics.csv.
+        #     `logit_spread` is the standard deviation of the emittable logits
+        #     *before* normalisation, and exists to disambiguate the two ways
+        #     `realised_survival` can fall: the speaker learning a flatter
+        #     policy, which is a finding, or its logit scale collapsing towards
+        #     the LayerNorm epsilon, which is a fault. Both look identical in
+        #     `realised_survival` alone.
         self.realised_survival = float("nan")
+        self.logit_spread = float("nan")
 
         self.gru = nn.GRU(
             self.token_embedding_size,
@@ -410,6 +440,7 @@ class SenderGRULM(nn.Module):
         # Pre-gain logits for every position, kept so the exploration gain can
         #     be recalibrated once per batch rather than once per position.
         survival_logits = []
+        spread_steps = []
 
         # Create and add SOS token
         sos_onehot = torch.zeros(
@@ -432,6 +463,13 @@ class SenderGRULM(nn.Module):
             symbol_embeddings.append(step_embedding)
 
             logits = self.outputs2vocab(step_embedding) # Shape: (B, V)
+
+            if self.training:
+                # Before normalisation, which is the whole point of it: this is
+                #     the scale the normaliser has to work with.
+                spread_steps.append(
+                    logits[..., 4:].detach().float().std(-1).mean()
+                )
 
             # This must come before the scale and the uniform weight mixing: it
             #     is what fixes the magnitude the scale is expressed against,
@@ -493,6 +531,7 @@ class SenderGRULM(nn.Module):
                 self.logit_scale,
                 self.uniform_weight,
             ).item()
+            self.logit_spread = torch.stack(spread_steps).mean().item()
 
         # Add final EOS token
         eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 4, device=device)
@@ -526,6 +565,7 @@ class SenderGRULM(nn.Module):
         self.outputs2vocab.reset_parameters()
         self.token_embedding.reset_parameters()
         self.realised_survival = float("nan")
+        self.logit_spread = float("nan")
 
 
 class SenderTransformerLM(nn.Module):
@@ -578,8 +618,15 @@ class SenderTransformerLM(nn.Module):
             kwargs["logit_scale_coefficient"], self.vocabulary
         )
 
-        # Not state: a per-batch diagnostic, read by `train.py` for metrics.csv.
+        # Not state: per-batch diagnostics, read by `train.py` for metrics.csv.
+        #     `logit_spread` is the standard deviation of the emittable logits
+        #     *before* normalisation, and exists to disambiguate the two ways
+        #     `realised_survival` can fall: the speaker learning a flatter
+        #     policy, which is a finding, or its logit scale collapsing towards
+        #     the LayerNorm epsilon, which is a fault. Both look identical in
+        #     `realised_survival` alone.
         self.realised_survival = float("nan")
+        self.logit_spread = float("nan")
 
         if self.referent_embedding_size != self.token_embedding_size:
             raise NotImplementedError(
@@ -736,6 +783,12 @@ class SenderTransformerLM(nn.Module):
 
         logits = self.outputs2vocab(symbol_embeddings)
 
+        if self.training:
+            # Before normalisation — as in `SenderGRULM.decode`, see there.
+            self.logit_spread = (
+                logits[..., 4:].detach().float().std(-1).mean().item()
+            )
+
         # This must come before the scale and the uniform weight mixing — as in
         #     `SenderGRULM.decode`, see the notes there.
         logits = layer_norm_logits(logits, self.vocabulary)
@@ -796,6 +849,7 @@ class SenderTransformerLM(nn.Module):
         self.transformer.reset_parameters()
         self.outputs2vocab.reset_parameters()
         self.realised_survival = float("nan")
+        self.logit_spread = float("nan")
 
 
 class Sender(nn.Module):

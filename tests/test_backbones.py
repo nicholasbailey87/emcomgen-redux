@@ -299,11 +299,13 @@ def test_reset_parameters_clears_the_speakers_measured_survival():
     _, pair = _pair("../data/cub", BIRDS_FEATS, "cub")
     speaker = pair.sender.language_model
     speaker.realised_survival = 0.5
+    speaker.logit_spread = 0.9
     scale = speaker.logit_scale
 
     pair.sender.reset_parameters()
 
     assert math.isnan(speaker.realised_survival)
+    assert math.isnan(speaker.logit_spread)
     assert speaker.logit_scale == scale
 
 

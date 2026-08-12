@@ -226,32 +226,40 @@ def test_layer_norm_makes_exploration_scale_invariant():
     assert max(realised.values()) - min(realised.values()) < 2e-3, realised
 
 
-def test_scale_invariance_stops_at_the_layer_norm_epsilon():
+def test_scale_invariance_survives_a_collapsing_logit_scale():
     """
-    Where the claim above runs out, pinned so it is a known limit rather than a
-    surprise. `F.layer_norm` divides by `sqrt(var + eps)` with `eps = 1e-5`, so
-    a speaker whose logits collapse towards that variance is normalised by
-    something increasingly unlike its own spread, and `logit_scale` -- a
-    constant -- cannot absorb it the way the per-batch solve could.
+    Where the claim above runs out, and why `LAYER_NORM_EPS` is not the default.
 
-    Three orders of magnitude clear of the real ladder, whose logits ran from a
-    standard deviation of 1 to 159. It is pinned because a future change to the
-    normaliser (or to `eps`) should move this deliberately, not silently.
+    `F.layer_norm` divides by `sqrt(var + eps)`, so a speaker whose logits
+    collapse towards `eps` gets normalised by something increasingly unlike its
+    own spread and quietly receives a weaker channel -- which `logit_scale`,
+    being a constant, cannot absorb the way the per-batch solve silently did.
+
+    At the 1e-5 default this was not academic: a birds run lost realised
+    survival 0.47 -> 0.17 to it over 22 epochs, because a channel that noisy
+    starves the very gradient that would restore the logits. At 1e-12 the same
+    collapse is absorbed four orders further out.
     """
-    raw = _logit_shapes(14)["typical"]
+    raw = _logit_shapes(14)["typical"]          # incoming sd ~1.0
     scale = S.logit_scale(0.66, 14)
 
     def survival(logits):
         return S.mean_winning_probability(_masked(logits), scale, 0.02).item()
 
-    baseline = survival(raw)  # incoming sd ~1.0
+    baseline = survival(raw)
 
-    assert abs(survival(raw * 0.1) - baseline) < 1e-3      # sd 0.1: fine
-    assert abs(survival(raw * 0.01) - baseline) > 5e-3     # sd 0.01: visible
-    assert abs(survival(raw * 0.001) - baseline) > 0.1     # sd 0.001: gone
+    # The range a collapsing speaker actually travels through.
+    for factor in (1e-2, 1e-3, 1e-4, 1e-5):
+        assert abs(survival(raw * factor) - baseline) < 5e-3, factor
 
-    # And it only bites downwards: there is no upper limit.
+    # It still has to give out somewhere, and that somewhere is ~1e-6.
+    assert abs(survival(raw * 1e-7) - baseline) > 0.1
+
+    # And it never bites upwards.
     assert abs(survival(raw * 1e6) - baseline) < 3e-4
+
+    # The constant is the thing under test, not the behaviour of some default.
+    assert S.LAYER_NORM_EPS == 1e-12
 
 
 def test_shape_still_moves_the_channel():
@@ -511,6 +519,7 @@ def test_survival_does_not_move_during_eval(build):
 
     speaker.decode(prototypes)
     trained = speaker.realised_survival
+    spread = speaker.logit_spread
 
     speaker.eval()
     with torch.no_grad():
@@ -518,6 +527,43 @@ def test_survival_does_not_move_during_eval(build):
             speaker.decode(prototypes)
 
     assert speaker.realised_survival == trained
+    assert speaker.logit_spread == spread
+
+
+@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+def test_logit_spread_reads_the_pre_norm_scale(build):
+    """
+    `logit_spread` is what separates a speaker learning a flatter policy from
+    its logit scale collapsing -- the two look identical in `realised_survival`,
+    and a birds run was lost to the second while the first was assumed.
+
+    It has to be read *before* normalisation, so it must track a rescaling of
+    the speaker's output layer that `realised_survival` is (correctly) blind to.
+    """
+    torch.manual_seed(0)
+    speaker = build().train()
+    prototypes = _prototypes(speaker)
+
+    assert math.isnan(speaker.logit_spread)
+
+    torch.manual_seed(1)
+    speaker.decode(prototypes)
+    before, survival = speaker.logit_spread, speaker.realised_survival
+    assert before > 0.0
+
+    torch.manual_seed(0)
+    collapsed = build().train()
+    with torch.no_grad():
+        collapsed.outputs2vocab.weight.mul_(1e-3)
+        collapsed.outputs2vocab.bias.mul_(1e-3)
+    torch.manual_seed(1)
+    collapsed.decode(prototypes)
+
+    # The spread follows the collapse; survival does not, because the normaliser
+    # absorbs it. That division of labour is the point of logging both -- and at
+    # the 1e-5 default this same collapse drops survival to 0.09.
+    assert collapsed.logit_spread == pytest.approx(before * 1e-3, rel=0.1)
+    assert collapsed.realised_survival == pytest.approx(survival, abs=5e-3)
 
 
 @pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])

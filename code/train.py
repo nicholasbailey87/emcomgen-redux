@@ -431,15 +431,24 @@ def run(
                 combined_loss=this_loss.item()
             )
 
-            # The speaker measures its channel fidelity once per batch, on the
-            # train pass only. Logging it is how the channel stops being an
-            # invisible property of the architecture: at a fixed `logit_scale`
-            # this reports what each speaker's own logit *shape* buys it, so it
-            # is a finding rather than a restatement of a target, and it is
-            # expected to climb over a run as the speaker grows confident.
+            # The speaker measures its channel once per batch, on the train pass
+            # only. Logging it is how the channel stops being an invisible
+            # property of the architecture: at a fixed `logit_scale`,
+            # `realised_survival` reports what each speaker's own logit *shape*
+            # buys it, so it is a finding rather than a restatement of a target,
+            # and it is expected to climb over a run as the speaker grows
+            # confident.
+            #
+            # `logit_spread` is read together with it, and only exists to say
+            # which of two things a falling survival means: a flatter policy,
+            # which is the speaker's own doing, or a collapsing logit scale,
+            # which is a fault the normaliser should have absorbed. They are
+            # indistinguishable in survival alone.
             if training and speaking:
+                language_model = pair.sender.language_model
                 stats.update(
-                    realised_survival=pair.sender.language_model.realised_survival,
+                    realised_survival=language_model.realised_survival,
+                    logit_spread=language_model.logit_spread,
                     batch_size=batch_size,
                 )
 

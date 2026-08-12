@@ -360,6 +360,16 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     `1 - w + w/V`. Flat at ~0.5 for many epochs means the speaker is learning no
     confidence; pinned at the ceiling early means the channel has nothing left to
     explore with.
+- `train_logit_spread` — the standard deviation of the emittable logits
+    *before* normalisation. Read it alongside `train_realised_survival`, which
+    it exists to disambiguate: a falling survival at a healthy spread (O(1)) is
+    the speaker learning a flatter policy, which is a finding, while a falling
+    survival with a spread heading for zero is the logit scale collapsing, which
+    is a fault. The two are indistinguishable in survival alone, and a real
+    birds run lost 0.47 → 0.17 to the second without it being visible. Below a
+    spread of ~1e-6 the normaliser can no longer rescue it (see
+    `LAYER_NORM_EPS`); anywhere above that the scale is absorbed and only shape
+    reaches the channel.
 - `{train,test,test_same,test_avg}_unique_message_fraction` — distinct messages
     over messages emitted. A language that is doing work compresses: healthy
     runs sit around 0.30–0.40, while runs whose channel is too noisy to learn
