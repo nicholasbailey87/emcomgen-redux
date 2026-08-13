@@ -602,6 +602,13 @@ class SenderGRULM(nn.Module):
         self.realised_survival = float("nan")
         self.logit_spread = float("nan")
 
+        # Fraction of training elapsed, set once per epoch by `train.py`. Not
+        #     state: it is a position in a schedule, recovered from the epoch
+        #     counter on resume rather than checkpointed. 0.0 until told
+        #     otherwise, so a speaker used outside a training loop -- ACRe, the
+        #     tests, an interactive session -- samples at the configured `tau`.
+        self.training_progress = 0.0
+
         self.gru = nn.GRU(
             self.token_embedding_size,
             self.d_model,
@@ -644,8 +651,39 @@ class SenderGRULM(nn.Module):
     @property
     def sampling_tau(self):
         """
-        The temperature handed to `gumbel_softmax`, tracking the learned scale:
-            `tau * logit_scale / initial_logit_scale`.
+        The temperature handed to `gumbel_softmax`: the configured `tau`,
+            adjusted towards `tau * logit_scale / initial_logit_scale` by a
+            cosine schedule over training.
+
+            ratio  = max(logit_scale / initial_logit_scale, 1)
+            weight = (1 + cos(pi * training_progress)) / 2
+            tau    = configured_tau * (1 + weight * (ratio - 1))
+
+        So a run opens fully coupled and ends at exactly the configured `tau`,
+            where the surrogate is an honest picture of the sharpness the
+            listener actually receives. The cosine is flat early, which is what
+            makes a single schedule work across datasets that take off at very
+            different times: at 100 epochs the weight is still 0.97 at epoch 11,
+            where ShapeWorld leaves chance, and 0.65 at epoch 40, where birds
+            does. Both take off fully coupled and the coupling retires over the
+            last third.
+
+        Being open-loop is the point, not a compromise. Driving the schedule
+            from `realised_survival` or from accuracy would track the model
+            rather than the clock, but it would also hand every rung of the
+            ablation a different tau schedule -- so arms would differ in their
+            estimator as well as their architecture, which is the confound the
+            ladder exists to avoid.
+
+        The ratio is floored at 1, so `tau` never falls below the configured
+            value. Below the opening scale the coupling runs backwards: the
+            surrogate becomes `softmax(s0 * L + s0 * g / s)`, whose noise term
+            grows as the scale shrinks. Measured at V = 20, scale 0.35, that
+            takes the surrogate from 4.9 effective tokens to 2.0 while the token
+            it favours matches the noiseless argmax only 9% of the time -- a
+            confident gradient pointing at noise. `tau` is monotone and cannot
+            change *which* token is favoured, only how hard the gradient commits
+            to it, so there is nothing to be gained in that direction.
 
         `tau` shapes the soft sample the straight-through estimator
             differentiates; it leaves the hard forward sample alone, which is an
@@ -684,9 +722,11 @@ class SenderGRULM(nn.Module):
             Straight-through is biased at any `tau`, so this is a change of
             degree.
         """
-        return (
-            self.tau * self.logit_scale / self.initial_logit_scale
-        ).detach()
+        ratio = torch.clamp(
+            self.logit_scale.detach() / self.initial_logit_scale, min=1.0
+        )
+        weight = 0.5 * (1.0 + math.cos(math.pi * min(self.training_progress, 1.0)))
+        return self.tau * (1.0 + weight * (ratio - 1.0))
 
     @property
     def logit_scale(self):
@@ -946,6 +986,9 @@ class SenderTransformerLM(nn.Module):
         self.realised_survival = float("nan")
         self.logit_spread = float("nan")
 
+        # See `SenderGRULM`.
+        self.training_progress = 0.0
+
         if self.referent_embedding_size != self.token_embedding_size:
             raise NotImplementedError(
                 "`referent_embedding_size` and `token_embedding_size` must "
@@ -1089,8 +1132,39 @@ class SenderTransformerLM(nn.Module):
     @property
     def sampling_tau(self):
         """
-        The temperature handed to `gumbel_softmax`, tracking the learned scale:
-            `tau * logit_scale / initial_logit_scale`.
+        The temperature handed to `gumbel_softmax`: the configured `tau`,
+            adjusted towards `tau * logit_scale / initial_logit_scale` by a
+            cosine schedule over training.
+
+            ratio  = max(logit_scale / initial_logit_scale, 1)
+            weight = (1 + cos(pi * training_progress)) / 2
+            tau    = configured_tau * (1 + weight * (ratio - 1))
+
+        So a run opens fully coupled and ends at exactly the configured `tau`,
+            where the surrogate is an honest picture of the sharpness the
+            listener actually receives. The cosine is flat early, which is what
+            makes a single schedule work across datasets that take off at very
+            different times: at 100 epochs the weight is still 0.97 at epoch 11,
+            where ShapeWorld leaves chance, and 0.65 at epoch 40, where birds
+            does. Both take off fully coupled and the coupling retires over the
+            last third.
+
+        Being open-loop is the point, not a compromise. Driving the schedule
+            from `realised_survival` or from accuracy would track the model
+            rather than the clock, but it would also hand every rung of the
+            ablation a different tau schedule -- so arms would differ in their
+            estimator as well as their architecture, which is the confound the
+            ladder exists to avoid.
+
+        The ratio is floored at 1, so `tau` never falls below the configured
+            value. Below the opening scale the coupling runs backwards: the
+            surrogate becomes `softmax(s0 * L + s0 * g / s)`, whose noise term
+            grows as the scale shrinks. Measured at V = 20, scale 0.35, that
+            takes the surrogate from 4.9 effective tokens to 2.0 while the token
+            it favours matches the noiseless argmax only 9% of the time -- a
+            confident gradient pointing at noise. `tau` is monotone and cannot
+            change *which* token is favoured, only how hard the gradient commits
+            to it, so there is nothing to be gained in that direction.
 
         `tau` shapes the soft sample the straight-through estimator
             differentiates; it leaves the hard forward sample alone, which is an
@@ -1129,9 +1203,11 @@ class SenderTransformerLM(nn.Module):
             Straight-through is biased at any `tau`, so this is a change of
             degree.
         """
-        return (
-            self.tau * self.logit_scale / self.initial_logit_scale
-        ).detach()
+        ratio = torch.clamp(
+            self.logit_scale.detach() / self.initial_logit_scale, min=1.0
+        )
+        weight = 0.5 * (1.0 + math.cos(math.pi * min(self.training_progress, 1.0)))
+        return self.tau * (1.0 + weight * (ratio - 1.0))
 
     @property
     def logit_scale(self):

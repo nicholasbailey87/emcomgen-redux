@@ -687,6 +687,14 @@ if __name__ == "__main__":
 
         metrics["epoch"] = epoch
 
+        # Position in the speaker's tau schedule. Set here rather than derived
+        #     inside the speaker so that it is recovered from the epoch counter
+        #     on resume, and so a speaker used outside a training loop keeps the
+        #     configured `tau`. See `SenderGRULM.sampling_tau`.
+        model_config['pair'].sender.language_model.training_progress = (
+            epoch / max(config['scheduler']['epochs'] - 1, 1)
+        )
+
         # Train
         train_metrics, lang = run("train", epoch, *run_args)
         util.update_with_prefix(metrics, train_metrics, "train")
