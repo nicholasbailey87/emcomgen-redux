@@ -431,8 +431,16 @@ feature_model = "ResNet18"
 # left birds with no ceiling at all: its fidelity floated with whatever scale the
 # architecture happened to produce -- 0.24 for the ViT sender, ~1.0 for a Conv4
 # one -- so the two datasets differed in their channel rather than in their task.
-# Inheriting w = 0.02 gives birds the same irreducible `w * (1 - 1/V)` corruption
-# ShapeWorld gets: 0.019 here against ShapeWorld's 0.0186.
+# Inheriting w gives birds the same irreducible `w * (1 - 1/V)` corruption
+# ShapeWorld gets. At the 0.1 that 119b2de made the default, that is 0.095 here
+# against ShapeWorld's 0.093 -- the vocabularies differ (20 against 14) but the
+# floor barely moves, which is the point of sharing the knob rather than the
+# rate.
+#
+# Note this applies on the train pass only, so train and eval do not run through
+# the same channel: eval decodes greedily, with no noise, no mixture and no
+# scale. Train accuracy is therefore depressed relative to test accuracy by
+# construction, and the two columns understate the real generalisation gap.
 #
 # No `init_energy` override either, and that is the point of solving for the
 # scale rather than stating one. Both datasets ask for the same *entropy*, and
