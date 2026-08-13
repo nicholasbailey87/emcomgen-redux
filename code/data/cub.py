@@ -147,9 +147,18 @@ def load(config):
     def to_dset(classes, train=False):
         if train:
             tr = train_transform
-            length = 1000
+            # `__getitem__` ignores its index and samples a fresh game, so this
+            #     is the size of an epoch rather than a set of stored games:
+            #     consecutive epochs are independent draws from a
+            #     combinatorially large space, and nothing here is exhausted by
+            #     raising it. See `games_per_epoch` in `[birds.data]` for why
+            #     the default is no longer jayelm's 1,000.
+            length = config['data'].get('games_per_epoch', 1000)
         else:
             tr = test_transform
+            # Left at jayelm's value deliberately. Eval size is not a training
+            #     knob, and holding it fixed keeps test metrics comparable with
+            #     every run recorded before `games_per_epoch` existed.
             length = 200
 
         if config['debug']:

@@ -81,6 +81,72 @@ weight_decay = 0.01
 clip_grad_norm = 1.0
 log_interval = 100
 
+# Learning rate for the speaker's `log_logit_scale` alone. Set to `lr` to
+# disable the override.
+#
+# This exists because that one scalar is the run's bottleneck, and it is
+# bottlenecked on *steps* rather than on gradient. AdamW normalises by the
+# gradient's own second moment, so a parameter with a consistently signed
+# gradient moves at about `lr` per step whatever that gradient's size; a lone
+# scalar therefore cannot travel further than `lr * steps` over a run, no matter
+# how badly the loss wants it to.
+#
+# The distance it has to travel is fixed by the other two knobs.
+# `layer_norm_logits` pins the emittable logits to unit variance, so the scale
+# *is* the channel's fidelity, and `init_energy` opens it at 0.839 for birds --
+# deliberately near-random, so the listener has no premature structure to
+# co-adapt to. A usable channel is somewhere around 4 to 6, which is
+# `ln(6/0.839)` = 1.9 log-units away.
+#
+# Birds could not cover that. At 62 steps an epoch and `lr` 1e-4 the ceiling
+# over 100 epochs was 0.62 log-units, reaching a scale of 1.56 at best -- and
+# the ablation measured 0.33 symbol survival at a comparable sd, which is dead
+# at ln 2. `games_per_epoch` 2,500 lifts that ceiling to 1.56 on its own.
+#
+# 2e-3 clears it with room to spare, and is set above what the arithmetic asks
+# for. At 156 steps an epoch the scale can travel 0.31 log-units per epoch, so
+# it covers 1.9 in about six epochs at full sign-consistency and twelve at half
+# -- against a whole-run ceiling of 31, roughly sixteen times the distance. The
+# intent is to stop the traverse being the binding constraint at all, so that
+# what the run measures is the language rather than the channel opening.
+#
+# Overshoot is cheap, and that is why this can be set high. `uniform_weight`
+# caps the effective logit gap at `log(((1-w)+w/V)/(w/V))` = 4.84, so fidelity
+# saturates and the scale's own gradient vanishes with it: the parameter parks
+# rather than running away, and a larger value buys earlier arrival rather than
+# a sharper endpoint.
+#
+# What it does cost is the bootstrapping window. `init_energy` 0.9 is there to
+# keep the speaker near-random while its embeddings become worth grounding, and
+# a takeoff at epoch six spends that window in the first tenth of the run --
+# a reliable channel over a speaker whose argmax is still close to
+# input-independent is exactly the co-adaptation `logit_scale`'s docstring warns
+# about. The `uniform_weight` floor is the brake: 10% of tokens are resampled
+# uniformly however sharp the speaker gets, so a code formed early still has to
+# survive that corruption. Whether the brake is enough at this rate is the thing
+# the run tests. The tell is `realised_survival` against shape accuracy -- a
+# channel that opens while accuracy stays at chance is the failure, not a slow
+# channel.
+#
+# Two other things move with it. The tau coupling in `sampling_tau` tracks
+# `logit_scale / initial_logit_scale`, so a fast climb makes the surrogate very
+# soft very early, and straight-through bias is at its worst exactly while the
+# pair is choosing its code. And `training_progress` retires that coupling on
+# the epoch counter, calibrated in 3b3b857 against takeoff at epoch 11 for
+# ShapeWorld and 40 for birds; at this rate both take off fully coupled and the
+# honest-tau phase arrives long after the code has settled.
+#
+# If `realised_survival` climbs promptly and accuracy still does not follow,
+# the traverse was never the constraint and this knob should go rather than
+# grow.
+#
+# Only the scale gets this. `outputs2vocab.bias` is the other shape parameter
+# and must *not* be raised with it: it is a vector, it has no distance to cover,
+# and it competes with `Wh` for control of the message. LayerNorm bounds the
+# magnitude of `Wh + b` but not the ratio between them, so a bias that outruns
+# the matrix leaves an input-independent message -- the single-message collapse.
+logit_scale_lr = 2e-3
+
 [scheduler]
 epochs = 100
 warm_up_epochs = 0
@@ -331,6 +397,25 @@ silhouette_p_receiver = 0.0
 batch_size = 16
 n_workers = 4
 n_examples = 10 # number of examples seen by agents, including distractors
+
+# Games per training epoch. Read only by `cub.py`: ShapeWorld's epoch is the
+# size of the stored game file, so there is no matching key under `[data]`.
+#
+# jayelm's value was 1,000, and with `batch_size` 16 and `accumulator_steps` 1
+# that makes an epoch 62 optimiser steps against ShapeWorld's 156 (20,000 games
+# at an effective batch of 128). The two datasets were therefore getting a
+# 2.5-fold different optimisation budget per epoch while sharing a 100-epoch
+# schedule -- and `training_progress`, which retires the tau coupling, is keyed
+# to the epoch counter. 2,500 equalises the step count.
+#
+# Nothing is exhausted by raising it. `CUBDataset.__getitem__` ignores its index
+# and samples a fresh game, so an epoch is a draw rather than a pass, and the
+# space is combinatorially large. Images do repeat, but they already did: 100
+# train classes at ~59 images is a ~5,900-image pool and each game consumes 20,
+# so at 1,000 games every image appeared ~3.4 times per epoch and 3.4% of them
+# appeared in no given epoch at all. 2,500 is roughly the coupon-collector point
+# at which an epoch first covers the training images.
+games_per_epoch = 2500
 
 [birds.optimiser]
 accumulator_steps = 1
