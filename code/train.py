@@ -439,16 +439,38 @@ def run(
             # and it is expected to climb over a run as the speaker grows
             # confident.
             #
-            # `logit_spread` is read together with it, and only exists to say
-            # which of two things a falling survival means: a flatter policy,
-            # which is the speaker's own doing, or a collapsing logit scale,
-            # which is a fault the normaliser should have absorbed. They are
-            # indistinguishable in survival alone.
+            # `logit_scale` and `logit_spread` are read together with it, and
+            # say which of two things a falling survival means: a flatter
+            # policy, which is the speaker's own doing, or a collapsing scale.
+            # They are indistinguishable in survival alone. `logit_scale` is
+            # the one that answers it now -- `logit_spread` measures the
+            # emittable logits *before* `layer_norm_logits`, which divides that
+            # magnitude straight back out, so since 87c1027 split sharpness off
+            # into its own parameter the spread reports the shape's size rather
+            # than the channel's.
+            #
+            # `logit_scale` is also the number `logit_scale_lr` exists to move,
+            # and the prediction is quantitative: birds opens at 0.839 and the
+            # scale cannot travel faster than `lr * steps`, so at 2e-3 over 156
+            # steps an epoch its ceiling is 0.31 log-units per epoch. Observed
+            # travel against that ceiling reads off directly how sign-consistent
+            # the gradient is, which is not recoverable from when accuracy
+            # happens to move.
+            #
+            # `sampling_tau` is logged because the coupling in 17ae9f9 and its
+            # retirement in 3b3b857 are both untested. It is a function of the
+            # scale and of `training_progress` alone, so it carries no new
+            # information in principle -- but it is the quantity that sets how
+            # much straight-through bias the run is paying, and reconstructing
+            # it after the fact from two other columns and a cosine is the sort
+            # of thing nobody does.
             if training and speaking:
                 language_model = pair.sender.language_model
                 stats.update(
                     realised_survival=language_model.realised_survival,
                     logit_spread=language_model.logit_spread,
+                    logit_scale=language_model.logit_scale.item(),
+                    sampling_tau=language_model.sampling_tau.item(),
                     batch_size=batch_size,
                 )
 

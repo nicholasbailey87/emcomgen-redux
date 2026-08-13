@@ -222,7 +222,7 @@ argmax-preserving, so it changes no eval-time message.)
     grounding on.
 
     **This is a starting point, not a target**: what a speaker actually does is
-    reported as `realised_survival` and `logit_spread`, and is expected to move
+    reported as `realised_survival` and `logit_scale`, and is expected to move
     over a run — including *downwards* in fidelity early on, which is the
     speaker annealing itself rather than a fault. `logit_scale`'s docstring
     carries the derivation and the reference points to rederive `0.9` from.
@@ -362,27 +362,46 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     soft variants under the decontextualised embeddings. Soft variants only.
 - `{train,test,...}_loss` — the training objective. `_combined_loss` is a
     duplicate of it, kept only so older analysis scripts keep working.
-- `train_realised_survival` — the mean winning-token probability at the fixed
-    `logit_scale`, i.e. the fraction of symbols surviving the noise. Train pass
-    only, since that is the only pass that samples. This is the channel
-    diagnostic and the direct readout of how far apart two architectures'
-    channels really are: the scale is identical across speakers, so what this
-    reports is what each speaker's own logit *shape* buys it. It is a finding,
-    not a target — expect it to start near 0.5 and climb as the speaker learns a
-    peaked distribution, bounded above by the `uniform_weight` ceiling of
-    `1 - w + w/V`. Flat at ~0.5 for many epochs means the speaker is learning no
-    confidence; pinned at the ceiling early means the channel has nothing left to
-    explore with.
+- `train_realised_survival` — the mean winning-token probability, i.e. the
+    fraction of symbols surviving the noise. Train pass only, since that is the
+    only pass that samples. This is the channel diagnostic. It is a finding, not
+    a target — expect it to start near 0.5 and climb as the speaker sharpens,
+    bounded above by the `uniform_weight` ceiling of `1 - w + w/V`. Flat at ~0.5
+    for many epochs means the channel is not opening; pinned at the ceiling
+    early means it has nothing left to explore with. Since `87c1027` the
+    speaker owns its sharpness, so this is no longer a pure readout of logit
+    *shape* — read it with `train_logit_scale`, which separates the two.
+- `train_logit_scale` — the multiplier applied to the normalised logits before
+    sampling, `exp(log_logit_scale)`. This is the channel's fidelity: the Gumbel
+    noise floor is a fixed sd of 1.283 and `layer_norm_logits` pins the logits
+    to unit variance, so the scale alone says how much of the speaker's
+    distribution survives. It opens where `init_energy` puts it (0.802 for
+    ShapeWorld, 0.839 for birds) and a usable channel is somewhere around 4 to
+    6. It is the disambiguator for a falling survival: a flatter policy at a
+    steady scale is the speaker's own doing, a falling scale is the channel
+    closing.
+    Its travel is bounded by `lr * steps`, because AdamW normalises by the
+    gradient's second moment and this is a lone scalar — so it moves at about
+    `logit_scale_lr` per step whatever the gradient's size, and comparing its
+    observed climb to that ceiling reads off how sign-consistent the gradient
+    is. Expect a flat start (no gradient reaches it while the listener cannot
+    use the message), then a climb, then a plateau once the `uniform_weight`
+    cap saturates fidelity and the gradient dies with it. A scale climbing
+    while accuracy stays at chance is co-adaptation to a premature code.
+- `train_sampling_tau` — the temperature actually handed to `gumbel_softmax`,
+    as against the configured `tau`. A function of `train_logit_scale` and the
+    epoch counter alone, so it carries no independent information, but it is
+    what sets how much straight-through bias the run is paying. It equals `tau`
+    at initialisation and whenever the scale sits below its opening value,
+    rises with the scale so that losing tokens keep receiving gradient, and
+    returns to `tau` by the last epoch as the coupling retires.
 - `train_logit_spread` — the standard deviation of the emittable logits
-    *before* normalisation. Read it alongside `train_realised_survival`, which
-    it exists to disambiguate: a falling survival at a healthy spread (O(1)) is
-    the speaker learning a flatter policy, which is a finding, while a falling
-    survival with a spread heading for zero is the logit scale collapsing, which
-    is a fault. The two are indistinguishable in survival alone, and a real
-    birds run lost 0.47 → 0.17 to the second without it being visible. Below a
-    spread of ~1e-6 the normaliser can no longer rescue it (see
-    `LAYER_NORM_EPS`); anywhere above that the scale is absorbed and only shape
-    reaches the channel.
+    *before* normalisation, so it reports the size of the logit *shape* rather
+    than of the channel: `layer_norm_logits` divides this magnitude back out,
+    and since `87c1027` the channel's sharpness lives in `train_logit_scale`
+    instead. What it is still good for is the normaliser's floor. Below a spread
+    of ~1e-6 LayerNorm can no longer rescue it (see `LAYER_NORM_EPS`); anywhere
+    above that the spread is absorbed and only shape reaches the channel.
 - `{train,test,test_same,test_avg}_unique_message_fraction` — distinct messages
     over messages emitted. A language that is doing work compresses: healthy
     runs sit around 0.30–0.40, while runs whose channel is too noisy to learn
