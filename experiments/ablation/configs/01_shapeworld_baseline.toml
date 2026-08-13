@@ -27,6 +27,9 @@ name = "ablation"
 # that could not fit their training set.
 weight_decay = 0.0
 
+[data]
+silhouette_p_receiver = 0.1
+
 [scheduler]
 epochs = 100
 
