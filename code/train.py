@@ -721,7 +721,12 @@ if __name__ == "__main__":
         train_metrics, lang = run("train", epoch, *run_args)
         util.update_with_prefix(metrics, train_metrics, "train")
 
-        # Eval on the held-out seen (`test`) and novel (`test_same`) concepts.
+        # Eval on the novel (`test`) and held-out seen (`test_same`) concepts.
+        # jayelm's naming: "same" means the concepts are the same ones training
+        # used, so `test_same` is the paper's Acc (Seen) column and `test` is
+        # Acc (Unseen). Only `test` exists for birds -- `cub.py` builds no
+        # seen-concept split -- hence the skip below.
+        #
         # A single game framing means no cross-eval, and a fixed training
         # endpoint means no val split, so this is two passes rather than twelve.
         # Topsim is computed on both.
