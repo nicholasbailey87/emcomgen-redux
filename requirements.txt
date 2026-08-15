@@ -1,3 +1,15 @@
+# This file is a strict superset of vit-representation-learning's requirements.
+# The two projects share one venv on the cluster, so `pip install -r` against
+# this file alone must produce an environment that runs both; anything only vit
+# needs is listed at the bottom under "vit-representation-learning only".
+#
+# Where the two disagree, this file wins, and it disagrees in exactly one place:
+# vit asks for broccoli-ml and gradboard at the `neovit` *branch*, and this file
+# pins them by SHA for the reason immediately below. As of 2026-08-15 those are
+# the same commits -- neovit points at broccoli 33d6f21 and gradboard ae464db --
+# so the superset costs vit nothing today. If they diverge later, the SHA is the
+# one to keep and vit's file is the one to update.
+#
 # broccoli-ml and gradboard are pinned to commit SHAs, not branches. A branch
 # ref is not a pin: `neovit` was used for both, and broccoli's was
 # fast-forwarded onto main, taking it from 27.1.1 to 30.1.0. That added a Q/K
@@ -32,6 +44,12 @@ pandas==2.3.3
 pillow==12.0.0
 POT==0.9.7.post1
 psutil==7.1.2
+# Only `tests/` needs pytest, but it was missing from this file entirely, so a
+# venv built from it could not run `tests/test_exploration.py` -- that file
+# imports pytest at module scope for `approx`, `raises`, `warns` and
+# `parametrize`, and so failed at import on the cluster too. The other four
+# suites avoid the import and run either way.
+pytest==9.1.1
 python-dateutil==2.9.0.post0
 pytz==2025.2
 rapidfuzz==3.14.5
@@ -46,3 +64,19 @@ tqdm==4.67.1
 tzdata==2025.2
 ujson==5.11.0
 wheel==0.45.1
+
+# ---- vit-representation-learning only ----
+#
+# Nothing in `code/` imports any of these. They are here so that the venv the
+# two projects share is described by one file, and so that installing this one
+# cannot leave vit broken.
+#
+# Left unpinned, matching vit's own requirements.txt. Pinning them here would
+# fork the version from the file that actually depends on them, which is the
+# failure this superset exists to prevent -- and none of them affects a result
+# emcomgen-redux produces. `pandas` is a shared dependency and is pinned above.
+timm
+datasets
+mup
+lightning>=2.0
+imagenetv2-pytorch @ git+https://github.com/modestyachts/ImageNetV2_pytorch.git
