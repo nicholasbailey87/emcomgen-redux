@@ -755,12 +755,6 @@ if __name__ == "__main__":
             "test_avg",
         )
 
-        if epoch % config['save_interval'] == 0:
-            model_fname = os.path.join(exp_dir, f"{epoch}_model.pt")
-            torch.save(model_config['pair'].state_dict(), model_fname)
-            if config['use_lang']:
-                lang.to_csv(os.path.join(exp_dir, f"{epoch}_lang.csv"), index=False)
-
         # Wall-clock time the epoch finished, matching vit's `timestamp` column,
         # so a run's pace can be read off metrics.csv after the fact.
         metrics["timestamp"] = datetime.now().isoformat()

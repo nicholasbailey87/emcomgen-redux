@@ -15,7 +15,6 @@ reference_game_xent = false
 debug = false
 vis = false
 receiver_reset_interval = 0.0
-save_interval = 10
 
 [analysis]
 # Settings for the topsim report (see code/emergence.py and

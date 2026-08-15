@@ -426,9 +426,14 @@ Training runs to a fixed endpoint (`[scheduler] epochs`) and the per-epoch
 `metrics.csv` trajectory *is* the deliverable — this is open-ended language
 evolution, so there is nothing to cherry-pick a best epoch against. Consequently
 there is no `val` split, no `best_*` metric columns, and no `best_model.pt` /
-`best_lang.csv`. What gets written is the periodic `<epoch>_model.pt` /
-`<epoch>_lang.csv` snapshots (`save_interval`) plus a `final_model.pt` /
-`final_lang.csv` at the end.
+`best_lang.csv`. What gets written is a `final_model.pt` / `final_lang.csv` at
+the end, alongside the rolling `checkpoint_last.pt` that exists only so an
+interrupted run can resume. There are no periodic `<epoch>_model.pt` /
+`<epoch>_lang.csv` snapshots: they were never read, and on a cluster they cost
+far more disk than the mid-training language was worth. The consequence to be
+aware of is that the *evolution* of the language is not recoverable after the
+fact — `metrics.csv` records topsim and accuracy per epoch, but the messages
+themselves survive only for the final epoch.
 
 Nor is there cross-game-type eval. A run trains and evaluates a single game
 framing; for the concept game (`percent_novel = 1.0`) speaker and listener see
