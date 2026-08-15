@@ -115,6 +115,34 @@ def _prototypes(speaker, batch_size=32, seed=0):
     )
 
 
+def _get_knob(speaker, attribute):
+    """
+    Read one of the sampling knobs as a plain float.
+
+    `logit_scale` is no longer one: it is a read-only property over the learned
+    `log_logit_scale` parameter, so it comes back as a grad-requiring tensor
+    that `pytest.approx` cannot take a `float()` of. `uniform_weight` and `tau`
+    are still ordinary attributes.
+    """
+    value = getattr(speaker, attribute)
+    return value.item() if torch.is_tensor(value) else value
+
+
+def _set_knob(speaker, attribute, value):
+    """
+    Set one of the sampling knobs, whatever it is stored as underneath.
+
+    `logit_scale` has no setter -- it is stored as its log so gradient descent
+    cannot walk it through zero -- so it is written through `log_logit_scale`
+    under `no_grad`, which is what `reset_logit_scale` does.
+    """
+    if attribute == "logit_scale":
+        with torch.no_grad():
+            speaker.log_logit_scale.fill_(math.log(value))
+    else:
+        setattr(speaker, attribute, value)
+
+
 # ------------------------------------ 1. the scale is solved, not stated --
 
 def test_logit_scale_resolves_the_requested_entropy():
@@ -177,22 +205,35 @@ def test_uniform_weight_floors_the_achievable_entropy():
 @pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
 def test_speaker_resolves_its_scale_from_its_own_vocabulary(build):
     """
-    The scale is a plain float resolved at construction, not a buffer and not
-    something a training step can move.
+    The scale is solved at construction from the speaker's *own* vocabulary and
+    uniform weight, not stated in the config and not shared between speakers.
+
+    It is no longer a plain float: it is learned, stored as `log_logit_scale`
+    and read back through the `logit_scale` property, so what is pinned here is
+    where it *starts*. `initial_logit_scale` keeps that starting value for
+    `reset_logit_scale` and for the tau coupling to measure against, so the two
+    must agree before any training step has run.
     """
     speaker = build()
-    assert speaker.logit_scale == pytest.approx(
-        S.logit_scale(
-            get_config()["sender_language_model"]["init_energy"],
-            speaker.vocabulary,
-            speaker.uniform_weight,
-        )
+    solved = S.logit_scale(
+        get_config()["sender_language_model"]["init_energy"],
+        speaker.vocabulary,
+        speaker.uniform_weight,
     )
-    assert isinstance(speaker.logit_scale, float)
+    assert speaker.logit_scale.item() == pytest.approx(solved)
+    assert speaker.initial_logit_scale == pytest.approx(solved)
+
+    # It is learned, so it has to be a parameter of the speaker and it has to
+    # be the log that carries the gradient -- exponentiating at the read is
+    # what keeps the scale positive under any step the optimiser takes.
+    assert isinstance(speaker.log_logit_scale, torch.nn.Parameter)
+    assert speaker.log_logit_scale.requires_grad
+    assert speaker.logit_scale.requires_grad
+    assert isinstance(speaker.initial_logit_scale, float)
 
     # A bigger vocabulary needs a bigger scale to hold the same entropy.
     birds = build(vocabulary=20)
-    assert birds.logit_scale > speaker.logit_scale
+    assert birds.logit_scale.item() > speaker.logit_scale.item()
 
 
 def test_the_documented_reference_points_still_hold():
@@ -540,12 +581,12 @@ def test_eval_is_invariant_to_the_training_knobs(build):
             ("logit_scale", 137.0),
             ("logit_scale", 0.001),
         ):
-            original = getattr(speaker, attribute)
-            setattr(speaker, attribute, value)
+            original = _get_knob(speaker, attribute)
+            _set_knob(speaker, attribute, value)
             assert torch.equal(_decode_message(speaker, prototypes), reference), (
                 f"eval message changed with {attribute} = {value}"
             )
-            setattr(speaker, attribute, original)
+            _set_knob(speaker, attribute, original)
 
 
 # ------------------------------------ 6. survival is measured, not targeted --
@@ -568,7 +609,7 @@ def test_realised_survival_reports_the_channel_in_use(build):
     baseline = speaker.realised_survival
     assert 0.0 < baseline < 1.0
 
-    speaker.logit_scale *= 20.0
+    _set_knob(speaker, "logit_scale", speaker.logit_scale.item() * 20.0)
     speaker.decode(prototypes)
     assert speaker.realised_survival > baseline + 0.1
 
