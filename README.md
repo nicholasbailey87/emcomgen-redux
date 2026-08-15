@@ -94,6 +94,52 @@ ShapeWorld-specific, species genuinely depend on plumage colour, and
 thresholding a photograph would destroy texture and pattern rather than isolate
 colour.
 
+#### Birds splits (CUB only)
+
+A CUB concept is a species: a game picks one class and draws every positive from
+it. The splits are built in `code/data/cub.py` at load time — the per-class
+`img.npz` archives that `save_cub_np.py` writes hold every image of their
+species, and nothing about the split is baked into them.
+
+| Split | Species | Images of those species | Share of the corpus |
+| --- | --- | --- | --- |
+| `train` | 1–150 | ~80% | ~60% |
+| `test_same` | 1–150 | ~20% | ~15% |
+| `test` | 151–200 | all | ~25% |
+
+`test` is jayelm's split unchanged, so the generalisation number keeps its
+footing. Two things about the other two are ours.
+
+**`test_same` holds out photographs, not species.** The paper reports an
+Acc (Seen) column for birds, but the released code never built a seen-concept
+split for CUB, so there was no implementation to port. For ShapeWorld the split
+comes free — `test_same.npz` holds freshly generated worlds, so its games are
+unseen *images* of seen *concepts* — but CUB has a finite pool of photographs per
+species, so the same property has to be bought by holding images out of training.
+Each training species gives up `max(n_examples, round(0.2 x n))` of its images.
+The floor matters: species carry 41–60 images, a game draws `n_examples` = 10
+*distinct* positives from one species, and a flat 20% of the smallest species
+would hold out 8 and raise. The partition is a blake2b hash of the image name, so
+it is identical across seeds, resumes and dataloader workers — an RNG would give
+each seed a different split and every seed would train on some other seed's test
+set. Distractors are held out along with targets, which falls out of building the
+dataset from the held-out image pool rather than filtering at sampling time.
+
+**Species 101–150 have moved into `train`.** They were a val split; there is no
+best-epoch selection any more, so they sat unused. Folding them in is what pays
+for the holdout — 150 species at 80% of their images is *more* training data than
+100 whole species was (~60% of the corpus against ~50%), with half again as much
+species diversity. The cost is that our birds train set is no longer the paper's
+100 classes. That comparison was already gone: we train the vision backbone from
+scratch where the paper fine-tunes a pretrained network, and we play a different
+number of games per epoch.
+
+Eval is sized per species (`eval_games_per_species`, 16), so `test` draws 800
+games and `test_same` 2,400. Equal coverage per species rather than equal totals,
+because topsim builds one prototype per concept from the modal message over that
+concept's instances, so it is games-per-species that has to match for the two
+splits to be read against each other.
+
 ## Running experiments
 
 ### Quickstart (SLURM array jobs)
@@ -409,8 +455,12 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
 
 `test_avg` is the unweighted mean of `test` and `test_same` for the same metric,
 applied to every eval metric including topsim — so it is a mean of two Spearman
-rhos, not a rho over the pooled data. `test_same` is optional; where a dataset
-ships no such split those columns are absent and `test_avg` equals `test`.
+rhos, not a rho over the pooled data. Both datasets ship a `test_same` split, so
+`test_avg` is a genuine mean in every current run; the split stays optional in
+principle, and where one is absent those columns are missing entirely and
+`test_avg` equals `test`. Note that birds runs recorded before `cub.py` grew a
+`test_same` split have `test_avg_*` columns that are copies of `test_*`, and are
+not poolable with newer ones.
 
 Two columns are unprefixed: `epoch`, and `timestamp` — the wall-clock time
 (ISO-8601, local) at which that epoch's row was written, for reading a run's pace

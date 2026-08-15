@@ -100,14 +100,21 @@ log_interval = 100
 # Birds could not cover that. At 62 steps an epoch and `lr` 1e-4 the ceiling
 # over 100 epochs was 0.62 log-units, reaching a scale of 1.56 at best -- and
 # the ablation measured 0.33 symbol survival at a comparable sd, which is dead
-# at ln 2. `games_per_epoch` 2,500 lifts that ceiling to 1.56 on its own.
+# at ln 2. `games_per_epoch` 3,100 lifts that ceiling to 1.94 on its own.
 #
 # 2e-3 clears it with room to spare, and is set above what the arithmetic asks
-# for. At 156 steps an epoch the scale can travel 0.31 log-units per epoch, so
-# it covers 1.9 in about six epochs at full sign-consistency and twelve at half
-# -- against a whole-run ceiling of 31, roughly sixteen times the distance. The
-# intent is to stop the traverse being the binding constraint at all, so that
-# what the run measures is the language rather than the channel opening.
+# for. At `games_per_epoch` 2,500 -- 156 steps an epoch -- the scale could travel
+# 0.31 log-units per epoch, covering 1.9 in about six epochs at full
+# sign-consistency and twelve at half. That was borne out: the predicted takeoff
+# of 6.1 epochs was observed at 6.
+#
+# `games_per_epoch` is now 3,100, so the arithmetic moves with it: 194 steps an
+# epoch, 0.39 log-units per epoch, and a traverse of 1.9 covered in 4.9 epochs at
+# full sign-consistency and 9.8 at half -- against a whole-run ceiling of 39,
+# roughly twenty times the distance. Treat 4.9 as a fresh prediction rather than
+# a restatement; the next birds run tests it the same way. The intent either way
+# is to stop the traverse being the binding constraint at all, so that what the
+# run measures is the language rather than the channel opening.
 #
 # Overshoot is cheap, and that is why this can be set high. `uniform_weight`
 # caps the effective logit gap at `log(((1-w)+w/V)/(w/V))` = 4.84, so fidelity
@@ -117,7 +124,7 @@ log_interval = 100
 #
 # What it does cost is the bootstrapping window. `init_energy` 0.9 is there to
 # keep the speaker near-random while its embeddings become worth grounding, and
-# a takeoff at epoch six spends that window in the first tenth of the run --
+# a takeoff around epoch five spends that window in the first twentieth of a run --
 # a reliable channel over a speaker whose argmax is still close to
 # input-independent is exactly the co-adaptation `logit_scale`'s docstring warns
 # about. The `uniform_weight` floor is the brake: 10% of tokens are resampled
@@ -405,16 +412,44 @@ n_examples = 10 # number of examples seen by agents, including distractors
 # at an effective batch of 128). The two datasets were therefore getting a
 # 2.5-fold different optimisation budget per epoch while sharing a 100-epoch
 # schedule -- and `training_progress`, which retires the tau coupling, is keyed
-# to the epoch counter. 2,500 equalises the step count.
+# to the epoch counter.
+#
+# 2,500 was chosen because it satisfied two things at once: it equalised the step
+# count with ShapeWorld, and it was roughly the coupon-collector point at which
+# an epoch first covers the training images (100 species at ~59 images is a
+# ~5,900-image pool, 20 images a game, `N ln N / 20` = 2,566).
+#
+# Those two no longer agree. The `test_same` holdout leaves 150 species at ~47
+# training images, a ~7,050-image pool, whose coupon-collector point is
+# `N ln N / 20` = 3,123. Coverage is the binding reason and step parity is
+# retired deliberately: an epoch that does not reach all of its training images
+# makes the epoch counter a poor clock, and `training_progress` and the
+# `logit_scale` traverse are both keyed to it. The cost is 194 steps an epoch
+# against ShapeWorld's 156, a 24% larger optimisation budget per epoch; the
+# `logit_scale_lr` comment above carries the revised traverse arithmetic.
 #
 # Nothing is exhausted by raising it. `CUBDataset.__getitem__` ignores its index
 # and samples a fresh game, so an epoch is a draw rather than a pass, and the
-# space is combinatorially large. Images do repeat, but they already did: 100
-# train classes at ~59 images is a ~5,900-image pool and each game consumes 20,
-# so at 1,000 games every image appeared ~3.4 times per epoch and 3.4% of them
-# appeared in no given epoch at all. 2,500 is roughly the coupon-collector point
-# at which an epoch first covers the training images.
-games_per_epoch = 2500
+# space is combinatorially large.
+games_per_epoch = 3100
+
+# Eval games per species, for `test` and `test_same` alike: 50 x 16 = 800 games
+# and 150 x 16 = 2,400. Read only by `cub.py`; ShapeWorld's eval splits are
+# stored files.
+#
+# Per species rather than flat because the two eval splits hold different numbers
+# of species, and topsim measures one prototype per concept -- the modal message
+# over that concept's instances -- so it is coverage *per species* that has to
+# match for the two splits to be read against each other. jayelm's flat 200 gave
+# `test` four games a species and would have given `test_same` 1.3.
+#
+# 16 rather than jayelm's effective 4 because 200 games was too few to see
+# through, `test_same` or not. Across the three recorded birds runs `test_acc`
+# jittered by 1.2-1.9 points epoch-to-epoch against a signal only ~5 points above
+# chance, and `test_topsim_s3` by 0.06-0.08 on a value of ~0.7. Eval is
+# forward-only and epochs run ~32s, so quadrupling it is affordable where it
+# would not be if eval trained.
+eval_games_per_species = 16
 
 [birds.optimiser]
 accumulator_steps = 1

@@ -37,8 +37,8 @@ Every other column is `<split>_<metric>`.
 | --- | --- |
 | `train_` | The training pass. |
 | `test_` | Held-out **novel** concepts — the generalisation split. |
-| `test_same_` | Held-out instances of concepts **seen in training**. Optional: absent for datasets that ship no `test_same` split, in which case these columns are missing entirely. |
-| `test_avg_` | The unweighted mean of `test_` and `test_same_` for the same metric. Applied to every eval metric, topsim included (so it is a mean of two Spearman rhos, not a rho over the pooled data). With no `test_same` split it equals `test_`. |
+| `test_same_` | Held-out instances of concepts **seen in training**. For ShapeWorld these are freshly generated worlds; for CUB, photographs held out of the training species (see the birds-splits section of the top-level README). Optional in principle: absent for a dataset that ships no `test_same` split, in which case these columns are missing entirely. |
+| `test_avg_` | The unweighted mean of `test_` and `test_same_` for the same metric. Applied to every eval metric, topsim included (so it is a mean of two Spearman rhos, not a rho over the pooled data). With no `test_same` split it equals `test_` — which is what birds runs recorded before `cub.py` grew one look like, so do not pool them with newer birds runs. |
 
 There is no `val` split and no best-epoch selection — training runs to a fixed
 endpoint and the trajectory *is* the deliverable — so there are no `best_*`

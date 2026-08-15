@@ -683,6 +683,28 @@ if __name__ == "__main__":
     # onto a stale metrics.csv from a previous run, since we now append per epoch.
     if start_epoch == 0 and os.path.exists(metrics_path):
         os.remove(metrics_path)
+    elif os.path.exists(metrics_path):
+        # Resuming appends rows under whatever header is already on disk, and
+        # `to_csv(mode="a")` checks nothing against it. A run started before this
+        # run's splits existed -- a birds run from before `cub.py` built
+        # `test_same`, say -- has no `test_same_*` columns, so resuming it here
+        # would write wider rows under a narrower header and silently misalign
+        # every column from that row on. The failure is invisible until someone
+        # reads the CSV months later, so refuse rather than append.
+        with open(metrics_path) as f:
+            header = f.readline().rstrip("\n").split(",")
+
+        missing = [
+            split for split in dataloaders
+            if not any(column.startswith(f"{split}_") for column in header)
+        ]
+        if missing:
+            raise RuntimeError(
+                f"{metrics_path} was written by a run with different splits: it "
+                f"has no columns for {missing}. That header cannot hold this "
+                f"run's rows. Start again with --no_resume, or move the existing "
+                f"run directory aside."
+            )
 
     if config['compile']:
         print("Compiling model...")
@@ -724,8 +746,9 @@ if __name__ == "__main__":
         # Eval on the novel (`test`) and held-out seen (`test_same`) concepts.
         # jayelm's naming: "same" means the concepts are the same ones training
         # used, so `test_same` is the paper's Acc (Seen) column and `test` is
-        # Acc (Unseen). Only `test` exists for birds -- `cub.py` builds no
-        # seen-concept split -- hence the skip below.
+        # Acc (Unseen). Both datasets ship both splits, but the skip below stays:
+        # ShapeWorld tolerates a `test_same` file being absent on disk, so the
+        # split remains optional in principle.
         #
         # A single game framing means no cross-eval, and a fixed training
         # endpoint means no val split, so this is two passes rather than twelve.

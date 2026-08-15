@@ -1,3 +1,4 @@
+import hashlib
 import numpy as np
 import os
 from pathlib import Path
@@ -13,13 +14,38 @@ from . import image_util as iu
 IMAGE_SIZE = 224
 LOAD_INTO_MEMORY = True
 
-# CUB classes are 1-indexed. Classes 101-150 used to be held out as a val split;
-# there is no val split any more (no best-epoch selection), so they are unused.
-TRAIN_CLASSES = range(1, 101)
+# CUB classes are 1-indexed. 1-150 are the training species; 151-200 are held out
+# wholesale and are the novel-concept `test` split -- the same 50 species as
+# jayelm's, so the generalisation number keeps its old footing.
+#
+# Classes 101-150 were a val split. There is no val split any more (no best-epoch
+# selection), so rather than sit unused they are folded into training. That is
+# what pays for the image-level holdout below: 150 species at 80% of their images
+# is ~60% of the corpus for training, against the ~50% that 100 whole species
+# gave, with half again as much species diversity.
+TRAIN_CLASSES = range(1, 151)
 TEST_CLASSES = range(151, 201)
 
-TRAIN_CLASSES_DEBUG = range(4)
+# jayelm's was `range(4)`, which asked for a class 0 that does not exist and so
+# gave debug runs three species rather than four.
+TRAIN_CLASSES_DEBUG = range(1, 5)
 TEST_CLASSES_DEBUG = range(8, 12)
+
+# The `test_same` holdout. ShapeWorld gets its seen-concept split for free --
+# `test_same.npz` holds freshly generated worlds, so they are unseen *images* of
+# seen *concepts* -- but CUB has a finite pool of photographs per species, so the
+# same property has to be bought by holding images out of training. Without it
+# `test_same` would measure recall of images the sender had already trained on
+# rather than generalisation to new instances of a seen concept, which is what
+# the paper's Acc (Seen) column reports.
+#
+# These are module constants rather than config keys on purpose. Changing either
+# moves the boundary between `train` and `test_same`, which invalidates every run
+# recorded under the old value; that is a version of the dataset, not a knob to
+# turn per run. Bump the salt's suffix if the partition ever has to change, so
+# that old and new runs are distinguishable rather than silently pooled.
+HOLDOUT_FRACTION = 0.2
+HOLDOUT_SALT = "cub-test_same-v1"
 
 
 def load_class_metadata(cub_path):
@@ -98,6 +124,115 @@ def load_cub_metadata(config):
     return img_md, class_md
 
 
+def _holdout_rank(name):
+    """
+    A stable pseudo-random sort key for one image name.
+
+    `hashlib` rather than an RNG, and blake2b rather than the builtin `hash()`,
+    because both of the alternatives move. `hash()` is salted per process, and
+    `numpy.random.Generator`'s stream is explicitly not guaranteed across numpy
+    releases (NEP 19 freezes only the legacy `RandomState`). A hash function is
+    fixed by its algorithm, so this partition reproduces on any machine, in any
+    environment, under any future version.
+    """
+    return hashlib.blake2b(
+        f"{HOLDOUT_SALT}:{name}".encode("utf-8"), digest_size=16
+    ).digest()
+
+
+def holdout_image_names(img_names, n_examples, fraction=HOLDOUT_FRACTION):
+    """
+    Choose the `test_same` images, per species.
+
+    `img_names` maps class id -> every image name of that species; the return
+    maps class id -> the frozenset of names held out of training.
+
+    This function touches no RNG at all, global or local, and that is a
+    requirement rather than a nicety. `train.py` seeds numpy from `--seed` and
+    `loader.worker_init` re-seeds it per worker, so an `np.random.choice` here
+    would hand every seed -- and every resume, and every dataloader worker -- a
+    different partition, and an image held out under seed 0 would be trained on
+    under seed 1. Since the sort key depends on the image *name* alone, the
+    result is also independent of how many species are passed, of the order they
+    are passed in, and of npz key order (which is whatever `os.listdir` happened
+    to hand `save_cub_np.py`).
+
+    Size is `max(n_examples, round(fraction * n))`. CUB species carry 41-60
+    images, so 20% is 8-12 and the floor binds only at the bottom of that range.
+    The floor is required: `sample_game` draws `n_examples` *distinct* positives
+    from a single species per game (`replace=False`), so a pool of 8 would raise
+    on every game played on that species. `fraction * n` cannot land on a .5 for
+    integer `n` at 0.2, so the rounding rule is not load-bearing.
+    """
+    holdout = {}
+    for cl, names in img_names.items():
+        n = len(names)
+        k = max(n_examples, int(round(fraction * n)))
+        if n - k < n_examples:
+            raise ValueError(
+                f"class {cl} has {n} images; holding out {k} leaves {n - k} for "
+                f"training, below n_examples={n_examples}. Every game needs "
+                f"{n_examples} distinct positives from a single species."
+            )
+        holdout[cl] = frozenset(sorted(names, key=_holdout_rank)[:k])
+    return holdout
+
+
+def split_images(imgs, classes, holdout=None, keep_holdout=False):
+    """
+    Subset `imgs` (class id -> {image name: array}) to `classes` and, where a
+    `holdout` map is given, to one side of that species' holdout.
+
+    Filtering here rather than at sampling time is what makes the `test_same`
+    *distractors* held out too. `sample_negatives` can only reach what is in
+    `self.imgs`, so a dataset built from the held-out pool cannot show the
+    listener an image the sender trained on, on either side of the game.
+    """
+    subset = {}
+    for cl, cl_imgs in imgs.items():
+        if cl not in classes:
+            continue
+        if holdout is None:
+            subset[cl] = cl_imgs
+        else:
+            held = holdout[cl]
+            subset[cl] = {
+                name: img
+                for name, img in cl_imgs.items()
+                if (name in held) == keep_holdout
+            }
+    return subset
+
+
+def n_games(split, n_species, config):
+    """
+    How many games one epoch of `split` draws.
+
+    Train: `CUBDataset.__getitem__` ignores its index and samples a fresh game,
+    so this is the size of an epoch rather than a set of stored games.
+    Consecutive epochs are independent draws from a combinatorially large space,
+    and nothing here is exhausted by raising it. See `games_per_epoch` in
+    `[birds.data]` for why the default is no longer jayelm's 1,000.
+
+    Eval: sized *per species* rather than flat. The two eval splits hold 50 and
+    150 species, so one shared game count would give them very different
+    per-concept coverage -- and topsim measures one prototype per concept, built
+    from the modal message over that concept's instances, so coverage per species
+    is the quantity that has to be held equal for the two splits to be read
+    against each other. jayelm's flat 200 gave `test` four games a species and
+    would have given `test_same` 1.3.
+    """
+    if split == "train":
+        length = config['data'].get('games_per_epoch', 1000)
+    else:
+        length = config['data'].get('eval_games_per_species', 16) * n_species
+
+    if config['debug']:
+        length = max(1, length // 10)
+
+    return length
+
+
 def load(config):
     img_dir = str(Path(config['data']['dataset']) / "CUB_200_2011" / "images")
 
@@ -109,7 +244,7 @@ def load(config):
         if config['debug']:
             if not any(
                 cl_n in r
-                for r in [TRAIN_CLASSES_DEBUG, VAL_CLASSES_DEBUG, TEST_CLASSES_DEBUG]
+                for r in [TRAIN_CLASSES_DEBUG, TEST_CLASSES_DEBUG]
             ):
                 continue
         npz_dir = str(Path(img_dir) / cl / "img.npz")
@@ -144,56 +279,47 @@ def load(config):
         to_pil=True,
     )
 
-    def to_dset(classes, train=False):
-        if train:
-            tr = train_transform
-            # `__getitem__` ignores its index and samples a fresh game, so this
-            #     is the size of an epoch rather than a set of stored games:
-            #     consecutive epochs are independent draws from a
-            #     combinatorially large space, and nothing here is exhausted by
-            #     raising it. See `games_per_epoch` in `[birds.data]` for why
-            #     the default is no longer jayelm's 1,000.
-            length = config['data'].get('games_per_epoch', 1000)
-        else:
-            tr = test_transform
-            # Left at jayelm's value deliberately. Eval size is not a training
-            #     knob, and holding it fixed keeps test metrics comparable with
-            #     every run recorded before `games_per_epoch` existed.
-            length = 200
-
-        if config['debug']:
-            length = length // 10
-
-        subset = {k: v for k, v in imgs.items() if k in classes}
+    def to_dset(subset, split):
         return CUBDataset(
             subset,
             md,
-            transform=tr,
+            transform=train_transform if split == "train" else test_transform,
             n_examples=config['data']['n_examples'],
-            length=length,
+            # `len(subset)` rather than the class range, so the eval size follows
+            #     the species actually present on disk.
+            length=n_games(split, len(subset), config),
             reference_game=config['reference_game'],
             percent_novel=config['data']['percent_novel'],
         )
 
     if config['debug']:
-        classes = {
-            "train": TRAIN_CLASSES_DEBUG,
-            "test": TEST_CLASSES_DEBUG,
-        }
+        train_classes, test_classes = TRAIN_CLASSES_DEBUG, TEST_CLASSES_DEBUG
     else:
-        classes = {
-            "train": TRAIN_CLASSES,
-            "test": TEST_CLASSES,
-        }
+        train_classes, test_classes = TRAIN_CLASSES, TEST_CLASSES
 
-    # Only the splits `train.py` consumes. There is no val split (no best-epoch
-    # selection) and no cross-game-type eval datasets: the run trains and
-    # evaluates a single game framing, so the `<split>_<game_type>` grid that
-    # used to be built here was never read. See the matching note in
-    # `shapeworld.load`.
+    holdout = holdout_image_names(
+        {cl: list(cl_imgs) for cl, cl_imgs in imgs.items() if cl in train_classes},
+        n_examples=config['data']['n_examples'],
+    )
+
+    # Only the splits `train.py` consumes. `train` and `test_same` are the two
+    # sides of one image-level partition of the *same* 150 species, so
+    # `test_same` is the paper's Acc (Seen): held-out photographs of concepts the
+    # sender was trained on. `test` species are unseen wholesale, so no
+    # image-level holdout applies to them.
+    #
+    # There is no val split (no best-epoch selection) and no cross-game-type eval
+    # datasets: the run trains and evaluates a single game framing, so the
+    # `<split>_<game_type>` grid that used to be built here was never read. See
+    # the matching note in `shapeworld.load`.
     return {
-        "train": to_dset(classes["train"], train=True),
-        "test": to_dset(classes["test"], train=False),
+        "train": to_dset(
+            split_images(imgs, train_classes, holdout, keep_holdout=False), "train"
+        ),
+        "test": to_dset(split_images(imgs, test_classes), "test"),
+        "test_same": to_dset(
+            split_images(imgs, train_classes, holdout, keep_holdout=True), "test_same"
+        ),
     }
 
 
