@@ -69,14 +69,28 @@ n_workers = 0
 # Cost: a colour concept needs both agents to see colour, so it is answerable
 # only (1 - p) of the time. Setting both rates to p makes that (1 - p)^2 --
 # strictly worse ceiling for the same shape pressure.
+#
+# The rate: 0.5 was never titrated -- it arrived in 536c59e and stayed -- and by
+# the time the last ShapeWorld run reached epoch 37 it had colour at 0.788 and
+# shape at exactly chance, which is the paper's failure mode rather than the one
+# silhouetting was added to prevent. 0.1 keeps some pressure against colour
+# while costing far less of the colour concepts, which are 62% of eval games.
+#
+# Birds overrides both rates to 0.0 in `[birds.data]`: CUB species genuinely
+# depend on plumage colour, and `cub.py` does not thread these through anyway.
 silhouette_p_sender = 0.0
-silhouette_p_receiver = 0.5
+silhouette_p_receiver = 0.1
 
 [optimiser]
 class = "AdamW"
 accumulator_steps = 4
 lr = 1e-4
-weight_decay = 0.01
+# 0.0 for both datasets -- `[birds.optimiser]` does not override it. jayelm uses
+# plain Adam with no decay, and bs6, the only run so far to reach the paper's
+# ShapeWorld numbers, set this to 0.0 explicitly. At 0.0 AdamW and Adam are the
+# same optimiser, so `class` above needs no accompanying override. The 0.01 it
+# replaces was never justified against a run that fitted its training set.
+weight_decay = 0.0
 clip_grad_norm = 1.0
 log_interval = 100
 
@@ -220,7 +234,7 @@ message_length = 7 # max message length. note this includes sos/eos token, i.e. 
 # `uniform_weight` (w) is the *ceiling* on fidelity, and so the floor under
 # exploration. Mixing caps a slot's winner at `1 - w + w/V` however sharp the
 # logits are, so at least `w * (1 - 1/V)` of symbols are flipped no matter what
-# -- 0.0186 at w = 0.02, V = 14. That is a permanent per-symbol corruption rate
+# -- 0.093 at w = 0.1, V = 14. That is a permanent per-symbol corruption rate
 # training cannot reduce, which is the point: it keeps late training from
 # committing the channel entirely. This is jayelm's `--uniform_weight`, and its
 # role here is the one it has there.

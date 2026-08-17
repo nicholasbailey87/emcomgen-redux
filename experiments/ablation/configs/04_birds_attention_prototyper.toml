@@ -15,7 +15,7 @@ prototyper = "AttentionPrototyper"
 epochs = 100
 
 [experiment]
-repeats = 1
+repeats = 5
 
 [slurm]
 time = "24:00:00"

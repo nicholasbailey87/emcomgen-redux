@@ -6,41 +6,25 @@
 # 16, n_examples 10, vocabulary 20, message_length 10, no silhouetting and
 # accumulator_steps 1.
 #
-# The blocks below still bind for birds: `get_config` merges the `[birds.*]`
-# family into the defaults *first* and applies this file's own blocks *after*,
-# so a key set here wins over the family. `[birds.sender_language_model]` sets
-# only `vocabulary` and `message_length`, and both survive the merge below.
-#
-# Overrides are kept in step with rung 1 so the two datasets differ in their
-# data and their agents' vision models, not in their optimiser or their channel.
-# See 01_shapeworld_baseline.toml for the reasoning behind each.
+# Nothing else is overridden. The optimiser and channel settings this file used
+# to restate -- `weight_decay` 0.0 and the `init_energy` / `uniform_weight` pair
+# -- are DEFAULT.toml's values, and the `[birds.*]` family overrides none of the
+# three, so birds and ShapeWorld differ in their data and their agents' vision
+# models rather than in their optimiser or their channel.
 
 name = "ablation"
 
 [data]
 dataset = "../data/cub"
 
-[optimiser]
-weight_decay = 0.0
-
 [scheduler]
 epochs = 100
 
 [experiment]
-repeats = 1
+repeats = 5
 
 [slurm]
 time = "24:00:00"
 cpus_per_task = 6
 gpus_per_task = 1
 mem_gb = 24
-
-[sender_language_model]
-# Birds needs this more than ShapeWorld does, not less. At the same
-# `init_energy` a larger vocabulary opens on a worse channel -- 0.190 realised
-# survival at V = 20 against ShapeWorld's 0.324 at V = 14 -- and the dead span
-# scales with it: 57 epochs at chance here against ShapeWorld's 11. That leaves
-# roughly 2,700 usable optimiser steps to train a from-scratch ResNet18, which
-# is the underfitting visible in the birds run's flat train accuracy.
-init_energy = 0.9
-uniform_weight = 0.1
