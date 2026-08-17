@@ -10,10 +10,14 @@
 #        2  351,578               1.88              3.11
 #        4  583,020               3.11              5.16
 #
-# True parity is unreachable at any usable depth: the patch projection, the
-# absolute position embedding over the 17x17 patch grid and the SequencePool
-# head come to 120,136 parameters before the first layer exists, which is
-# already 0.64 x Conv6, and each layer then costs 115,721. Four layers at 3.1x
+# True parity is unreachable at any usable depth. The tokeniser is not the
+# reason: `cnn = False` leaves patch extraction as a plain unfold, so it has no
+# parameters and no convolution. The fixed cost is the transformer's own initial
+# feedforward block -- `transformer_feedforward_first`, carrying no residual
+# path so that d_model is free of the patch size -- plus the absolute position
+# embedding over the 17x17 patch grid and the SequencePool head. Those come to
+# 120,136 parameters before any attention happens at all, which is already
+# 0.64 x Conv6, and each attention layer then costs 115,721. Four layers at 3.1x
 # Conv6 is the compromise; it is the shallowest depth at which the stack is
 # worth calling a transformer.
 #

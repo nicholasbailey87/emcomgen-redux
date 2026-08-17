@@ -328,13 +328,38 @@ class TransformerCrossAttentionComparer(nn.Module):
             int(self.layers // 2),
             self.heads,
             # Not configurable, unlike the same arguments on `self.encoding`
-            #     above. This block has no position embeddings of its own by
-            #     construction: it consumes the cross-attention output, which
-            #     already carries position from the encoder upstream, and it
-            #     runs over the referent set, which has no order to embed.
-            #     Turning either on here would need a `source_size` for the
-            #     referent axis, which is a property of the game rather than
-            #     of this module.
+            #     above, and pinned rather than exposed because turning either
+            #     on would break the module.
+            #
+            # Note this block's sequence axis is the *referent set*, not the
+            #     message. `self.encoding` is the one that runs over the
+            #     message, and that is where message position is embedded; by
+            #     the time the cross-attention has run, message position has
+            #     been summarised into each referent's vector and the axis
+            #     here is referents. So a position embedding here would number
+            #     the referents.
+            #
+            # The weak reason not to is that a set has no order to embed. The
+            #     load-bearing reason is that in this codebase the referent
+            #     order *is* the label vector: `data.util.split_spk_lis`
+            #     writes positives into the first half of each agent's view and
+            #     negatives into the second, and the augmentation in
+            #     `ConceptDataset.__getitem__` (and `CUBDataset.sample_game`)
+            #     permutes only *within* each half. `Sender.get_prototypes`
+            #     relies on the same arrangement and raises without it.
+            #
+            # A fusion stack that could index its own sequence axis could
+            #     therefore learn "the first half are targets" and score
+            #     perfectly while ignoring the message. Without position
+            #     embeddings, and with `causal=False` below, this block is
+            #     permutation-equivariant over referents and cannot read the
+            #     ordering at all. `BilinearGRUComparer` is immune for a
+            #     different reason: it scores each referent in isolation and
+            #     never sees the set.
+            #
+            # Turning either on would also need a `source_size` for the
+            #     referent axis, which is a property of the game rather than of
+            #     this module.
             absolute_position_embedding=False,
             relative_position_embedding=False,
             positional_heads=self.positional_heads, # inert while both are False
