@@ -63,7 +63,15 @@ class ViT2(nn.Module):
             pooling_kernel_stride=self.pooling_kernel_stride,
             pooling_padding=self.pooling_padding,
             transformer_feedforward_first=True,
-            transformer_initial_ff_residual_path=False, # So that d_model can be as small as we like
+            # On, because broccoli 30.1.0 carries the residual with
+            #     `ResizeAndPadPatches`: it bilinearly downscales each patch to
+            #     the largest volume that fits `d_model` and zero-pads the rest,
+            #     so the skip connection no longer ties `d_model` to the patch
+            #     size. It was off here on the older assumption that it did.
+            #     The resizer has no parameters, so this costs nothing but the
+            #     interpolation, and it only raises below `d_model` = 3
+            #     (`in_channels`), which no config approaches.
+            transformer_initial_ff_residual_path=True,
             transformer_initial_ff_linear_module_up=None,
             transformer_initial_ff_linear_module_down=None,
             # None means "fall back to the corresponding `transformer_ff_*`
