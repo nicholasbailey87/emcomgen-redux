@@ -290,12 +290,13 @@ argmax-preserving, so it changes no eval-time message.)
     **This is a starting point, not a target**: what a speaker actually does is
     reported as `realised_survival` and `logit_scale`, and is expected to move
     over a run — including *downwards* in fidelity early on, which is the
-    speaker annealing itself rather than a fault. It is also a **floor**:
-    `clamp_logit_scale` holds the learned scale at or above the value solved for
-    here after every optimiser step, since below a deliberately near-random
-    opening there is nothing left to explore towards, only a channel being
-    muted. `logit_scale`'s docstring
-    carries the derivation and the reference points to rederive `0.9` from.
+    speaker annealing itself rather than a fault, and the birds baseline makes
+    that descent every run: 0.81x of its opening by epoch 5, recovered by epoch
+    8, and it is bootstrapping from a realised survival of 0.12-0.14 while it is
+    down there. Flooring the scale at this value was tried and reverted — it
+    cost that arm fifteen epochs against a same-seed control. `logit_scale`'s
+    docstring carries the derivation and the reference points to rederive `0.9`
+    from.
 - `[sender_language_model] uniform_weight`: the **ceiling** on fidelity, and so
     the floor under exploration. Weight of the uniform component mixed into the
     policy before sampling, train-pass only. It caps a slot's winner at
@@ -449,11 +450,10 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     ShapeWorld, 0.839 for birds) and a usable channel is somewhere around 4 to
     6. It is the disambiguator for a falling survival: a flatter policy at a
     steady scale is the speaker's own doing, a falling scale is the channel
-    closing. It cannot fall below its opening value — see `init_energy` — so a
-    column pinned flat at 0.802 or 0.839 is a run whose loss wants the channel
-    quieter than it started, i.e. whose message never became informative. That
-    is a finding about the architecture rather than a fault in the channel, and
-    it is where the preliminary ViT-sender arms sat.
+    closing. Both happen, and the distinction that matters is depth rather than
+    direction: a healthy arm dips about 0.2 log-units below its opening and
+    climbs back through it within a few epochs, while the preliminary ViT-sender
+    arm fell 0.94 log-units over a hundred and never returned.
     Its travel is bounded by `lr * steps`, because AdamW normalises by the
     gradient's second moment and this is a lone scalar — so it moves at about
     `logit_scale_lr` per step whatever the gradient's size, and comparing its
@@ -466,10 +466,9 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     as against the configured `tau`. A function of `train_logit_scale` and the
     epoch counter alone, so it carries no independent information, but it is
     what sets how much straight-through bias the run is paying. It equals `tau`
-    at initialisation and whenever the scale sits at its opening value (which,
-    with the floor in place, is as low as it goes), rises with the scale so that
-    losing tokens keep receiving gradient, and returns to `tau` by the last
-    epoch as the coupling retires.
+    at initialisation and whenever the scale sits below its opening value,
+    rises with the scale so that losing tokens keep receiving gradient, and
+    returns to `tau` by the last epoch as the coupling retires.
 - `train_logit_spread` — the standard deviation of the emittable logits
     *before* normalisation, so it reports the size of the logit *shape* rather
     than of the channel: `layer_norm_logits` divides this magnitude back out,

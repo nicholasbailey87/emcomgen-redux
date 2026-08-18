@@ -769,45 +769,6 @@ class SenderGRULM(nn.Module):
         with torch.no_grad():
             self.log_logit_scale.fill_(math.log(self.initial_logit_scale))
 
-    def clamp_logit_scale(self):
-        """
-        Hold the learned scale at or above the value `init_energy` solved for.
-            Called by `train.py` after every optimiser step.
-
-        `init_energy` already opens the channel deliberately close to random --
-            0.9 of maximum entropy, which is a symbol survival around 0.15 --
-            so there is nothing below it that could be exploration. What is
-            below it is muting: the fastest descent direction available to a
-            fresh pair is to quieten the channel until the listener learns to
-            ignore the message, which parks the loss at `ln 2` and removes the
-            gradient that would have made the message worth listening to. It is
-            a stable state and runs have sat in it for a hundred epochs, with
-            `logit_spread` growing all the while and `layer_norm_logits`
-            dividing it straight back out.
-
-        `sampling_tau` already refuses to follow the scale below its opening,
-            and for a related reason: the coupling inverts there, amplifying
-            the Gumbel noise while keeping the surrogate sharp about it. This
-            is the same floor applied to the scale itself, so the two agree on
-            what the opening channel is worth.
-
-        The floor costs nothing a healthy run wanted. Every arm dips below its
-            opening scale for the first few epochs and the ones that work climb
-            back through it; a run that stays pinned at the floor is telling
-            you its message never became informative, which is a finding rather
-            than a failure of the channel.
-
-        Applied to the parameter rather than to the `logit_scale` property on
-            purpose. Clamping on the read would leave the gradient zero
-            wherever the parameter sat below the floor, so it could wander
-            arbitrarily far down and then need `distance / lr` steps to come
-            back -- the same step-budget trap `logit_scale_lr` exists to
-            escape. Projecting the parameter after the step keeps it at the
-            boundary, where one favourable step releases it.
-        """
-        with torch.no_grad():
-            self.log_logit_scale.clamp_(min=math.log(self.initial_logit_scale))
-
     @property
     def sampling_tau(self):
         """
@@ -1295,45 +1256,6 @@ class SenderTransformerLM(nn.Module):
         """
         with torch.no_grad():
             self.log_logit_scale.fill_(math.log(self.initial_logit_scale))
-
-    def clamp_logit_scale(self):
-        """
-        Hold the learned scale at or above the value `init_energy` solved for.
-            Called by `train.py` after every optimiser step.
-
-        `init_energy` already opens the channel deliberately close to random --
-            0.9 of maximum entropy, which is a symbol survival around 0.15 --
-            so there is nothing below it that could be exploration. What is
-            below it is muting: the fastest descent direction available to a
-            fresh pair is to quieten the channel until the listener learns to
-            ignore the message, which parks the loss at `ln 2` and removes the
-            gradient that would have made the message worth listening to. It is
-            a stable state and runs have sat in it for a hundred epochs, with
-            `logit_spread` growing all the while and `layer_norm_logits`
-            dividing it straight back out.
-
-        `sampling_tau` already refuses to follow the scale below its opening,
-            and for a related reason: the coupling inverts there, amplifying
-            the Gumbel noise while keeping the surrogate sharp about it. This
-            is the same floor applied to the scale itself, so the two agree on
-            what the opening channel is worth.
-
-        The floor costs nothing a healthy run wanted. Every arm dips below its
-            opening scale for the first few epochs and the ones that work climb
-            back through it; a run that stays pinned at the floor is telling
-            you its message never became informative, which is a finding rather
-            than a failure of the channel.
-
-        Applied to the parameter rather than to the `logit_scale` property on
-            purpose. Clamping on the read would leave the gradient zero
-            wherever the parameter sat below the floor, so it could wander
-            arbitrarily far down and then need `distance / lr` steps to come
-            back -- the same step-budget trap `logit_scale_lr` exists to
-            escape. Projecting the parameter after the step keeps it at the
-            boundary, where one favourable step releases it.
-        """
-        with torch.no_grad():
-            self.log_logit_scale.clamp_(min=math.log(self.initial_logit_scale))
 
     @property
     def sampling_tau(self):

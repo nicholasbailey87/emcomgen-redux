@@ -420,11 +420,6 @@ def run(
                     clip_gradients(pair, config['optimiser']['clip_grad_norm'])
                     scaler.step(optimizer)
                     scaler.update()
-                    # Projected after the step, not clamped on the read -- see
-                    # `clamp_logit_scale`. Unconditional: `scaler.step` skips
-                    # steps with a non-finite gradient, and re-imposing a bound
-                    # the parameter already satisfies costs nothing.
-                    pair.sender.language_model.clamp_logit_scale()
                     scheduler.step(this_loss.item())
                     optimizer.zero_grad()
                     backpropped = True
@@ -505,7 +500,6 @@ def run(
         clip_gradients(pair, config['optimiser']['clip_grad_norm'])
         scaler.step(optimizer)
         scaler.update()
-        pair.sender.language_model.clamp_logit_scale()
         scheduler.step(this_loss.item())
         optimizer.zero_grad()
 
