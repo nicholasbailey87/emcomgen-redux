@@ -17,10 +17,10 @@
 name = "ablation"
 
 [scheduler]
-epochs = 100
+epochs = 30
 
 [experiment]
-repeats = 5
+repeats = 1
 
 [slurm]
 time = "24:00:00"
