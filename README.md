@@ -220,7 +220,7 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
     from `LayerNorm`ed embeddings while pooling the raw ones. Both are there for
     the same reason `layer_norm_logits` is: without them the softmax over
     examples inherits the backbone's output magnitude, which decides both where
-    the pooling opens (near-selection of one example at Conv4's scale, near the
+    the pooling opens (near-selection of one example at an unnormalised CNN's scale, near the
     mean at a normalised backbone's) and how fast it leaves the mean. Watch
     `train_pool_effective_examples` to see whether it moved.
 - `[sender] prototype_dropout` / `[sender] vision_dropout`: dropout on the pooled
@@ -489,6 +489,19 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     from "the pooler stayed at the average" — otherwise indistinguishable
     outside a checkpoint. NaN for `AveragePrototyper`, which has no scoring
     vector, rather than a zero that would read as a pooler which had not moved.
+- `train_polarity_separation` — the distance between the two rows of the
+    Transformer speaker's `polarity_embedding`, the learned tag that marks which
+    of its prototypes is the positive concept. Only the *difference* between the
+    rows can do anything: a constant added to both shifts every key and value
+    alike and cannot separate them. It opens at exactly zero, so this column is
+    what separates "the speaker learned to tell its prototypes apart" from "the
+    speaker never used the tag".
+    NaN for `SenderGRULM`, which is handed the distinction by `init_h` — it
+    reads `torch.cat(prototypes, 1)`, so each polarity gets its own weight
+    columns — and so has nothing to learn and nothing to report. Without the tag
+    the Transformer speaker cannot make the distinction at all: its
+    cross-attention carries no positional or type encoding on the key side, so
+    its output is bit-identical under swapping the two prototypes.
 - `{train,test,test_same,test_avg}_unique_message_fraction` — distinct messages
     over messages emitted. A language that is doing work compresses: healthy
     runs sit around 0.30–0.40, while runs whose channel is too noisy to learn

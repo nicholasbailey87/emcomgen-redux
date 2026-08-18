@@ -477,6 +477,15 @@ def run(
             # between rung 3 and rung 1 would only be visible in a checkpoint.
             # Both are NaN for `AveragePrototyper`'s score norm, which has no
             # scoring vector to report.
+            #
+            # `polarity_separation` is the same kind of column for the
+            # Transformer speaker's `polarity_embedding`: the distance between
+            # its two rows, which is the only part of the tag the cross-attention
+            # can act on, opening at exactly zero. Without it, a speaker that
+            # learned to tell its positive prototype from its negative one and a
+            # speaker that never used the tag are the same row. NaN for
+            # `SenderGRULM`, which is handed the distinction by `init_h` and has
+            # nothing to learn.
             if training and speaking:
                 language_model = pair.sender.language_model
                 prototyper = pair.sender.prototyper
@@ -487,6 +496,7 @@ def run(
                     sampling_tau=language_model.sampling_tau.item(),
                     pool_effective_examples=prototyper.pool_effective_examples,
                     pool_score_norm=prototyper.pool_score_norm,
+                    polarity_separation=language_model.polarity_separation,
                     batch_size=batch_size,
                 )
 

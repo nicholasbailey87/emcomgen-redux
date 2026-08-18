@@ -61,9 +61,12 @@ def build_vit2():
     # Built from DEFAULT.toml rather than a hand-written kwarg list, so that
     # adding a config key cannot silently break this check.
     settings = dict(get_config()["sender_feature_model"])
-    # d_model/heads are overridden: 2D axial RoPE concatenates freqs per
-    # spatial axis and so needs head_dim >= 32, which the defaults do not give.
-    settings.update(d_model=64, heads=2, layers=L, utility_tokens=1)
+    # `layers` and `utility_tokens` overridden only to keep the check cheap and
+    # to exercise the BOS path; the defaults' width is left alone. They used to
+    # be repaired here too -- 2D axial RoPE concatenates freqs per spatial axis
+    # and so needs head_dim >= 32, which DEFAULT.toml's old `d_model = 16,
+    # heads = 4` did not give. It now carries head_dim 64.
+    settings.update(layers=L, utility_tokens=1)
     m = ViT2(n_feats=(3, 64, 64), **settings)
     x = torch.randn(2, 3, 64, 64)
     return m(x)

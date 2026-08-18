@@ -71,15 +71,15 @@ def _backbones():
     the config, so it is built the way `models.builder` builds it.
     """
     config = parse_config.get_config()  # plain defaults, i.e. ShapeWorld
-    # DEFAULT.toml's `d_model = 16, heads = 4` puts head_dim at 4, under
-    # broccoli's floor of 32 for 2D axial RoPE, so a ViT built from the plain
-    # defaults constructs but raises on the forward pass. The runnable rungs all
-    # override to exactly this, head_dim = 32 being that floor; see
-    # `experiments/ablation/05_shapeworld_sender_vit.toml`.
-    config["sender_feature_model"].update(d_model=128, heads=4, layers=2, ff_ratio=1)
+    # DEFAULT.toml now carries a runnable ViT -- 320 wide, 5 heads, head_dim 64
+    # -- so this no longer has to repair it. Only `layers` is overridden, and
+    # only to keep the test cheap: a 10-layer stack is built and forwarded in
+    # every one of these cases and none of them is about depth.
+    config["sender_feature_model"].update(layers=2)
     return [
         ("Conv4", vision.Conv4(), SHAPEWORLD_FEATS),
         ("ResNet18", vision.ResNet18(), BIRDS_FEATS),
+        ("ResNet18SmallInput", vision.ResNet18SmallInput(), SHAPEWORLD_FEATS),
         (
             "ViT2",
             vision.ViT2(n_feats=SHAPEWORLD_FEATS, **config["sender_feature_model"]),
@@ -134,6 +134,60 @@ def _still_perturbed(module):
         if b.is_floating_point() and (b.abs() > PERTURBATION / 2).all()
     ]
     return stale
+
+
+def test_resnet18_small_input_stem():
+    """
+    `ResNet18SmallInput` is `ResNet18` with SimCLR's CIFAR stem, and the reason
+    for it is resolution rather than parameters.
+
+    The stock stem downsamples 4x before any residual block -- 7x7 stride 2 then
+    a 3x3 stride-2 maxpool -- which on ShapeWorld's 64px images leaves a 2x2 map
+    at the end for the adaptive pool to average. Colour survives that; shape does
+    not. With the small-input stem the same input reaches the last stage as 8x8.
+    """
+    stock = vision.ResNet18()
+    small = vision.ResNet18SmallInput()
+
+    stem = small.trunk[0]
+    assert isinstance(stem, torch.nn.Conv2d)
+    assert (stem.kernel_size, stem.stride, stem.padding) == ((3, 3), (1, 1), (1, 1))
+    assert not any(isinstance(m, torch.nn.MaxPool2d) for m in small.modules())
+    assert any(isinstance(m, torch.nn.MaxPool2d) for m in stock.modules())
+
+    # 3*3*3*64 against 7*7*3*64, and the maxpool has none.
+    assert sum(p.numel() for p in stock.parameters()) == 11_176_512
+    assert sum(p.numel() for p in small.parameters()) == 11_168_832
+
+    # Same depth, so `ResNet.reset_parameters`' 20-convolution expectation and
+    # everything keyed to it still hold.
+    convs = [m for m in small.modules() if isinstance(m, torch.nn.Conv2d)]
+    assert len(convs) == 20
+
+    assert small.final_feat_dim == stock.final_feat_dim == 512
+
+
+def test_small_input_stem_keeps_more_of_a_small_image():
+    """The claim the stem swap is actually for, measured rather than asserted."""
+    x = torch.randn(2, 3, *SHAPEWORLD_FEATS[1:])
+
+    def pre_pool(model):
+        # Everything up to, but not including, the adaptive pool and flatten.
+        trunk = torch.nn.Sequential(*list(model.trunk)[:-2])
+        with torch.no_grad():
+            return trunk(x).shape[-2:]
+
+    assert tuple(pre_pool(vision.ResNet18())) == (2, 2)
+    assert tuple(pre_pool(vision.ResNet18SmallInput())) == (8, 8)
+
+
+def test_small_input_stem_is_still_resolution_independent():
+    """It is the ShapeWorld backbone, but nothing should pin it to 64px."""
+    model = vision.ResNet18SmallInput().eval()
+    for size in (64, 112, 224):
+        with torch.no_grad():
+            out = model(torch.randn(1, 3, size, size))
+        assert out.shape == (1, model.final_feat_dim)
 
 
 def test_every_backbone_constructs_and_forwards():
@@ -321,6 +375,12 @@ def test_cross_attention_comparer_reset_covers_its_adapters():
     config = parse_config.get_config()
     kwargs = dict(config["receiver_comparer"])
     kwargs["layers"] = 2  # so the fusion stack is non-empty
+    # `d_model` has to be overridden, as it is everywhere this class is built
+    # outside a rung config. DEFAULT's 1024 is `BilinearGRUComparer`'s hidden
+    # size, and the section's `heads` describes this class instead -- the two
+    # numbers belong to different modules, so the pair does not satisfy
+    # broccoli's `d_model % n_heads == 0`. 320 is the width rung 11 uses.
+    kwargs["d_model"] = 320
     comparer = receiver.TransformerCrossAttentionComparer(512, **kwargs)
 
     _perturb(comparer)

@@ -1,33 +1,22 @@
 # Rung 7: rung 5 with a Transformer sender language model.
 #
-# `SenderTransformerLM` has no free width. It layer-norms the incoming
-# prototypes at its own d_model and rejects any config where
-# token_embedding_size != referent_embedding_size, so both are pinned to the
-# sender vision model's output width -- 128, set by rung 5.
+# This is the rung the rebalancing was for. At the old widths it was 533,943
+# parameters against the GRU's 6,813,499 -- 12.8x smaller -- because
+# `SenderTransformerLM` pins its width to the vision model's and ShapeWorld's
+# ViT had been sized against Conv4's 113,088. Whatever that rung measured, it
+# was not architecture.
 #
-# That makes parity with the default GRU unreachable here. The GRU speaker is
-# 4,978,490 parameters at this referent width, and it is the 1024-wide
-# recurrent cell that dominates (4,687,872 of it) regardless of how narrow the
-# thing feeding it is. At d_model 128 the Transformer costs ~115k per layer:
+# At 320 wide with 5 layers it is 5,562,934 against the GRU's 5,764,923, or
+# -3.5%. The GRU figure moved too: its referent width fell from Conv4's 1024 to
+# ResNet18's 512 when the baseline backbone changed, which is most of why the
+# two now meet.
 #
-#   layers      params   x GRU
-#        4     533,686    0.11
-#        8     996,570    0.20
-#       16   1,922,338    0.39
-#       32   3,773,874    0.76
-#       48   5,625,410    1.13
-#
-# Parity therefore means roughly 42 layers over a five-token message, which is
-# not a model anyone would defend. Four layers is taken instead, matching rung
-# 5's depth, and the ~9x parameter shortfall against the GRU is a property of
-# this rung to be reported rather than engineered away. Rung 8 does not have
-# this problem: ResNet18's budget buys a 384-wide sender, and 384 is wide
-# enough for the language model to reach parity at 5 layers.
-#
-# Note `bidirectional` stays at DEFAULT's false, so the stack is causal. That
-# is the faithful analogue of the GRU it replaces, which is also
-# unidirectional -- but it is a live choice, not a forced one, since this
-# speaker decodes every position in one pass.
+# The speaker also gains a latent phase at this rung -- see
+# `latent_message_multiplier` in DEFAULT.toml. It is a Perceiver IO now: the
+# learned query array is twice the message length, the self-attention stack runs
+# over that, and a second learned query reads it back down to 5 symbols. About
+# 419k of the count above is the decoder cross-attention that makes that
+# possible.
 
 name = "ablation"
 
@@ -36,19 +25,14 @@ feature_model = "ViT2"
 prototyper = "AttentionPrototyper"
 language_model = "SenderTransformerLM"
 
-[sender_feature_model]
-d_model = 128
-heads = 4    # head_dim = 32, broccoli's 2D RoPE minimum
-layers = 4
-ff_ratio = 1
-
 [sender_language_model]
-# Both must equal sender_feature_model.d_model -- see above.
-token_embedding_size = 128
-d_model = 128
-heads = 4    # head_dim = 32; the 1D RoPE floor is only 16, so this is slack
-layers = 4
-ff_ratio = 1
+# Both must equal `sender_feature_model.d_model`: `SenderTransformerLM`
+# layer-norms the incoming prototypes at its own `d_model` and separately
+# rejects `token_embedding_size != referent_embedding_size`.
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+layers = 5
 
 [scheduler]
 epochs = 30

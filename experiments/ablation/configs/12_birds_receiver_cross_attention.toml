@@ -1,14 +1,9 @@
 # Rung 12: rung 10 with `TransformerCrossAttentionComparer` on the receiver.
 #
-# Same reasoning and the same shape as rung 11 -- the module's width is
-# independent of the 384-d referents it is reading, so nothing has to change
-# for CUB. Against the `BilinearGRUComparer` plus token embedding it replaces
-# (5,093,088 parameters at 384-d referents):
-#
-#   d_model  heads  layers      params   x GRU comparer
-#       256      8       8   4,190,985             0.82
-#       256      8      10   5,112,595             1.00
-#       256      8      12   6,034,205             1.18
+# The same shape as rung 11 -- the module's width is independent of the
+# referents it reads, so nothing has to change for CUB. It comes to 5,084,211
+# here against the same 5,015,552 bilinear comparer, the 768-parameter
+# difference being the longer message.
 #
 # `message_length` comes from the birds defaults (10, against ShapeWorld's 7)
 # and is validated against `sender_language_model.message_length` in both
@@ -24,34 +19,49 @@ feature_model = "ViT2"
 prototyper = "AttentionPrototyper"
 language_model = "SenderTransformerLM"
 
-[sender_feature_model]
-d_model = 384
-heads = 12   # head_dim = 32, broccoli's 2D RoPE minimum
-layers = 9
-ff_ratio = 1
-
 [sender_language_model]
-token_embedding_size = 384
-d_model = 384
-heads = 12
+# Both must equal `sender_feature_model.d_model`: `SenderTransformerLM`
+# layer-norms the incoming prototypes at its own `d_model` and separately
+# rejects `token_embedding_size != referent_embedding_size`.
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
 layers = 5
-ff_ratio = 1
 
 [receiver]
 feature_model = "ViT2"
 comparer = "TransformerCrossAttentionComparer"
 
-[receiver_feature_model]
-d_model = 384
-heads = 12
-layers = 9
-ff_ratio = 1
-
 [receiver_comparer]
-d_model = 256
-heads = 8    # head_dim = 32
-layers = 10
-ff_ratio = 1
+# Only `layers` is set here. This module's width is free of every other width in
+# the run -- it adapts the referents (`referent_adapter`) and the message
+# (`message_adapter`) into its own space -- so it could be sized to hit a budget
+# exactly, and used to be, at 256 wide with a feedforward inner size of 256.
+#
+# It takes DEFAULT's 320 / 5 heads / 554 instead, so that every transformer in
+# the repo is one width, one head dimension (64) and one feedforward proportion
+# (1.73), and depth is the only thing that varies between them. Sizing this one
+# to a target meant either an inner size of 256 -- a proportion of 1.0 where
+# everything else is 1.73 -- or 443, which would have put it 1.30x over the
+# comparer it replaces. Neither is worth an exact match.
+#
+# 5 layers is then the closest depth: 5,399,700 parameters against
+# `BilinearGRUComparer`'s 5,015,552, or 1.08x. That is looser than the 1.01x the
+# hand-sized version reached, but tighter than the vision arms, which sit at
+# 0.91x and 1.11x because a ViT's patch tokeniser scales with image size.
+#
+# Depth is not free to move much either way. `layers` is split inside the module
+# -- `encoding` takes layers - layers//2 and `fusion` takes layers//2 -- so 5
+# gives a 3-layer message encoder and a 2-layer fusion block over the referent
+# set, and 2 is the minimum that keeps `stochastic_depth` alive at all, since it
+# is suppressed entirely unless layers//2 > 1. 6 layers would give an even 3/3
+# but 1.26x.
+#
+# `d_model` is the only width restated here. DEFAULT's 1024 in that section is
+# `BilinearGRUComparer`'s hidden size, not this class's; `heads`,
+# `ff_inner_size` and the rest are read only by this class and are inherited.
+d_model = 320
+layers = 5
 
 [scheduler]
 epochs = 30

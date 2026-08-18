@@ -1,12 +1,11 @@
 # Rung 10: rung 8 with the receiver's vision model updated to match the
 # sender's.
 #
-# Same ViT2 shape as rung 6 gave the sender: d_model 384, 12 heads
-# (head_dim 32), 9 layers, ff_ratio 1 -> 11,535,113 parameters against
-# ResNet18's 11,176,512, i.e. 1.03x. Unlike the sender's language model, the
-# receiver's comparer is not pinned to this width -- it adapts whatever
-# referent width it is given -- so this rung changes the receiver's vision in
-# isolation.
+# The same ViT2 specification the sender took in rung 6, so 12,430,908
+# parameters against ResNet18's 11,176,512. Unlike the sender's language model,
+# the receiver's comparer is not pinned to this width -- it adapts whatever
+# referent width it is given through `referent_adapter` -- so this rung changes
+# the receiver's vision in isolation.
 
 name = "ablation"
 
@@ -18,27 +17,17 @@ feature_model = "ViT2"
 prototyper = "AttentionPrototyper"
 language_model = "SenderTransformerLM"
 
-[sender_feature_model]
-d_model = 384
-heads = 12   # head_dim = 32, broccoli's 2D RoPE minimum
-layers = 9
-ff_ratio = 1
-
 [sender_language_model]
-token_embedding_size = 384
-d_model = 384
-heads = 12
+# Both must equal `sender_feature_model.d_model`: `SenderTransformerLM`
+# layer-norms the incoming prototypes at its own `d_model` and separately
+# rejects `token_embedding_size != referent_embedding_size`.
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
 layers = 5
-ff_ratio = 1
 
 [receiver]
 feature_model = "ViT2"
-
-[receiver_feature_model]
-d_model = 384
-heads = 12
-layers = 9
-ff_ratio = 1
 
 [scheduler]
 epochs = 30

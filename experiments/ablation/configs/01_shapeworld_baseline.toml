@@ -1,8 +1,21 @@
 # Rung 1: ShapeWorld with the GRU/CNN baseline agents.
 #
-# Conv4 sender + Conv4 receiver, AveragePrototyper, SenderGRULM,
+# ResNet18SmallInput on both agents, AveragePrototyper, SenderGRULM,
 # BilinearGRUComparer. This is the reference point every other rung is measured
-# against, and it now overrides nothing: the settings it used to carry --
+# against, and it now overrides nothing:
+#
+# The backbone was Conv4 (113,088 parameters) until the rebalancing. Conv4 is
+# both tiny and, at 1024, oddly wide -- that width is a flattened 64x4x4 feature
+# map rather than a learned one -- and it was what forced ShapeWorld's ViT down
+# to 128 and, through the sender's width pinning, its Transformer language model
+# to a twelfth of the GRU's size. `ResNet18SmallInput` is the same ResNet18 the
+# birds arm uses with SimCLR's small-image stem: 3x3 stride 1, no maxpool, so
+# the 64px input reaches the last stage as an 8x8 map rather than 2x2. See
+# `ResNet.__init__` for why that matters more than the parameter count on a task
+# whose known failure mode is the speaker naming colours.
+#
+# This rung is therefore not comparable to any ShapeWorld run recorded before
+# the change -- the whole ladder rebaselines, not just the arms that moved. the settings it used to carry --
 # `weight_decay` 0.0, `silhouette_p_receiver` 0.1, and the `init_energy` /
 # `uniform_weight` pair -- are DEFAULT.toml's own values, so every rung inherits
 # them rather than rung 1 alone.

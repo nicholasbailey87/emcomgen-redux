@@ -1,26 +1,5 @@
 # Rung 11: rung 9 with `TransformerCrossAttentionComparer` on the receiver.
 #
-# Parity is reachable here, and cleanly. Unlike the sender's language model,
-# this module's d_model is free of every vision width in the run: it adapts the
-# referents (`referent_adapter`) and the message (`message_adapter`) into its
-# own space, so width can be chosen purely to hit the budget.
-#
-# The target is the `BilinearGRUComparer` it replaces plus the receiver's token
-# embedding, since `token_embedding_size` sizes both -- 4,827,944 parameters at
-# rung 9's 128-d referents. Holding head_dim at 32 and ff_ratio at 1:
-#
-#   d_model  heads  layers      params   x GRU comparer
-#       256      8       8   4,121,681             0.85
-#       256      8      10   5,043,291             1.04
-#       256      8      12   5,964,901             1.24
-#       384     12       4   4,986,045             1.03
-#
-# 256 x 10 is taken over 384 x 4 because `layers` is split inside the module --
-# `encoding` gets layers - layers//2 and `fusion` gets layers//2 -- so 4 layers
-# would leave a 2-layer message encoder and a 2-layer fusion block, and
-# `stochastic_depth` is suppressed entirely below layers//2 > 1. At 10 it is a
-# 5-layer encoder over the message and a 5-layer fusion over the referent set.
-#
 # `token_embedding_size` stays at DEFAULT's 500, so the comparison against the
 # GRU comparer is like for like on the embedding table.
 
@@ -31,34 +10,49 @@ feature_model = "ViT2"
 prototyper = "AttentionPrototyper"
 language_model = "SenderTransformerLM"
 
-[sender_feature_model]
-d_model = 128
-heads = 4    # head_dim = 32, broccoli's 2D RoPE minimum
-layers = 4
-ff_ratio = 1
-
 [sender_language_model]
-token_embedding_size = 128
-d_model = 128
-heads = 4
-layers = 4
-ff_ratio = 1
+# Both must equal `sender_feature_model.d_model`: `SenderTransformerLM`
+# layer-norms the incoming prototypes at its own `d_model` and separately
+# rejects `token_embedding_size != referent_embedding_size`.
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+layers = 5
 
 [receiver]
 feature_model = "ViT2"
 comparer = "TransformerCrossAttentionComparer"
 
-[receiver_feature_model]
-d_model = 128
-heads = 4
-layers = 4
-ff_ratio = 1
-
 [receiver_comparer]
-d_model = 256
-heads = 8    # head_dim = 32
-layers = 10
-ff_ratio = 1
+# Only `layers` is set here. This module's width is free of every other width in
+# the run -- it adapts the referents (`referent_adapter`) and the message
+# (`message_adapter`) into its own space -- so it could be sized to hit a budget
+# exactly, and used to be, at 256 wide with a feedforward inner size of 256.
+#
+# It takes DEFAULT's 320 / 5 heads / 554 instead, so that every transformer in
+# the repo is one width, one head dimension (64) and one feedforward proportion
+# (1.73), and depth is the only thing that varies between them. Sizing this one
+# to a target meant either an inner size of 256 -- a proportion of 1.0 where
+# everything else is 1.73 -- or 443, which would have put it 1.30x over the
+# comparer it replaces. Neither is worth an exact match.
+#
+# 5 layers is then the closest depth: 5,399,700 parameters against
+# `BilinearGRUComparer`'s 5,015,552, or 1.08x. That is looser than the 1.01x the
+# hand-sized version reached, but tighter than the vision arms, which sit at
+# 0.91x and 1.11x because a ViT's patch tokeniser scales with image size.
+#
+# Depth is not free to move much either way. `layers` is split inside the module
+# -- `encoding` takes layers - layers//2 and `fusion` takes layers//2 -- so 5
+# gives a 3-layer message encoder and a 2-layer fusion block over the referent
+# set, and 2 is the minimum that keeps `stochastic_depth` alive at all, since it
+# is suppressed entirely unless layers//2 > 1. 6 layers would give an even 3/3
+# but 1.26x.
+#
+# `d_model` is the only width restated here. DEFAULT's 1024 in that section is
+# `BilinearGRUComparer`'s hidden size, not this class's; `heads`,
+# `ff_inner_size` and the rest are read only by this class and are inherited.
+d_model = 320
+layers = 5
 
 [scheduler]
 epochs = 30

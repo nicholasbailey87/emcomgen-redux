@@ -1,38 +1,32 @@
 # Rung 5: rung 3 with a Transformer sender vision model.
 #
-# Sized against Conv4/Conv6 rather than against the existing (unrunnable)
-# transformer configs, which used d_model 32 / heads 4 -> head_dim 8 against
-# broccoli's axial-RoPE floor of 32 for a 2D source. head_dim is 32 exactly
-# here, which is that floor, so heads is pinned to 4 by d_model = 128.
+# ViT2 at the shared specification comes to 10,177,420 parameters on
+# ShapeWorld's 64px images, against ResNet18SmallInput's 11,168,832 -- 0.91x.
 #
-#   layers  params    x Conv6 (187,200)  x Conv4 (113,088)
-#        1  235,857               1.26              2.09
-#        2  351,578               1.88              3.11
-#        4  583,020               3.11              5.16
+# Note the ViT is *not* the same size on both datasets even at identical
+# settings, because its patch tokeniser scales with the image. At 64px the
+# pooling kernel is 8 and each token carries 8*8*3 = 192 channels; at 224px the
+# kernel is 28 and each token carries 2352. Both land on the same 17x17 token
+# grid, so only the tokeniser differs -- but it differs by 2.25M parameters. See
+# rung 6 for the birds figure.
 #
-# True parity is unreachable at any usable depth. The tokeniser is not the
-# reason: `cnn = False` leaves patch extraction as a plain unfold, so it has no
-# parameters and no convolution. The fixed cost is the transformer's own initial
-# feedforward block -- `transformer_feedforward_first` -- plus the absolute
-# position embedding over the 17x17 patch grid and the SequencePool head. Those
-# come to 120,136 parameters before any attention happens at all, which is
-# already 0.64 x Conv6, and each attention layer then costs 115,721. Four layers
-# at 3.1x Conv6 is the compromise; it is the shallowest depth at which the stack
-# is worth calling a transformer.
+# The ViT's shape is no longer set here. `[sender_feature_model]` and
+# `[receiver_feature_model]` in DEFAULT.toml carry the one specification every
+# rung uses -- 320 wide, 10 layers, feedforward inner 554, 5 heads for a head
+# dimension of 64 -- so a rung that swaps in a ViT now only has to name it.
 #
-# ff_ratio = 1 (against DEFAULT's 2) puts the feedforward inner size at 128.
+# That is a change of principle, not just of numbers. The widths used to be
+# picked per dataset to match each one's own baseline backbone, which is
+# defensible for a vision rung on its own but not once `SenderTransformerLM`
+# enters: it pins its width to the vision model's, so ShapeWorld's language
+# model inherited 128 and came out 12.8x smaller than the GRU it is compared
+# against. One width for both datasets is what makes rungs 7 and 8 comparable.
 
 name = "ablation"
 
 [sender]
 feature_model = "ViT2"
 prototyper = "AttentionPrototyper"
-
-[sender_feature_model]
-d_model = 128
-heads = 4    # head_dim = 32, broccoli's 2D RoPE minimum
-layers = 4
-ff_ratio = 1
 
 [scheduler]
 epochs = 30

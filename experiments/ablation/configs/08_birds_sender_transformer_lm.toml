@@ -1,15 +1,15 @@
 # Rung 8: rung 6 with a Transformer sender language model.
 #
-# Same pinning as rung 7 -- token_embedding_size and d_model are both forced to
-# the sender vision model's 384 -- but here that width is wide enough for
-# parity with the GRU speaker (5,511,928 parameters at this referent width):
+# 5,569,660 parameters against the GRU's 5,774,073, or -3.5% -- the same offset
+# rung 7 reaches on ShapeWorld, which is the point of giving both datasets the
+# same width. It was 0.2% here before, but only by luck of the per-dataset
+# sizing, and the same luck left ShapeWorld 12.8x short.
 #
-#   layers      params   x GRU
-#        4   4,751,292    0.86
-#        5   5,786,565    1.05
-#        6   6,821,838    1.24
-#
-# 5 layers, at 1.05x, is taken.
+# The message is longer here (8 content symbols against ShapeWorld's 5), so the
+# latent array is 16 rather than 10 and the referents reach the language model
+# through 5 heads x 16 latents = 80 scalars rather than 50. See
+# `latent_message_multiplier` in DEFAULT.toml for why that number is worth
+# tracking at all.
 
 name = "ablation"
 
@@ -21,19 +21,14 @@ feature_model = "ViT2"
 prototyper = "AttentionPrototyper"
 language_model = "SenderTransformerLM"
 
-[sender_feature_model]
-d_model = 384
-heads = 12   # head_dim = 32, broccoli's 2D RoPE minimum
-layers = 9
-ff_ratio = 1
-
 [sender_language_model]
-# Both must equal sender_feature_model.d_model -- see rung 7.
-token_embedding_size = 384
-d_model = 384
-heads = 12
+# Both must equal `sender_feature_model.d_model`: `SenderTransformerLM`
+# layer-norms the incoming prototypes at its own `d_model` and separately
+# rejects `token_embedding_size != referent_embedding_size`.
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
 layers = 5
-ff_ratio = 1
 
 [scheduler]
 epochs = 30

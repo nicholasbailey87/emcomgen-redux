@@ -93,14 +93,31 @@ class ViT2(nn.Module):
             transformer_relative_position_embedding=kwargs[
                 "relative_position_embedding"
             ],
-            # Live: with relative position embedding on, this decides how many
-            #     heads receive axial RoPE.
-            transformer_positional_heads=kwargs["positional_heads"],
+            # Pinned at 1.0, so every head receives axial RoPE, and no longer
+            #     configurable. At any fraction below 1 broccoli splits the head
+            #     axis -- `math.ceil(fraction * n_heads)` heads take RoPE and the
+            #     rest are carried through a second value projection and
+            #     concatenated back -- so the size of the partition moved
+            #     whenever `heads` moved, which made it a hidden confound in a
+            #     study that varies width. At the full head count every one of
+            #     those splits collapses to the identity path.
+            #
+            # Note broccoli's docstrings say the fraction is applied with
+            #     `floor`; the code is `math.ceil`. Another reason not to sit on
+            #     a fraction.
+            transformer_positional_heads=1.0,
             transformer_embedding_size=self.d_model,
             transformer_layers=kwargs["layers"],
             transformer_heads=kwargs["heads"],
-            transformer_ff_ratio=kwargs["ff_ratio"],
-            transformer_ff_inner_size=None, # inert: `ff_ratio` sizes the block
+            # `ff_ratio` must be None here or it wins. broccoli's `ViT` resolves
+            #     the two in the *opposite* order to `FeedforwardBlock`: the
+            #     block takes `int(ratio * width) if inner_size is None else
+            #     inner_size`, so the explicit size wins there, but `ViT` takes
+            #     `if transformer_ff_ratio is not None:` and derives the inner
+            #     size from the ratio, discarding whatever was passed here. Left
+            #     as a number, this promotion would be silently dead.
+            transformer_ff_ratio=None,
+            transformer_ff_inner_size=kwargs["ff_inner_size"],
             transformer_bos_tokens=kwargs["utility_tokens"],
             transformer_knocking_heads=kwargs["knocking_heads"],
             transformer_return_bos_tokens=kwargs["return_bos_tokens"],
@@ -610,25 +627,62 @@ def Conv4(
 class ResNet(nn.Module):
     maml = False  # Default
 
-    def __init__(self, block, list_of_num_layers, list_of_out_dims, flatten=True):
+    def __init__(
+        self,
+        block,
+        list_of_num_layers,
+        list_of_out_dims,
+        flatten=True,
+        small_input_stem=False,
+    ):
+        """
+        Args:
+            small_input_stem: replace the ImageNet stem -- 7x7 stride 2 followed
+                by a 3x3 stride-2 maxpool -- with a 3x3 stride-1 convolution and
+                no pooling, as SimCLR does for CIFAR-10 (Chen et al. 2020,
+                arXiv:2002.05709, its CIFAR-10 appendix: "we replace the first
+                7x7 Conv of stride 2 with 3x3 Conv of stride 1, and also remove
+                the first max pooling operation"). He et al. 2015 section 4.2 is
+                the underlying precedent, though their CIFAR network is a
+                separate architecture rather than a modified ResNet.
+
+                The stock stem discards 4x resolution before any residual block
+                runs. On ImageNet's 224px that is proportionate; on ShapeWorld's
+                64px it leaves 16x16 into stage 1 and a 2x2 map at the end,
+                which the adaptive pool then averages to a single position. What
+                survives that is colour, and what does not is shape -- which is
+                precisely the wrong bias for a study whose known failure mode is
+                the speaker learning to name colours. With this stem the final
+                map is 8x8 at 64px, so the pool has 64 positions to average
+                rather than 4.
+
+                Cheaper, too, though only just: 3*3*3*64 = 1,728 parameters
+                against 7*7*3*64 = 9,408, and the maxpool has none. The point is
+                the resolution, not the 7,680 parameters.
+        """
         # list_of_num_layers specifies number of layers in each stage
         # list_of_out_dims specifies number of output channel for each stage
         super(ResNet, self).__init__()
         assert len(list_of_num_layers) == 4, "Can have only four stages"
-        if self.maml:
-            conv1 = Conv2d_fw(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
-            bn1 = BatchNorm2d_fw(64)
+
+        conv2d = Conv2d_fw if self.maml else nn.Conv2d
+        batch_norm2d = BatchNorm2d_fw if self.maml else nn.BatchNorm2d
+
+        if small_input_stem:
+            conv1 = conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
         else:
-            conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
-            bn1 = nn.BatchNorm2d(64)
+            conv1 = conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        bn1 = batch_norm2d(64)
 
         relu = nn.ReLU()
-        pool1 = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
 
         init_layer(conv1)
         init_layer(bn1)
 
-        trunk = [conv1, bn1, relu, pool1]
+        trunk = [conv1, bn1, relu]
+
+        if not small_input_stem:
+            trunk.append(nn.MaxPool2d(kernel_size=3, stride=2, padding=1))
 
         indim = 64
         for i in range(4):
@@ -735,6 +789,29 @@ class ResNet(nn.Module):
 def ResNet18(*args, **kwargs):
     rn18 = ResNet(SimpleBlock, [2, 2, 2, 2], [64, 128, 256, 512], flatten=True)
     return rn18
+
+
+def ResNet18SmallInput(*args, **kwargs):
+    """
+    `ResNet18` with SimCLR's small-image stem -- see `ResNet.__init__`.
+
+    A separate factory rather than a flag on `ResNet18` because `ResNet18` is
+        pinned tensor-for-tensor against `torchvision.models.resnet18` by
+        `tests/test_backbones.py`, and because the backbone is selected by name
+        from the config (`getattr(vision, config['sender']['feature_model'])`),
+        so a name is the whole of the registration.
+
+    Both factories swallow their arguments, as every backbone factory here does:
+        `builder.py` splats the entire `[*_feature_model]` section into them and
+        none of it applies to a ResNet.
+    """
+    return ResNet(
+        SimpleBlock,
+        [2, 2, 2, 2],
+        [64, 128, 256, 512],
+        flatten=True,
+        small_input_stem=True,
+    )
 
 
 # def PretrainedResNet18():

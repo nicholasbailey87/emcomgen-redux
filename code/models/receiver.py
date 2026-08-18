@@ -201,9 +201,8 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.heads = kwargs["heads"]
         self.utility_tokens = kwargs["utility_tokens"]
         self.bidirectional = kwargs["bidirectional"]
-        self.ff_ratio = kwargs["ff_ratio"]
+        self.ff_inner_size = kwargs["ff_inner_size"]
         self.cross_attention_dropout = kwargs["cross_attention_dropout"]
-        self.positional_heads = kwargs["positional_heads"]
         self.activation = model_util.get_activation(kwargs["activation"])
         self.absolute_position_embedding = kwargs["absolute_position_embedding"]
         self.relative_position_embedding = kwargs["relative_position_embedding"]
@@ -276,12 +275,16 @@ class TransformerCrossAttentionComparer(nn.Module):
             self.heads,
             absolute_position_embedding=self.absolute_position_embedding,
             relative_position_embedding=self.relative_position_embedding,
-            positional_heads=self.positional_heads,
+            # Pinned at 1.0, not configurable -- see `ViT2` for the argument.
+            positional_heads=1.0,
             # Derived from the data, not configured separately: this block
             #     reads the message, so its source is the message length.
             source_size=(self.message_length,),
-            ff_ratio=self.ff_ratio,
-            ff_inner_size=None, # inert: `ff_ratio` sizes the block instead
+            # `ff_ratio` None so that `ff_inner_size` is the live knob -- see
+            #     `SenderTransformerLM`, and note broccoli's `ViT` resolves the
+            #     two the other way round.
+            ff_ratio=None,
+            ff_inner_size=self.ff_inner_size,
             activation=self.activation,
             activation_kwargs=None,
             ff_linear_module_up=None,
@@ -384,10 +387,17 @@ class TransformerCrossAttentionComparer(nn.Module):
             #     this module.
             absolute_position_embedding=False,
             relative_position_embedding=False,
-            positional_heads=self.positional_heads, # inert while both are False
+            # Inert while both position embeddings are False, just below; pinned
+            #     to the repo-wide 1.0 rather than left to broccoli's 0.5 so that
+            #     turning either of them on could not quietly reintroduce a head
+            #     partition. See `ViT2` for why 1.0.
+            positional_heads=1.0,
             source_size=None,
-            ff_ratio=self.ff_ratio,
-            ff_inner_size=None, # inert: `ff_ratio` sizes the block instead
+            # `ff_ratio` None so that `ff_inner_size` is the live knob -- see
+            #     `SenderTransformerLM`, and note broccoli's `ViT` resolves the
+            #     two the other way round.
+            ff_ratio=None,
+            ff_inner_size=self.ff_inner_size,
             activation=self.activation,
             activation_kwargs=None,
             ff_linear_module_up=None,

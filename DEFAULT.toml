@@ -167,6 +167,38 @@ log_interval = 100
 # the matrix leaves an input-independent message -- the single-message collapse.
 logit_scale_lr = 2e-3
 
+# The same elevated rate, for `SenderTransformerLM.polarity_embedding` -- the
+# learned tag that tells that speaker which of its two prototypes is the
+# positive concept. Deliberately a second key rather than a reuse of the one
+# above, even though they open at the same number: `log_logit_scale` exists on
+# both speakers, so turning that knob up to hurry the tag along would also
+# retune the GRU baseline's channel and move the comparison the ablation is
+# there to make. These two want to be separable, and one of them is
+# Transformer-only.
+#
+# It is here for the same reason as the rate above. The tag is zero-initialised,
+# so like the logit scale it has a distance to cover before it does anything at
+# all, and until it has covered it the speaker cannot distinguish "the concept
+# is X" from "the concept is not-X" except through whatever content cue survives
+# `referent_layer_norm`. At initialisation nothing does: an untrained backbone
+# makes both prototypes the mean of noise. So the traverse sits in exactly the
+# bootstrapping window where the GRU speaker gets the same information for free,
+# and the arms are least comparable while it lasts.
+#
+# Unlike the logit scale there is no arithmetic here yet, because there is no
+# target to compute one against. The scale's ceiling is known -- `init_energy`
+# fixes where it starts and `uniform_weight` caps where it usefully ends -- but
+# how large a tag the cross-attention needs is set by whatever scale
+# `referent_layer_norm` hands it, which is a property of the trained backbone.
+# `polarity_separation` in metrics.csv is the readout: if it is still near zero
+# late in a run, either the speaker found the content cue sufficient or this
+# rate is too low, and the two are told apart by whether the Transformer arm's
+# accuracy tracks the GRU's over the first few epochs.
+#
+# Applies only to `SenderTransformerLM`; `build_models` skips it for a GRU
+# speaker, which is told its polarities apart by `init_h`.
+polarity_embedding_lr = 2e-3
+
 [scheduler]
 epochs = 100
 warm_up_epochs = 0
@@ -176,7 +208,7 @@ range_test = false
 
 [sender]
 class = "Sender"
-feature_model = "Conv4"
+feature_model = "ResNet18SmallInput"
 vision_dropout = 0.0    # On per-image embeddings, before pooling. jayelm's
                         # speaker has no dropout here, and it would stack a
                         # second regulariser on the same pathway.
@@ -187,9 +219,23 @@ prototyper = "AveragePrototyper"
 language_model = "SenderGRULM"
 
 [sender_feature_model]
-d_model = 16 # Only applies to Transformer vision models
-layers = 4 # Only applies to Transformer vision models
-heads = 4 # Only applies to Transformer vision models
+# The one ViT specification, used by every rung that swaps a CNN for a
+# Transformer on either agent. Sized against ResNet18's 11,176,512 parameters:
+# 320 wide, 10 layers, feedforward inner 554 comes to 10,177,420, or 91%. It was
+# 384/9/384 for birds and 128/4/128 for ShapeWorld, which matched each dataset's
+# own baseline backbone -- but `SenderTransformerLM` pins its width to the vision
+# model's, so the ShapeWorld language model inherited 128 and came out 12.8x
+# smaller than the GRU it is meant to be compared against. One width for both
+# datasets is what makes that comparison mean anything.
+#
+# `heads` is 5 for a head dimension of 64. Every attention module in the repo now
+# has that same head dimension -- see `[receiver_comparer]`, which reaches it at
+# 256 wide with 4 heads. The previous rule was head_dim 32, chosen as broccoli's
+# 2D axial-RoPE floor; 64 clears that floor with room, so the constraint no
+# longer decides the number.
+d_model = 320 # Only applies to Transformer vision models
+layers = 10 # Only applies to Transformer vision models
+heads = 5 # head_dim 64. Only applies to Transformer vision models
 utility_tokens = 0 # Only applies to Transformer vision models
 # Architecture settings that used to be hardcoded in the model classes, and so
 # were neither recorded in a run's `args.json` nor sweepable. Every value here
@@ -202,10 +248,9 @@ utility_tokens = 0 # Only applies to Transformer vision models
 # code -- `source_size`, `input_size`, `in_channels`, the pooling kernel
 # geometry -- are derived rather than configured. The `cnn_*` group is inert
 # while `cnn` is False and stays in Python too.
-ff_ratio = 2 # Only applies to Transformer vision models
+ff_inner_size = 554 # Only applies to Transformer vision models
 stochastic_depth = 0.1 # Only applies to Transformer vision models
 depthwise_linear_stochastic_depth = true # ramp the rate linearly over depth
-positional_heads = 0.5 # fraction of heads receiving axial RoPE
 activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
 absolute_position_embedding = true
 relative_position_embedding = true
@@ -305,16 +350,48 @@ dropout = 0.1
 layers = 1
 bidirectional = false
 heads = 4 # Heads per layer - only applies to Transformer language models
+
+# How much longer the speaker's *latent* array is than the message it produces.
+# Only applies to `SenderTransformerLM`, which is the only speaker with a latent
+# array at all; `SenderGRULM` receives this key through the same splat and
+# ignores it.
+#
+# The speaker is a Perceiver IO: a learned query array cross-attends into the two
+# prototypes, a self-attention stack processes the result, and a second learned
+# query reads that array back out at the message's length. This knob sets the
+# length of the middle stage, and nothing downstream of the decoder can see it --
+# `message_length` and the receiver are untouched by it.
+#
+# It is here because the channel from the referents into the message is narrower
+# than it looks. broccoli's `MHAttention` has no residual and the speaker's byte
+# array is two prototypes, so each query position's whole dependence on the
+# referents is one softmax weight per head: the referents reach the language
+# model through `heads * latent_length` scalars and nothing else. Under the
+# previous ShapeWorld configuration that was 4 heads x 5 positions = 20 numbers.
+# At 2.0 and the new 5 heads it is 50 for ShapeWorld and 80 for birds.
+#
+# Rounded, not floored. 2.0 is exact at both message lengths (5 content symbols
+# -> 10 latents, 8 -> 16), so the rounding only matters if this is swept.
+#
+# 1.0 does not restore the previous architecture: the decoder cross-attention is
+# built either way, so that a sweep over this knob varies one thing rather than
+# two, and so that `state_dict` shapes stay comparable across sweep points. The
+# cost of the decoder is 4*d_model^2, about 419k parameters at 320 wide.
+latent_message_multiplier = 2.0
 utility_tokens = 4 # Only applies to Transformer language models
 # See [sender_feature_model] for what these are and why they are here. Note the
 # vocabulary logits are always layer-normalised before sampling and there is no
 # knob for it: `init_energy` above is resolved against unit
 # variance, so the two are a pair. That is unrelated to a vision model's
 # `batch_norm_logits`, which is broccoli's own.
-ff_ratio = 2 # Only applies to Transformer language models
-stochastic_depth = 0.2 # Only applies to Transformer language models
+ff_inner_size = 554 # Only applies to Transformer language models
+# 0.1, matching every other stack. It was 0.2 here alone, from when the speaker's
+# language model was the deepest thing in the run relative to what it had to say;
+# at 5 layers over a latent array of 10 or 16 it is now the shallowest of the
+# three transformer stacks, and there is no argument left for regularising it
+# twice as hard as the ViT in front of it.
+stochastic_depth = 0.1 # Only applies to Transformer language models
 depthwise_linear_stochastic_depth = true
-positional_heads = 0.5
 activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
 absolute_position_embedding = true
 relative_position_embedding = true
@@ -334,7 +411,7 @@ beta = "deepnorm"
 
 [receiver]
 class = "Receiver"
-feature_model = "Conv4"
+feature_model = "ResNet18SmallInput"
 comparer = "BilinearGRUComparer"
 # No `vision_dropout` here, unlike [sender]: it would mask the same tensor as
 #     the referent side of `receiver_comparer.dropout`, with nothing but a
@@ -343,15 +420,14 @@ comparer = "BilinearGRUComparer"
 #     `receiver_comparer.dropout` below.
 
 [receiver_feature_model]
-d_model = 16 # Only applies to Transformer vision models
-layers = 4 # Only applies to Transformer vision models
-heads = 4 # Only applies to Transformer vision models
+d_model = 320 # Only applies to Transformer vision models
+layers = 10 # Only applies to Transformer vision models
+heads = 5 # head_dim 64. Only applies to Transformer vision models
 utility_tokens = 0 # Only applies to Transformer vision models
 # See [sender_feature_model] for what these are and why they are here.
-ff_ratio = 2 # Only applies to Transformer vision models
+ff_inner_size = 554 # Only applies to Transformer vision models
 stochastic_depth = 0.1 # Only applies to Transformer vision models
 depthwise_linear_stochastic_depth = true
-positional_heads = 0.5
 activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
 absolute_position_embedding = true
 relative_position_embedding = true
@@ -381,9 +457,22 @@ dropout = 0.1 # The listener's only dropout, applied equally to both operands
 layers = 1
 bidirectional = false
 message_length = 7 # Only applies to Transformer comparers. Should be the same as sender_language_model.message_length
-heads = 4 # Only applies to Transformer comparers
+# 5, for head_dim 64 at the 320 width the Transformer comparer takes in rung 11
+# -- the same head dimension every attention module in the repo now has.
+#
+# Note this does not divide the `d_model = 1024` above, and that is not the
+# contradiction it looks like: the two describe different modules. 1024 is
+# `BilinearGRUComparer`'s hidden size, and that class builds an `nn.GRU`, which
+# has no heads and no broccoli in it. `heads` is read only by
+# `TransformerCrossAttentionComparer`, which sets its own width. No configuration
+# reaches broccoli's `d_model % n_heads == 0` assertion with this pair.
+#
+# What can is code that builds the Transformer comparer straight from the
+# defaults, so anything doing that must override `d_model` -- see
+# `tests/test_backbones.py`.
+heads = 5 # Only applies to Transformer comparers
 utility_tokens = 0 # Only applies to Transformer comparers
-ff_ratio = 2 # Only applies to Transformer comparers
+ff_inner_size = 554 # Only applies to Transformer comparers
 stochastic_depth = 0.1 # Only applies to Transformer comparers. Suppressed
                        # entirely when the fusion stack is shallower than two
                        # layers -- see `TransformerCrossAttentionComparer`.
@@ -402,7 +491,6 @@ cross_attention_dropout = 0.0 # Only applies to Transformer comparers
 # fusion block has none by construction -- it reads the cross-attention output,
 # which already carries position, over a referent set that has no order.
 depthwise_linear_stochastic_depth = true
-positional_heads = 0.5
 activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
 absolute_position_embedding = true
 relative_position_embedding = true

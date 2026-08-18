@@ -1,12 +1,12 @@
 # Rung 9: rung 7 with the receiver's vision model updated to match the
 # sender's.
 #
-# Same ViT2 shape as rung 5 gave the sender: d_model 128, 4 heads (head_dim 32,
-# the 2D RoPE floor), 4 layers, ff_ratio 1 -> 583,020 parameters against
-# Conv4's 113,088. The comparer is still `BilinearGRUComparer`, which reads the
-# referent embeddings through a bias-free bilinear projection, so dropping the
-# receiver's referent width from 1024 to 128 shrinks that projection by the same
-# factor -- the comparer's own GRU is unaffected. Rung 11 replaces it.
+# The same ViT2 specification the sender took in rung 5, so 10,177,420
+# parameters against ResNet18SmallInput's 11,168,832. The comparer is still
+# `BilinearGRUComparer`, which reads the referent embeddings through a bias-free
+# bilinear projection, so changing the receiver's referent width from 512 to 320
+# rescales that projection and nothing else -- the comparer's own GRU is
+# unaffected. Rung 11 replaces it.
 
 name = "ablation"
 
@@ -15,27 +15,17 @@ feature_model = "ViT2"
 prototyper = "AttentionPrototyper"
 language_model = "SenderTransformerLM"
 
-[sender_feature_model]
-d_model = 128
-heads = 4    # head_dim = 32, broccoli's 2D RoPE minimum
-layers = 4
-ff_ratio = 1
-
 [sender_language_model]
-token_embedding_size = 128
-d_model = 128
-heads = 4
-layers = 4
-ff_ratio = 1
+# Both must equal `sender_feature_model.d_model`: `SenderTransformerLM`
+# layer-norms the incoming prototypes at its own `d_model` and separately
+# rejects `token_embedding_size != referent_embedding_size`.
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+layers = 5
 
 [receiver]
 feature_model = "ViT2"
-
-[receiver_feature_model]
-d_model = 128
-heads = 4
-layers = 4
-ff_ratio = 1
 
 [scheduler]
 epochs = 30

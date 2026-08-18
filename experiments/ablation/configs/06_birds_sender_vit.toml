@@ -1,23 +1,26 @@
 # Rung 6: rung 4 with a Transformer sender vision model.
 #
-# ResNet18 is 11,176,512 parameters, which is a large enough budget that
-# parity is actually attainable here, unlike on ShapeWorld. Holding head_dim
-# at 32 and ff_ratio at 1 as in rung 5, and sweeping width against depth:
+# ViT2 at the shared specification comes to 12,430,908 parameters on CUB's 224px
+# images, against ResNet18's 11,176,512 -- 1.11x. The gap to rung 5's 0.91x is
+# entirely the patch tokeniser, which scales with image size; see there.
 #
-#   d_model  heads  layers      params   x ResNet18
-#       256      8      21  11,090,677         0.99
-#       384     12       9  11,535,113         1.03
-#       512     16       4  10,443,612         0.93
+# So parity is now approximate rather than tuned -- within about 11% on either
+# dataset rather than 1.03x on one and unreachable on the other. That is the
+# trade this rebalancing makes, and it is the right way round: a vision model
+# 11% off its counterpart is a far smaller confound than a language model 12.8x
+# off its counterpart, which is what the old per-dataset widths bought.
 #
-# 384 x 9 is taken: 21 layers over a 289-token grid is a lot of depth for the
-# same budget, and 4 layers is barely a stack. It is also close to ViT-Small's
-# proportions, though with 12 heads rather than 6 because head_dim is pinned.
+# The ViT's shape is no longer set here. `[sender_feature_model]` and
+# `[receiver_feature_model]` in DEFAULT.toml carry the one specification every
+# rung uses -- 320 wide, 10 layers, feedforward inner 554, 5 heads for a head
+# dimension of 64 -- so a rung that swaps in a ViT now only has to name it.
 #
-# This width matters beyond this rung: `SenderTransformerLM` layer-norms the
-# incoming prototypes at its own d_model and separately requires
-# token_embedding_size == referent_embedding_size, so the sender's vision width
-# *is* the sender's language-model width. 384 is what makes rung 8 able to
-# reach GRU parity.
+# That is a change of principle, not just of numbers. The widths used to be
+# picked per dataset to match each one's own baseline backbone, which is
+# defensible for a vision rung on its own but not once `SenderTransformerLM`
+# enters: it pins its width to the vision model's, so ShapeWorld's language
+# model inherited 128 and came out 12.8x smaller than the GRU it is compared
+# against. One width for both datasets is what makes rungs 7 and 8 comparable.
 
 name = "ablation"
 
@@ -27,12 +30,6 @@ dataset = "../data/cub"
 [sender]
 feature_model = "ViT2"
 prototyper = "AttentionPrototyper"
-
-[sender_feature_model]
-d_model = 384
-heads = 12   # head_dim = 32, broccoli's 2D RoPE minimum
-layers = 9
-ff_ratio = 1
 
 [scheduler]
 epochs = 30

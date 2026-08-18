@@ -723,6 +723,14 @@ class SenderGRULM(nn.Module):
         self.realised_survival = float("nan")
         self.logit_spread = float("nan")
 
+        # Declared here as well as on `SenderTransformerLM` so that the two
+        #     speakers write the same columns to metrics.csv. This speaker is
+        #     told which prototype is which -- `init_h` reads the concatenation,
+        #     so each polarity has its own weight columns -- and so has nothing
+        #     to learn and nothing to report. NaN rather than 0.0: the tag is
+        #     not-applicable here, not unused.
+        self.polarity_separation = float("nan")
+
         # Fraction of training elapsed, set once per epoch by `train.py`. Not
         #     state: it is a position in a schedule, recovered from the epoch
         #     counter on resume rather than checkpointed. 0.0 until told
@@ -1039,6 +1047,7 @@ class SenderGRULM(nn.Module):
         self.reset_logit_scale()
         self.realised_survival = float("nan")
         self.logit_spread = float("nan")
+        self.polarity_separation = float("nan")
 
 
 class SenderTransformerLM(nn.Module):
@@ -1067,9 +1076,9 @@ class SenderTransformerLM(nn.Module):
         self.bidirectional = kwargs["bidirectional"]
         self.heads = kwargs["heads"]
         self.utility_tokens = kwargs["utility_tokens"]
-        self.ff_ratio = kwargs["ff_ratio"]
+        self.latent_message_multiplier = kwargs["latent_message_multiplier"]
+        self.ff_inner_size = kwargs["ff_inner_size"]
         self.stochastic_depth = kwargs["stochastic_depth"]
-        self.positional_heads = kwargs["positional_heads"]
         self.activation = model_util.get_activation(kwargs["activation"])
         self.absolute_position_embedding = kwargs["absolute_position_embedding"]
         self.relative_position_embedding = kwargs["relative_position_embedding"]
@@ -1113,6 +1122,15 @@ class SenderTransformerLM(nn.Module):
         #     `realised_survival` alone.
         self.realised_survival = float("nan")
         self.logit_spread = float("nan")
+        # `norm(e_pos - e_neg)`, the only part of `polarity_embedding` the
+        #     cross-attention can act on: a constant added to both rows shifts
+        #     every key and value alike and cannot separate them. Opens at
+        #     exactly zero, by the zero-init below, so "the speaker learned to
+        #     tell its prototypes apart" and "the speaker never used the tag"
+        #     are different rows rather than the same one. Read next to
+        #     `pool_score_norm`, which reports the same kind of thing for the
+        #     prototyper.
+        self.polarity_separation = float("nan")
 
         # See `SenderGRULM`.
         self.training_progress = 0.0
@@ -1138,12 +1156,117 @@ class SenderTransformerLM(nn.Module):
 
         self.content_length = self.message_length - 2
 
+        # The length of the latent array the self-attention stack runs over, as
+        #     distinct from the message it eventually produces. This is the
+        #     Perceiver IO shape: a learned query array cross-attends into the
+        #     byte array (here the two prototypes), a self-attention stack
+        #     processes the result, and a *second* learned query reads that
+        #     latent array back out at whatever length the task wants.
+        #
+        # Perceiver's own reason for the split does not apply -- its latent
+        #     array is *smaller* than its input so the quadratic attention stays
+        #     affordable, whereas a byte array of two prototypes is smaller than
+        #     anything. The reason it earns its place here is bandwidth.
+        #     `MHAttention` has no residual (it returns
+        #     `out_norm(out_proj(attention))`) and there are exactly two keys,
+        #     so each query position's entire dependence on the referents is one
+        #     softmax weight per head. The referents therefore reach the
+        #     language model through `heads * latent_length` scalars and nothing
+        #     else -- 20 of them under the pre-`latent_message_multiplier`
+        #     configuration. Lengthening the query array is the only knob that
+        #     widens that without touching `message_length`.
+        #
+        # Rounded rather than floored so the knob is symmetric about the
+        #     integers; at the configured 2.0 it is exact for every message
+        #     length anyway.
+        self.latent_length = round(
+            self.content_length * self.latent_message_multiplier
+        )
+
+        if self.latent_length < 1:
+            raise ValueError(
+                "`latent_message_multiplier` "
+                f"({self.latent_message_multiplier}) rounds the latent array to "
+                f"{self.latent_length} positions at content length "
+                f"{self.content_length}; it must leave at least one."
+            )
+
+        # The encoder query: what to ask the prototypes, `latent_length` times.
         self.query = nn.Parameter(
+            torch.empty(self.latent_length, self.d_model)
+        )
+
+        # The decoder query: which symbol slot each output is. Splitting the two
+        #     is what lets the latent array be a different length from the
+        #     message -- with a single query array those are necessarily the
+        #     same number, which is what tied the two together before.
+        self.output_query = nn.Parameter(
             torch.empty(self.content_length, self.d_model)
         )
 
         self.query_layer_norm = nn.LayerNorm(self.d_model)
         self.referent_layer_norm = nn.LayerNorm(self.d_model)
+        self.output_query_layer_norm = nn.LayerNorm(self.d_model)
+        self.latent_layer_norm = nn.LayerNorm(self.d_model)
+
+        # A learned tag marking which row of the prototype sequence is the
+        #     positive concept and which is the negative one. Row 0 is
+        #     positive, row 1 negative, matching the order `Sender.speak` and
+        #     `Sender.forward` hand over and `Sender.get_prototypes` asserts.
+        #
+        # Without it this speaker cannot read that order at all. The
+        #     cross-attention below carries no positional or rotary embedding
+        #     on its key side -- correctly, since two prototypes have no
+        #     sequence to encode -- so its output is a weighted *sum* over the
+        #     keys and is bit-identical under swapping them. The ordering is
+        #     there in the tensor; there was no parameter that could condition
+        #     on it. `SenderGRULM` has never had this problem: `init_h` reads
+        #     `torch.cat(prototypes, 1)`, so each polarity lands in its own
+        #     slice of the input and gets its own weight columns.
+        #
+        # What survived the symmetry was a content cue -- positives are a tight
+        #     cluster and negatives a diverse one, so the negative prototype
+        #     sits nearer the global mean with a smaller norm -- and
+        #     `referent_layer_norm` normalises each prototype independently
+        #     over its feature axis, which divides that norm difference out
+        #     before the attention ever sees it. Only direction was left, and at
+        #     initialisation not even that: an untrained backbone makes both
+        #     prototypes the mean of noise. So the cost was heaviest exactly
+        #     during bootstrapping, where this speaker started with zero
+        #     polarity information while the GRU had it for free.
+        #
+        # Added *after* the norm rather than before, which is the opposite of
+        #     where a ViT puts its position embedding, and for a reason that
+        #     does not apply to a ViT: there the embedding rides a residual
+        #     stream re-read by every pre-norm block, whereas here the
+        #     prototypes are normalised once, consumed by one cross-attention
+        #     and discarded. Inside a single LayerNorm the tag and the content
+        #     compete for one unit budget, so growing the tag enough to be read
+        #     reliably suppresses the prototype it is tagging. After the norm
+        #     the two scales are independent.
+        #
+        # Zero-init so the rung opens at the previous behaviour exactly, in the
+        #     same spirit as `AttentionPrototyper`'s scoring weights: departure
+        #     has to be paid for by the loss. The gradients still separate the
+        #     two rows -- `dL/de_i` is the gradient at row `i` of the sequence,
+        #     and the rows differ in content -- so there is no symmetry to
+        #     break. Not normalised or otherwise scale-pinned: a unit-norm tag
+        #     would be `sqrt(d_model)` and so exactly as loud as a whole normed
+        #     prototype, which is an arbitrary number rather than a principled
+        #     one, and nothing here needs the cross-arm scale comparability that
+        #     earned `AttentionPrototyper` its parameter-free norm.
+        #
+        # The name matters: `gradboard`'s `EXCLUDE_FROM_WEIGHT_DECAY` matches
+        #     "embedding" as a substring, so this lands at `weight_decay=0.0`.
+        #     A 2-D parameter would otherwise be decayed -- and decayed *up*, by
+        #     `sqrt(in_features)/sqrt(d_base)` -- which on a zero-init tag is a
+        #     force pulling it back to the zero it is trying to leave. Renaming
+        #     it to anything without "embedding" in it reintroduces that
+        #     silently. `polarity_embedding_lr` in `[optimiser]` is the other
+        #     half of the same concern; see `DEFAULT.toml`.
+        self.polarity_embedding = nn.Parameter(
+            torch.zeros(2, self.d_model)
+        )
 
         # As in `receiver.py`, every broccoli argument is set explicitly, including
         #     the inert ones, because broccoli's defaults have changed underneath
@@ -1158,8 +1281,8 @@ class SenderTransformerLM(nn.Module):
             #     speaker's input regularisation silently rewired its attention
             #     and the two agents were regularised on different terms.
             dropout=self.cross_attention_dropout,
-            causal=False, # Whole image informs whole initial message
-            seq_len=self.content_length,
+            causal=False, # Whole image informs whole latent array
+            seq_len=self.latent_length,
             linear_module=nn.Linear,
             bos_tokens=0,
             knocking_heads=False,
@@ -1175,18 +1298,27 @@ class SenderTransformerLM(nn.Module):
         )
 
         self.transformer = broccoli.transformer.TransformerEncoder(
-            self.content_length,
+            self.latent_length,
             self.d_model,
             self.layers,
             self.heads,
             absolute_position_embedding=self.absolute_position_embedding,
             relative_position_embedding=self.relative_position_embedding,
-            positional_heads=self.positional_heads,
+            # Pinned at 1.0 and no longer configurable -- see `ViT2` for the
+            #     argument. Every head takes axial RoPE, so the head partition
+            #     that used to move with `heads` is gone.
+            positional_heads=1.0,
             # Derived, not configured: the sequence this block runs over is the
-            #     message minus its SOS and EOS tokens.
-            source_size=(self.content_length,),
-            ff_ratio=self.ff_ratio,
-            ff_inner_size=None, # inert: `ff_ratio` sizes the block instead
+            #     *latent* array, which is `latent_message_multiplier` times the
+            #     message's content length. See `latent_length`.
+            source_size=(self.latent_length,),
+            # `ff_ratio` None so that `ff_inner_size` is the live knob:
+            #     `FeedforwardBlock` takes `int(ratio * width) if inner_size is
+            #     None else inner_size`. Note this precedence is the reverse of
+            #     broccoli's `ViT`, which discards the explicit size unless the
+            #     ratio is None -- see the comment at that call site.
+            ff_ratio=None,
+            ff_inner_size=self.ff_inner_size,
             activation=self.activation,
             activation_kwargs=None,
             ff_linear_module_up=None,
@@ -1216,6 +1348,45 @@ class SenderTransformerLM(nn.Module):
             beta=self.beta,
         )
 
+        # Perceiver IO's decoder: `content_length` learned queries read the
+        #     processed latent array and return one vector per symbol slot. This
+        #     is what makes `latent_length` free of `message_length` -- the
+        #     output length is set here and nowhere else, so `decode` and
+        #     everything downstream of it are untouched by the multiplier.
+        #
+        # Built at 1.0 as well as above it, deliberately. The knob's job is to
+        #     vary the latent width and nothing else; if 1.0 also removed a
+        #     module then a sweep over it would confound two changes at once,
+        #     and the `state_dict` shape would move with the knob, so
+        #     checkpoints could not be compared across sweep points. At 1.0 this
+        #     is a learned re-read of an array of its own length -- redundant,
+        #     but honestly so.
+        #
+        # Every broccoli argument set explicitly, including the inert ones, as
+        #     for `self.cross_attention` above; see the note at the top of
+        #     `receiver.py` for why.
+        self.decode_attention = broccoli.transformer.MHAttention(
+            self.d_model,
+            self.heads,
+            dropout=self.cross_attention_dropout,
+            causal=False, # Whole latent array informs whole message
+            seq_len=self.content_length,
+            linear_module=nn.Linear,
+            bos_tokens=0,
+            knocking_heads=False,
+            # No positional information on the key side: the latent array's
+            #     order is already baked into it by `self.transformer`, and the
+            #     output query carries its own. `positional_heads` is inert
+            #     while `rotary_embedding` is None but is pinned to broccoli's
+            #     own `MHAttention` default anyway -- 0.25 here, not the 1.0
+            #     this repo now pins on `TransformerEncoder`, because the two
+            #     classes default differently and this one is not the knob.
+            rotary_embedding=None,
+            positional_heads=0.25,
+            source_size=None,
+            scaling="d",
+        )
+
         # Pre-norm token prior, as in `SenderGRULM`, see there.
         self.outputs2vocab = nn.Linear(
             self.d_model,
@@ -1232,21 +1403,45 @@ class SenderTransformerLM(nn.Module):
 
         stack_prototypes = torch.stack(prototypes, 1) # To sequence
 
-        normed_prototypes = self.referent_layer_norm(stack_prototypes)
+        # Tag after the norm, not before -- see `polarity_embedding`. Shape
+        #     (2, d_model) broadcasts over the batch.
+        normed_prototypes = (
+            self.referent_layer_norm(stack_prototypes) + self.polarity_embedding
+        )
 
         query = self.query.unsqueeze(0).expand(
             batch_size,
-            self.content_length,
+            self.latent_length,
             self.d_model
         )
 
         normed_query = self.query_layer_norm(query)
 
-        initial_sequence = self.cross_attention(
+        # Encode: the byte array (two prototypes) is read into a latent array of
+        #     `latent_length` positions.
+        latents = self.cross_attention(
             normed_query, normed_prototypes, normed_prototypes
-        ) # (batch, self.content_length, self.d_model)
+        ) # (batch, self.latent_length, self.d_model)
 
-        return self.transformer(initial_sequence)
+        # Process: self-attention over the latents, and only the latents. The
+        #     prototypes are not re-read -- unlike Perceiver proper, whose
+        #     signature is iterated cross-attention back into the same byte
+        #     array, this is a single pass, as in Perceiver IO.
+        latents = self.transformer(latents)
+
+        output_query = self.output_query.unsqueeze(0).expand(
+            batch_size,
+            self.content_length,
+            self.d_model
+        )
+
+        # Decode: `content_length` queries read the latent array back out, which
+        #     is what fixes the message length regardless of `latent_length`.
+        return self.decode_attention(
+            self.output_query_layer_norm(output_query),
+            self.latent_layer_norm(latents),
+            self.latent_layer_norm(latents),
+        ) # (batch, self.content_length, self.d_model)
 
     def reset_logit_scale(self):
         """
@@ -1379,6 +1574,15 @@ class SenderTransformerLM(nn.Module):
                 logits[..., 4:].detach().float().std(-1).mean().item()
             )
 
+            # A parameter norm rather than a per-batch quantity, so it does not
+            #     depend on this pass at all; recorded here because `train.py`
+            #     reads the speaker's diagnostics once per training batch and
+            #     this keeps every column on the same clock.
+            with torch.no_grad():
+                self.polarity_separation = (
+                    self.polarity_embedding[0] - self.polarity_embedding[1]
+                ).norm().item()
+
         # This must come before the scale and the uniform weight mixing — as in
         #     `SenderGRULM.decode`, see the notes there.
         normalised = layer_norm_logits(logits, self.vocabulary)
@@ -1435,14 +1639,22 @@ class SenderTransformerLM(nn.Module):
 
     def reset_parameters(self):
         nn.init.normal_(self.query, mean=0.0, std=1.0)
+        nn.init.normal_(self.output_query, mean=0.0, std=1.0)
         self.query_layer_norm.reset_parameters()
         self.referent_layer_norm.reset_parameters()
+        self.output_query_layer_norm.reset_parameters()
+        self.latent_layer_norm.reset_parameters()
+        # Zero, not a draw: see `polarity_embedding` for why this rung has to
+        #     open at the untagged speaker's behaviour exactly.
+        nn.init.zeros_(self.polarity_embedding)
         self.cross_attention.reset_parameters()
         self.transformer.reset_parameters()
+        self.decode_attention.reset_parameters()
         self.outputs2vocab.reset_parameters()
         self.reset_logit_scale()
         self.realised_survival = float("nan")
         self.logit_spread = float("nan")
+        self.polarity_separation = float("nan")
 
 
 class Sender(nn.Module):

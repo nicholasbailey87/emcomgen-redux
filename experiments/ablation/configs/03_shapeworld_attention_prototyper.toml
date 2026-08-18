@@ -3,7 +3,8 @@
 # Replaces the mean over positive/negative examples with broccoli's
 # `SequencePool` attention pooling, one instance per polarity. Everything else
 # is rung 1. The prototyper is sized from the sender's feature model, so at
-# Conv4's 1024-d output this adds 2 x 1025 = 2,050 parameters.
+# ResNet18SmallInput's 512-d output this adds 2 x 513 = 1,026 parameters -- the
+# same as rung 4, now that both datasets' baselines emit 512.
 
 name = "ablation"
 
