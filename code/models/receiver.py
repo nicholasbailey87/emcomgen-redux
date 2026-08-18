@@ -217,8 +217,30 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.ff_inner_dropout = kwargs["ff_inner_dropout"]
         self.ff_outer_dropout = kwargs["ff_outer_dropout"]
         self.self_attention_dropout = kwargs["self_attention_dropout"]
-        self.alpha = kwargs["alpha"]
-        self.beta = kwargs["beta"]
+        # This comparer's residual path is two stacks with a cross-attention
+        #     between them, so the depth `alpha` and `beta` should be derived
+        #     from is each sub-stack's own, not the configured total. Resolved
+        #     separately for that reason; a pinned number still passes straight
+        #     through to both. `layers` is split unevenly when it is odd, the
+        #     reading stack taking the extra block.
+        self.encoding_layers = self.layers - (self.layers // 2)
+        self.fusion_layers = int(self.layers // 2)
+
+        self.encoding_alpha, self.encoding_beta = (
+            model_util.resolve_residual_scaling(
+                kwargs["alpha"], kwargs["beta"], self.encoding_layers
+            )
+        )
+
+        # A fusion stack of no blocks has no residual path for these to scale,
+        #     so they are inert and the derivation has nothing to derive from.
+        self.fusion_alpha, self.fusion_beta = (
+            model_util.resolve_residual_scaling(
+                kwargs["alpha"], kwargs["beta"], self.fusion_layers
+            )
+            if self.fusion_layers >= 1
+            else (1.0, 1.0)
+        )
         # Suppressed unless the fusion stack is deep enough for a depth ramp to
         #     mean anything: `depthwise_linear_stochastic_depth` spreads the
         #     rate linearly across layers, so a one-layer stack would get a
@@ -250,7 +272,7 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.encoding = broccoli.transformer.TransformerEncoder(
             self.message_length, # seq_len can be none as length-invariant
             self.d_model,
-            self.layers - (self.layers // 2),
+            self.encoding_layers,
             self.heads,
             absolute_position_embedding=self.absolute_position_embedding,
             relative_position_embedding=self.relative_position_embedding,
@@ -285,8 +307,8 @@ class TransformerCrossAttentionComparer(nn.Module):
             pre_norm=self.pre_norm,
             post_norm=self.post_norm,
             msa_scaling="d",
-            alpha=self.alpha,
-            beta=self.beta,
+            alpha=self.encoding_alpha,
+            beta=self.encoding_beta,
         )
 
         self.cross_attention = broccoli.transformer.MHAttention(
@@ -325,7 +347,7 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.fusion = broccoli.transformer.TransformerEncoder(
             None, # seq_len can be none as length-invariant
             self.d_model,
-            int(self.layers // 2),
+            self.fusion_layers,
             self.heads,
             # Not configurable, unlike the same arguments on `self.encoding`
             #     above, and pinned rather than exposed because turning either
@@ -391,8 +413,8 @@ class TransformerCrossAttentionComparer(nn.Module):
             pre_norm=self.pre_norm,
             post_norm=self.post_norm,
             msa_scaling="d",
-            alpha=self.alpha,
-            beta=self.beta,
+            alpha=self.fusion_alpha,
+            beta=self.fusion_beta,
         )
 
         self.decision = nn.Linear(self.d_model, 1, bias=True)

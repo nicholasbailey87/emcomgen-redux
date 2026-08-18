@@ -420,6 +420,11 @@ def run(
                     clip_gradients(pair, config['optimiser']['clip_grad_norm'])
                     scaler.step(optimizer)
                     scaler.update()
+                    # Projected after the step, not clamped on the read -- see
+                    # `clamp_logit_scale`. Unconditional: `scaler.step` skips
+                    # steps with a non-finite gradient, and re-imposing a bound
+                    # the parameter already satisfies costs nothing.
+                    pair.sender.language_model.clamp_logit_scale()
                     scheduler.step(this_loss.item())
                     optimizer.zero_grad()
                     backpropped = True
@@ -464,13 +469,29 @@ def run(
             # much straight-through bias the run is paying, and reconstructing
             # it after the fact from two other columns and a cosine is the sort
             # of thing nobody does.
+            #
+            # The prototyper is measured on the same pass and for the same
+            # reason. `pool_effective_examples` is `1 / sum(p^2)` over its
+            # attention weights, so it reads in examples: it opens at the
+            # number of positive examples, where the pooling is uniform and the
+            # prototype is exactly the mean, and falls towards 1 as the pooler
+            # commits to particular images. `pool_score_norm` is the scoring
+            # vector that carries that departure, and opens at exactly zero.
+            # Without the pair of them, "the pooler found something" and "the
+            # pooler stayed at the mean" are the same row, and the difference
+            # between rung 3 and rung 1 would only be visible in a checkpoint.
+            # Both are NaN for `AveragePrototyper`'s score norm, which has no
+            # scoring vector to report.
             if training and speaking:
                 language_model = pair.sender.language_model
+                prototyper = pair.sender.prototyper
                 stats.update(
                     realised_survival=language_model.realised_survival,
                     logit_spread=language_model.logit_spread,
                     logit_scale=language_model.logit_scale.item(),
                     sampling_tau=language_model.sampling_tau.item(),
+                    pool_effective_examples=prototyper.pool_effective_examples,
+                    pool_score_norm=prototyper.pool_score_norm,
                     batch_size=batch_size,
                 )
 
@@ -484,6 +505,7 @@ def run(
         clip_gradients(pair, config['optimiser']['clip_grad_norm'])
         scaler.step(optimizer)
         scaler.update()
+        pair.sender.language_model.clamp_logit_scale()
         scheduler.step(this_loss.item())
         optimizer.zero_grad()
 
@@ -785,6 +807,29 @@ if __name__ == "__main__":
         # Append this epoch's row to metrics.csv (write the header only for a new
         # file). Appending — rather than rewriting from an in-memory list — is
         # what lets earlier rows survive a resume.
+        #
+        # The columns are checked against the header on disk first. The splits
+        # check at the top of this function catches a run whose *splits* have
+        # changed, but any new metric does the same damage for the same reason:
+        # `to_csv(mode="a")` writes values in this row's key order under
+        # whatever header is already there, so a run resumed across a change in
+        # what is measured — `pool_effective_examples` arriving mid-flight, say
+        # — silently misaligns every column from that row on, and nothing shows
+        # it until someone reads the file months later.
+        if os.path.exists(metrics_path):
+            with open(metrics_path) as f:
+                existing_columns = f.readline().rstrip("\n").split(",")
+
+            if existing_columns != list(metrics):
+                raise RuntimeError(
+                    f"{metrics_path} has a header this run's rows do not match, "
+                    f"so appending would misalign the columns. On disk but not "
+                    f"measured now: {sorted(set(existing_columns) - set(metrics))}. "
+                    f"Measured now but not on disk: "
+                    f"{sorted(set(metrics) - set(existing_columns))}. Start again "
+                    f"with --no_resume, or move the existing run directory aside."
+                )
+
         pd.DataFrame([metrics]).to_csv(
             metrics_path,
             mode="a",

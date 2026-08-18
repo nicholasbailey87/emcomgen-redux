@@ -508,6 +508,15 @@ class AveragePrototyper(nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__()
 
+        # Not state: per-batch diagnostics, read by `train.py` for metrics.csv,
+        #     and defined here as well as on `AttentionPrototyper` so that the
+        #     two arms write the same columns and can be read side by side.
+        #     Averaging *is* pooling with uniform weights, so the effective
+        #     count is the number of examples by construction; there is no
+        #     scoring vector, so its norm is undefined rather than zero.
+        self.pool_effective_examples = float("nan")
+        self.pool_score_norm = float("nan")
+
     def forward(self, samples, labels=None):
         """
         Args:
@@ -528,6 +537,8 @@ class AveragePrototyper(nn.Module):
         positive_prototype = positive_examples.mean(1)
         negative_prototype = negative_examples.mean(1)
 
+        self.pool_effective_examples = float(n_pos_ex)
+
         return positive_prototype, negative_prototype
 
     def reset_parameters(self):
@@ -535,11 +546,88 @@ class AveragePrototyper(nn.Module):
 
 
 class AttentionPrototyper(nn.Module):
+    """
+    Pool each polarity with `SequencePool`'s learned attention -- a single
+        scoring direction per polarity, softmaxed over the examples -- rather
+        than averaging them.
+
+    Two departures from a bare `SequencePool`, both there to stop the *softmax
+        over examples* inheriting the same problem the softmax over tokens had
+        before `layer_norm_logits`: a pre-softmax input whose magnitude is set
+        by the backbone rather than by anything learned.
+
+    - **Zero-initialised scoring weights.** Scores are then equal across
+      examples, the softmax is exactly uniform, and the prototype is exactly
+      the mean -- so this rung opens at `AveragePrototyper`'s behaviour and can
+      only depart from it where the loss pays for the departure. That is what
+      an ablation rung should isolate. Left at broccoli's default init the
+      opening pooling is an arbitrary weighting, and how arbitrary depends on
+      the feature scale: with a random scoring direction the softmax's
+      sharpness goes as the between-example standard deviation of the
+      embeddings, so at Conv4's scale a fresh pooler is within a whisker of
+      selecting one example, while at a normalised backbone's it is within a
+      few percent of the mean. Two arms of the ladder then differ in their
+      pooling as well as in the thing being ablated.
+
+      Zeroing a weight matrix is safe here in a way it is not for a hidden
+      layer: there is one output unit, so no symmetry between units to break,
+      and `dL/dW = sum_i (dL/ds_i) x_i` depends on the examples rather than on
+      `W`, so it is non-zero as soon as the examples differ and the loss cares
+      which of them carries weight. The softmax Jacobian at uniform weights,
+      `(1/n)(delta_ij - 1/n)`, is full rank on the zero-sum subspace and
+      transmits it. Only the bias is inert -- a constant added to every score
+      cancels in the softmax, so it has exactly zero gradient -- and it is
+      zeroed too, to say so.
+
+    - **A parameter-free `LayerNorm` on the scoring path only.** The pooled
+      *values* are the raw embeddings, so prototype magnitude is unchanged and
+      whatever the backbone emits still reaches the language model intact; only
+      the scores are computed from normalised examples. This is what makes the
+      rate of departure from the mean comparable across arms. Growth in the
+      scoring vector's norm buys score spread in units of the embeddings'
+      scale, so without it an arm on a large-magnitude backbone leaves the mean
+      tens of times faster than one on a normalised backbone -- the same
+      architecture-dependence, relocated from where the pooling starts to how
+      fast it moves. `elementwise_affine=False` on purpose: a learnable gain
+      here would be one more route to score magnitude that differs by arm,
+      which is the thing being removed.
+    """
+
     def __init__(self, d_model, *args, **kwargs):
         super().__init__()
         self.d_model = d_model
+
+        # Scoring path only -- see the class docstring. Shared by both
+        #     polarities because it has no parameters to share.
+        self.score_norm = nn.LayerNorm(d_model, elementwise_affine=False)
+
         self.pos_pool = broccoli.vit.SequencePool(d_model)
         self.neg_pool = broccoli.vit.SequencePool(d_model)
+
+        # Not state: per-batch diagnostics, read by `train.py` for metrics.csv.
+        #     `pool_effective_examples` is `1 / sum(p^2)` over the attention
+        #     weights, i.e. how many examples the prototype is actually built
+        #     from -- the number of examples at initialisation, falling towards
+        #     1 as the pooler commits. `pool_score_norm` is the scoring
+        #     vector's norm, which is what carries that departure and starts at
+        #     exactly zero. Without them, "the pooler learned something" and
+        #     "the pooler stayed at the mean" are the same row in metrics.csv.
+        self.pool_effective_examples = float("nan")
+        self.pool_score_norm = float("nan")
+
+        self.reset_parameters()
+
+    def _pool(self, pool, examples):
+        """
+        Attention-weighted sum of `examples`, scored from their normalised
+            selves and weighted over their raw selves.
+
+        Returns:
+            (prototype, weights), the weights being needed for the diagnostic.
+        """
+        weights = pool.attention_scores(self.score_norm(examples))
+        prototype = torch.einsum("bs,bsd->bd", weights, examples)
+        return prototype, weights
 
     def forward(self, samples, labels=None):
         n_pos_ex = samples.size(1) // 2
@@ -547,14 +635,47 @@ class AttentionPrototyper(nn.Module):
         positive_examples = samples[:, :n_pos_ex, :]
         negative_examples = samples[:, n_pos_ex:, :]
 
-        positive_prototype = self.pos_pool(positive_examples)
-        negative_prototype = self.neg_pool(negative_examples)
+        positive_prototype, positive_weights = self._pool(
+            self.pos_pool, positive_examples
+        )
+        negative_prototype, negative_weights = self._pool(
+            self.neg_pool, negative_examples
+        )
+
+        self._record_diagnostics(positive_weights, negative_weights)
 
         return positive_prototype, negative_prototype
+
+    @torch.no_grad()
+    def _record_diagnostics(self, positive_weights, negative_weights):
+        effective = torch.cat(
+            [
+                1.0 / positive_weights.pow(2).sum(-1),
+                1.0 / negative_weights.pow(2).sum(-1),
+            ]
+        ).mean()
+        self.pool_effective_examples = effective.item()
+
+        self.pool_score_norm = 0.5 * (
+            self.pos_pool.attention[0].weight.norm().item()
+            + self.neg_pool.attention[0].weight.norm().item()
+        )
 
     def reset_parameters(self):
         self.pos_pool.reset_parameters()
         self.neg_pool.reset_parameters()
+
+        # After broccoli's own reset, not instead of it: `SequencePool` may
+        #     grow parameters this does not know about, and they should still
+        #     be initialised the way broccoli intends. Only the scoring
+        #     projection is overridden, and only here rather than in broccoli,
+        #     where `SequencePoolClassificationHead` uses the same module and
+        #     wants the usual init.
+        with torch.no_grad():
+            for pool in (self.pos_pool, self.neg_pool):
+                pool.attention[0].weight.zero_()
+                if pool.attention[0].bias is not None:
+                    pool.attention[0].bias.zero_()
 
 
 class SenderGRULM(nn.Module):
@@ -647,6 +768,45 @@ class SenderGRULM(nn.Module):
         """
         with torch.no_grad():
             self.log_logit_scale.fill_(math.log(self.initial_logit_scale))
+
+    def clamp_logit_scale(self):
+        """
+        Hold the learned scale at or above the value `init_energy` solved for.
+            Called by `train.py` after every optimiser step.
+
+        `init_energy` already opens the channel deliberately close to random --
+            0.9 of maximum entropy, which is a symbol survival around 0.15 --
+            so there is nothing below it that could be exploration. What is
+            below it is muting: the fastest descent direction available to a
+            fresh pair is to quieten the channel until the listener learns to
+            ignore the message, which parks the loss at `ln 2` and removes the
+            gradient that would have made the message worth listening to. It is
+            a stable state and runs have sat in it for a hundred epochs, with
+            `logit_spread` growing all the while and `layer_norm_logits`
+            dividing it straight back out.
+
+        `sampling_tau` already refuses to follow the scale below its opening,
+            and for a related reason: the coupling inverts there, amplifying
+            the Gumbel noise while keeping the surrogate sharp about it. This
+            is the same floor applied to the scale itself, so the two agree on
+            what the opening channel is worth.
+
+        The floor costs nothing a healthy run wanted. Every arm dips below its
+            opening scale for the first few epochs and the ones that work climb
+            back through it; a run that stays pinned at the floor is telling
+            you its message never became informative, which is a finding rather
+            than a failure of the channel.
+
+        Applied to the parameter rather than to the `logit_scale` property on
+            purpose. Clamping on the read would leave the gradient zero
+            wherever the parameter sat below the floor, so it could wander
+            arbitrarily far down and then need `distance / lr` steps to come
+            back -- the same step-budget trap `logit_scale_lr` exists to
+            escape. Projecting the parameter after the step keeps it at the
+            boundary, where one favourable step releases it.
+        """
+        with torch.no_grad():
+            self.log_logit_scale.clamp_(min=math.log(self.initial_logit_scale))
 
     @property
     def sampling_tau(self):
@@ -963,8 +1123,15 @@ class SenderTransformerLM(nn.Module):
         self.ff_outer_dropout = kwargs["ff_outer_dropout"]
         self.self_attention_dropout = kwargs["self_attention_dropout"]
         self.cross_attention_dropout = kwargs["cross_attention_dropout"]
-        self.alpha = kwargs["alpha"]
-        self.beta = kwargs["beta"]
+        # Resolved against this stack's own depth when the config asks for
+        #     `"deepnorm"`, so that changing `layers` cannot leave the residual
+        #     scaling behind at a value derived for a different depth. See
+        #     `model_util.deepnorm_constants` for why the encoder constants are
+        #     the right ones here: the cross-attention below runs once, to build
+        #     the sequence this stack reads, rather than inside every block.
+        self.alpha, self.beta = model_util.resolve_residual_scaling(
+            kwargs["alpha"], kwargs["beta"], kwargs["layers"]
+        )
 
         # A constant, resolved once: nothing about it is learned or calibrated,
         #     so there is no buffer here and nothing enters the `state_dict`.
@@ -1128,6 +1295,45 @@ class SenderTransformerLM(nn.Module):
         """
         with torch.no_grad():
             self.log_logit_scale.fill_(math.log(self.initial_logit_scale))
+
+    def clamp_logit_scale(self):
+        """
+        Hold the learned scale at or above the value `init_energy` solved for.
+            Called by `train.py` after every optimiser step.
+
+        `init_energy` already opens the channel deliberately close to random --
+            0.9 of maximum entropy, which is a symbol survival around 0.15 --
+            so there is nothing below it that could be exploration. What is
+            below it is muting: the fastest descent direction available to a
+            fresh pair is to quieten the channel until the listener learns to
+            ignore the message, which parks the loss at `ln 2` and removes the
+            gradient that would have made the message worth listening to. It is
+            a stable state and runs have sat in it for a hundred epochs, with
+            `logit_spread` growing all the while and `layer_norm_logits`
+            dividing it straight back out.
+
+        `sampling_tau` already refuses to follow the scale below its opening,
+            and for a related reason: the coupling inverts there, amplifying
+            the Gumbel noise while keeping the surrogate sharp about it. This
+            is the same floor applied to the scale itself, so the two agree on
+            what the opening channel is worth.
+
+        The floor costs nothing a healthy run wanted. Every arm dips below its
+            opening scale for the first few epochs and the ones that work climb
+            back through it; a run that stays pinned at the floor is telling
+            you its message never became informative, which is a finding rather
+            than a failure of the channel.
+
+        Applied to the parameter rather than to the `logit_scale` property on
+            purpose. Clamping on the read would leave the gradient zero
+            wherever the parameter sat below the floor, so it could wander
+            arbitrarily far down and then need `distance / lr` steps to come
+            back -- the same step-budget trap `logit_scale_lr` exists to
+            escape. Projecting the parameter after the step keeps it at the
+            boundary, where one favourable step releases it.
+        """
+        with torch.no_grad():
+            self.log_logit_scale.clamp_(min=math.log(self.initial_logit_scale))
 
     @property
     def sampling_tau(self):

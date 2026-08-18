@@ -782,6 +782,73 @@ def test_config_rejects_a_missing_or_invalid_init_energy():
             parse_config.validate_config(config)
 
 
+# ------------------------------------------- 9. the floor under the scale --
+
+@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+def test_clamp_holds_the_scale_at_its_opening(build):
+    """
+    `init_energy` already opens the channel at 0.9 of maximum entropy, which is
+    a survival around 0.15 -- deliberately near-random, so that a fresh listener
+    has no premature structure to co-adapt to. Nothing below that is
+    exploration. What is below it is muting: quietening the channel until the
+    listener learns to ignore the message parks the loss at `ln 2` and takes
+    away the gradient that would have made the message worth hearing, and it is
+    the fastest descent direction a fresh pair has. One preliminary arm sat
+    there for a hundred epochs, its scale falling from 0.875 to 0.375.
+    """
+    speaker = build()
+    floor = math.log(speaker.initial_logit_scale)
+
+    with torch.no_grad():
+        speaker.log_logit_scale.fill_(floor - 2.0)
+
+    speaker.clamp_logit_scale()
+
+    assert speaker.log_logit_scale.item() == pytest.approx(floor, abs=1e-6)
+    assert speaker.logit_scale.item() >= speaker.initial_logit_scale * (1 - 1e-6)
+
+
+@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+def test_clamp_leaves_a_scale_above_its_opening_alone(build):
+    """
+    The floor is a floor, not a target: the traverse upwards is the whole
+    bootstrapping, and a run that has made it must be untouched.
+    """
+    speaker = build()
+    opened = math.log(speaker.initial_logit_scale) + 2.0
+
+    with torch.no_grad():
+        speaker.log_logit_scale.fill_(opened)
+
+    speaker.clamp_logit_scale()
+
+    assert speaker.log_logit_scale.item() == pytest.approx(opened, abs=1e-6)
+
+
+@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+def test_the_scale_can_leave_the_floor_on_the_next_step(build):
+    """
+    Why the clamp is applied to the parameter after the step rather than to the
+    `logit_scale` property. Clamping the read would leave the gradient zero
+    wherever the parameter sat below the floor, so it could wander arbitrarily
+    far down and then need `distance / lr` steps to climb back -- the same step
+    budget `logit_scale_lr` exists to escape. Projected, it sits at the
+    boundary, and one favourable step releases it.
+    """
+    speaker = build()
+    floor = math.log(speaker.initial_logit_scale)
+
+    with torch.no_grad():
+        speaker.log_logit_scale.fill_(floor - 2.0)
+    speaker.clamp_logit_scale()
+
+    with torch.no_grad():
+        speaker.log_logit_scale.add_(0.1)
+    speaker.clamp_logit_scale()
+
+    assert speaker.log_logit_scale.item() == pytest.approx(floor + 0.1, abs=1e-6)
+
+
 if __name__ == "__main__":
     import itertools
 

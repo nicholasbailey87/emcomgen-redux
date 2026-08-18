@@ -12,7 +12,7 @@ import torchvision.models as models
 from broccoli.activation import ReLU
 from broccoli.vit import ViT, SequencePoolClassificationHead
 
-from ..model_util import get_activation
+from ..model_util import get_activation, resolve_residual_scaling
 
 class ViT2(nn.Module):
     def __init__(
@@ -23,6 +23,10 @@ class ViT2(nn.Module):
         super().__init__()
         
         self.d_model = kwargs["d_model"]
+
+        self.alpha, self.beta = resolve_residual_scaling(
+            kwargs["alpha"], kwargs["beta"], kwargs["layers"]
+        )
 
         self.image_max_side = max(n_feats[1:])
 
@@ -122,10 +126,15 @@ class ViT2(nn.Module):
             logit_projection_layer=nn.Linear,
             linear_module=nn.Linear,
             head=SequencePoolClassificationHead,
-            # Residual branch scaling. broccoli moved away from deepnorm at
-            #     30.0.0, and 1.0 is the no-scaling identity either way.
-            alpha=kwargs["alpha"],
-            beta=kwargs["beta"],
+            # Residual branch scaling, resolved against this stack's depth
+            #     when the config asks for `"deepnorm"` -- see
+            #     `model_util.deepnorm_constants`. Derived from `layers` alone,
+            #     which counts the transformer blocks; the initial feedforward
+            #     residual path this backbone also scales with `alpha` and
+            #     `beta` is one branch outside that count, and a quarter root is
+            #     forgiving enough that it is not worth a second constant.
+            alpha=self.alpha,
+            beta=self.beta,
         )
         self.final_feat_dim = self.d_model
 

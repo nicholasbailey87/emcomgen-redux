@@ -212,12 +212,32 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
     two must match)
 - `[sender_language_model] vocabulary`: vocab size of the agents
 - `[data] n_examples`: number of examples given to agents
+- `[sender] prototyper`: `AveragePrototyper` pools a concept's examples by
+    averaging them; `AttentionPrototyper` pools them with a learned attention
+    score per example (broccoli's `SequencePool`, one per polarity). The
+    attention version is initialised to *be* the average — its scoring weights
+    are zeroed, so the softmax over examples opens exactly uniform — and scores
+    from `LayerNorm`ed embeddings while pooling the raw ones. Both are there for
+    the same reason `layer_norm_logits` is: without them the softmax over
+    examples inherits the backbone's output magnitude, which decides both where
+    the pooling opens (near-selection of one example at Conv4's scale, near the
+    mean at a normalised backbone's) and how fast it leaves the mean. Watch
+    `train_pool_effective_examples` to see whether it moved.
 - `[sender] prototype_dropout` / `[sender] vision_dropout`: dropout on the pooled
     concept vectors (between prototyper and language model) and on the per-image
     embeddings (between vision model and prototyper) respectively. The former is
     the stronger regulariser and is where jayelm's single speaker-side
     `--dropout` sits; dropping pre-pool features is largely undone by the
     average over n/2 examples.
+- `[*] alpha` / `[*] beta`: DeepNorm's residual scaling on every post-norm
+    transformer stack — `alpha` on the skip, `beta` on the branch. `"deepnorm"`
+    (the default) resolves them at construction from that stack's own `layers`,
+    as `(2N)^(1/4)` and `(8N)^(-1/4)`; a number pins them instead, and `1.0` is
+    the no-scaling identity every run before this used. The cross-attention
+    comparer resolves each of its two sub-stacks separately, since `layers` is
+    the total across both. Derived rather than configured because two constants
+    restated per config is an invitation to leave them at values belonging to a
+    depth the stack no longer has.
 - `[receiver_comparer] dropout`: the listener's **only** dropout, and the
     counterpart of the sender's `prototype_dropout`. Applied equally to both
     operands of the comparison — the pooled message embedding and the incoming
@@ -270,7 +290,11 @@ argmax-preserving, so it changes no eval-time message.)
     **This is a starting point, not a target**: what a speaker actually does is
     reported as `realised_survival` and `logit_scale`, and is expected to move
     over a run — including *downwards* in fidelity early on, which is the
-    speaker annealing itself rather than a fault. `logit_scale`'s docstring
+    speaker annealing itself rather than a fault. It is also a **floor**:
+    `clamp_logit_scale` holds the learned scale at or above the value solved for
+    here after every optimiser step, since below a deliberately near-random
+    opening there is nothing left to explore towards, only a channel being
+    muted. `logit_scale`'s docstring
     carries the derivation and the reference points to rederive `0.9` from.
 - `[sender_language_model] uniform_weight`: the **ceiling** on fidelity, and so
     the floor under exploration. Weight of the uniform component mixed into the
@@ -425,7 +449,11 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     ShapeWorld, 0.839 for birds) and a usable channel is somewhere around 4 to
     6. It is the disambiguator for a falling survival: a flatter policy at a
     steady scale is the speaker's own doing, a falling scale is the channel
-    closing.
+    closing. It cannot fall below its opening value — see `init_energy` — so a
+    column pinned flat at 0.802 or 0.839 is a run whose loss wants the channel
+    quieter than it started, i.e. whose message never became informative. That
+    is a finding about the architecture rather than a fault in the channel, and
+    it is where the preliminary ViT-sender arms sat.
     Its travel is bounded by `lr * steps`, because AdamW normalises by the
     gradient's second moment and this is a lone scalar — so it moves at about
     `logit_scale_lr` per step whatever the gradient's size, and comparing its
@@ -438,9 +466,10 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     as against the configured `tau`. A function of `train_logit_scale` and the
     epoch counter alone, so it carries no independent information, but it is
     what sets how much straight-through bias the run is paying. It equals `tau`
-    at initialisation and whenever the scale sits below its opening value,
-    rises with the scale so that losing tokens keep receiving gradient, and
-    returns to `tau` by the last epoch as the coupling retires.
+    at initialisation and whenever the scale sits at its opening value (which,
+    with the floor in place, is as low as it goes), rises with the scale so that
+    losing tokens keep receiving gradient, and returns to `tau` by the last
+    epoch as the coupling retires.
 - `train_logit_spread` — the standard deviation of the emittable logits
     *before* normalisation, so it reports the size of the logit *shape* rather
     than of the channel: `layer_norm_logits` divides this magnitude back out,
@@ -448,6 +477,19 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     instead. What it is still good for is the normaliser's floor. Below a spread
     of ~1e-6 LayerNorm can no longer rescue it (see `LAYER_NORM_EPS`); anywhere
     above that the spread is absorbed and only shape reaches the channel.
+- `train_pool_effective_examples` — `1 / sum(p^2)` over the prototyper's
+    attention weights, in examples: how many of a concept's images the prototype
+    is actually built from. It opens at the number of positive examples, where
+    the pooling is uniform and the prototype is exactly the mean, and falls
+    towards 1 as the pooler commits to particular images. `AveragePrototyper`
+    reports the example count by construction, so the two arms of the ladder
+    stay readable side by side.
+- `train_pool_score_norm` — the norm of the attention prototyper's scoring
+    vector, which is what carries that departure. It opens at exactly zero, so
+    this and the column above are what separate "the pooler learned something"
+    from "the pooler stayed at the average" — otherwise indistinguishable
+    outside a checkpoint. NaN for `AveragePrototyper`, which has no scoring
+    vector, rather than a zero that would read as a pooler which had not moved.
 - `{train,test,test_same,test_avg}_unique_message_fraction` — distinct messages
     over messages emitted. A language that is doing work compresses: healthy
     runs sit around 0.30–0.40, while runs whose channel is too noisy to learn

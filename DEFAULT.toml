@@ -221,8 +221,22 @@ batch_norm_logits = true
 ff_inner_dropout = 0.0
 ff_outer_dropout = 0.0
 self_attention_dropout = 0.0
-alpha = 1.0 # residual branch scaling; 1.0 is the no-scaling identity
-beta = 1.0
+# DeepNorm's residual scaling, `alpha` on the skip and `beta` on the branch.
+# "deepnorm" resolves both from the stack's own `layers` at construction --
+# `(2N)^(1/4)` and `(8N)^(-1/4)` -- so a config that changes its depth cannot
+# leave them behind at constants derived for a different one. A number pins
+# either of them instead; 1.0 is the no-scaling identity.
+#
+# Post-norm at `alpha = beta = 1.0` is vanilla post-LN, which is the
+# configuration these stacks are least likely to train in: the depths here are
+# 4 to 10, so the constants are not close to 1 (1.68/0.42 at four layers,
+# 2.06/0.34 at nine). broccoli applies `beta` as a forward multiplier on the
+# branch rather than as an initialisation scaling on its projections, and the
+# post-norm `RMSNorm` after it carries a learnable gain, so a branch that earns
+# it can learn its way back out of the opening ratio. These set where a stack
+# starts, not a ceiling it is held to.
+alpha = "deepnorm"
+beta = "deepnorm"
 
 [sender_language_model]
 token_embedding_size = 500
@@ -315,8 +329,8 @@ ff_outer_dropout = 0.0
 # emerging message.
 self_attention_dropout = 0.0
 cross_attention_dropout = 0.0
-alpha = 1.0
-beta = 1.0
+alpha = "deepnorm" # see [sender_feature_model]
+beta = "deepnorm"
 
 [receiver]
 class = "Receiver"
@@ -350,8 +364,8 @@ batch_norm_logits = true
 ff_inner_dropout = 0.0
 ff_outer_dropout = 0.0
 self_attention_dropout = 0.0
-alpha = 1.0
-beta = 1.0
+alpha = "deepnorm" # see [sender_feature_model]
+beta = "deepnorm"
 
 [receiver_comparer]
 token_embedding_size = 500
@@ -399,8 +413,13 @@ knocking_heads = false
 ff_inner_dropout = 0.0
 ff_outer_dropout = 0.0
 self_attention_dropout = 0.0
-alpha = 1.0
-beta = 1.0
+# Resolved per sub-stack rather than from `layers`: this comparer's residual
+# path is the reading stack, then the cross-attention, then the fusion stack,
+# so each half is scaled for its own depth (`layers` splits evenly, the reading
+# stack taking the extra block when it is odd). Otherwise as
+# [sender_feature_model].
+alpha = "deepnorm"
+beta = "deepnorm"
 
 # ====== Defaults for the CUB birds data set below here ======
 
