@@ -1,0 +1,53 @@
+# Rung 14: rung 8 with the speaker's language model in its parallel arm.
+#
+# The CUB counterpart of rung 13, and it does the same job: rung 8 moves
+# architecture while holding the generation regime, this one holds the
+# architecture and moves the regime. See rung 13's header for the full argument;
+# it is not restated here.
+#
+# 5,569,660 parameters against the GRU baseline's 5,774,073, or -3.5%, matching
+# the offset rung 13 reaches on ShapeWorld. Rung 8 is +1.5%.
+#
+# The message is longer here (8 content symbols against ShapeWorld's 5), so the
+# latent array is 16 rather than 10 and the referents reach the language model
+# through 5 heads x 16 latents = 80 scalars rather than 50. That is the same on
+# both arms -- the encoder cross-attention is the one part of this speaker
+# `bidirectional` does not touch.
+
+name = "ablation"
+
+[data]
+dataset = "../data/cub"
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+language_model = "SenderTransformerLM"
+
+[sender_language_model]
+# Both must equal `sender_feature_model.d_model`: `SenderTransformerLM`
+# layer-norms the incoming prototypes at its own `d_model` and separately
+# rejects `token_embedding_size != referent_embedding_size`.
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+
+# 5, where rung 8's decoder takes 4. See rung 13's `layers` for why the two arms
+# cannot be matched on depth and parameters at once.
+layers = 5
+
+# `true`: the parallel Perceiver IO arm. See rung 7's `bidirectional` for what
+# the two settings select and why the word means what it does on this class.
+bidirectional = true
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

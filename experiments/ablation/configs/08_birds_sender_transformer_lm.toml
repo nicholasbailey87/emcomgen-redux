@@ -1,15 +1,18 @@
 # Rung 8: rung 6 with a Transformer sender language model.
 #
-# 5,569,660 parameters against the GRU's 5,774,073, or -3.5% -- the same offset
+# 5,857,909 parameters against the GRU's 5,774,073, or +1.5% -- the same offset
 # rung 7 reaches on ShapeWorld, which is the point of giving both datasets the
 # same width. It was 0.2% here before, but only by luck of the per-dataset
 # sizing, and the same luck left ShapeWorld 12.8x short.
 #
 # The message is longer here (8 content symbols against ShapeWorld's 5), so the
-# latent array is 16 rather than 10 and the referents reach the language model
-# through 5 heads x 16 latents = 80 scalars rather than 50. See
-# `latent_message_multiplier` in DEFAULT.toml for why that number is worth
-# tracking at all.
+# latent memory the decoder reads is 16 rather than 10 and the referents reach
+# the language model through 5 heads x 16 latents = 80 scalars rather than 50.
+# See `latent_message_multiplier` in DEFAULT.toml for why that number is worth
+# tracking at all. The decoding loop is correspondingly eight steps rather than
+# five, since the stack is re-read once per symbol -- see
+# `SenderTransformerLM.decode_autoregressively` for why re-read rather than
+# extend.
 
 name = "ablation"
 
@@ -28,7 +31,43 @@ language_model = "SenderTransformerLM"
 token_embedding_size = 320
 d_model = 320
 heads = 5    # head_dim 64, as everywhere
-layers = 5
+
+# 4, where the latent arm takes 5, and the difference is parameters rather than
+# taste. A decoder block carries a cross-attention the encoder block does not,
+# so it costs about 4*d_model^2 more: 1,354,951 against 944,711 at 320 wide with
+# `ff_inner_size = 554`. At 5 layers this speaker would be 7,206,133 parameters,
+# or 1.25x the GRU baseline; at 4 it is 5,851,183, or 1.015x -- a tighter match
+# than the latent arm's 0.965x. Three would be 0.78x.
+#
+# The cost of matching parameters is that the two Transformer arms differ in
+# depth as well as in where their layers act. Depth or parameters, not both, and
+# the ladder is built on parameters.
+layers = 4
+
+# `false`, matching DEFAULT.toml, and the flag does not mean here what it means
+# for the GRU baselines -- but it does mean the same *thing*.
+#
+# The key is shared with `SenderGRULM`, which passes it to
+# `nn.GRU(bidirectional=)`; `false` there is a speaker that generates left to
+# right and cannot read its own message backwards. On `SenderTransformerLM`
+# `false` selects an architecture rather than a mask: a proper autoregressive
+# decoder, whose blocks run at message length and cross-attend into the latent
+# array, sampling one symbol at a time with each conditioned on the symbols
+# before it. `true` selects the other arm -- the Perceiver IO shape, whose
+# self-attention runs over the latent array and whose symbols are all emitted in
+# one shot. Rungs 13 and 14 run that arm; see their headers.
+#
+# So `false` is the causal, left-to-right speaker on both classes, which is what
+# the word already meant for the GRU. What it no longer does on this class is
+# mask the *latent* array left to right, which is what it used to do and which
+# bought nothing: the latent array is not a sequence in time, so that mask only
+# hid most of the image from the low-index latents.
+#
+# This is the rung that makes the ladder honest. Against a GRU baseline, the
+# `true` arm moves two things at once -- GRU to Transformer, and autoregressive
+# to parallel -- so whatever it measures cannot be attributed to architecture.
+# This arm moves one.
+bidirectional = false
 
 [scheduler]
 epochs = 30

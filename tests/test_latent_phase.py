@@ -1,10 +1,17 @@
 """
-`SenderTransformerLM`'s latent phase and its polarity tag.
+`SenderTransformerLM`'s latent phase, its polarity tag, and its two arms.
 
-The speaker is a Perceiver IO: a learned query array cross-attends into the two
-prototypes, a self-attention stack runs over the result, and a second learned
-query reads that array back down to the message's length. Two things follow that
-are worth pinning down, because both are invisible in a training curve.
+A learned query array cross-attends into the two prototypes to build a latent
+array, and what happens next depends on `bidirectional`. The parallel arm
+(`true`) runs a self-attention stack over that array and a second learned query
+reads it back down to the message's length. The decoder arm (`false`, the
+default) treats it as a memory and generates the message one symbol at a time.
+Everything up to and including the latent array is shared, which is why the
+polarity tests below run against `encode` rather than against either arm's
+output.
+
+Three things follow that are worth pinning down, because all three are invisible
+in a training curve.
 
 **The latent length must not leak downstream.** It is the whole point of the
 decoder cross-attention that `latent_message_multiplier` can move without
@@ -17,6 +24,13 @@ encoding, so its output is bit-identical under swapping the positive and negativ
 prototype -- the speaker cannot tell "the concept is X" from "the concept is
 not-X". `SenderGRULM` never had the problem, because `init_h` reads
 `torch.cat(prototypes, 1)` and each polarity lands in its own weight columns.
+
+**The decoder arm must actually be autoregressive.** Its whole justification is
+that symbol `i` is conditioned on symbols `< i`, and nothing in a loss curve
+would reveal a causal mask that had stopped biting -- the model would simply be
+the parallel arm wearing the wrong config. `decode` builds the sequence in a
+fixed-length buffer with the tail held at zero, which is exact only if the mask
+holds, so the test that checks the mask is also the test that checks the buffer.
 """
 
 import os
@@ -44,6 +58,12 @@ def _settings(**overrides):
 
 
 def _speaker(**overrides):
+    """The decoder arm, as `DEFAULT.toml` selects it."""
+    return S.SenderTransformerLM(D_MODEL, **_settings(**overrides))
+
+
+def _latent_speaker(**overrides):
+    overrides.setdefault("bidirectional", True)
     return S.SenderTransformerLM(D_MODEL, **_settings(**overrides))
 
 
@@ -104,8 +124,8 @@ def test_the_decoder_is_built_even_at_a_multiplier_of_one():
     a sweep over it would confound two changes, and `state_dict` shapes would
     move with it, so checkpoints could not be compared across sweep points.
     """
-    one = _speaker(latent_message_multiplier=1.0)
-    two = _speaker(latent_message_multiplier=2.0)
+    one = _latent_speaker(latent_message_multiplier=1.0)
+    two = _latent_speaker(latent_message_multiplier=2.0)
 
     assert one.decode_attention is not None
     assert set(dict(one.named_parameters())) == set(dict(two.named_parameters()))
@@ -142,13 +162,18 @@ def test_without_the_tag_the_prototypes_are_interchangeable():
     The bug the tag exists for, stated as the property that used to hold. At
     zero the encoder cross-attention is still a plain weighted sum over two
     unmarked keys, so swapping them changes nothing.
+
+    Against `encode` rather than against a whole forward pass, because that is
+    where the tag acts and where the symmetry lives. It also makes the test arm
+    -independent: both arms read the prototypes through this one module and
+    neither can recover a distinction the latent array does not carry.
     """
     speaker = _speaker().eval()
     positive, negative = _prototypes()
 
     with torch.no_grad():
-        forwards = speaker.embeddings((positive, negative))
-        backwards = speaker.embeddings((negative, positive))
+        forwards = speaker.encode((positive, negative))
+        backwards = speaker.encode((negative, positive))
 
     assert torch.allclose(forwards, backwards, atol=1e-5)
 
@@ -161,8 +186,8 @@ def test_a_learned_tag_tells_the_prototypes_apart():
     positive, negative = _prototypes()
 
     with torch.no_grad():
-        forwards = speaker.embeddings((positive, negative))
-        backwards = speaker.embeddings((negative, positive))
+        forwards = speaker.encode((positive, negative))
+        backwards = speaker.encode((negative, positive))
 
     assert not torch.allclose(forwards, backwards, atol=1e-5)
 
@@ -176,7 +201,7 @@ def test_the_two_tag_rows_receive_different_gradients():
     """
     speaker = _speaker()
 
-    speaker.embeddings(_prototypes()).pow(2).sum().backward()
+    speaker.encode(_prototypes()).pow(2).sum().backward()
     gradient = speaker.polarity_embedding.grad
 
     assert gradient is not None
@@ -216,3 +241,113 @@ def test_reset_parameters_restores_the_tag_and_the_diagnostic():
 
     assert torch.equal(speaker.polarity_embedding, torch.zeros(2, D_MODEL))
     assert speaker.polarity_separation != speaker.polarity_separation  # NaN
+
+
+# ---------------------------------------------------------------- the arms --
+
+def test_each_arm_builds_only_its_own_modules():
+    """
+    The two arms are one class, so the thing that stops them blurring is that
+    neither carries the other's parameters. A `state_dict` from one must fail
+    loudly against the other rather than load with the shapes that happen to
+    match.
+    """
+    decoder = _speaker()
+    latent = _latent_speaker()
+
+    assert hasattr(decoder, "decoder")
+    assert hasattr(decoder, "token_embedding")
+    assert not hasattr(decoder, "transformer")
+    assert not hasattr(decoder, "decode_attention")
+    assert not hasattr(decoder, "output_query")
+
+    assert hasattr(latent, "transformer")
+    assert hasattr(latent, "decode_attention")
+    assert hasattr(latent, "output_query")
+    assert not hasattr(latent, "token_embedding")
+
+    assert set(dict(decoder.named_parameters())) != set(
+        dict(latent.named_parameters())
+    )
+
+
+@pytest.mark.parametrize("build", [_speaker, _latent_speaker])
+@pytest.mark.parametrize("multiplier", [1.0, 2.0, 3.0])
+def test_both_arms_speak_at_the_configured_length(build, multiplier):
+    """
+    `latent_message_multiplier` must not leak downstream on either arm. On the
+    parallel arm the readout query fixes the length; on the decoder arm the
+    sampling loop does. Different mechanisms, same guarantee.
+    """
+    speaker = build(latent_message_multiplier=multiplier).eval()
+
+    onehot, embeddings = speaker.decode(_prototypes())
+
+    assert onehot.shape == (3, speaker.message_length, speaker.vocabulary + 4)
+    assert embeddings.shape == (3, speaker.content_length, D_MODEL)
+
+
+def test_the_decoder_arm_conditions_on_the_symbols_it_emitted():
+    """
+    The property the arm exists for, and the one no loss curve would show.
+
+    Recomputed by teacher forcing: feed the message the loop actually emitted
+    back through the stack in one pass, and the embeddings must match what the
+    loop produced. That holds only if each step really did see the sampled
+    prefix and only the prefix -- if the causal mask had stopped biting, the
+    loop's steps would each have seen a different zero-padded tail and the two
+    would disagree.
+    """
+    speaker = _speaker().eval()
+    prototypes = _prototypes()
+
+    with torch.no_grad():
+        onehot, embeddings = speaker.decode(prototypes)
+
+        memory = speaker.latent_layer_norm(speaker.encode(prototypes))
+
+        # SOS, then every emitted symbol but the last, which is never fed back.
+        sos = torch.zeros(3, 1, speaker.vocabulary + 4)
+        sos[:, 0, 1] = 1.0  # SOS_IDX
+        sequence = (
+            torch.cat([sos, onehot[:, 1:-2, :]], dim=1)
+            @ speaker.token_embedding.weight
+        )
+
+        teacher_forced = speaker.decoder(sequence, memory)
+
+    assert torch.allclose(teacher_forced, embeddings, atol=1e-5)
+
+
+def test_the_parallel_arm_conditions_on_nothing():
+    """
+    The counterpart claim, and the reason rung 13 answers a different question
+    from rung 7: this arm's embeddings are a function of the prototypes alone,
+    so they are unchanged by anything about the symbols drawn from them.
+    """
+    speaker = _latent_speaker().eval()
+    prototypes = _prototypes()
+
+    with torch.no_grad():
+        first = speaker.decode(prototypes)[1]
+        second = speaker.embeddings(prototypes)
+
+    assert torch.equal(first, second)
+
+
+def test_the_decoder_arm_reports_its_diagnostics_over_every_position():
+    """
+    `realised_survival` and `logit_spread` are pooled after the loop rather than
+    taken from one step, as `SenderGRULM` pools them. A speaker that recorded
+    only its last position would look steadily more confident than it is, since
+    later positions are the ones with the most context.
+    """
+    speaker = _speaker()
+    speaker.train()
+
+    speaker.decode(_prototypes())
+
+    assert speaker.realised_survival == speaker.realised_survival  # not NaN
+    assert speaker.logit_spread == speaker.logit_spread
+    assert 0.0 < speaker.realised_survival <= 1.0
+    assert speaker.logit_spread > 0.0

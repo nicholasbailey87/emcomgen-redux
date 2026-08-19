@@ -1,0 +1,69 @@
+# Rung 13: rung 7 with the speaker's language model in its parallel arm.
+#
+# The one rung that is not a step up the ladder. It sits beside rung 7 rather
+# than above it, and it exists to separate the two things a Transformer speaker
+# changes at once.
+#
+# Rung 7 replaces the GRU with an autoregressive Transformer decoder, so it
+# moves architecture and holds the generation regime: both speakers emit symbol
+# `i` conditioned on symbols `< i`. This rung holds the architecture at rung 7's
+# and moves the regime instead. `bidirectional = true` selects
+# `SenderTransformerLM`'s Perceiver IO arm: a learned query array cross-attends
+# the two prototypes into a latent array of 10 positions, five self-attention
+# blocks process it, and a second learned query reads it back out as all five
+# content symbols in one shot. No position is conditioned on any other.
+#
+# 7 minus 13 is therefore the price of parallel emission, and 5 minus 7 is the
+# price of the architecture, with neither reading the other's effect.
+#
+# 5,562,934 parameters against the GRU baseline's 5,764,923, or -3.5%; rung 7 is
+# +1.5%. The two arms are matched to the baseline rather than to each other, and
+# they cannot be both -- see `layers` below.
+#
+# This arm is also what every ablation rung ran before the decoder existed, so
+# the numbers it produces are comparable with anything recorded up to then.
+
+name = "ablation"
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+language_model = "SenderTransformerLM"
+
+[sender_language_model]
+# Both must equal `sender_feature_model.d_model`: `SenderTransformerLM`
+# layer-norms the incoming prototypes at its own `d_model` and separately
+# rejects `token_embedding_size != referent_embedding_size`.
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+
+# 5, where rung 7's decoder takes 4. Matching the two arms on parameters means
+# not matching them on depth: an encoder block is 944,711 parameters at this
+# width and a decoder block is 1,354,951, because the decoder cross-attends into
+# the latent memory inside every block. Five encoder blocks put this arm at
+# 0.965x the GRU baseline and four decoder blocks put rung 7 at 1.015x, which is
+# as close as the two get to the same reference without one of them being sized
+# to the other instead.
+#
+# So a difference between this rung and rung 7 is a difference of regime and of
+# depth together. That is the residual confound in this pair, and it is the one
+# that could not be removed: parameters, depth, and regime cannot all three be
+# held.
+layers = 5
+
+# `true`: the parallel Perceiver IO arm. See rung 7's `bidirectional` for what
+# the two settings select and why the word means what it does on this class.
+bidirectional = true
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

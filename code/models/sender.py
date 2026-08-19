@@ -5,6 +5,27 @@ Speaker models. This includes speakers with a GRU-based language model as
     Transformer language models. The intention is to show that
     Transformer-based speakers can be just as successful in tasks and show
     equal or greater compositionality.
+
+`SenderTransformerLM` is two architectures behind one flag, and the flag is
+    `bidirectional`, exactly as it is on `SenderGRULM`:
+
+    `false`, the default -- an autoregressive Transformer decoder. A learned
+        query cross-attends the two prototypes into a latent memory, and
+        `layers` decoder blocks then generate the message one symbol at a time,
+        each conditioned on the symbols before it and cross-attending back into
+        that memory. Causal in the sense the GRU is causal, and comparable to it
+        on generation regime as well as on parameters.
+
+    `true` -- Perceiver IO. The same cross-attention into the same latent array,
+        then `layers` blocks of self-attention over the latents, then a second
+        learned query reading them back out as every symbol at once. Nothing is
+        conditioned on anything; the message has an order only because its slots
+        are numbered.
+
+    Both are built here rather than split into two classes because they share
+        everything up to the latent array -- the polarity tag, the encoder
+        cross-attention, the logit scale and its diagnostics -- and because the
+        ablation configs select between them by setting one key.
 """
 
 import math
@@ -22,6 +43,7 @@ import data.language
 import broccoli
 
 from . import model_util
+from . import transformer_decoder
 
 
 def trim_messages(token_id_rows):
@@ -1095,12 +1117,21 @@ class SenderTransformerLM(nn.Module):
         self.cross_attention_dropout = kwargs["cross_attention_dropout"]
         # Resolved against this stack's own depth when the config asks for
         #     `"deepnorm"`, so that changing `layers` cannot leave the residual
-        #     scaling behind at a value derived for a different depth. See
-        #     `model_util.deepnorm_constants` for why the encoder constants are
-        #     the right ones here: the cross-attention below runs once, to build
-        #     the sequence this stack reads, rather than inside every block.
+        #     scaling behind at a value derived for a different depth.
+        #
+        # Which DeepNorm form is right follows from the arm, and the two differ.
+        #     The latent arm's blocks have two residual branches -- its
+        #     cross-attentions run once each, outside the stack, to build the
+        #     sequence it reads and to read it back out -- so it takes the
+        #     encoder constants. The decoder arm cross-attends into the latent
+        #     memory inside every block, three branches, which is the
+        #     configuration DeepNorm's decoder constants were derived for. See
+        #     `model_util.deepnorm_constants`.
         self.alpha, self.beta = model_util.resolve_residual_scaling(
-            kwargs["alpha"], kwargs["beta"], kwargs["layers"]
+            kwargs["alpha"],
+            kwargs["beta"],
+            kwargs["layers"],
+            decoder=not self.bidirectional,
         )
 
         # A constant, resolved once: nothing about it is learned or calibrated,
@@ -1192,22 +1223,52 @@ class SenderTransformerLM(nn.Module):
             )
 
         # The encoder query: what to ask the prototypes, `latent_length` times.
+        #     Built in both arms -- it is what turns two prototypes into an
+        #     array wide enough to read from, and the decoder arm needs that
+        #     just as much as the latent arm does. See `latent_length` above for
+        #     the bandwidth argument, which is about the cross-attention rather
+        #     than about what happens downstream of it.
         self.query = nn.Parameter(
             torch.empty(self.latent_length, self.d_model)
         )
 
-        # The decoder query: which symbol slot each output is. Splitting the two
-        #     is what lets the latent array be a different length from the
-        #     message -- with a single query array those are necessarily the
-        #     same number, which is what tied the two together before.
-        self.output_query = nn.Parameter(
-            torch.empty(self.content_length, self.d_model)
-        )
-
         self.query_layer_norm = nn.LayerNorm(self.d_model)
         self.referent_layer_norm = nn.LayerNorm(self.d_model)
-        self.output_query_layer_norm = nn.LayerNorm(self.d_model)
         self.latent_layer_norm = nn.LayerNorm(self.d_model)
+
+        if self.bidirectional:
+            # The decoder query: which symbol slot each output is. Splitting the
+            #     two is what lets the latent array be a different length from
+            #     the message -- with a single query array those are necessarily
+            #     the same number, which is what tied the two together before.
+            #
+            # Latent arm only. The decoder arm has no use for a query per symbol
+            #     slot: its positions are the symbols already emitted, and their
+            #     order comes from the absolute position embedding and the
+            #     rotary self-attention inside the stack.
+            self.output_query = nn.Parameter(
+                torch.empty(self.content_length, self.d_model)
+            )
+
+            self.output_query_layer_norm = nn.LayerNorm(self.d_model)
+        else:
+            # Decoder arm only, and new to this class: the parallel arm never
+            #     reads a symbol back, so it never needed one. `SenderGRULM` has
+            #     carried the equivalent since the start -- see the note at its
+            #     own `token_embedding`, and note both speakers feed the *soft*
+            #     one-hot through it (`onehot @ weight` rather than an index
+            #     lookup) so that the straight-through gradient reaches the
+            #     step that produced the symbol.
+            #
+            # Sized at `d_model`, not `token_embedding_size`. The two are
+            #     required to be equal for this class anyway (the check above
+            #     rejects them differing, via `referent_embedding_size`), and
+            #     writing the width the stack actually consumes keeps the
+            #     dependency visible.
+            self.token_embedding = nn.Embedding(
+                self.vocabulary + 4, # +4 for PAD, SOS, EOS, UNK
+                self.d_model
+            )
 
         # A learned tag marking which row of the prototype sequence is the
         #     positive concept and which is the negative one. Row 0 is
@@ -1297,95 +1358,176 @@ class SenderTransformerLM(nn.Module):
             scaling="d",
         )
 
-        self.transformer = broccoli.transformer.TransformerEncoder(
-            self.latent_length,
-            self.d_model,
-            self.layers,
-            self.heads,
-            absolute_position_embedding=self.absolute_position_embedding,
-            relative_position_embedding=self.relative_position_embedding,
-            # Pinned at 1.0 and no longer configurable -- see `ViT2` for the
-            #     argument. Every head takes axial RoPE, so the head partition
-            #     that used to move with `heads` is gone.
-            positional_heads=1.0,
-            # Derived, not configured: the sequence this block runs over is the
-            #     *latent* array, which is `latent_message_multiplier` times the
-            #     message's content length. See `latent_length`.
-            source_size=(self.latent_length,),
-            # `ff_ratio` None so that `ff_inner_size` is the live knob:
-            #     `FeedforwardBlock` takes `int(ratio * width) if inner_size is
-            #     None else inner_size`. Note this precedence is the reverse of
-            #     broccoli's `ViT`, which discards the explicit size unless the
-            #     ratio is None -- see the comment at that call site.
-            ff_ratio=None,
-            ff_inner_size=self.ff_inner_size,
-            activation=self.activation,
-            activation_kwargs=None,
-            ff_linear_module_up=None,
-            ff_linear_module_down=None,
-            # Not configurable, and pinned rather than promoted: broccoli's
-            # `FeedforwardBlock` uses this only as a fallback --
-            # `inner_dropout if inner_dropout is not None else dropout` -- and
-            # `TransformerEncoder` always forwards `ff_inner_dropout` and
-            # `ff_outer_dropout`, which default to 0.0 rather than None. So this
-            # argument can never take effect, and TOML has no way to write the
-            # None that would let it. Use the inner/outer knobs instead.
-            ff_dropout=0.0,
-            ff_inner_dropout=self.ff_inner_dropout,
-            ff_outer_dropout=self.ff_outer_dropout,
-            msa_dropout=self.self_attention_dropout,
-            stochastic_depth=self.stochastic_depth,
-            depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
-            causal = not self.bidirectional,
-            linear_module=nn.Linear,
-            bos_tokens=self.utility_tokens,
-            knocking_heads=self.knocking_heads,
-            return_bos_tokens=self.return_bos_tokens,
-            pre_norm=self.pre_norm,
-            post_norm=self.post_norm,
-            msa_scaling="d",
-            alpha=self.alpha,
-            beta=self.beta,
-        )
+        # The two arms. `bidirectional` chooses between them, and on this
+        #     speaker it selects an architecture rather than a mask -- see
+        #     the class docstring and `DEFAULT.toml`.
+        if self.bidirectional:
+            self.transformer = broccoli.transformer.TransformerEncoder(
+                self.latent_length,
+                self.d_model,
+                self.layers,
+                self.heads,
+                absolute_position_embedding=self.absolute_position_embedding,
+                relative_position_embedding=self.relative_position_embedding,
+                # Pinned at 1.0 and no longer configurable -- see `ViT2` for the
+                #     argument. Every head takes axial RoPE, so the head partition
+                #     that used to move with `heads` is gone.
+                positional_heads=1.0,
+                # Derived, not configured: the sequence this block runs over is the
+                #     *latent* array, which is `latent_message_multiplier` times the
+                #     message's content length. See `latent_length`.
+                source_size=(self.latent_length,),
+                # `ff_ratio` None so that `ff_inner_size` is the live knob:
+                #     `FeedforwardBlock` takes `int(ratio * width) if inner_size is
+                #     None else inner_size`. Note this precedence is the reverse of
+                #     broccoli's `ViT`, which discards the explicit size unless the
+                #     ratio is None -- see the comment at that call site.
+                ff_ratio=None,
+                ff_inner_size=self.ff_inner_size,
+                activation=self.activation,
+                activation_kwargs=None,
+                ff_linear_module_up=None,
+                ff_linear_module_down=None,
+                # Not configurable, and pinned rather than promoted: broccoli's
+                # `FeedforwardBlock` uses this only as a fallback --
+                # `inner_dropout if inner_dropout is not None else dropout` -- and
+                # `TransformerEncoder` always forwards `ff_inner_dropout` and
+                # `ff_outer_dropout`, which default to 0.0 rather than None. So this
+                # argument can never take effect, and TOML has no way to write the
+                # None that would let it. Use the inner/outer knobs instead.
+                ff_dropout=0.0,
+                ff_inner_dropout=self.ff_inner_dropout,
+                ff_outer_dropout=self.ff_outer_dropout,
+                msa_dropout=self.self_attention_dropout,
+                stochastic_depth=self.stochastic_depth,
+                depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
+                # Never causal, and no longer configurable. This used to read
+                #     `not self.bidirectional`, which masked the *latent* array
+                #     left to right -- and the latent array is not a sequence in
+                #     time. It is read back out in one shot by `output_query`
+                #     below, so latent index 0 is no earlier than latent index 9
+                #     in any sense the task can see. All that mask did was hide
+                #     most of the image from the low-index latents, which is
+                #     exactly what `self.cross_attention` above declares it does
+                #     not want ("Whole image informs whole latent array").
+                #     Ordering the message is the decoder arm's job, and it does
+                #     it by conditioning rather than by masking this.
+                causal=False,
+                linear_module=nn.Linear,
+                bos_tokens=self.utility_tokens,
+                knocking_heads=self.knocking_heads,
+                return_bos_tokens=self.return_bos_tokens,
+                pre_norm=self.pre_norm,
+                post_norm=self.post_norm,
+                msa_scaling="d",
+                alpha=self.alpha,
+                beta=self.beta,
+            )
 
-        # Perceiver IO's decoder: `content_length` learned queries read the
-        #     processed latent array and return one vector per symbol slot. This
-        #     is what makes `latent_length` free of `message_length` -- the
-        #     output length is set here and nowhere else, so `decode` and
-        #     everything downstream of it are untouched by the multiplier.
-        #
-        # Built at 1.0 as well as above it, deliberately. The knob's job is to
-        #     vary the latent width and nothing else; if 1.0 also removed a
-        #     module then a sweep over it would confound two changes at once,
-        #     and the `state_dict` shape would move with the knob, so
-        #     checkpoints could not be compared across sweep points. At 1.0 this
-        #     is a learned re-read of an array of its own length -- redundant,
-        #     but honestly so.
-        #
-        # Every broccoli argument set explicitly, including the inert ones, as
-        #     for `self.cross_attention` above; see the note at the top of
-        #     `receiver.py` for why.
-        self.decode_attention = broccoli.transformer.MHAttention(
-            self.d_model,
-            self.heads,
-            dropout=self.cross_attention_dropout,
-            causal=False, # Whole latent array informs whole message
-            seq_len=self.content_length,
-            linear_module=nn.Linear,
-            bos_tokens=0,
-            knocking_heads=False,
-            # No positional information on the key side: the latent array's
-            #     order is already baked into it by `self.transformer`, and the
-            #     output query carries its own. `positional_heads` is inert
-            #     while `rotary_embedding` is None but is pinned to broccoli's
-            #     own `MHAttention` default anyway -- 0.25 here, not the 1.0
-            #     this repo now pins on `TransformerEncoder`, because the two
-            #     classes default differently and this one is not the knob.
-            rotary_embedding=None,
-            positional_heads=0.25,
-            source_size=None,
-            scaling="d",
-        )
+            # Perceiver IO's decoder: `content_length` learned queries read the
+            #     processed latent array and return one vector per symbol slot. This
+            #     is what makes `latent_length` free of `message_length` -- the
+            #     output length is set here and nowhere else, so `decode` and
+            #     everything downstream of it are untouched by the multiplier.
+            #
+            # Built at 1.0 as well as above it, deliberately. The knob's job is to
+            #     vary the latent width and nothing else; if 1.0 also removed a
+            #     module then a sweep over it would confound two changes at once,
+            #     and the `state_dict` shape would move with the knob, so
+            #     checkpoints could not be compared across sweep points. At 1.0 this
+            #     is a learned re-read of an array of its own length -- redundant,
+            #     but honestly so.
+            #
+            # Every broccoli argument set explicitly, including the inert ones, as
+            #     for `self.cross_attention` above; see the note at the top of
+            #     `receiver.py` for why.
+            self.decode_attention = broccoli.transformer.MHAttention(
+                self.d_model,
+                self.heads,
+                dropout=self.cross_attention_dropout,
+                causal=False, # Whole latent array informs whole message
+                seq_len=self.content_length,
+                linear_module=nn.Linear,
+                bos_tokens=0,
+                knocking_heads=False,
+                # No positional information on the key side: the latent array's
+                #     order is already baked into it by `self.transformer`, and the
+                #     output query carries its own. `positional_heads` is inert
+                #     while `rotary_embedding` is None but is pinned to broccoli's
+                #     own `MHAttention` default anyway -- 0.25 here, not the 1.0
+                #     this repo now pins on `TransformerEncoder`, because the two
+                #     classes default differently and this one is not the knob.
+                rotary_embedding=None,
+                positional_heads=0.25,
+                source_size=None,
+                scaling="d",
+            )
+        else:
+            # The decoder arm. Same `layers` blocks, spent at message length
+            #     rather than at latent length, and cross-attending into the
+            #     latent array from inside every one of them instead of reading
+            #     it once at the end.
+            #
+            # Note what is *not* here: no self-attention stack over the latents.
+            #     The latent array is what `self.cross_attention` above produced
+            #     and nothing else touches it, so it is a memory rather than a
+            #     representation -- the processing all happens on the message
+            #     side. `latent_message_multiplier` still sets its length, and
+            #     still buys the same thing it buys in the other arm, since the
+            #     bandwidth argument at `latent_length` is about the
+            #     cross-attention into two prototypes and is indifferent to what
+            #     reads the result.
+            #
+            # The two arms are not the same size at the same `layers`: a decoder
+            #     block carries a cross-attention the encoder block does not, so
+            #     it costs about 4*d_model^2 more -- 1,354,951 against 944,711 at
+            #     320 wide with `ff_inner_size = 554`. The ablation rungs
+            #     therefore run this arm at 4 layers and the latent arm at 5,
+            #     which is what puts both within 2% of the GRU baseline. See the
+            #     rung headers.
+            self.decoder = transformer_decoder.TransformerDecoder(
+                self.content_length,
+                self.latent_length,
+                self.d_model,
+                self.layers,
+                self.heads,
+                absolute_position_embedding=self.absolute_position_embedding,
+                relative_position_embedding=self.relative_position_embedding,
+                # Pinned at 1.0, as on the latent arm's stack; see there.
+                positional_heads=1.0,
+                # The message, not the latent array: these blocks run over the
+                #     symbols emitted so far. This is the one argument whose
+                #     value differs in kind between the arms rather than in
+                #     number, and it is the whole difference between them.
+                source_size=(self.content_length,),
+                # `ff_ratio` None so that `ff_inner_size` is the live knob -- as
+                #     on the latent arm's stack, see there.
+                ff_ratio=None,
+                ff_inner_size=self.ff_inner_size,
+                activation=self.activation,
+                activation_kwargs=None,
+                ff_dropout=0.0,
+                ff_inner_dropout=self.ff_inner_dropout,
+                ff_outer_dropout=self.ff_outer_dropout,
+                msa_dropout=self.self_attention_dropout,
+                # The per-block cross-attention takes the speaker's
+                #     cross-attention setting, so that every cross-attention in
+                #     this speaker -- the one into the prototypes and the
+                #     `layers` into the latent memory -- is regularised on one
+                #     knob rather than two.
+                cross_attention_dropout=self.cross_attention_dropout,
+                stochastic_depth=self.stochastic_depth,
+                depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
+                linear_module=nn.Linear,
+                bos_tokens=self.utility_tokens,
+                knocking_heads=self.knocking_heads,
+                return_bos_tokens=self.return_bos_tokens,
+                pre_norm=self.pre_norm,
+                post_norm=self.post_norm,
+                msa_scaling="d",
+                alpha=self.alpha,
+                beta=self.beta,
+            )
 
         # Pre-norm token prior, as in `SenderGRULM`, see there.
         self.outputs2vocab = nn.Linear(
@@ -1395,10 +1537,22 @@ class SenderTransformerLM(nn.Module):
 
         self.reset_parameters()
 
-    def embeddings(
+    def encode(
         self,
         prototypes
     ):
+        """
+        Read the two prototypes into a latent array of `latent_length`
+            positions. Shared by both arms: it is the only place the referents
+            enter the language model at all, and neither arm changes it.
+
+        Returns:
+            latents: (batch, latent_length, d_model), unnormalised. The callers
+                normalise, because the two arms want it at different points --
+                the latent arm feeds the raw array to its self-attention stack
+                and norms afterwards, the decoder arm norms once and hands the
+                result to every block as a fixed memory.
+        """
         batch_size = prototypes[0].size(0)
 
         stack_prototypes = torch.stack(prototypes, 1) # To sequence
@@ -1417,11 +1571,28 @@ class SenderTransformerLM(nn.Module):
 
         normed_query = self.query_layer_norm(query)
 
-        # Encode: the byte array (two prototypes) is read into a latent array of
-        #     `latent_length` positions.
-        latents = self.cross_attention(
+        return self.cross_attention(
             normed_query, normed_prototypes, normed_prototypes
         ) # (batch, self.latent_length, self.d_model)
+
+    def embeddings(
+        self,
+        prototypes
+    ):
+        """
+        The latent arm's whole forward pass: one vector per symbol slot, a
+            function of the prototypes alone.
+
+        Latent arm only, and deliberately not given a decoder-arm branch. The
+            decoder arm's embeddings are not a function of the prototypes --
+            each depends on the symbols sampled before it -- so there is no
+            honest signature this method could have there, and the loop that
+            produces them lives in `decode` for the same reason
+            `SenderGRULM`'s does.
+        """
+        batch_size = prototypes[0].size(0)
+
+        latents = self.encode(prototypes)
 
         # Process: self-attention over the latents, and only the latents. The
         #     prototypes are not re-read -- unlike Perceiver proper, whose
@@ -1543,17 +1714,165 @@ class SenderTransformerLM(nn.Module):
         """
         return self.log_logit_scale.exp()
 
+    def decode_autoregressively(
+        self,
+        prototypes
+    ):
+        """
+        The decoder arm's sampling loop: one symbol at a time, each conditioned
+            on the symbols already emitted and on the latent memory.
+
+        A step-for-step mirror of `SenderGRULM.decode` from the sampling
+            onwards -- same normalisation order, same mask-then-explore order,
+            same scale-the-unmasked-logits-then-remask discipline, same greedy
+            eval branch, same per-step accumulation of the diagnostics pooled
+            once at the end. All of the reasoning behind those is written out
+            there; this method deliberately does not restate it, so that the two
+            speakers cannot drift apart with only one of them documented.
+
+        What differs is what carries the state. The GRU threads a hidden state
+            through the loop; this threads the symbols themselves, re-reading
+            the whole prefix through the stack at every step.
+
+        Why re-read rather than extend: broccoli's `MHAttention` asserts
+            `query_tokens == seq_len` whenever it is causal, so a growing prefix
+            is not something the module will accept. The loop therefore runs the
+            stack over a full-length sequence every step, with the positions
+            after the cursor held at zero. The causal mask makes those positions
+            unable to reach the ones before them, so they are inert and the
+            result is exactly what a growing prefix would have given. The cost
+            is `content_length` passes over a `content_length` sequence -- five
+            of them at ShapeWorld's message length, over a stack a few million
+            parameters wide, which is not worth a KV cache.
+
+        Note the input sequence is built fresh at each step rather than written
+            into in place. In-place would be the obvious way to do it and it
+            does not work: the previous step's forward pass has already saved
+            that tensor for backward, so mutating it makes autograd refuse.
+
+        Returns: as `decode`.
+        """
+        batch_size = prototypes[0].size(0)
+        device = prototypes[0].device
+
+        # Normalised once, here, rather than inside each block: it is the same
+        #     array for every block and every step, so norming it per block
+        #     would repeat identical work `layers * content_length` times.
+        memory = self.latent_layer_norm(self.encode(prototypes))
+
+        lang = []
+        symbol_embeddings = []
+        survival_logits = []
+        spread_steps = []
+
+        sos_onehot = torch.zeros(
+            batch_size,
+            1,
+            self.vocabulary + 4, # +4 for PAD, SOS, EOS, UNK
+            device=device
+        )
+        sos_onehot[:, 0, data.language.SOS_IDX] = 1.0
+        lang.append(sos_onehot)
+
+        # Through the embedding matrix rather than an index lookup, as in
+        #     `SenderGRULM.decode`: the sampled one-hots that follow are soft in
+        #     the backward pass, and a matmul is what lets the straight-through
+        #     gradient reach the step that produced them.
+        emitted = [(sos_onehot @ self.token_embedding.weight)[:, 0, :]] # (B, D)
+
+        padding = torch.zeros(
+            batch_size, self.d_model, device=device, dtype=emitted[0].dtype
+        )
+
+        if self.training:
+            # A parameter norm rather than a per-batch quantity -- as in the
+            #     other arm, see `decode`.
+            with torch.no_grad():
+                self.polarity_separation = (
+                    self.polarity_embedding[0] - self.polarity_embedding[1]
+                ).norm().item()
+
+        for i in range(self.content_length):
+            decoder_input = torch.stack(
+                emitted + [padding] * (self.content_length - len(emitted)),
+                dim=1
+            ) # (B, content_length, D)
+
+            step_embedding = self.decoder(decoder_input, memory)[:, i, :] # (B, D)
+            symbol_embeddings.append(step_embedding)
+
+            logits = self.outputs2vocab(step_embedding) # (B, V + 4)
+
+            if self.training:
+                spread_steps.append(
+                    logits[..., 4:].detach().float().std(-1).mean()
+                )
+
+            normalised = layer_norm_logits(logits, self.vocabulary)
+
+            logits = mask_reserved_tokens(normalised)
+
+            if self.training:
+                survival_logits.append(logits.detach())
+
+                logits = mask_reserved_tokens(normalised * self.logit_scale)
+
+                if self.uniform_weight > 0.0:
+                    logits = flatten_logit_distribution(logits, self.uniform_weight)
+
+                predicted_onehot = F.gumbel_softmax(
+                    logits,
+                    tau=self.sampling_tau,
+                    hard=True,
+                    dim=-1
+                )
+            else:
+                predicted_onehot = F.one_hot(
+                    logits.argmax(-1), self.vocabulary + 4
+                ).to(logits.dtype)
+
+            lang.append(predicted_onehot.unsqueeze(1))
+
+            # The last symbol is never fed back -- there is nothing left to
+            #     condition -- so the sequence stays `content_length` long and
+            #     position 0 stays the SOS.
+            if i + 1 < self.content_length:
+                emitted.append(predicted_onehot @ self.token_embedding.weight)
+
+        if self.training:
+            # Pooled over positions after the loop, as in `SenderGRULM.decode`:
+            #     per position instead would read each position's statistics
+            #     alone. The other arm can take these straight off its logits
+            #     because it emits every position in one shot; this one has to
+            #     stack them, exactly as the GRU does.
+            self.realised_survival = mean_winning_probability(
+                torch.stack(survival_logits, 1).float(),
+                self.logit_scale.detach(),
+                self.uniform_weight,
+            ).item()
+            self.logit_spread = torch.stack(spread_steps).mean().item()
+
+        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 4, device=device)
+        eos_onehot[:, 0, data.language.EOS_IDX] = 1.0
+        lang.append(eos_onehot)
+
+        return torch.cat(lang, 1), torch.stack(symbol_embeddings, 1)
+
     def decode(
         self,
         prototypes
     ):
         """
-        Produce a message and the symbol embeddings that produced it, in a
-            single pass. Mirrors `SenderGRULM.decode`.
+        Produce a message and the symbol embeddings that produced it. Mirrors
+            `SenderGRULM.decode`, and dispatches on the arm.
 
-        This speaker is not autoregressive, so unlike the GRU the embeddings
-            here do not depend on which symbols were sampled. This method
-            exists so that callers can treat the two speakers identically.
+        The two arms differ in exactly the way the GRU's docstring warns about.
+            The latent arm is not autoregressive: its embeddings are a function
+            of the prototypes alone and do not depend on which symbols were
+            sampled. The decoder arm is, so its embeddings and its message only
+            correspond when they come from the *same* call, as the GRU's do.
+            Either way this method returns them together, so callers can treat
+            all three speakers identically.
 
         Returns:
             onehot: (batch, message_length, vocabulary + 4)
@@ -1561,6 +1880,9 @@ class SenderTransformerLM(nn.Module):
                 dense contextual vector per content symbol, taken before the
                 vocabulary projection and sampling
         """
+        if not self.bidirectional:
+            return self.decode_autoregressively(prototypes)
+
         batch_size = prototypes[0].size(0)
         device = prototypes[0].device
 
@@ -1639,17 +1961,23 @@ class SenderTransformerLM(nn.Module):
 
     def reset_parameters(self):
         nn.init.normal_(self.query, mean=0.0, std=1.0)
-        nn.init.normal_(self.output_query, mean=0.0, std=1.0)
         self.query_layer_norm.reset_parameters()
         self.referent_layer_norm.reset_parameters()
-        self.output_query_layer_norm.reset_parameters()
         self.latent_layer_norm.reset_parameters()
         # Zero, not a draw: see `polarity_embedding` for why this rung has to
         #     open at the untagged speaker's behaviour exactly.
         nn.init.zeros_(self.polarity_embedding)
         self.cross_attention.reset_parameters()
-        self.transformer.reset_parameters()
-        self.decode_attention.reset_parameters()
+
+        if self.bidirectional:
+            nn.init.normal_(self.output_query, mean=0.0, std=1.0)
+            self.output_query_layer_norm.reset_parameters()
+            self.transformer.reset_parameters()
+            self.decode_attention.reset_parameters()
+        else:
+            self.token_embedding.reset_parameters()
+            self.decoder.reset_parameters()
+
         self.outputs2vocab.reset_parameters()
         self.reset_logit_scale()
         self.realised_survival = float("nan")

@@ -51,6 +51,7 @@ from torch.nn import functional as F
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
 
+import data.language  # noqa: E402
 import models.sender as S  # noqa: E402
 from parse_config import get_config  # noqa: E402
 
@@ -98,10 +99,38 @@ def _gru_speaker(**overrides):
 
 
 def _transformer_speaker(**overrides):
+    """
+    The decoder arm, which is what `DEFAULT.toml`'s `bidirectional = false`
+        selects and so what the ablation rungs run.
+    """
     # d_model 64 over 4 heads gives head_dim 16, which is broccoli's minimum for
     # a 1-D rotary embedding; the DEFAULT.toml width would work but is slow.
     settings = _language_model_config(
-        d_model=64, token_embedding_size=64, heads=4, layers=1, **overrides
+        d_model=64,
+        token_embedding_size=64,
+        heads=4,
+        layers=1,
+        bidirectional=False,
+        **overrides
+    )
+    return S.SenderTransformerLM(64, **settings)
+
+
+def _transformer_latent_speaker(**overrides):
+    """
+    The parallel arm. Built alongside the decoder arm everywhere the exploration
+        channel is tested, because the channel is the one thing the two arms
+        share exactly -- same normalisation, same scale, same mixture, same
+        estimator -- so a change that breaks it on one and not the other is a
+        change that has leaked out of the architecture and into the sampling.
+    """
+    settings = _language_model_config(
+        d_model=64,
+        token_embedding_size=64,
+        heads=4,
+        layers=1,
+        bidirectional=True,
+        **overrides
     )
     return S.SenderTransformerLM(64, **settings)
 
@@ -202,7 +231,9 @@ def test_uniform_weight_floors_the_achievable_entropy():
     )
 
 
-@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
 def test_speaker_resolves_its_scale_from_its_own_vocabulary(build):
     """
     The scale is solved at construction from the speaker's *own* vocabulary and
@@ -501,7 +532,9 @@ def _decode_message(speaker, prototypes):
     return speaker.decode(prototypes)[0].argmax(-1)
 
 
-@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
 def test_eval_is_deterministic_and_greedy(build):
     """
     Eval decodes greedily, so repeated calls agree and the message is the argmax
@@ -530,10 +563,41 @@ def test_eval_is_deterministic_and_greedy(build):
 
 def _greedy_reference(speaker, prototypes):
     """Recompute the greedy message straight from the logits, independently."""
-    if isinstance(speaker, S.SenderTransformerLM):
+    if isinstance(speaker, S.SenderTransformerLM) and speaker.bidirectional:
         logits = speaker.outputs2vocab(speaker.embeddings(prototypes))
         logits = S.layer_norm_logits(logits, speaker.vocabulary)
         return S.mask_reserved_tokens(logits).argmax(-1)
+
+    if isinstance(speaker, S.SenderTransformerLM):
+        # The decoder arm, which is autoregressive and so needs the loop. Built
+        #     as a growing prefix rather than as `decode`'s fixed-length buffer,
+        #     deliberately: the two agree only if the causal mask really does
+        #     stop the unwritten tail reaching the positions behind it, so this
+        #     reference checks that claim as a side effect of checking the
+        #     greedy policy.
+        batch_size = prototypes[0].size(0)
+        memory = speaker.latent_layer_norm(speaker.encode(prototypes))
+
+        onehot = torch.zeros(batch_size, 1, speaker.vocabulary + 4)
+        onehot[:, 0, data.language.SOS_IDX] = 1.0
+        emitted = [(onehot @ speaker.token_embedding.weight)[:, 0, :]]
+
+        tokens = []
+        for i in range(speaker.content_length):
+            padding = torch.zeros(batch_size, speaker.d_model)
+            sequence = torch.stack(
+                emitted + [padding] * (speaker.content_length - len(emitted)), dim=1
+            )
+            logits = speaker.outputs2vocab(speaker.decoder(sequence, memory)[:, i, :])
+            logits = S.layer_norm_logits(logits, speaker.vocabulary)
+            chosen = S.mask_reserved_tokens(logits).argmax(-1)
+            tokens.append(chosen)
+            emitted.append(
+                F.one_hot(chosen, speaker.vocabulary + 4).float()
+                @ speaker.token_embedding.weight
+            )
+
+        return torch.stack(tokens, 1)
 
     # The GRU is autoregressive, so the reference has to run the loop too.
     batch_size = prototypes[0].size(0)
@@ -561,7 +625,9 @@ def _greedy_reference(speaker, prototypes):
     return torch.stack(tokens, 1)
 
 
-@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
 def test_eval_is_invariant_to_the_training_knobs(build):
     """
     argmax is invariant to a positive rescale, to the uniform mixture and to
@@ -591,7 +657,9 @@ def test_eval_is_invariant_to_the_training_knobs(build):
 
 # ------------------------------------ 6. survival is measured, not targeted --
 
-@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
 def test_realised_survival_reports_the_channel_in_use(build):
     """
     `realised_survival` is a measurement at the fixed scale, so raising the
@@ -622,7 +690,9 @@ def test_realised_survival_reports_the_channel_in_use(build):
     assert 0.12 < fresh.realised_survival < 0.32, fresh.realised_survival
 
 
-@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
 def test_survival_does_not_move_during_eval(build):
     """Eval samples nothing, so it measures nothing."""
     torch.manual_seed(0)
@@ -642,7 +712,9 @@ def test_survival_does_not_move_during_eval(build):
     assert speaker.logit_spread == spread
 
 
-@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
 def test_logit_spread_reads_the_pre_norm_scale(build):
     """
     `logit_spread` is what separates a speaker learning a flatter policy from
@@ -678,7 +750,9 @@ def test_logit_spread_reads_the_pre_norm_scale(build):
     assert collapsed.realised_survival == pytest.approx(survival, abs=5e-3)
 
 
-@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
 def test_no_calibration_state_reaches_the_checkpoint(build):
     """
     The scale is a constant, so nothing about exploration is checkpointed. Also
@@ -702,7 +776,9 @@ def test_no_calibration_state_reaches_the_checkpoint(build):
 
 # ------------------------------------------------- 7. position invariance --
 
-@pytest.mark.parametrize("build", [_gru_speaker, _transformer_speaker])
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
 def test_layer_norm_is_position_invariant(build):
     """
     A per-position offset added to every token of a slot survives normalisation

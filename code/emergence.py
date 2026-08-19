@@ -505,6 +505,15 @@ def decontextualised_embeddings(token_seqs, symbol_embeddings):
     can therefore read a correlation straight out of the meaning space without
     the language taking any part.
 
+    Every speaker here has that property in some form, so this is not a
+    GRU-specific control. ``SenderTransformerLM``'s decoder arm reaches the
+    first content symbol with nothing in its sequence but SOS and the utility
+    tokens, and everything else it has is the prototype-derived memory, so that
+    position is a function of the concept alone in exactly the same way. Its
+    parallel arm is the extreme case: *no* position depends on a sampled token,
+    since they are all emitted at once, so there every symbol's embedding is a
+    function of the concept alone.
+
     Averaging every occurrence of a token id into one vector removes exactly
     that second sensitivity and keeps the first. What survives is a
     non-contextual embedding table learned from the sender's own usage: two

@@ -1,5 +1,5 @@
 """
-The twelve ablation rungs, built the way `train.py` builds them.
+The fourteen ablation rungs, built the way `train.py` builds them.
 
 Nothing checked this before, and the cost of that was rung 7. Its speaker came
 out at 533,943 parameters against the GRU baseline's 6,813,499 -- twelve times
@@ -70,9 +70,9 @@ def _count(module):
     return sum(p.numel() for p in module.parameters())
 
 
-def test_there_are_twelve_rungs():
+def test_there_are_fourteen_rungs():
     """A rung added or renamed without the counts below being revisited."""
-    assert len(RUNGS) == 12
+    assert len(RUNGS) == 14
 
 
 @pytest.mark.parametrize("config_file", RUNGS)
@@ -120,9 +120,11 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # counterpart is rung 9's comparer, at 5,015,552, which the
         # cross-attention comparer meets at 1.08x.
         ("01_shapeworld_baseline.toml", "receiver.comparer", 5_212_160),
-        # ShapeWorld: the Transformer arm it is compared against.
+        # ShapeWorld: the Transformer arm it is compared against. The speaker's
+        # language model is the autoregressive decoder, four blocks at message
+        # length -- see rung 7 for why four rather than five.
         ("11_shapeworld_receiver_cross_attention.toml", "sender.feat_model", 10_177_420),
-        ("11_shapeworld_receiver_cross_attention.toml", "sender.language_model", 5_562_934),
+        ("11_shapeworld_receiver_cross_attention.toml", "sender.language_model", 5_851_183),
         ("11_shapeworld_receiver_cross_attention.toml", "receiver.comparer", 5_399_700),
         # CUB: the CNN/GRU baseline.
         ("02_birds_baseline.toml", "sender.feat_model", 11_176_512),
@@ -130,8 +132,17 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         ("02_birds_baseline.toml", "receiver.comparer", 5_212_160),
         # CUB: the Transformer arm it is compared against.
         ("12_birds_receiver_cross_attention.toml", "sender.feat_model", 12_430_908),
-        ("12_birds_receiver_cross_attention.toml", "sender.language_model", 5_569_660),
+        ("12_birds_receiver_cross_attention.toml", "sender.language_model", 5_857_909),
         ("12_birds_receiver_cross_attention.toml", "receiver.comparer", 5_400_660),
+        # The parallel arm, rungs 13 and 14. Five encoder blocks over the latent
+        # array rather than four decoder blocks over the message, which is a
+        # different speaker at a different size against the same baseline --
+        # 0.965x where the decoder is 1.015x. Pinned here because the pair is
+        # what makes a difference between rungs 7 and 13 readable: if either
+        # moves without the other, the two are no longer answering the same
+        # question.
+        ("13_shapeworld_sender_transformer_lm_latent.toml", "sender.language_model", 5_562_934),
+        ("14_birds_sender_transformer_lm_latent.toml", "sender.language_model", 5_569_660),
     ],
 )
 def test_the_arms_are_the_sizes_they_claim(config_file, module, expected):
@@ -149,6 +160,11 @@ def test_the_arms_are_the_sizes_they_claim(config_file, module, expected):
     [
         ("01_shapeworld_baseline.toml", "11_shapeworld_receiver_cross_attention.toml", 0.05),
         ("02_birds_baseline.toml", "12_birds_receiver_cross_attention.toml", 0.05),
+        # Both Transformer arms are matched to the baseline, not to each other:
+        # the decoder lands at 1.015x and the parallel arm at 0.965x, and no
+        # integer depth puts them at the same place. See rung 13's `layers`.
+        ("01_shapeworld_baseline.toml", "13_shapeworld_sender_transformer_lm_latent.toml", 0.05),
+        ("02_birds_baseline.toml", "14_birds_sender_transformer_lm_latent.toml", 0.05),
     ],
 )
 def test_the_speakers_language_models_are_matched(baseline, transformer, tolerance):
@@ -168,8 +184,14 @@ def test_the_speakers_language_models_are_matched(baseline, transformer, toleran
     assert abs(ratio - 1.0) < tolerance, f"{ratio:.3f}x"
 
 
+# Both arms: the rotary module is the latent self-attention on one and the
+# decoder's causal self-attention on the other, so neither covers the other.
 @pytest.mark.parametrize(
-    "config_file", ["11_shapeworld_receiver_cross_attention.toml"]
+    "config_file",
+    [
+        "11_shapeworld_receiver_cross_attention.toml",
+        "13_shapeworld_sender_transformer_lm_latent.toml",
+    ],
 )
 def test_every_rope_attention_takes_all_its_heads(config_file):
     """

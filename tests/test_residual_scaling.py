@@ -109,7 +109,16 @@ def test_vit_resolves_from_its_own_depth(layers):
 
 
 @pytest.mark.parametrize("layers", [1, 4])
-def test_sender_transformer_lm_resolves_from_its_own_depth(layers):
+@pytest.mark.parametrize("bidirectional", [False, True])
+def test_sender_transformer_lm_resolves_from_its_own_depth(layers, bidirectional):
+    """
+    Depth *and* form. The two arms have different numbers of residual branches
+    per block -- the decoder arm cross-attends into the latent memory inside
+    every one of them, the parallel arm does not -- and DeepNorm derives
+    different constants for the two cases. Reading the encoder constants for a
+    three-branch block would open the stack scaled for a residual path shorter
+    than the one it has.
+    """
     language_model = S.SenderTransformerLM(
         64,
         **_settings(
@@ -118,11 +127,25 @@ def test_sender_transformer_lm_resolves_from_its_own_depth(layers):
             token_embedding_size=64,
             heads=4,
             layers=layers,
+            bidirectional=bidirectional,
         ),
     )
-    alpha, beta = model_util.deepnorm_constants(layers)
+    alpha, beta = model_util.deepnorm_constants(
+        layers, decoder=not bidirectional
+    )
 
     assert (language_model.alpha, language_model.beta) == (alpha, beta)
+
+
+def test_the_two_deepnorm_forms_are_not_the_same():
+    """
+    Guards the test above against passing vacuously if the `decoder` flag ever
+    stopped doing anything.
+    """
+    for layers in (1, 4, 10):
+        assert model_util.deepnorm_constants(layers) != model_util.deepnorm_constants(
+            layers, decoder=True
+        )
 
 
 @pytest.mark.parametrize("layers,reading,fusing", [(10, 5, 5), (7, 4, 3), (2, 1, 1)])

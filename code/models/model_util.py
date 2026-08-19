@@ -48,21 +48,33 @@ def get_activation(name):
 DEEPNORM = "deepnorm"
 
 
-def deepnorm_constants(layers):
+def deepnorm_constants(layers, decoder=False):
     """
-    DeepNorm's residual scaling for a post-norm encoder stack `layers` deep:
-        `alpha = (2N)^(1/4)` on the skip connection and `beta = (8N)^(-1/4)` on
-        the branch, from Wang et al. (2022), *"DeepNet: Scaling Transformers to
-        1,000 Layers"* (https://arxiv.org/abs/2203.00555).
+    DeepNorm's residual scaling for a post-norm stack `layers` deep, from Wang
+        et al. (2022), *"DeepNet: Scaling Transformers to 1,000 Layers"*
+        (https://arxiv.org/abs/2203.00555).
 
-    The encoder constants rather than the decoder ones, everywhere this repo
-        uses them. DeepNorm's decoder form assumes a cross-attention sublayer
-        inside every block; neither stack here is built that way.
-        `SenderTransformerLM` runs one cross-attention over the prototypes to
-        build the sequence its encoder then reads, and
+        encoder: `alpha = (2N)^(1/4)`, `beta = (8N)^(-1/4)`
+        decoder: `alpha = (3N)^(1/4)`, `beta = (12N)^(-1/4)`
+
+    Which form is right is decided by the block, not by what the stack is
+        called: DeepNorm's decoder constants assume a cross-attention sublayer
+        inside *every* block, so a block with three residual branches takes the
+        decoder form and a block with two takes the encoder form.
+
+    Most stacks here are the encoder case, and not by accident.
+        `SenderTransformerLM`'s latent arm runs one cross-attention over the
+        prototypes to build the sequence its encoder then reads, and
         `TransformerCrossAttentionComparer` runs one between two encoder
         stacks. In both, the cross-attention sits outside the residual path
-        whose depth this is correcting for.
+        whose depth this is correcting for, so it is not a sublayer and the
+        encoder constants are the right ones.
+
+    The exception is `transformer_decoder.DecoderBlock`, which
+        `SenderTransformerLM` builds for its autoregressive arm. That one does
+        cross-attend into the latent memory inside every block, which is the
+        configuration DeepNorm's decoder form was derived for, so it asks for
+        `decoder=True`.
 
     broccoli applies `beta` as a forward multiplier on the branch rather than
         as an initialisation scaling on its projections, and the post-norm
@@ -74,6 +86,8 @@ def deepnorm_constants(layers):
         layers: the number of blocks on the residual path being scaled. For a
             stack that is split into sub-stacks, this is the depth of the
             sub-stack, resolved once per sub-stack.
+        decoder: whether every block carries a cross-attention sublayer, i.e.
+            three residual branches rather than two.
 
     Returns:
         (alpha, beta)
@@ -85,23 +99,28 @@ def deepnorm_constants(layers):
             f"`beta` to 1.0 instead."
         )
 
+    if decoder:
+        return (3.0 * layers) ** 0.25, (12.0 * layers) ** -0.25
+
     return (2.0 * layers) ** 0.25, (8.0 * layers) ** -0.25
 
 
-def resolve_residual_scaling(alpha, beta, layers):
+def resolve_residual_scaling(alpha, beta, layers, decoder=False):
     """
     Resolve the configured `alpha` and `beta` against a stack's depth.
 
     Each is either a number, which is passed through untouched, or the string
-        `DEEPNORM`, which is replaced by `deepnorm_constants(layers)`. Mixing
-        the two is allowed: pinning one while deriving the other is a coherent
-        thing to want, and refusing it would only push the arithmetic back into
-        the config.
+        `DEEPNORM`, which is replaced by `deepnorm_constants(layers, decoder)`.
+        Mixing the two is allowed: pinning one while deriving the other is a
+        coherent thing to want, and refusing it would only push the arithmetic
+        back into the config.
 
     Args:
         alpha: configured skip scaling, a number or `DEEPNORM`
         beta: configured branch scaling, a number or `DEEPNORM`
         layers: depth of the residual path these scale
+        decoder: passed through to `deepnorm_constants`; see there for when the
+            decoder form is the right one. Inert unless something is `DEEPNORM`.
 
     Returns:
         (alpha, beta), both floats
@@ -121,7 +140,7 @@ def resolve_residual_scaling(alpha, beta, layers):
             )
 
     derived_alpha, derived_beta = (
-        deepnorm_constants(layers)
+        deepnorm_constants(layers, decoder=decoder)
         if DEEPNORM in (alpha, beta)
         else (None, None)
     )

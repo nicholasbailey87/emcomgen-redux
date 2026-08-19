@@ -348,6 +348,39 @@ tau = 1.0                     # Gumbel-softmax tau. Gradient shaping only:
                               # one operating point for the whole run.
 dropout = 0.1
 layers = 1
+
+# One key, two speakers, and on the Transformer it selects an architecture
+# rather than a mask. In both cases `false` is the causal, left-to-right
+# speaker:
+#
+#   false  SenderGRULM          unidirectional `nn.GRU` -- the baseline
+#          SenderTransformerLM  autoregressive Transformer decoder: `layers`
+#                               blocks at message length, each cross-attending
+#                               into the latent array, one symbol sampled at a
+#                               time conditioned on the symbols before it
+#
+#   true   SenderGRULM          `nn.GRU(bidirectional=True)`
+#          SenderTransformerLM  Perceiver IO: `layers` blocks of self-attention
+#                               over the *latent* array, and a learned query
+#                               that reads it back out as every symbol at once
+#
+# `false` here, so the decoder is what a speaker is unless a config says
+# otherwise. The ablation rungs that run the parallel arm say so explicitly --
+# 13 and 14, and see rung 7 for the argument about which arm belongs where.
+#
+# What this no longer does on `SenderTransformerLM` is set `causal` on the
+# latent self-attention stack, which is what it used to mean and which bought
+# nothing. The latent array is not a sequence in time: it is read back out in
+# one shot, so latent index 0 is no earlier than latent index 9 in any sense the
+# task can see, and masking it left to right only hid most of the image from the
+# low-index latents. No Transformer in this repository now runs a causal mask
+# except the decoder arm's self-attention, over the message, where it means what
+# it says.
+#
+# Note the two arms are not the same size at the same `layers` -- a decoder
+# block carries a cross-attention an encoder block does not -- so a config that
+# flips this and nothing else changes the parameter count by about 43%. See
+# `layers` in rungs 7 and 13.
 bidirectional = false
 heads = 4 # Heads per layer - only applies to Transformer language models
 
@@ -356,11 +389,13 @@ heads = 4 # Heads per layer - only applies to Transformer language models
 # array at all; `SenderGRULM` receives this key through the same splat and
 # ignores it.
 #
-# The speaker is a Perceiver IO: a learned query array cross-attends into the two
-# prototypes, a self-attention stack processes the result, and a second learned
-# query reads that array back out at the message's length. This knob sets the
-# length of the middle stage, and nothing downstream of the decoder can see it --
-# `message_length` and the receiver are untouched by it.
+# A learned query array cross-attends into the two prototypes, and this knob sets
+# how many positions that query array has. What happens to the result depends on
+# `bidirectional` above: the parallel arm processes it with a self-attention
+# stack and then reads it back out at the message's length, while the decoder arm
+# treats it as a fixed memory that every block cross-attends into. Either way
+# nothing downstream can see this number -- `message_length` and the receiver are
+# untouched by it.
 #
 # It is here because the channel from the referents into the message is narrower
 # than it looks. broccoli's `MHAttention` has no residual and the speaker's byte
@@ -373,11 +408,18 @@ heads = 4 # Heads per layer - only applies to Transformer language models
 # Rounded, not floored. 2.0 is exact at both message lengths (5 content symbols
 # -> 10 latents, 8 -> 16), so the rounding only matters if this is swept.
 #
-# 1.0 does not restore the previous architecture: the decoder cross-attention is
-# built either way, so that a sweep over this knob varies one thing rather than
-# two, and so that `state_dict` shapes stay comparable across sweep points. The
-# cost of the decoder is 4*d_model^2, about 419k parameters at 320 wide.
+# On the parallel arm, 1.0 does not restore the pre-latent-phase architecture:
+# the readout cross-attention is built either way, so that a sweep over this knob
+# varies one thing rather than two, and so that `state_dict` shapes stay
+# comparable across sweep points. At 1.0 it is a learned re-read of an array of
+# its own length -- redundant, but honestly so. The cost of it is 4*d_model^2,
+# about 419k parameters at 320 wide. The decoder arm has no readout to build, so
+# this does not arise there.
 latent_message_multiplier = 2.0
+# Learned prefix tokens on the stack that reads the latent array -- the
+# self-attention stack on the parallel arm, the message sequence on the decoder
+# arm, where they sit ahead of the SOS position and every symbol attends back to
+# them through the causal mask.
 utility_tokens = 4 # Only applies to Transformer language models
 # See [sender_feature_model] for what these are and why they are here. Note the
 # vocabulary logits are always layer-normalised before sampling and there is no
@@ -401,9 +443,16 @@ return_bos_tokens = false
 knocking_heads = false
 ff_inner_dropout = 0.0
 ff_outer_dropout = 0.0
-# See [receiver_comparer] for what these two are. The speaker's cross-attention
-# reads the prototypes; its self-attention is the Transformer stack over the
-# emerging message.
+# See [receiver_comparer] for what these two are.
+#
+# `cross_attention_dropout` covers every cross-attention in the speaker, on both
+# arms: the one that reads the prototypes into the latent array, the parallel
+# arm's readout back down to message length, and the decoder arm's per-block
+# reads of the latent memory -- `layers` of them rather than one, so this knob
+# reaches considerably further on that arm than on the other.
+# `self_attention_dropout` covers the stack, which is the self-attention over the
+# latent array on the parallel arm and over the emerging message on the decoder
+# arm.
 self_attention_dropout = 0.0
 cross_attention_dropout = 0.0
 alpha = "deepnorm" # see [sender_feature_model]
