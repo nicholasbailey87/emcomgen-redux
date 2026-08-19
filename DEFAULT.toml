@@ -199,6 +199,42 @@ logit_scale_lr = 2e-3
 # speaker, which is told its polarities apart by `init_h`.
 polarity_embedding_lr = 2e-3
 
+# The listener's counterpart, for `BilinearGRUComparer.log_score_scale` -- the
+# one scalar that sets how loudly it states a conclusion. Both comparer operands
+# are layer-normalised without an affine and the dot product is divided by
+# `sqrt(referent_embedding_size)`, so nothing else can reach the score's
+# magnitude: `bilinear` sets the *direction* of the comparison and this sets its
+# volume.
+#
+# A third key rather than a reuse, on the same argument as the one above. This
+# one exists on every rung, `logit_scale_lr` moves a speaker and this moves a
+# listener, and an ablation that varies one agent wants to be able to hold the
+# other's rate still.
+#
+# 2e-3 is not inherited by analogy, despite matching. Unlike the speaker's scale
+# this one opens *at* its target -- 1.0 is the calibrated value by construction
+# -- so it has no traverse to cover and the arithmetic that set 2e-3 there does
+# not apply. What sets it here is the dip. `29b18ea` measured a healthy speaker
+# falling ~0.2 log-units below its opening and returning within a few epochs,
+# which is the pair correctly refusing to commit while the message is still
+# noise; at the base 1e-4 and 194 steps an epoch that is 0.019 log-units an
+# epoch, so a 0.2 dip would take ten epochs and the listener would be
+# recalibrating an order of magnitude slower than the speaker it is aimed at.
+# At 2e-3 the ceiling is 0.388 an epoch and the speaker's observed dip used
+# about 11% of the same budget, so the headroom goes unspent when the gradient
+# is not sign-consistent.
+#
+# Read `train_score_scale` against `29b18ea`'s separation, which is the whole
+# reason the column exists: a healthy arm dips to ~0.8x and comes back, and the
+# arm that died fell 0.94 log-units and never did. There is deliberately no
+# floor -- that was tried in `e3fcabd` and cost fifteen epochs before `29b18ea`
+# removed it.
+#
+# Applies only to `BilinearGRUComparer`; `build_models` skips it for
+# `TransformerCrossAttentionComparer`, whose score comes from a `decision`
+# linear rather than a normalised dot product and which has no such parameter.
+score_scale_lr = 2e-3
+
 [scheduler]
 epochs = 100
 warm_up_epochs = 0
@@ -262,7 +298,6 @@ post_norm = true
 return_bos_tokens = false
 knocking_heads = false
 pooling_type = "concat" # max, average or concat
-batch_norm_logits = true
 ff_inner_dropout = 0.0
 ff_outer_dropout = 0.0
 self_attention_dropout = 0.0
@@ -424,8 +459,7 @@ utility_tokens = 4 # Only applies to Transformer language models
 # See [sender_feature_model] for what these are and why they are here. Note the
 # vocabulary logits are always layer-normalised before sampling and there is no
 # knob for it: `init_energy` above is resolved against unit
-# variance, so the two are a pair. That is unrelated to a vision model's
-# `batch_norm_logits`, which is broccoli's own.
+# variance, so the two are a pair.
 ff_inner_size = 554 # Only applies to Transformer language models
 # 0.1, matching every other stack. It was 0.2 here alone, from when the speaker's
 # language model was the deepest thing in the run relative to what it had to say;
@@ -485,7 +519,6 @@ post_norm = true
 return_bos_tokens = false
 knocking_heads = false
 pooling_type = "concat" # max, average or concat
-batch_norm_logits = true
 ff_inner_dropout = 0.0
 ff_outer_dropout = 0.0
 self_attention_dropout = 0.0

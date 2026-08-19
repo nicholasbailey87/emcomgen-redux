@@ -2,12 +2,26 @@
 Listener models
 """
 
+import math
+
 import torch
 import torch.nn as nn
 
 import broccoli
 
 from . import model_util
+
+# Mirrors `sender.LAYER_NORM_EPS`, and load-bearing for the same reason.
+#     `F.layer_norm` divides by `sqrt(var + eps)`, so scale invariance holds only
+#     while the incoming variance is large against `eps`; below that the
+#     normaliser quietly stops normalising and the operand comes through smaller
+#     than unit variance, taking the score's magnitude back out of
+#     `score_scale`'s hands and putting it back in the backbone's. At the 1e-5
+#     default a referent at RMS 0.01 comes out 4.5% off; at 1e-12 it is exact to
+#     four decimal places. Not currently binding -- ViT2 emits RMS 0.23 -- but it
+#     is the same trap `layer_norm_logits` documents, and closing it costs
+#     nothing. See `sender.layer_norm_logits` for the derivation.
+LAYER_NORM_EPS = 1e-12
 
 # Every broccoli module below is constructed with its full argument list, even
 #     where an argument is being set to the value it would have defaulted to.
@@ -107,6 +121,71 @@ class BilinearGRUComparer(nn.Module):
             bias=False
         )
 
+        # The two operands of the dot product, normalised per example over the
+        #     feature axis so the score's magnitude stops being inherited from
+        #     whichever vision model the rung mounts. Both are in referent space:
+        #     the message operand is `bilinear`'s *output*, not the GRU state,
+        #     because a norm upstream of a free `Linear` constrains nothing
+        #     downstream of it.
+        #
+        # No affine on either. The score is `r . p`, so a per-dimension gain is
+        #     absorbable into `bilinear` and could only add a second, unbounded
+        #     route to score magnitude -- the one these exist to close. It also
+        #     keeps `sum(LN(r)) = 0`, which is what annihilates the message
+        #     operand's mean-subtraction; with a `beta` that term would start
+        #     shifting scores between objects.
+        self.referent_layer_norm = nn.LayerNorm(
+            self.referent_embedding_size,
+            elementwise_affine=False,
+            eps=LAYER_NORM_EPS,
+        )
+        self.message_layer_norm = nn.LayerNorm(
+            self.referent_embedding_size,
+            elementwise_affine=False,
+            eps=LAYER_NORM_EPS,
+        )
+
+        # The listener's one degree of freedom over its own confidence, and the
+        #     counterpart of the speaker's `log_logit_scale`. Normalising both
+        #     operands closes every other route to score magnitude, and BCE is
+        #     not scale-invariant, so without this the listener could only ever
+        #     sharpen by aligning the two -- never by committing harder to an
+        #     alignment it already has.
+        #
+        # One scalar, not one per operand: `c * LN(p) . LN(r)` and
+        #     `LN(p) . c * LN(r)` are the same function, so a second would be
+        #     redundant with only the product able to act. It multiplies the
+        #     message operand, which is shared across the objects of a game, so
+        #     it cannot change which object wins -- only how loudly the listener
+        #     says so.
+        #
+        # Opens at 1.0, which `forward`'s `1/sqrt(d)` makes the calibrated
+        #     value: both operands leave LayerNorm at norm `sqrt(d)` and start
+        #     mutually random, so the division puts the untrained score at unit
+        #     standard deviation and BCE within a hair of `ln 2` on both arms.
+        #     Nothing here has a traverse to cover -- unlike
+        #     `log_logit_scale`, which opens at 0.839 against a usable channel
+        #     of 4 to 6.
+        #
+        # Stored as a log anyway, for reasons that are not that one. Zero is
+        #     where every gradient in the pair is gated, since `s` multiplies
+        #     the only path from the message to the loss, and `exp` puts it out
+        #     of reach; halving and doubling a gain should cost the same step;
+        #     and it gives `train_score_scale` a known ceiling of
+        #     `score_scale_lr * steps` log-units per epoch, which is what makes
+        #     the column readable rather than merely present.
+        self.log_score_scale = nn.Parameter(torch.zeros(()))
+
+    @property
+    def score_scale(self):
+        """
+        The multiplier applied to the normalised message operand, always
+            positive. Read here rather than exponentiating at the use site, so
+            `forward` and the metrics column cannot drift apart. Counterpart of
+            `SenderGRULM.logit_scale`.
+        """
+        return self.log_score_scale.exp()
+
     def forward(
         self,
         referents: torch.Tensor, # (batch, n_objects, d_embedding)
@@ -161,23 +240,42 @@ class BilinearGRUComparer(nn.Module):
             # Standard unidirectional extraction
             message_embeddings = token_embeddings[:, -1, ...]
         
-        message_embeddings = self.dropout(message_embeddings)
+        # Normalised *after* the projection, not before it: `bilinear` is free,
+        #     so a norm on its input would set only where `W` starts, where a
+        #     norm on its output divides `W`'s magnitude out of the score
+        #     entirely and leaves `score_scale` as the one thing that sets it.
         projected = self.bilinear(message_embeddings)
+        projected = self.message_layer_norm(projected) * self.score_scale
+        projected = self.dropout(projected)
 
         # Both operands of the comparison are regularised, not just the
         #     message. The score is a dot product, so dropping units of one
         #     side only lets the listener lean on whichever side is left
         #     intact; masking both forces the bilinear map to be robust in the
         #     referent basis as well as the message basis.
+        referents = self.referent_layer_norm(referents)
         referents = self.dropout(referents)
 
         scores = torch.einsum("ijh,ih->ij", (referents, projected)) # (batch, n_objects)
 
-        return scores
+        # Attention's `1/sqrt(d)`, and load-bearing rather than cosmetic now
+        #     that both operands are normalised. It is what makes
+        #     `score_scale = 1.0` the calibrated opening instead of a number
+        #     whose meaning moves with `referent_embedding_size` -- 512 on
+        #     ResNet18 against 320 on ViT2, which would otherwise open the two
+        #     arms 1.26x apart and both far too loud.
+        return scores / math.sqrt(self.referent_embedding_size)
 
     def reset_parameters(self):
         self.gru.reset_parameters()
         self.bilinear.reset_parameters()
+        # No-ops while the two norms are parameter-free, and listed anyway so
+        #     that turning `elementwise_affine` back on cannot leave a reset
+        #     listener holding trained gains -- the failure the other comparer's
+        #     `reset_parameters` already had once.
+        self.referent_layer_norm.reset_parameters()
+        self.message_layer_norm.reset_parameters()
+        nn.init.zeros_(self.log_score_scale)
 
 
 class TransformerCrossAttentionComparer(nn.Module):
@@ -261,7 +359,13 @@ class TransformerCrossAttentionComparer(nn.Module):
             self.d_model
         )
 
-        self.referent_layer_norm = nn.LayerNorm(self.d_model)
+        # Parameter-free, as on `BilinearGRUComparer`: an affine here would
+        #     be a second route to score magnitude alongside `decision`, and
+        #     the point of the norm is that the referent arrives at a size
+        #     the vision model did not choose.
+        self.referent_layer_norm = nn.LayerNorm(
+            self.d_model, elementwise_affine=False, eps=LAYER_NORM_EPS
+        )
 
         self.message_adapter = nn.Linear(
             self.token_embedding_size,

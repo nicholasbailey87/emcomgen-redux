@@ -139,7 +139,39 @@ class ViT2(nn.Module):
             transformer_depthwise_linear_stochastic_depth=kwargs[
                 "depthwise_linear_stochastic_depth"
             ],
-            batch_norm_logits=kwargs["batch_norm_logits"],
+            # Pinned `False`, and deliberately not a config key. `image_classes`
+            #     above is `d_model`, so what broccoli calls the logits is this
+            #     backbone's output *embedding*, and this flag would put an
+            #     `nn.BatchNorm1d(d_model, affine=False)` on it as the last
+            #     operation before the prototyper or the comparer ever sees it.
+            #
+            # Both objections are ones this repository already accepted one
+            #     level down, when `layer_norm_logits` replaced an
+            #     `nn.BatchNorm1d` over the vocabulary logits: BatchNorm keeps
+            #     running statistics, so train and eval normalise by different
+            #     numbers and every `test_` column is read through an estimate
+            #     the training pass never used; and it couples to the batch,
+            #     which means it also couples to `accumulator_steps`.
+            #
+            # The batch coupling is worse here than it was there. The listener
+            #     forwards `batch * n_objects` images in one flat call, so this
+            #     normalised targets and distractors from *different games*
+            #     against each other -- a referent's embedding depended on which
+            #     other candidates happened to share its batch. The speaker has
+            #     the same shape one step earlier, where the pooled positives
+            #     and negatives of unrelated games meet in the same statistic.
+            #
+            # Turning it off leaves this backbone's output unnormalised:
+            #     `SequencePool` into a plain `Linear`. That is the intended
+            #     state, not an oversight. Whichever consumer needs the referent
+            #     at a controlled magnitude should normalise it where the score
+            #     is formed -- `SenderTransformerLM.referent_layer_norm` and
+            #     `TransformerCrossAttentionComparer.referent_layer_norm` both
+            #     already do -- rather than have one flag inside the vision model
+            #     decide it for every consumer at once, per batch, differently at
+            #     eval. Note `BilinearGRUComparer` has no such norm, so its score
+            #     now inherits whatever magnitude the backbone emits.
+            batch_norm_logits=False,
             logit_projection_layer=nn.Linear,
             linear_module=nn.Linear,
             head=SequencePoolClassificationHead,

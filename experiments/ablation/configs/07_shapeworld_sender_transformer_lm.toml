@@ -20,8 +20,14 @@
 #
 # That leaves this rung moving one thing against rung 5: the speaker's language
 # model. The GRU baseline is autoregressive too, so the comparison is
-# architecture rather than architecture plus generation regime. Rung 13 is the
-# same speaker in the parallel Perceiver IO arm, for the regime on its own.
+# architecture rather than architecture plus generation regime.
+#
+# The regime is measured on its own by rungs 13 and 14, but at the *top* of the
+# ladder rather than here: they are rungs 11 and 12 with this flag flipped. The
+# choice made on this rung is inherited by 9 through 12, so it is a fork rather
+# than a step, and a contrast taken beside rung 7 could not tell you whether the
+# fork was called correctly -- the two arms are free to reorder as the listener
+# gets better at reading a message. See rung 13's header.
 
 name = "ablation"
 

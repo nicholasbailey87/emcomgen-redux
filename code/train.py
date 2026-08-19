@@ -500,6 +500,32 @@ def run(
                     batch_size=batch_size,
                 )
 
+            # `score_scale` is the listener's half of the same story, and is
+            # read the same way. `logit_scale` says how audibly the speaker
+            # states a message; this says how confidently the listener acts on
+            # one. Both dip during bootstrapping for the same reason -- neither
+            # agent should commit while the message is still noise -- and
+            # 29b18ea measured the separation that tells a productive dip from a
+            # collapse: a healthy speaker fell ~0.2 log-units and returned
+            # within a few epochs, where the arm that died fell 0.94 and never
+            # did. There is deliberately no floor on either; e3fcabd tried one
+            # and it cost fifteen epochs.
+            #
+            # Only `BilinearGRUComparer` has such a parameter. Logged as NaN
+            # otherwise rather than omitted, so both comparers write the same
+            # metrics.csv header and the rungs stay readable side by side, as
+            # `AveragePrototyper` does for the pooling columns above.
+            if training:
+                comparer = pair.receiver.comparer
+                stats.update(
+                    score_scale=(
+                        comparer.score_scale.item()
+                        if hasattr(comparer, "score_scale")
+                        else float("nan")
+                    ),
+                    batch_size=batch_size,
+                )
+
         if training:
             if batch_i % config['optimiser']['log_interval'] == 0:
                 log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats)

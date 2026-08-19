@@ -72,8 +72,9 @@ comparer = "TransformerCrossAttentionComparer"
 # everything else is 1.73 -- or 443, which would have put it 1.30x over the
 # comparer it replaces. Neither is worth an exact match.
 #
-# 5 layers is then the closest depth: 5,399,700 parameters against
-# `BilinearGRUComparer`'s 5,015,552, or 1.08x. That is looser than the 1.01x the
+# 5 layers is then the closest depth: 5,399,060 parameters on ShapeWorld and
+# 5,400,020 on CUB, against `BilinearGRUComparer`'s 5,015,553 on the ViT
+# referents of rungs 9 and 10, or 1.08x. That is looser than the 1.01x the
 # hand-sized version reached, but tighter than the vision arms, which sit at
 # 0.91x and 1.11x because a ViT's patch tokeniser scales with image size.
 #

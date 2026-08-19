@@ -1,18 +1,13 @@
-# Rung 14: rung 8 with the speaker's language model in its parallel arm.
+# Rung 14: rung 12 with the speaker's language model in its parallel arm.
 #
-# The CUB counterpart of rung 13, and it does the same job: rung 8 moves
-# architecture while holding the generation regime, this one holds the
-# architecture and moves the regime. See rung 13's header for the full argument;
-# it is not restated here.
+# CUB's copy of rung 13; see that header for why this pair sits beside rungs 11
+# and 12 rather than above them, and why the contrast is taken at the top of the
+# ladder rather than at the fork in rung 8.
 #
-# 5,569,660 parameters against the GRU baseline's 5,774,073, or -3.5%, matching
-# the offset rung 13 reaches on ShapeWorld. Rung 8 is +1.5%.
+# The speaker is 5,569,660 parameters against the GRU baseline's 5,774,073, or
+# -3.5%, where rung 12's decoder speaker is +1.5%.
 #
-# The message is longer here (8 content symbols against ShapeWorld's 5), so the
-# latent array is 16 rather than 10 and the referents reach the language model
-# through 5 heads x 16 latents = 80 scalars rather than 50. That is the same on
-# both arms -- the encoder cross-attention is the one part of this speaker
-# `bidirectional` does not touch.
+# `train_score_scale` is NaN here, as on rung 12.
 
 name = "ablation"
 
@@ -32,12 +27,73 @@ token_embedding_size = 320
 d_model = 320
 heads = 5    # head_dim 64, as everywhere
 
-# 5, where rung 8's decoder takes 4. See rung 13's `layers` for why the two arms
-# cannot be matched on depth and parameters at once.
+# 5, where the decoder arm on rungs 11 and 12 takes 4. Matching the two arms on
+# parameters means not matching them on depth: an encoder block is 944,711
+# parameters at this width and a decoder block is 1,354,951, because the decoder
+# cross-attends into the latent memory inside every block. Five encoder blocks
+# put this arm at 0.965x the GRU baseline and four decoder blocks put the decoder
+# arm at 1.015x, which is as close as the two get to the same reference without
+# one being sized to the other instead.
+#
+# So a difference between this rung and rung 11 is a difference of regime and of
+# depth together. That is the residual confound in the pair, and it is the one
+# that could not be removed: parameters, depth and regime cannot all three be
+# held.
 layers = 5
 
-# `true`: the parallel Perceiver IO arm. See rung 7's `bidirectional` for what
+# `true`: the parallel Perceiver IO arm, and the one thing this rung moves
+# against rung 11. See rung 11's `[sender_language_model] bidirectional` for what
 # the two settings select and why the word means what it does on this class.
+#
+# Note the identically-named key in `[receiver_comparer]` below is a different
+# knob on a different module and keeps rung 11's value.
+bidirectional = true
+
+[receiver]
+feature_model = "ViT2"
+comparer = "TransformerCrossAttentionComparer"
+
+[receiver_comparer]
+# Only `layers` is set here. This module's width is free of every other width in
+# the run -- it adapts the referents (`referent_adapter`) and the message
+# (`message_adapter`) into its own space -- so it could be sized to hit a budget
+# exactly, and used to be, at 256 wide with a feedforward inner size of 256.
+#
+# It takes DEFAULT's 320 / 5 heads / 554 instead, so that every transformer in
+# the repo is one width, one head dimension (64) and one feedforward proportion
+# (1.73), and depth is the only thing that varies between them. Sizing this one
+# to a target meant either an inner size of 256 -- a proportion of 1.0 where
+# everything else is 1.73 -- or 443, which would have put it 1.30x over the
+# comparer it replaces. Neither is worth an exact match.
+#
+# 5 layers is then the closest depth: 5,399,060 parameters on ShapeWorld and
+# 5,400,020 on CUB, against `BilinearGRUComparer`'s 5,015,553 on the ViT
+# referents of rungs 9 and 10, or 1.08x. That is looser than the 1.01x the
+# hand-sized version reached, but tighter than the vision arms, which sit at
+# 0.91x and 1.11x because a ViT's patch tokeniser scales with image size.
+#
+# Depth is not free to move much either way. `layers` is split inside the module
+# -- `encoding` takes layers - layers//2 and `fusion` takes layers//2 -- so 5
+# gives a 3-layer message encoder and a 2-layer fusion block over the referent
+# set, and 2 is the minimum that keeps `stochastic_depth` alive at all, since it
+# is suppressed entirely unless layers//2 > 1. 6 layers would give an even 3/3
+# but 1.26x.
+#
+# `d_model` is the only width restated here. DEFAULT's 1024 in that section is
+# `BilinearGRUComparer`'s hidden size, not this class's; `heads`,
+# `ff_inner_size` and the rest are read only by this class and are inherited.
+d_model = 320
+layers = 5
+
+# `true`, and for the same reason rung 7 sets it on `[sender_language_model]`:
+# no transformer in this ladder runs a causal mask. The key is shared with
+# `BilinearGRUComparer`, which passes it to `nn.GRU(bidirectional=)` and where
+# DEFAULT.toml's `false` still applies; `TransformerCrossAttentionComparer`
+# instead turns it into `causal = not bidirectional` on the stack that encodes
+# the incoming message (`receiver.py`). Masking that stack left to right models
+# a listener that must commit to an interpretation of symbol 1 before seeing
+# symbol 5, which is not the listening task -- the message arrives whole, and
+# the cross-attention and fusion stacks after it are already `causal=False`.
 bidirectional = true
 
 [scheduler]

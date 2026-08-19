@@ -256,9 +256,8 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
 There are exactly **two** exploration controls, and they do different jobs. The
 emittable logits are always layer-normalised to unit variance per example and
 per position before sampling — there is no knob for that, because both controls
-below are expressed against it. (LayerNorm replaced a `batch_norm_logits` here;
-the identically-named keys in the two `*_feature_model` sections are broccoli's
-own and are unrelated. It is ~2.6× tighter on the criterion that matters, is
+below are expressed against it. (LayerNorm replaced a `batch_norm_logits` here.
+It is ~2.6× tighter on the criterion that matters, is
 position-invariant for both speakers, has no running statistics so train and
 eval agree, and does not couple to `accumulator_steps`. Without an affine it is
 argmax-preserving, so it changes no eval-time message.)
@@ -462,6 +461,27 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     use the message), then a climb, then a plateau once the `uniform_weight`
     cap saturates fidelity and the gradient dies with it. A scale climbing
     while accuracy stays at chance is co-adaptation to a premature code.
+- `train_score_scale` — the listener's counterpart, `exp(log_score_scale)` on
+    `BilinearGRUComparer`, and NaN for the cross-attention comparer, which has
+    no such parameter. Both operands of the listener's dot product are
+    layer-normalised without an affine and the product is divided by
+    `sqrt(referent_embedding_size)`, so this is the only thing left that can set
+    how loudly the listener states a conclusion — `bilinear` sets the direction
+    of the comparison and this sets its volume. It cannot move the decision:
+    it multiplies an operand shared across the objects of a game, so `scores > 0`
+    and the reference-game argmax are both invariant to it. What it moves is BCE,
+    and through BCE every gradient in the pair.
+    It opens at exactly 1.0, which the `sqrt(d)` division makes the calibrated
+    value rather than an arbitrary one, so unlike `train_logit_scale` it has no
+    traverse to cover and a flat start is not expected. Read it the same way
+    otherwise, and against the same separation: a dip while the message is still
+    noise is the listener correctly refusing to commit, and `29b18ea`'s numbers
+    are the yardstick for when a dip has become a collapse. Its travel is bounded
+    by `score_scale_lr * steps` for the same AdamW reason as the speaker's — at
+    `2e-3` and 194 steps that is 0.388 log-units an epoch, against an observed
+    healthy dip of about 0.2 over five. There is no floor, deliberately;
+    `e3fcabd` fitted one to the speaker's scale and `29b18ea` removed it after it
+    cost fifteen epochs.
 - `train_sampling_tau` — the temperature actually handed to `gumbel_softmax`,
     as against the configured `tau`. A function of `train_logit_scale` and the
     epoch counter alone, so it carries no independent information, but it is

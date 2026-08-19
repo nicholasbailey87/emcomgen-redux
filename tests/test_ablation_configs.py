@@ -117,32 +117,46 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # Reads 512-d referents from the ResNet, where rung 11's reads 320-d
         # from the ViT, and `BilinearGRUComparer`'s projection is sized from
         # that width -- so these two are not the like-for-like pair. Rung 11's
-        # counterpart is rung 9's comparer, at 5,015,552, which the
+        # counterpart is rung 9's comparer, at 5,015,553, which the
         # cross-attention comparer meets at 1.08x.
-        ("01_shapeworld_baseline.toml", "receiver.comparer", 5_212_160),
+        #
+        # The odd digit is `log_score_scale`, one 0-d parameter. The
+        # cross-attention counts fell 640 in the same change, its
+        # `referent_layer_norm` having given up a `gamma` and a `beta` at
+        # `d_model = 320`.
+        ("01_shapeworld_baseline.toml", "receiver.comparer", 5_212_161),
         # ShapeWorld: the Transformer arm it is compared against. The speaker's
         # language model is the autoregressive decoder, four blocks at message
         # length -- see rung 7 for why four rather than five.
         ("11_shapeworld_receiver_cross_attention.toml", "sender.feat_model", 10_177_420),
         ("11_shapeworld_receiver_cross_attention.toml", "sender.language_model", 5_851_183),
-        ("11_shapeworld_receiver_cross_attention.toml", "receiver.comparer", 5_399_700),
+        ("11_shapeworld_receiver_cross_attention.toml", "receiver.comparer", 5_399_060),
         # CUB: the CNN/GRU baseline.
         ("02_birds_baseline.toml", "sender.feat_model", 11_176_512),
         ("02_birds_baseline.toml", "sender.language_model", 5_774_073),
-        ("02_birds_baseline.toml", "receiver.comparer", 5_212_160),
+        ("02_birds_baseline.toml", "receiver.comparer", 5_212_161),
         # CUB: the Transformer arm it is compared against.
         ("12_birds_receiver_cross_attention.toml", "sender.feat_model", 12_430_908),
         ("12_birds_receiver_cross_attention.toml", "sender.language_model", 5_857_909),
-        ("12_birds_receiver_cross_attention.toml", "receiver.comparer", 5_400_660),
+        ("12_birds_receiver_cross_attention.toml", "receiver.comparer", 5_400_020),
         # The parallel arm, rungs 13 and 14. Five encoder blocks over the latent
         # array rather than four decoder blocks over the message, which is a
         # different speaker at a different size against the same baseline --
         # 0.965x where the decoder is 1.015x. Pinned here because the pair is
-        # what makes a difference between rungs 7 and 13 readable: if either
+        # what makes a difference between rungs 11 and 13 readable: if either
         # moves without the other, the two are no longer answering the same
         # question.
         ("13_shapeworld_sender_transformer_lm_latent.toml", "sender.language_model", 5_562_934),
         ("14_birds_sender_transformer_lm_latent.toml", "sender.language_model", 5_569_660),
+        # And the listener, which is the half that has to be *identical* to 11
+        # and 12 for the contrast to be about emission at all. 13 and 14 are
+        # those rungs with the speaker's `bidirectional` flipped and nothing
+        # else, so these two assertions are the ones that would catch the pair
+        # drifting apart.
+        ("13_shapeworld_sender_transformer_lm_latent.toml", "receiver.comparer", 5_399_060),
+        ("14_birds_sender_transformer_lm_latent.toml", "receiver.comparer", 5_400_020),
+        ("13_shapeworld_sender_transformer_lm_latent.toml", "sender.feat_model", 10_177_420),
+        ("14_birds_sender_transformer_lm_latent.toml", "sender.feat_model", 12_430_908),
     ],
 )
 def test_the_arms_are_the_sizes_they_claim(config_file, module, expected):
