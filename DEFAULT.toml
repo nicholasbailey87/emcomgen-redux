@@ -3,7 +3,28 @@
 name = "DEFAULT" # experiment name - should be the same as file name
 resume = true
 cuda = true
-compile = false
+# `torch.compile` on the agent pair, applied in `train.py` after the checkpoint
+# restore so a resume still key-matches. On because the ablation rungs were
+# leaving throughput on the floor: a ShapeWorld ViT epoch is ~18.2 PFLOPs
+# (20,000 games x 20 examples x 2 agents, 22.7 GFLOPs each fwd+bwd) and was
+# taking 22 minutes, i.e. ~14 TFLOP/s, against the ~35 TFLOP/s per GPU the
+# ImageNet ViT in `vit-representation-learning` sustains on the same hardware --
+# where `torch.compile` is on. A CPU profile of `ViT2` puts `aten::mul` at 22%
+# of self time over 1,373 calls, which is the elementwise traffic compile exists
+# to fuse.
+#
+# Expect graph breaks rather than one graph: the autoregressive decode loop in
+# `SenderTransformerLM`/`SenderGRULM`, the Gumbel sampling, and the per-batch
+# `.cpu()` calls in the training loop all force them. The win is real but is
+# unlikely to be the full 2.5x.
+#
+# One consequence, and the reason this is set here rather than per rung. A
+# compiled module prefixes every `state_dict` key with `_orig_mod.`, so the
+# `final_model.pt` a compiled rung writes does not key-match one from an
+# uncompiled rung. `probe_shape.py` fails loudly on the mismatch rather than
+# silently loading nothing, but the files are still incompatible: flipping this
+# means re-running a whole comparison, not half of one.
+compile = true
 use_lang = true
 copy_receiver = false
 receiver_only = false
@@ -257,7 +278,7 @@ language_model = "SenderGRULM"
 [sender_feature_model]
 # The one ViT specification, used by every rung that swaps a CNN for a
 # Transformer on either agent. Sized against ResNet18's 11,176,512 parameters:
-# 320 wide, 10 layers, feedforward inner 554 comes to 10,084,940, or 91%. It was
+# 320 wide, 10 layers, feedforward inner 576 comes to 10,317,986, or 92%. It was
 # 384/9/384 for birds and 128/4/128 for ShapeWorld, which matched each dataset's
 # own baseline backbone -- but `SenderTransformerLM` pins its width to the vision
 # model's, so the ShapeWorld language model inherited 128 and came out 12.8x
@@ -284,7 +305,27 @@ utility_tokens = 0 # Only applies to Transformer vision models
 # code -- `source_size`, `input_size`, `in_channels`, the pooling kernel
 # geometry -- are derived rather than configured. The `cnn_*` group is inert
 # while `cnn` is False and stays in Python too.
-ff_inner_size = 554 # Only applies to Transformer vision models
+
+# 576 rather than the 554 the ResNet18 parameter budget solves for exactly, and
+# the two extra points of budget above buy alignment. SwiGLU makes this number
+# the shape of two matmuls -- `Linear(320 -> 2*ff_inner_size)` and
+# `Linear(ff_inner_size -> 320)` -- which between them are about 47% of the
+# ViT's FLOPs. bf16 is two bytes and the tensor-core kernels want 16-byte
+# aligned rows, so cuBLAS's fast path wants those dimensions to be multiples of
+# 8, and NVIDIA asks for 64 or 128 for good tile efficiency. 554 and its double
+# 1108 are neither; 576 is a multiple of 64 and 1152 a multiple of 128.
+#
+# 576 over the other aligned candidates because it stays closest to the budget.
+# 512 aligns no better in practice and drops the backbone to 86% of ResNet18,
+# four points *below* the target where 576 is two above; 552 is a multiple of 8
+# but not 64.
+#
+# Worth 1.2-2x on the affected matmuls at best, not the whole gap to the ~35
+# TFLOP/s per GPU the ImageNet ViT in `vit-representation-learning` sustains --
+# note that run reaches 896 (128 x 7) by setting `transformer_ff_ratio`, which
+# makes broccoli discard `ff_inner_size` entirely. See `compile` at the top of
+# this file for the other half, and `scripts/vit_throughput.py` to measure both.
+ff_inner_size = 576 # Only applies to Transformer vision models
 stochastic_depth = 0.1 # Only applies to Transformer vision models
 depthwise_linear_stochastic_depth = true # ramp the rate linearly over depth
 activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
@@ -474,7 +515,7 @@ utility_tokens = 4 # Only applies to Transformer language models
 # vocabulary logits are always layer-normalised before sampling and there is no
 # knob for it: `init_energy` above is resolved against unit
 # variance, so the two are a pair.
-ff_inner_size = 554 # Only applies to Transformer language models
+ff_inner_size = 576 # Only applies to Transformer language models
 # 0.1, matching every other stack. It was 0.2 here alone, from when the speaker's
 # language model was the deepest thing in the run relative to what it had to say;
 # at 5 layers over a latent array of 10 or 16 it is now the shallowest of the
@@ -521,7 +562,7 @@ layers = 10 # Only applies to Transformer vision models
 heads = 5 # head_dim 64. Only applies to Transformer vision models
 utility_tokens = 0 # Only applies to Transformer vision models
 # See [sender_feature_model] for what these are and why they are here.
-ff_inner_size = 554 # Only applies to Transformer vision models
+ff_inner_size = 576 # Only applies to Transformer vision models
 stochastic_depth = 0.1 # Only applies to Transformer vision models
 depthwise_linear_stochastic_depth = true
 activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
@@ -574,7 +615,7 @@ message_length = 7 # Only applies to Transformer comparers. Should be the same a
 # `tests/test_backbones.py`.
 heads = 5 # Only applies to Transformer comparers
 utility_tokens = 0 # Only applies to Transformer comparers
-ff_inner_size = 554 # Only applies to Transformer comparers
+ff_inner_size = 576 # Only applies to Transformer comparers
 stochastic_depth = 0.1 # Only applies to Transformer comparers, and only to
                        # the message encoder: the three attention stages around
                        # it are bare `MHAttention`, with no branch to drop.

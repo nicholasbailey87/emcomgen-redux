@@ -25,10 +25,27 @@ heads = 5    # head_dim 64, as everywhere
 
 # 4, where the latent arm takes 5, and the difference is parameters rather than
 # taste. A decoder block carries a cross-attention the encoder block does not,
-# so it costs about 4*d_model^2 more: 1,354,951 against 944,711 at 320 wide with
-# `ff_inner_size = 554`. At 5 layers this speaker would be 7,206,133 parameters,
-# or 1.25x the GRU baseline; at 4 it is 5,848,303, or 1.015x -- a tighter match
-# than the latent arm's 0.965x. Three would be 0.78x.
+# so it costs about 4*d_model^2 more: 1,376,137 against 965,897 at 320 wide with
+# `ff_inner_size = 576`. At 5 layers this speaker would be 7,309,184 parameters,
+# or 1.36x the GRU baseline; at 4 it is 5,933,047, or 1.10x. Three would be
+# 0.85x, so 4 is the closest this arm gets.
+#
+# Two of those numbers moved for two different reasons, and only one of them is
+# `ff_inner_size`. Raising it 554 -> 576 for tensor-core alignment (see
+# DEFAULT.toml) added about 1.4% here, which changes nothing. The ratios are the
+# other reason: they read 1.25x, 1.015x and 0.78x when this comment was written,
+# against a `SenderGRULM` baseline about 7% larger than the one the code now
+# builds. The counts above are measured against the current tree -- 5,371,707 on
+# ShapeWorld, 5,380,857 on birds, the two within 0.2% of each other -- so the
+# drift is in the baseline, not in this arm.
+#
+# That reverses one claim this comment used to make. The latent arm at 5 layers
+# is now 1.05x, a *tighter* match to the baseline than this arm's 1.10x, where
+# it used to be the looser of the two at 0.965x. The ladder still picks 4 here,
+# since 3 is further out on the other side, but "closest available" is a weaker
+# warrant than "1.015x" was, and the two Transformer arms are no longer matched
+# to the same tolerance. Worth re-deriving the ladder against the current
+# baseline before the ablation is read as a capacity-matched comparison.
 #
 # The cost of matching parameters is that the two Transformer arms differ in
 # depth as well as in where their layers act. Depth or parameters, not both, and
