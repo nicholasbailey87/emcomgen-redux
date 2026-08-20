@@ -1,7 +1,7 @@
 # Rung 10: rung 8 with the receiver's vision model updated to match the
 # sender's.
 #
-# The same ViT2 specification the sender took in rung 6, so 12,430,908
+# The same ViT2 specification the sender took in rung 6, so 12,338,428
 # parameters against ResNet18's 11,176,512. Unlike the sender's language model,
 # the receiver's comparer is not pinned to this width -- it adapts whatever
 # referent width it is given through `referent_adapter` -- so this rung changes
@@ -29,7 +29,7 @@ heads = 5    # head_dim 64, as everywhere
 # taste. A decoder block carries a cross-attention the encoder block does not,
 # so it costs about 4*d_model^2 more: 1,354,951 against 944,711 at 320 wide with
 # `ff_inner_size = 554`. At 5 layers this speaker would be 7,206,133 parameters,
-# or 1.25x the GRU baseline; at 4 it is 5,851,183, or 1.015x -- a tighter match
+# or 1.25x the GRU baseline; at 4 it is 5,848,303, or 1.015x -- a tighter match
 # than the latent arm's 0.965x. Three would be 0.78x.
 #
 # The cost of matching parameters is that the two Transformer arms differ in

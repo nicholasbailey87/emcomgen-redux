@@ -155,9 +155,11 @@ class DecoderBlock(nn.Module):
         #     the rotary self-attention above; the memory's order is already
         #     baked into it by whatever produced it. This mirrors how
         #     `SenderTransformerLM` pins its two standalone cross-attentions,
-        #     including `positional_heads` at broccoli's own `MHAttention`
-        #     default of 0.25, which is inert while `rotary_embedding` is None
-        #     but differs from the 1.0 this repo pins on `TransformerEncoder`.
+        #     including `positional_heads` at the repo-wide 1.0 -- inert while
+        #     `rotary_embedding` is None, and pinned so that turning rotary on
+        #     here could not quietly introduce a head partition. broccoli's own
+        #     defaults differ by class (0.25 on `MHAttention`, 0.5 on
+        #     `TransformerEncoder`), so neither is a value to inherit.
         self.cross_attention = broccoli.transformer.MHAttention(
             d_model,
             n_heads,
@@ -168,7 +170,7 @@ class DecoderBlock(nn.Module):
             bos_tokens=0,
             knocking_heads=False,
             rotary_embedding=None,
-            positional_heads=0.25,
+            positional_heads=1.0,
             source_size=None,
             scaling=msa_scaling,
         )
@@ -298,7 +300,7 @@ class TransformerDecoder(nn.Module):
         d_model,
         n_layers,
         n_heads,
-        absolute_position_embedding=True,
+        absolute_position_embedding=False,
         relative_position_embedding=False,
         positional_heads=1.0,
         source_size=None,

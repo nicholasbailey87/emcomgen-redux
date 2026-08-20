@@ -511,18 +511,15 @@ def run(
             # did. There is deliberately no floor on either; e3fcabd tried one
             # and it cost fifteen epochs.
             #
-            # Only `BilinearGRUComparer` has such a parameter. Logged as NaN
-            # otherwise rather than omitted, so both comparers write the same
-            # metrics.csv header and the rungs stay readable side by side, as
-            # `AveragePrototyper` does for the pooling columns above.
+            # Read straight off the comparer, with no `hasattr` fallback:
+            # every comparer carries one now, so a fallback could only turn a
+            # rename into a silently-NaN column -- and a silently-NaN column is
+            # how the cross-attention comparer's collapse went unnoticed for a
+            # whole smoke test. Unlike the pooling columns above, there is no
+            # class here for which the quantity is genuinely inapplicable.
             if training:
-                comparer = pair.receiver.comparer
                 stats.update(
-                    score_scale=(
-                        comparer.score_scale.item()
-                        if hasattr(comparer, "score_scale")
-                        else float("nan")
-                    ),
+                    score_scale=pair.receiver.comparer.score_scale.item(),
                     batch_size=batch_size,
                 )
 

@@ -204,19 +204,16 @@ def build_models(dataloaders, config):
             "polarity_embedding_lr",
         )
 
-    # The listener's scale, gated on the comparer class for the same reason the
-    #     tag is gated on the speaker's: a `TransformerCrossAttentionComparer`
-    #     has no `log_score_scale` by construction -- its score comes off a
-    #     `decision` linear rather than a normalised dot product -- so the key is
-    #     inapplicable there rather than missing, and skipping is right. A
-    #     `BilinearGRUComparer` without the parameter is a rename, and
-    #     `split_out_parameter` raises.
+    # The listener's scale. Ungated, unlike the speaker's polarity tag: both
+    #     comparers carry `log_score_scale` now, so there is no class for which
+    #     the key is inapplicable and nothing left for a gate to distinguish.
+    #     That puts `split_out_parameter`'s `RuntimeError` back on duty as a
+    #     live guard -- a rename says so instead of leaving the knob quietly
+    #     doing nothing, which is what the old `isinstance` check would have
+    #     done for the comparer it excluded.
     score_scale_lr = config['optimiser'].get('score_scale_lr', base_lr)
 
-    if (
-        score_scale_lr != base_lr
-        and isinstance(pair.receiver.comparer, receiver.BilinearGRUComparer)
-    ):
+    if score_scale_lr != base_lr:
         optimiser = split_out_parameter(
             optimiser,
             pair,

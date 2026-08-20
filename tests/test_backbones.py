@@ -386,7 +386,19 @@ def test_cross_attention_comparer_reset_covers_its_adapters():
     _perturb(comparer)
     comparer.reset_parameters()
 
-    for name in ("referent_adapter", "message_adapter", "referent_layer_norm"):
+    for name in (
+        "referent_adapter",
+        "message_adapter",
+        "referent_layer_norm",
+        "message_cross_attention",
+        "message_residual_norm",
+        "referent_cross_attention",
+        "referent_residual_norm",
+        "referent_self_attention",
+        "referent_self_attention_norm",
+        "decision_layer_norm",
+        "decision",
+    ):
         module = getattr(comparer, name)
         stale = _still_perturbed(module)
         assert not stale, f"{name} not reset: {stale}"

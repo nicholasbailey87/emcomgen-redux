@@ -1,6 +1,6 @@
 # Rung 8: rung 6 with a Transformer sender language model.
 #
-# 5,857,909 parameters against the GRU's 5,774,073, or +1.5% -- the same offset
+# 5,854,069 parameters against the GRU's 5,774,073, or +1.5% -- the same offset
 # rung 7 reaches on ShapeWorld, which is the point of giving both datasets the
 # same width. It was 0.2% here before, but only by luck of the per-dataset
 # sizing, and the same luck left ShapeWorld 12.8x short.
@@ -36,7 +36,7 @@ heads = 5    # head_dim 64, as everywhere
 # taste. A decoder block carries a cross-attention the encoder block does not,
 # so it costs about 4*d_model^2 more: 1,354,951 against 944,711 at 320 wide with
 # `ff_inner_size = 554`. At 5 layers this speaker would be 7,206,133 parameters,
-# or 1.25x the GRU baseline; at 4 it is 5,851,183, or 1.015x -- a tighter match
+# or 1.25x the GRU baseline; at 4 it is 5,848,303, or 1.015x -- a tighter match
 # than the latent arm's 0.965x. Three would be 0.78x.
 #
 # The cost of matching parameters is that the two Transformer arms differ in

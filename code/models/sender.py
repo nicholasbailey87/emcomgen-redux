@@ -1102,7 +1102,6 @@ class SenderTransformerLM(nn.Module):
         self.ff_inner_size = kwargs["ff_inner_size"]
         self.stochastic_depth = kwargs["stochastic_depth"]
         self.activation = model_util.get_activation(kwargs["activation"])
-        self.absolute_position_embedding = kwargs["absolute_position_embedding"]
         self.relative_position_embedding = kwargs["relative_position_embedding"]
         self.pre_norm = kwargs["pre_norm"]
         self.post_norm = kwargs["post_norm"]
@@ -1349,11 +1348,13 @@ class SenderTransformerLM(nn.Module):
             knocking_heads=False,
             # No positional information here: the query carries its own order
             #     and the prototypes are an unordered pair. `positional_heads`
-            #     is inert while `rotary_embedding` is None, but is pinned
-            #     anyway — broccoli defaults it to 0.25 on `MHAttention` and
-            #     0.5 on `TransformerEncoder`, so the two are not the same.
+            #     is inert while `rotary_embedding` is None, and is pinned at
+            #     the repo-wide 1.0 anyway so that turning rotary on here could
+            #     not quietly introduce a head partition. Note broccoli defaults
+            #     it to 0.25 on `MHAttention` and 0.5 on `TransformerEncoder`,
+            #     so the two are not the same.
             rotary_embedding=None,
-            positional_heads=0.25,
+            positional_heads=1.0,
             source_size=None,
             scaling="d",
         )
@@ -1367,7 +1368,12 @@ class SenderTransformerLM(nn.Module):
                 self.d_model,
                 self.layers,
                 self.heads,
-                absolute_position_embedding=self.absolute_position_embedding,
+# Pinned False, and no longer a config option. Both arms run
+                #     rotary, which encodes position as a rotation of the query
+                #     and key subspace at the point of use; an absolute table
+                #     added once at the input is a second answer to the same
+                #     question, not a complement to it. See `ViT2`.
+                absolute_position_embedding=False,
                 relative_position_embedding=self.relative_position_embedding,
                 # Pinned at 1.0 and no longer configurable -- see `ViT2` for the
                 #     argument. Every head takes axial RoPE, so the head partition
@@ -1453,12 +1459,14 @@ class SenderTransformerLM(nn.Module):
                 # No positional information on the key side: the latent array's
                 #     order is already baked into it by `self.transformer`, and the
                 #     output query carries its own. `positional_heads` is inert
-                #     while `rotary_embedding` is None but is pinned to broccoli's
-                #     own `MHAttention` default anyway -- 0.25 here, not the 1.0
-                #     this repo now pins on `TransformerEncoder`, because the two
-                #     classes default differently and this one is not the knob.
+                #     while `rotary_embedding` is None, and is pinned at the
+                #     repo-wide 1.0 like every other site, so that turning rotary
+                #     on here could not quietly introduce a head partition. Note
+                #     broccoli's own defaults differ by class -- 0.25 on
+                #     `MHAttention`, 0.5 on `TransformerEncoder` -- so neither is
+                #     a value to inherit.
                 rotary_embedding=None,
-                positional_heads=0.25,
+                positional_heads=1.0,
                 source_size=None,
                 scaling="d",
             )
@@ -1491,7 +1499,12 @@ class SenderTransformerLM(nn.Module):
                 self.d_model,
                 self.layers,
                 self.heads,
-                absolute_position_embedding=self.absolute_position_embedding,
+# Pinned False, and no longer a config option. Both arms run
+                #     rotary, which encodes position as a rotation of the query
+                #     and key subspace at the point of use; an absolute table
+                #     added once at the input is a second answer to the same
+                #     question, not a complement to it. See `ViT2`.
+                absolute_position_embedding=False,
                 relative_position_embedding=self.relative_position_embedding,
                 # Pinned at 1.0, as on the latent arm's stack; see there.
                 positional_heads=1.0,

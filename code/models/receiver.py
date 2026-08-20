@@ -6,6 +6,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import broccoli
 
@@ -81,14 +82,22 @@ class BilinearGRUComparer(nn.Module):
         self.referent_embedding_size = referent_embedding_size
         self.token_embedding_size = kwargs["token_embedding_size"]
         self.d_model = kwargs["d_model"]
-        # `dropout` means exactly one thing across both comparers: mask *both*
-        #     operands of the comparison, i.e. the pooled message embedding and
-        #     the incoming referent embeddings. It is the listener's only
+        # `dropout` means exactly one thing across both comparers: mask the
+        #     incoming referent embeddings, after their norm and immediately
+        #     before the comparison, where there is no averaging left
+        #     downstream to restore the masked units. It is the listener's only
         #     regulariser and the counterpart of the sender's
-        #     `prototype_dropout`; like it, it sits where there is no averaging
-        #     left downstream to restore the masked units. Module internals are
-        #     fixed constants below, so raising this knob never silently
-        #     rewires the architecture.
+        #     `prototype_dropout`. Module internals are fixed constants below,
+        #     so raising this knob never silently rewires the architecture.
+        #
+        # It used to mask the message operand too, and the argument for that
+        #     was that a dot product lets the listener lean on whichever side
+        #     is left intact. True, but it assumed the two sides arrive on
+        #     equal terms and they do not: the message comes through the Gumbel
+        #     channel, whose noise is already calibrated by `sampling_tau` and
+        #     `uniform_weight`, so a mask on top is a second perturbation of a
+        #     signal that has one -- and the listener cannot tell which of the
+        #     two it is being asked to be robust to. The referents arrive clean.
         self.dropout = nn.Dropout(p=kwargs["dropout"])
         self.bidirectional = kwargs["bidirectional"]
         self.layers = kwargs["layers"]
@@ -246,13 +255,19 @@ class BilinearGRUComparer(nn.Module):
         #     entirely and leaves `score_scale` as the one thing that sets it.
         projected = self.bilinear(message_embeddings)
         projected = self.message_layer_norm(projected) * self.score_scale
-        projected = self.dropout(projected)
 
-        # Both operands of the comparison are regularised, not just the
-        #     message. The score is a dot product, so dropping units of one
-        #     side only lets the listener lean on whichever side is left
-        #     intact; masking both forces the bilinear map to be robust in the
-        #     referent basis as well as the message basis.
+        # The referents are masked and the message is not. The message operand
+        #     arrives through the Gumbel channel, which is already a noise
+        #     process the listener has to be robust to and one whose scale
+        #     `sampling_tau` and `uniform_weight` are calibrated to set; a
+        #     dropout mask on top of it is a second, uncalibrated perturbation
+        #     of the same signal, and the listener cannot tell the two apart.
+        #     The referents arrive clean, so this is the only side where a mask
+        #     regularises rather than compounds.
+        #
+        # `TransformerCrossAttentionComparer` masks the same one side, so the
+        #     key still means one thing across both classes. It stopped meaning
+        #     "both operands" here rather than starting to mean it there.
         referents = self.referent_layer_norm(referents)
         referents = self.dropout(referents)
 
@@ -285,9 +300,71 @@ class TransformerCrossAttentionComparer(nn.Module):
         **kwargs
     ):
         """
-        Use multiheaded cross-attention as per Attention Is All You Need
-            (https://arxiv.org/abs/1706.03762) to compare embedded messages
-            with sets of possible message referents.
+        Compare an embedded message against a set of candidate referents by
+            reading each against the other, twice.
+
+        The message reads the candidate set first (`message_cross_attention`),
+            so that `encoding` refines a meaning that already knows what it is
+            choosing between; then each candidate reads the refined message
+            (`referent_cross_attention`); then the candidates read each other
+            (`referent_self_attention`); then a normalised linear readout
+            scores each one.
+
+        ---
+        Why the message reads the referents before it is encoded
+
+        Without that first pass the encoder sees the message alone, so the best
+            it can build is an *absolute* meaning -- "a red square" -- when the
+            task is discriminative and what distinguishes the target from this
+            particular set of distractors may be something else entirely. The
+            candidate set is not privileged information: the listener is
+            holding it. Letting the message query it is the difference between
+            encoding what the message says and encoding what the message says
+            *about these objects*.
+
+        This costs the first cross-attention its position information, because
+            `encoding` is where position is embedded and it now runs second. So
+            two identical symbols in different slots query the candidate set
+            identically, and `encoding` has to tell them apart from context
+            afterwards. Cheap at `message_length` 7 to 10, and the alternative
+            -- lifting absolute position out of broccoli's encoder into this
+            class -- buys little for the wiring it costs.
+
+        ---
+        Why every residual is post-normed rather than a bare add
+
+        `MHAttention` already RMS-normalises its output, so `x + attn(...)`
+            adds two tensors of norm `sqrt(d)` and the residual stream grows by
+            `sqrt(2)` per stage -- 2.8x across the three here. Each add is
+            therefore `RMSNorm(alpha * x + beta * attended)`, which is what
+            broccoli's `EncoderBlock` does internally and what DeepNorm's
+            constants are derived for.
+
+        ---
+        Why the readout is normalised and the scale is a separate scalar
+
+        `decision` used to be a bare `nn.Linear(d_model, 1)`, which made one
+            vector both the *direction* the head reads out and the *volume* it
+            reads out at. BCE will always reduce a loss it cannot otherwise
+            reduce by becoming less confident, and that pressure is
+            first-order where learning a useful direction is not, so the volume
+            collapses first. On CUB it did exactly that: scores fell from sd
+            0.42 to sd 0.016 inside one epoch and stayed there for thirty,
+            with `train_loss` pinned at `ln 2 + 2e-5`.
+
+        That is worse than a bad score, because every gradient reaching
+            `referent_self_attention`, both cross-attentions, `encoding`, both
+            adapters, both vision models and the entire speaker is proportional
+            to the readout's magnitude. A quiet listener starves the machinery
+            that would make it informative, which is why thirty epochs did not
+            escape it.
+
+        So the direction is normalised to a unit vector in `forward` -- which
+            leaves its gradient orthogonal to itself, making the magnitude
+            inert -- and the magnitude lives in `log_score_scale`, exactly as
+            `bilinear`'s magnitude is divided out by `message_layer_norm` and
+            replaced by `BilinearGRUComparer.log_score_scale`. Same defect,
+            same fix, one module later.
         """
         super().__init__()
         self.d_model = kwargs["d_model"]
@@ -302,7 +379,6 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.ff_inner_size = kwargs["ff_inner_size"]
         self.cross_attention_dropout = kwargs["cross_attention_dropout"]
         self.activation = model_util.get_activation(kwargs["activation"])
-        self.absolute_position_embedding = kwargs["absolute_position_embedding"]
         self.relative_position_embedding = kwargs["relative_position_embedding"]
         self.pre_norm = kwargs["pre_norm"]
         self.post_norm = kwargs["post_norm"]
@@ -314,55 +390,91 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.ff_inner_dropout = kwargs["ff_inner_dropout"]
         self.ff_outer_dropout = kwargs["ff_outer_dropout"]
         self.self_attention_dropout = kwargs["self_attention_dropout"]
-        # This comparer's residual path is two stacks with a cross-attention
-        #     between them, so the depth `alpha` and `beta` should be derived
-        #     from is each sub-stack's own, not the configured total. Resolved
-        #     separately for that reason; a pinned number still passes straight
-        #     through to both. `layers` is split unevenly when it is odd, the
-        #     reading stack taking the extra block.
-        self.encoding_layers = self.layers - (self.layers // 2)
-        self.fusion_layers = int(self.layers // 2)
 
+        # `layers` is the message encoder's depth, and nothing else's. It used
+        #     to be a total split between a reading stack and a fusion stack,
+        #     which meant `layers = 5` bought a 3-layer encoder and asking for
+        #     one more block moved two.
         self.encoding_alpha, self.encoding_beta = (
             model_util.resolve_residual_scaling(
-                kwargs["alpha"], kwargs["beta"], self.encoding_layers
+                kwargs["alpha"], kwargs["beta"], self.layers
             )
         )
 
-        # A fusion stack of no blocks has no residual path for these to scale,
-        #     so they are inert and the derivation has nothing to derive from.
-        self.fusion_alpha, self.fusion_beta = (
+        # One pair for the three hand-written residuals, resolved at depth 1.
+        #     DeepNorm's depth argument counts attention-plus-feedforward
+        #     *layers*, and these are bare attention sublayers: one on the
+        #     message stream, two on the referent stream. A stream of two
+        #     attention sublayers and no feedforward is one layer's worth of
+        #     residual path, so 1 is the honest depth for both. Pinning a
+        #     number in config still passes straight through, as everywhere.
+        self.residual_alpha, self.residual_beta = (
             model_util.resolve_residual_scaling(
-                kwargs["alpha"], kwargs["beta"], self.fusion_layers
+                kwargs["alpha"], kwargs["beta"], 1
             )
-            if self.fusion_layers >= 1
-            else (1.0, 1.0)
-        )
-        # Suppressed unless the fusion stack is deep enough for a depth ramp to
-        #     mean anything: `depthwise_linear_stochastic_depth` spreads the
-        #     rate linearly across layers, so a one-layer stack would get a
-        #     single rate of 0.0 regardless and a two-layer stack only half the
-        #     configured rate on its second block.
-        self.stochastic_depth = (
-            kwargs["stochastic_depth"] if int(self.layers // 2) > 1 else 0.0
         )
 
-        # Same meaning as in `BilinearGRUComparer`: mask both operands of the
-        #     comparison. Applied to each input as it arrives, before the
-        #     adapters, which is the only point at which the two are
-        #     symmetrically placed. Attention dropout is a separate setting
-        #     (`receiver_comparer.cross_attention_dropout`) rather than this knob.
+        # Suppressed unless the encoder is deep enough for a depth ramp to mean
+        #     anything: `depthwise_linear_stochastic_depth` spreads the rate
+        #     linearly across layers, so a one-layer stack would get a single
+        #     rate of 0.0 regardless. The three residuals below get none --
+        #     they are not `EncoderBlock`s and have no branch to drop.
+        self.stochastic_depth = (
+            kwargs["stochastic_depth"] if self.layers > 1 else 0.0
+        )
+
+        # The listener's regulariser, and it masks the referents only. See
+        #     `BilinearGRUComparer.__init__` for why the message operand is
+        #     left alone: it arrives through the Gumbel channel, whose noise is
+        #     already calibrated, and a mask on top is a second perturbation of
+        #     the same signal. Attention dropout is a separate setting
+        #     (`receiver_comparer.cross_attention_dropout`), not this knob.
+        #
+        # Placed after `referent_layer_norm` rather than before the adapter,
+        #     which is where it used to be. A mask upstream of a learned
+        #     projection is a mask the projection can average away, and a mask
+        #     upstream of a LayerNorm has its `1/(1-p)` rescale thrown away and
+        #     its survivors renormalised *up*, so the perturbation is neither
+        #     the size nor the shape the knob names.
         self.input_dropout = nn.Dropout(p=self.dropout)
 
+        # `bias=False`, and load-bearing rather than tidy. `referent_layer_norm`
+        #     below is what makes the score independent of the size the vision
+        #     model happens to emit, and it can only do that exactly if what
+        #     reaches it is homogeneous in the input: `W(cx) = cW(x)` gives
+        #     `LN(W(cx)) = LN(W(x))`, where `W(cx) + b` does not. With a bias,
+        #     a backbone emitting features a hundred times smaller gets a score
+        #     shaped partly by this layer's bias and one emitting large features
+        #     does not -- a weaker form of exactly the defect being removed, and
+        #     one that would leave the invariance test asserting an
+        #     approximation. The following norm subtracts the mean anyway, so
+        #     most of a bias here would be annihilated a line later.
         self.referent_adapter = nn.Linear(
             self.referent_embedding_size,
-            self.d_model
+            self.d_model,
+            bias=False
         )
 
-        # Parameter-free, as on `BilinearGRUComparer`: an affine here would
-        #     be a second route to score magnitude alongside `decision`, and
-        #     the point of the norm is that the referent arrives at a size
-        #     the vision model did not choose.
+        # Parameter-free, as on `BilinearGRUComparer`. Not for the reason
+        #     originally given here: broccoli's `project_qkv` RMS-normalises Q
+        #     and K per head, so the attention *logits* are already free of the
+        #     vision model's scale, and `MHAttention.out_norm` handles a
+        #     uniformly louder backbone (measured: the whole set at 10x moves
+        #     the output by 0.0%).
+        #
+        # What neither handles is *per-object* magnitude, and at
+        #     `message_cross_attention` the referents are the values. V is not
+        #     normed anywhere, so the attention output is a magnitude-weighted
+        #     mixture: one candidate 50x larger than its neighbours moves that
+        #     output by 116% without this norm and by 0.0% with it, and no
+        #     downstream norm can undo it because the averaging has already
+        #     happened. That is an object winning for being large rather than
+        #     for matching, which is the failure
+        #     `test_the_referent_norm_is_not_a_global_rescale` pins on the
+        #     other comparer.
+        #
+        # An affine would also be a second route to score magnitude alongside
+        #     `log_score_scale`, which is the route this class exists to close.
         self.referent_layer_norm = nn.LayerNorm(
             self.d_model, elementwise_affine=False, eps=LAYER_NORM_EPS
         )
@@ -372,12 +484,31 @@ class TransformerCrossAttentionComparer(nn.Module):
             self.d_model
         )
 
+        # Stage 1: the message queries the candidate set.
+        self.message_cross_attention = self._attention()
+        self.message_residual_norm = nn.RMSNorm(self.d_model)
+
+        # Stage 2: refine that reading in context.
         self.encoding = broccoli.transformer.TransformerEncoder(
             self.message_length, # seq_len can be none as length-invariant
             self.d_model,
-            self.encoding_layers,
+            self.layers,
             self.heads,
-            absolute_position_embedding=self.absolute_position_embedding,
+            # Pinned False, and no longer a config option. Every stack here runs
+            #     rotary, which encodes position where it is used -- as a
+            #     rotation of the query and key subspace -- rather than as a
+            #     vector added to the residual stream once at the input. A
+            #     rotation of part of the vector is sufficient for relative
+            #     position, so an absolute embedding on top is not covering
+            #     anything RoPE leaves out; it is a second, differently-shaped
+            #     answer to the same question, learned from scratch, and one
+            #     that has to be re-learned for every sequence length. broccoli
+            #     agrees: its own `ViT` defaults to exactly this pair, False
+            #     absolute and True relative.
+            #
+            # It cost ~190k parameters a rung, most of it two 289-position
+            #     tables in the ViT2 backbones.
+            absolute_position_embedding=False,
             relative_position_embedding=self.relative_position_embedding,
             # Pinned at 1.0, not configurable -- see `ViT2` for the argument.
             positional_heads=1.0,
@@ -418,7 +549,66 @@ class TransformerCrossAttentionComparer(nn.Module):
             beta=self.encoding_beta,
         )
 
-        self.cross_attention = broccoli.transformer.MHAttention(
+        # Stage 3: each candidate queries the refined message.
+        self.referent_cross_attention = self._attention()
+        self.referent_residual_norm = nn.RMSNorm(self.d_model)
+
+        # Stage 4: the candidates query each other, which is the only stage at
+        #     which a score can depend on the rest of the set. Redundant for a
+        #     criterion like "bigger than average", which the message could
+        #     carry on its own; load-bearing for one like "the odd one out",
+        #     which no per-object reading can express. Neither is in the task
+        #     as it stands, and it is the stage this class had all along --
+        #     `fusion`, minus the feedforward.
+        self.referent_self_attention = self._attention()
+        self.referent_self_attention_norm = nn.RMSNorm(self.d_model)
+
+        # Parameter-free, and not optional. broccoli's post-norm is
+        #     `nn.RMSNorm(d_model)` with `elementwise_affine=True` by default,
+        #     so `referent_self_attention_norm` above carries a learnable gain
+        #     -- a second, unbounded route to score magnitude that BCE would
+        #     drive the collapse through instead. That affine cannot simply be
+        #     turned off: the same class is used by `encoding` and by the
+        #     speaker's stacks, where it is wanted. So the readout normalises
+        #     downstream of it.
+        self.decision_layer_norm = nn.LayerNorm(
+            self.d_model, elementwise_affine=False, eps=LAYER_NORM_EPS
+        )
+
+        # Held as an `nn.Linear` for its initialisation and its
+        #     `reset_parameters`, but deliberately never *called* -- `forward`
+        #     normalises `weight` first. Calling it directly would restore the
+        #     free magnitude this class was rewritten to remove, so if you find
+        #     yourself writing `self.decision(...)`, that is the bug.
+        self.decision = nn.Linear(self.d_model, 1, bias=True)
+
+        # The one thing that sets how loudly this listener states a conclusion,
+        #     and the exact counterpart of `BilinearGRUComparer`'s. Opens at
+        #     1.0, which is calibrated rather than arbitrary: `decision_layer_norm`
+        #     leaves `refined` at norm `sqrt(d)` and the readout direction is a
+        #     unit vector, so their product opens at unit variance and BCE
+        #     within a hair of `ln 2`.
+        #
+        # Stored as a log for the reasons given on the other comparer, plus one
+        #     specific to this class: a linear scale does not stop at zero. At
+        #     `score_scale_lr = 2e-3` AdamW moves a lone scalar about `lr` a
+        #     step, so from 1.0 it would reach zero in 500 steps -- under three
+        #     CUB epochs -- and then go negative, inverting the readout's sign
+        #     while the loss looked unremarkable. `exp` forbids that, and bounds
+        #     the descent to `score_scale_lr * steps` log-units, which is what
+        #     makes the collapse this class just had visible in
+        #     `train_score_scale` rather than recoverable only by algebra on the
+        #     fourth decimal place of `train_loss`.
+        self.log_score_scale = nn.Parameter(torch.zeros(()))
+
+    def _attention(self):
+        """
+        One bare `MHAttention` at this module's width, built the same way three
+            times. Bare rather than an `EncoderBlock` because the residual and
+            its post-norm are written out in `forward`, where the two streams
+            they join are visible.
+        """
+        return broccoli.transformer.MHAttention(
             self.d_model,
             self.heads,
             # Architecture internals, deliberately not `self.dropout` — that
@@ -431,107 +621,56 @@ class TransformerCrossAttentionComparer(nn.Module):
             #     eval the way a bare
             #     `F.scaled_dot_product_attention(dropout_p=...)` would.
             dropout=self.cross_attention_dropout,
+            # Inert while `causal=False`, and that is not negotiable for the
+            #     two stages whose sequence axis is the referent set. In this
+            #     codebase referent *order is the label vector*:
+            #     `data.util.split_spk_lis` writes positives into the first
+            #     half of each agent's view and negatives into the second, and
+            #     the augmentation in `ConceptDataset.__getitem__` (and
+            #     `CUBDataset.sample_game`) permutes only *within* each half.
+            #     Anything here that could index its own sequence axis could
+            #     learn "the first half are targets" and score perfectly while
+            #     ignoring the message. With no position embedding and no mask,
+            #     all three of these are permutation-equivariant and cannot read
+            #     the ordering at all. `BilinearGRUComparer` is immune for a
+            #     different reason: it scores each referent in isolation and
+            #     never sees the set.
             causal=False,
             seq_len=self.message_length,
             linear_module=nn.Linear,
             bos_tokens=0,
             knocking_heads=False,
-            # No positional information here: the message side already carries
-            #     it from `self.encoding`, and the referent side is an
-            #     unordered set. `positional_heads` is inert while
-            #     `rotary_embedding` is None, but is pinned anyway — note that
-            #     broccoli defaults it to 0.25 on `MHAttention` and 0.5 on
+            # No positional information in any of the three. On the referent
+            #     axis that is the ordering argument above. On the message axis
+            #     `encoding` is where position is embedded, and stage 1 runs
+            #     before it -- see the class docstring for what that costs.
+            #     `positional_heads` is inert while `rotary_embedding` is None
+            #     and is pinned at the repo-wide 1.0 anyway, so that turning
+            #     rotary on here could not quietly introduce a head partition.
+            #     Note broccoli defaults it to 0.25 on `MHAttention` and 0.5 on
             #     `TransformerEncoder`, so the two are not interchangeable.
             rotary_embedding=None,
-            positional_heads=0.25,
+            positional_heads=1.0,
             source_size=None,
             scaling="d",
         )
 
-        # Fusion module to refine the cross-attention output
-        # This makes use of the position embeddings from the two encoders,
-        #     so doesn't need its own position embeddings and is seq_len-invariant
-        self.fusion = broccoli.transformer.TransformerEncoder(
-            None, # seq_len can be none as length-invariant
-            self.d_model,
-            self.fusion_layers,
-            self.heads,
-            # Not configurable, unlike the same arguments on `self.encoding`
-            #     above, and pinned rather than exposed because turning either
-            #     on would break the module.
-            #
-            # Note this block's sequence axis is the *referent set*, not the
-            #     message. `self.encoding` is the one that runs over the
-            #     message, and that is where message position is embedded; by
-            #     the time the cross-attention has run, message position has
-            #     been summarised into each referent's vector and the axis
-            #     here is referents. So a position embedding here would number
-            #     the referents.
-            #
-            # The weak reason not to is that a set has no order to embed. The
-            #     load-bearing reason is that in this codebase the referent
-            #     order *is* the label vector: `data.util.split_spk_lis`
-            #     writes positives into the first half of each agent's view and
-            #     negatives into the second, and the augmentation in
-            #     `ConceptDataset.__getitem__` (and `CUBDataset.sample_game`)
-            #     permutes only *within* each half. `Sender.get_prototypes`
-            #     relies on the same arrangement and raises without it.
-            #
-            # A fusion stack that could index its own sequence axis could
-            #     therefore learn "the first half are targets" and score
-            #     perfectly while ignoring the message. Without position
-            #     embeddings, and with `causal=False` below, this block is
-            #     permutation-equivariant over referents and cannot read the
-            #     ordering at all. `BilinearGRUComparer` is immune for a
-            #     different reason: it scores each referent in isolation and
-            #     never sees the set.
-            #
-            # Turning either on would also need a `source_size` for the
-            #     referent axis, which is a property of the game rather than of
-            #     this module.
-            absolute_position_embedding=False,
-            relative_position_embedding=False,
-            # Inert while both position embeddings are False, just below; pinned
-            #     to the repo-wide 1.0 rather than left to broccoli's 0.5 so that
-            #     turning either of them on could not quietly reintroduce a head
-            #     partition. See `ViT2` for why 1.0.
-            positional_heads=1.0,
-            source_size=None,
-            # `ff_ratio` None so that `ff_inner_size` is the live knob -- see
-            #     `SenderTransformerLM`, and note broccoli's `ViT` resolves the
-            #     two the other way round.
-            ff_ratio=None,
-            ff_inner_size=self.ff_inner_size,
-            activation=self.activation,
-            activation_kwargs=None,
-            ff_linear_module_up=None,
-            ff_linear_module_down=None,
-            # Not configurable, and pinned rather than promoted: broccoli's
-            # `FeedforwardBlock` uses this only as a fallback --
-            # `inner_dropout if inner_dropout is not None else dropout` -- and
-            # `TransformerEncoder` always forwards `ff_inner_dropout` and
-            # `ff_outer_dropout`, which default to 0.0 rather than None. So this
-            # argument can never take effect, and TOML has no way to write the
-            # None that would let it. Use the inner/outer knobs instead.
-            ff_dropout=0.0,
-            ff_inner_dropout=self.ff_inner_dropout,
-            ff_outer_dropout=self.ff_outer_dropout,
-            msa_dropout=self.self_attention_dropout,
-            stochastic_depth=self.stochastic_depth,
-            depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
-            causal=False,
-            linear_module=nn.Linear,
-            bos_tokens=self.utility_tokens,
-            knocking_heads=self.knocking_heads,
-            return_bos_tokens=self.return_bos_tokens,
-            pre_norm=self.pre_norm,
-            post_norm=self.post_norm,
-            msa_scaling="d",
-            alpha=self.fusion_alpha,
-            beta=self.fusion_beta,
-        )
+    @property
+    def score_scale(self):
+        """
+        The multiplier applied to the normalised readout, always positive. Read
+            here rather than exponentiating at the use site, so `forward` and
+            the metrics column cannot drift apart. Counterpart of
+            `BilinearGRUComparer.score_scale`.
+        """
+        return self.log_score_scale.exp()
 
-        self.decision = nn.Linear(self.d_model, 1, bias=True)
+    def _residual(self, stream, attended, norm):
+        """
+        DeepNorm's post-norm residual, written out because these three joins
+            are between two different streams rather than inside one block.
+        """
+        return norm(self.residual_alpha * stream + self.residual_beta * attended)
 
     def forward(
         self,
@@ -546,35 +685,91 @@ class TransformerCrossAttentionComparer(nn.Module):
 
         Returns a batch of scores, of shape (batch_size, n_obj)
         """
-        # Both operands masked, symmetrically, before their adapters.
-        referents = self.input_dropout(referents)
-        messages = self.input_dropout(messages)
-
         referents = self.referent_adapter(referents)
-        normed_referents = self.referent_layer_norm(referents)
+        referents = self.referent_layer_norm(referents)
+        referents = self.input_dropout(referents)
+
         messages = self.message_adapter(messages)
-        encoded_messages = self.encoding(messages)
-        mixed = self.cross_attention(
-            normed_referents,
-            encoded_messages,
-            encoded_messages
+
+        # 1. The message reads the candidate set, so what `encoding` refines is
+        #    a discriminative meaning rather than an absolute one.
+        messages = self._residual(
+            messages,
+            self.message_cross_attention(messages, referents, referents),
+            self.message_residual_norm,
         )
-        refined = self.fusion(mixed)
-        scores = self.decision(refined) # (batch, n_objects, 1)
-        return scores.squeeze(-1) # (batch, n_objects)
+
+        # 2. Refine it. Note this *mutates* `messages`: broccoli's
+        #    `TransformerEncoder.preprocess` adds its position embedding with
+        #    `x += position_embedding`, in place, on the tensor handed to it.
+        #    Harmless here because nothing reads `messages` again -- but a
+        #    second residual taken from the pre-encoding message would silently
+        #    be reading a positional embedding as well, so take a copy first if
+        #    one is ever added.
+        encoded_messages = self.encoding(messages)
+
+        # 3. Each candidate reads the refined message. The residual is what
+        #    carries referent identity to the readout *linearly* -- without it
+        #    a candidate reaches the score only through near-uniform attention
+        #    weights, and this stage halved the between-object share of the
+        #    variance (0.415 going in, 0.221 coming out) at init.
+        enriched = self._residual(
+            referents,
+            self.referent_cross_attention(
+                referents, encoded_messages, encoded_messages
+            ),
+            self.referent_residual_norm,
+        )
+
+        # 4. The candidates read each other.
+        refined = self._residual(
+            enriched,
+            self.referent_self_attention(enriched, enriched, enriched),
+            self.referent_self_attention_norm,
+        )
+
+        # 5. Read out along a direction of unit length, at a volume set by one
+        #    scalar. `F.normalize` leaves `decision.weight`'s gradient
+        #    orthogonal to itself, so its magnitude is inert and cannot become
+        #    a second route to confidence.
+        refined = self.decision_layer_norm(refined)
+        direction = F.normalize(self.decision.weight, dim=-1) # (1, d_model)
+        scores = refined @ direction.squeeze(0) # (batch, n_objects)
+
+        # The bias sits *inside* the scale, which is what keeps `score_scale`
+        #     a pure temperature. The decision boundary is `scores = -bias`
+        #     either way round, but only this way is it independent of the
+        #     scale: `s * (u + b)` crosses zero where `u = -b` whatever `s` is,
+        #     where `s * u + b` crosses at `u = -b/s` and so moves the boundary
+        #     every time the listener's confidence changes -- which would make
+        #     `b` something the head has to re-learn against `s` rather than
+        #     once. `train.py` reads the binary decision as `scores > 0` and the
+        #     reference-game decision as an argmax, and this leaves both
+        #     invariant, as on `BilinearGRUComparer`.
+        return self.score_scale * (scores + self.decision.bias)
 
     def reset_parameters(self):
-        # The two adapters and the referent norm were missing here, so a reset
-        #     listener kept the projections that map referents and messages into
-        #     `d_model` -- i.e. most of what it had learned about its inputs --
-        #     while everything downstream of them was re-drawn.
+        # Every submodule holding a parameter, including the two adapters and
+        #     the norms. The adapters were missing here once, so a reset
+        #     listener kept the projections that map referents and messages
+        #     into `d_model` -- most of what it had learned about its inputs --
+        #     while everything downstream of them was re-drawn. The
+        #     parameter-free norms are listed for the mirror reason: turning
+        #     `elementwise_affine` back on must not leave a reset listener
+        #     holding trained gains.
         self.referent_adapter.reset_parameters()
         self.referent_layer_norm.reset_parameters()
         self.message_adapter.reset_parameters()
+        self.message_cross_attention.reset_parameters()
+        self.message_residual_norm.reset_parameters()
         self.encoding.reset_parameters()
-        self.fusion.reset_parameters()
-        self.cross_attention.reset_parameters()
+        self.referent_cross_attention.reset_parameters()
+        self.referent_residual_norm.reset_parameters()
+        self.referent_self_attention.reset_parameters()
+        self.referent_self_attention_norm.reset_parameters()
+        self.decision_layer_norm.reset_parameters()
         self.decision.reset_parameters()
+        nn.init.zeros_(self.log_score_scale)
 
 
 class Receiver(nn.Module):

@@ -1,6 +1,6 @@
 # Rung 6: rung 4 with a Transformer sender vision model.
 #
-# ViT2 at the shared specification comes to 12,430,908 parameters on CUB's 224px
+# ViT2 at the shared specification comes to 12,338,428 parameters on CUB's 224px
 # images, against ResNet18's 11,176,512 -- 1.11x. The gap to rung 5's 0.91x is
 # entirely the patch tokeniser, which scales with image size; see there.
 #

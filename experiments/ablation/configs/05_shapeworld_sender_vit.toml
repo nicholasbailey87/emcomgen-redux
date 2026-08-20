@@ -1,6 +1,6 @@
 # Rung 5: rung 3 with a Transformer sender vision model.
 #
-# ViT2 at the shared specification comes to 10,177,420 parameters on
+# ViT2 at the shared specification comes to 10,084,940 parameters on
 # ShapeWorld's 64px images, against ResNet18SmallInput's 11,168,832 -- 0.91x.
 #
 # Note the ViT is *not* the same size on both datasets even at identical

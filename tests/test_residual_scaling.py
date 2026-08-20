@@ -148,38 +148,55 @@ def test_the_two_deepnorm_forms_are_not_the_same():
         )
 
 
-@pytest.mark.parametrize("layers,reading,fusing", [(10, 5, 5), (7, 4, 3), (2, 1, 1)])
-def test_the_comparer_resolves_each_sub_stack_separately(layers, reading, fusing):
+@pytest.mark.parametrize("layers", [1, 2, 4, 7])
+def test_the_comparer_resolves_its_encoder_from_the_configured_depth(layers):
     """
-    The configured `layers` is the total across both halves, so deriving from
-    it would scale each half for a depth neither of them has. An odd total
-    splits unevenly, and each half still has to follow its own count.
+    `layers` is the message encoder's depth and nothing else's, so it derives
+    from the whole of it. It used to be a total split between a reading stack
+    and a fusion stack, which meant asking for one more block moved two.
     """
     comparer = R.TransformerCrossAttentionComparer(
         64, **_settings("receiver_comparer", d_model=64, heads=4, layers=layers)
     )
 
-    assert (comparer.encoding_layers, comparer.fusion_layers) == (reading, fusing)
     assert (comparer.encoding_alpha, comparer.encoding_beta) == (
-        model_util.deepnorm_constants(reading)
-    )
-    assert (comparer.fusion_alpha, comparer.fusion_beta) == (
-        model_util.deepnorm_constants(fusing)
+        model_util.deepnorm_constants(layers)
     )
 
 
-def test_a_fusion_stack_of_no_blocks_falls_back_to_the_identity():
+@pytest.mark.parametrize("layers", [1, 4, 10])
+def test_the_hand_written_residuals_resolve_at_depth_one(layers):
     """
-    `layers = 1` gives the reading stack the only block and leaves the fusion
-    stack empty. There is no residual path there to scale, so the derivation
-    has nothing to derive from and must not raise on an otherwise valid config.
+    The three attention stages around the encoder are bare sublayers, not
+    `EncoderBlock`s, and DeepNorm's depth argument counts attention-plus-
+    feedforward layers. Two attention sublayers with no feedforward are one
+    layer's worth of residual path, so these do not move with `layers` -- and
+    if they ever start to, the encoder's depth would be silently rescaling
+    residuals it is not on.
     """
     comparer = R.TransformerCrossAttentionComparer(
-        64, **_settings("receiver_comparer", d_model=64, heads=4, layers=1)
+        64, **_settings("receiver_comparer", d_model=64, heads=4, layers=layers)
     )
 
-    assert comparer.fusion_layers == 0
-    assert (comparer.fusion_alpha, comparer.fusion_beta) == (1.0, 1.0)
+    assert (comparer.residual_alpha, comparer.residual_beta) == (
+        model_util.deepnorm_constants(1)
+    )
+
+
+def test_a_pinned_number_reaches_both_residual_groups():
+    """
+    Pinning is documented as passing straight through, and there are now two
+    places for it to pass through to.
+    """
+    comparer = R.TransformerCrossAttentionComparer(
+        64,
+        **_settings(
+            "receiver_comparer", d_model=64, heads=4, layers=4, alpha=2.0, beta=0.25
+        ),
+    )
+
+    assert (comparer.encoding_alpha, comparer.encoding_beta) == (2.0, 0.25)
+    assert (comparer.residual_alpha, comparer.residual_beta) == (2.0, 0.25)
 
 
 def test_the_comparer_still_runs_at_its_resolved_scaling():

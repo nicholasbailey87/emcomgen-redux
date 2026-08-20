@@ -22,7 +22,7 @@ heads = 5    # head_dim 64, as everywhere
 # taste. A decoder block carries a cross-attention the encoder block does not,
 # so it costs about 4*d_model^2 more: 1,354,951 against 944,711 at 320 wide with
 # `ff_inner_size = 554`. At 5 layers this speaker would be 7,206,133 parameters,
-# or 1.25x the GRU baseline; at 4 it is 5,851,183, or 1.015x -- a tighter match
+# or 1.25x the GRU baseline; at 4 it is 5,848,303, or 1.015x -- a tighter match
 # than the latent arm's 0.965x. Three would be 0.78x.
 #
 # The cost of matching parameters is that the two Transformer arms differ in
@@ -72,24 +72,24 @@ comparer = "TransformerCrossAttentionComparer"
 # everything else is 1.73 -- or 443, which would have put it 1.30x over the
 # comparer it replaces. Neither is worth an exact match.
 #
-# 5 layers is then the closest depth: 5,399,060 parameters on ShapeWorld and
-# 5,400,020 on CUB, against `BilinearGRUComparer`'s 5,015,553 on the ViT
-# referents of rungs 9 and 10, or 1.08x. That is looser than the 1.01x the
+# 4 layers is then the closest depth: 5,272,606 parameters on both datasets,
+# against `BilinearGRUComparer`'s 5,015,553 on the ViT referents of rungs 9 and
+# 10, or 1.05x. That is looser than the 1.01x the
 # hand-sized version reached, but tighter than the vision arms, which sit at
 # 0.91x and 1.11x because a ViT's patch tokeniser scales with image size.
 #
-# Depth is not free to move much either way. `layers` is split inside the module
-# -- `encoding` takes layers - layers//2 and `fusion` takes layers//2 -- so 5
-# gives a 3-layer message encoder and a 2-layer fusion block over the referent
-# set, and 2 is the minimum that keeps `stochastic_depth` alive at all, since it
-# is suppressed entirely unless layers//2 > 1. 6 layers would give an even 3/3
-# but 1.26x.
+# `layers` is the message encoder's depth and nothing else's. It used to be a
+# total, split inside the module between a reading stack and a fusion stack, so
+# asking for one more block moved two and `layers = 5` bought a 3-layer encoder.
+# The module now has one stack -- three bare attention stages surround it, at
+# fixed cost -- so the number means what it says. 3 layers would be 0.86x and 5
+# would be 1.24x; 4 is the only depth inside the 10% the ladder aims at.
 #
 # `d_model` is the only width restated here. DEFAULT's 1024 in that section is
 # `BilinearGRUComparer`'s hidden size, not this class's; `heads`,
 # `ff_inner_size` and the rest are read only by this class and are inherited.
 d_model = 320
-layers = 5
+layers = 4
 
 # `true`, and for the same reason rung 7 sets it on `[sender_language_model]`:
 # no transformer in this ladder runs a causal mask. The key is shared with
@@ -99,7 +99,7 @@ layers = 5
 # the incoming message (`receiver.py`). Masking that stack left to right models
 # a listener that must commit to an interpretation of symbol 1 before seeing
 # symbol 5, which is not the listening task -- the message arrives whole, and
-# the cross-attention and fusion stacks after it are already `causal=False`.
+# the three attention stages around it are already `causal=False`.
 bidirectional = true
 
 [scheduler]

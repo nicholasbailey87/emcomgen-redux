@@ -257,7 +257,7 @@ language_model = "SenderGRULM"
 [sender_feature_model]
 # The one ViT specification, used by every rung that swaps a CNN for a
 # Transformer on either agent. Sized against ResNet18's 11,176,512 parameters:
-# 320 wide, 10 layers, feedforward inner 554 comes to 10,177,420, or 91%. It was
+# 320 wide, 10 layers, feedforward inner 554 comes to 10,084,940, or 91%. It was
 # 384/9/384 for birds and 128/4/128 for ShapeWorld, which matched each dataset's
 # own baseline backbone -- but `SenderTransformerLM` pins its width to the vision
 # model's, so the ShapeWorld language model inherited 128 and came out 12.8x
@@ -288,7 +288,21 @@ ff_inner_size = 554 # Only applies to Transformer vision models
 stochastic_depth = 0.1 # Only applies to Transformer vision models
 depthwise_linear_stochastic_depth = true # ramp the rate linearly over depth
 activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
-absolute_position_embedding = true
+# Rotary, and rotary only. There is no `absolute_position_embedding` key any
+# more: it is pinned False at every construction site in the repo.
+#
+# The two are not complementary. RoPE encodes position where it is used, as a
+# rotation of the query and key subspace, and rotating a subspace is sufficient
+# for relative position -- the unrotated dimensions are not a gap for an
+# absolute table to fill. What an absolute embedding adds is a second,
+# differently-shaped answer to the same question, learned from scratch, added
+# once to the residual stream at the input, and relearned per sequence length.
+# broccoli's own `ViT` defaults to exactly this pair for the same reason.
+#
+# Dropping it took ~190k parameters off every Transformer rung, most of it two
+# 289-position tables in the ViT2 backbones, and made the listener's comparer
+# identical in size on ShapeWorld and CUB -- the whole difference between them
+# had been the absolute table sized to `message_length`.
 relative_position_embedding = true
 # `pre_norm` and `post_norm` are coupled and must be flipped together: broccoli
 # rejects a transformer that is both, so setting `pre_norm = true` without also
@@ -469,7 +483,6 @@ ff_inner_size = 554 # Only applies to Transformer language models
 stochastic_depth = 0.1 # Only applies to Transformer language models
 depthwise_linear_stochastic_depth = true
 activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
-absolute_position_embedding = true
 relative_position_embedding = true
 pre_norm = false
 post_norm = true
@@ -512,7 +525,6 @@ ff_inner_size = 554 # Only applies to Transformer vision models
 stochastic_depth = 0.1 # Only applies to Transformer vision models
 depthwise_linear_stochastic_depth = true
 activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
-absolute_position_embedding = true
 relative_position_embedding = true
 pre_norm = false
 post_norm = true
@@ -528,14 +540,22 @@ beta = "deepnorm"
 [receiver_comparer]
 token_embedding_size = 500
 d_model = 1024
-dropout = 0.1 # The listener's only dropout, applied equally to both operands
-              # of the comparison: the pooled message embedding and the
-              # incoming referent embeddings. Counterpart to the sender's
-              # `prototype_dropout`, and set to match it — the literature says
-              # listeners want at least as much regularisation as speakers for
-              # compositional languages to emerge, and jayelm's single
-              # `--dropout` (0.1) gave both agents the same weak setting. Also
-              # passed to `nn.GRU(dropout=)`, which is inert while `layers = 1`.
+dropout = 0.1 # The listener's only dropout, and in both comparers it masks
+              # one operand of the comparison: the incoming referent
+              # embeddings, after their norm and immediately before they are
+              # compared. Counterpart to the sender's `prototype_dropout`, and
+              # set to match it — the literature says listeners want at least
+              # as much regularisation as speakers for compositional languages
+              # to emerge, and jayelm's single `--dropout` (0.1) gave both
+              # agents the same weak setting. Also passed to `nn.GRU(dropout=)`,
+              # which is inert while `layers = 1`.
+              #
+              # It used to mask the message operand too. The message arrives
+              # through the Gumbel channel, whose noise `sampling_tau` and
+              # `uniform_weight` already calibrate, so a mask on top is a
+              # second and uncalibrated perturbation of a signal that has one.
+              # The referents arrive clean, which is what makes that the side
+              # where a mask regularises rather than compounds.
 layers = 1
 bidirectional = false
 message_length = 7 # Only applies to Transformer comparers. Should be the same as sender_language_model.message_length
@@ -555,9 +575,12 @@ message_length = 7 # Only applies to Transformer comparers. Should be the same a
 heads = 5 # Only applies to Transformer comparers
 utility_tokens = 0 # Only applies to Transformer comparers
 ff_inner_size = 554 # Only applies to Transformer comparers
-stochastic_depth = 0.1 # Only applies to Transformer comparers. Suppressed
-                       # entirely when the fusion stack is shallower than two
-                       # layers -- see `TransformerCrossAttentionComparer`.
+stochastic_depth = 0.1 # Only applies to Transformer comparers, and only to
+                       # the message encoder: the three attention stages around
+                       # it are bare `MHAttention`, with no branch to drop.
+                       # Suppressed entirely at `layers = 1`, where a linear
+                       # depth ramp would give a single rate of 0.0 anyway --
+                       # see `TransformerCrossAttentionComparer`.
 # Attention dropout. Named per attention type, and kept strictly separate from
 # the `dropout` above, which regularises the two operands of the comparison
 # rather than anything inside a module. `self_attention_dropout` reaches every
@@ -568,13 +591,12 @@ stochastic_depth = 0.1 # Only applies to Transformer comparers. Suppressed
 # `AttentionPrototyper` and the ViT head) takes no dropout argument at all, so
 # it is not covered by either key.
 cross_attention_dropout = 0.0 # Only applies to Transformer comparers
-# See [sender_feature_model] for what these are and why they are here. The
-# position-embedding settings drive the comparer's message encoder only. Its
-# fusion block has none by construction -- it reads the cross-attention output,
-# which already carries position, over a referent set that has no order.
+# See [sender_feature_model] for what this is and why it is here. It drives the
+# comparer's message encoder only; the three attention stages around it take
+# `rotary_embedding=None` by construction, two of them because their sequence
+# axis is the referent set and a set has no order to embed.
 depthwise_linear_stochastic_depth = true
 activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
-absolute_position_embedding = true
 relative_position_embedding = true
 pre_norm = false
 post_norm = true
@@ -583,11 +605,13 @@ knocking_heads = false
 ff_inner_dropout = 0.0
 ff_outer_dropout = 0.0
 self_attention_dropout = 0.0
-# Resolved per sub-stack rather than from `layers`: this comparer's residual
-# path is the reading stack, then the cross-attention, then the fusion stack,
-# so each half is scaled for its own depth (`layers` splits evenly, the reading
-# stack taking the extra block when it is odd). Otherwise as
-# [sender_feature_model].
+# Resolved twice in this comparer rather than once: the message encoder takes
+# `layers`, and the three hand-written residuals around it take depth 1. Those
+# three are bare attention sublayers -- one on the message stream, two on the
+# referent stream -- and DeepNorm's depth argument counts attention-plus-
+# feedforward layers, so a stream of two attention sublayers and no feedforward
+# is one layer's worth of residual path. Pinning a number still passes straight
+# through to both. Otherwise as [sender_feature_model].
 alpha = "deepnorm"
 beta = "deepnorm"
 

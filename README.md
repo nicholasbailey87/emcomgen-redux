@@ -234,25 +234,33 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
     (the default) resolves them at construction from that stack's own `layers`,
     as `(2N)^(1/4)` and `(8N)^(-1/4)`; a number pins them instead, and `1.0` is
     the no-scaling identity every run before this used. The cross-attention
-    comparer resolves each of its two sub-stacks separately, since `layers` is
-    the total across both. Derived rather than configured because two constants
-    restated per config is an invitation to leave them at values belonging to a
-    depth the stack no longer has.
+    comparer resolves them twice: its message encoder takes `layers`, and the
+    three bare attention stages around it take depth 1, since DeepNorm's depth
+    argument counts attention-plus-feedforward layers and those stages have no
+    feedforward. Derived rather than configured because two constants restated
+    per config is an invitation to leave them at values belonging to a depth the
+    stack no longer has.
 - `[receiver_comparer] dropout`: the listener's **only** dropout, and the
-    counterpart of the sender's `prototype_dropout`. Applied equally to both
-    operands of the comparison — the pooled message embedding and the incoming
-    referent embeddings — and defaults to `0.5` to match the sender. There is
-    deliberately no `[receiver] vision_dropout`: it would mask the same tensor
-    as the referent side of this knob, with nothing but a reshape between them,
-    so the two would compose into one mask at a rate neither knob names. The
-    sender keeps its `vision_dropout` because the prototyper pools between the
-    two masks there. It affects **only** those two inputs: module internals are
-    fixed constants, so raising it never silently rewires the architecture. The
-    listener GRU's inter-layer dropout is pinned to `0.0` (jayelm's listener GRU
-    takes no dropout argument), and the cross-attention comparer's attention
-    dropout to `MSA_DROPOUT = 0.1`. For reference, jayelm regularised both agents with a
-    single `--dropout` at `0.1`, on the listener's vision pathway only, with
-    nothing at all on its language pathway.
+    counterpart of the sender's `prototype_dropout`. In both comparers it masks
+    the incoming referent embeddings, after their norm and immediately before
+    the comparison, and defaults to `0.1` to match the sender. It used to mask
+    the message operand as well; the message arrives through the Gumbel channel,
+    whose noise `sampling_tau` and `uniform_weight` already calibrate, so a mask
+    on top is a second and uncalibrated perturbation of a signal that has one.
+    The referents arrive clean, which is what makes that the side where a mask
+    regularises rather than compounds. There is deliberately no
+    `[receiver] vision_dropout`: it would mask the same tensor as this knob,
+    with nothing but a reshape between them, so the two would compose into one
+    mask at a rate neither names. The sender keeps its `vision_dropout` because
+    the prototyper pools between the two masks there. It affects **only** that
+    one input: module internals are fixed constants, so raising it never
+    silently rewires the architecture. The listener GRU's inter-layer dropout is
+    pinned to `0.0` (jayelm's listener GRU takes no dropout argument), and the
+    cross-attention comparer's attention dropout is
+    `[receiver_comparer] cross_attention_dropout`, which is `0.0`. For
+    reference, jayelm regularised both agents with a single `--dropout` at
+    `0.1`, on the listener's vision pathway only, with nothing at all on its
+    language pathway.
 There are exactly **two** exploration controls, and they do different jobs. The
 emittable logits are always layer-normalised to unit variance per example and
 per position before sampling — there is no knob for that, because both controls
@@ -461,16 +469,22 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     use the message), then a climb, then a plateau once the `uniform_weight`
     cap saturates fidelity and the gradient dies with it. A scale climbing
     while accuracy stays at chance is co-adaptation to a premature code.
-- `train_score_scale` — the listener's counterpart, `exp(log_score_scale)` on
-    `BilinearGRUComparer`, and NaN for the cross-attention comparer, which has
-    no such parameter. Both operands of the listener's dot product are
+- `train_score_scale` — the listener's counterpart, `exp(log_score_scale)`, and
+    live on every rung. Both comparers reach it by the same route with different
+    parts: on `BilinearGRUComparer` both operands of the dot product are
     layer-normalised without an affine and the product is divided by
-    `sqrt(referent_embedding_size)`, so this is the only thing left that can set
-    how loudly the listener states a conclusion — `bilinear` sets the direction
-    of the comparison and this sets its volume. It cannot move the decision:
-    it multiplies an operand shared across the objects of a game, so `scores > 0`
-    and the reference-game argmax are both invariant to it. What it moves is BCE,
-    and through BCE every gradient in the pair.
+    `sqrt(referent_embedding_size)`; on `TransformerCrossAttentionComparer` the
+    readout direction is normalised to unit length and its input is
+    layer-normalised without an affine. Either way the architecture is left
+    setting the *direction* of the comparison and this scalar setting its
+    volume, and it is the only thing that can. It cannot move the decision:
+    `scores > 0` and the reference-game argmax are both invariant to it. What it
+    moves is BCE, and through BCE every gradient in the pair.
+    It was NaN on the cross-attention rungs until the readout was separated
+    that way, which is how rung 12 ran a whole 30-epoch smoke test with its
+    scores collapsed 25x — from sd 0.42 to sd 0.016 inside the first epoch —
+    while every column that would have said so was either blank or, in
+    `train_loss`, parked at `ln 2` to four decimal places.
     It opens at exactly 1.0, which the `sqrt(d)` division makes the calibrated
     value rather than an arbitrary one, so unlike `train_logit_scale` it has no
     traverse to cover and a flat start is not expected. Read it the same way

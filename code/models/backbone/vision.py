@@ -87,9 +87,21 @@ class ViT2(nn.Module):
             transformer_ff_linear_module_down=None,
             transformer_pre_norm=kwargs["pre_norm"],
             transformer_post_norm=kwargs["post_norm"],
-            transformer_absolute_position_embedding=kwargs[
-                "absolute_position_embedding"
-            ],
+            # Pinned False, and no longer a config option. Every stack here runs
+            #     rotary, which encodes position where it is used -- as a
+            #     rotation of the query and key subspace -- rather than as a
+            #     vector added to the residual stream once at the input. A
+            #     rotation of part of the vector is sufficient for relative
+            #     position, so an absolute embedding on top is not covering
+            #     anything RoPE leaves out; it is a second, differently-shaped
+            #     answer to the same question, learned from scratch, and one
+            #     that has to be re-learned for every sequence length. broccoli
+            #     agrees: its own `ViT` defaults to exactly this pair, False
+            #     absolute and True relative.
+            #
+            # It cost ~190k parameters a rung, most of it two 289-position
+            #     tables in the ViT2 backbones.
+            transformer_absolute_position_embedding=False,
             transformer_relative_position_embedding=kwargs[
                 "relative_position_embedding"
             ],
