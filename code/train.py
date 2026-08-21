@@ -530,6 +530,25 @@ def run(
             # which is the shape `score_scale` traced on rungs 11 and 12 before
             # this change.
             #
+            # `decision_kurtosis` -- same class, and the one to read first.
+            # `score_norm` pins the readout's variance but not its shape, and
+            # BCE's cost is linear far from zero while variance is quadratic,
+            # so a listener with nothing to say can meet the variance budget
+            # with a few enormous outliers and leave the rest at sigmoid 0.5.
+            # That walks the loss towards `ln 2` carrying no information at all
+            # -- and unlike the old `score_scale` collapse it does move the loss
+            # column, so a falling loss is not evidence of anything on its own.
+            #
+            # Read the sign. Negative means the scores are bimodal, which is
+            # what discriminating looks like (-2 is the two-point floor).
+            # Sustained positive with `train_acc` at 0.5 is the failure that
+            # `receiver-cross-attention-birds.csv` and its ShapeWorld
+            # counterpart ran for thirty epochs. Measured against this module on
+            # a synthetic game, an informative message gave -2.0 and a scrambled
+            # one +11..+23, while `decision_spread` overlapped between the two
+            # -- which is why that column is not enough by itself. NaN when the
+            # readout is constant, where the fourth standardised moment is 0/0.
+            #
             # Each is genuinely inapplicable to the other class, so each is NaN
             # on the runs that do not have it -- the same situation as
             # `pool_score_norm` under `AveragePrototyper`, and not the same as a
@@ -545,6 +564,7 @@ def run(
                 else:
                     stats.update(
                         decision_spread=comparer.decision_spread,
+                        decision_kurtosis=comparer.decision_kurtosis,
                         batch_size=batch_size,
                     )
 

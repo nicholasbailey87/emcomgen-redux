@@ -257,8 +257,9 @@ polarity_embedding_lr = 2e-3
 # multiplies by a fixed `decision_gain`, because on rungs 11 and 12 the scale
 # this key exists to move went monotonically to 0.27 and pinned `train_loss` at
 # ln 2 for thirty epochs. `train_score_scale` is therefore a bilinear-only
-# column now, and `decision_spread` is what the other arm reports instead --
-# see `decision_gain` under `[receiver_comparer]` for the argument.
+# column now, and `decision_spread` and `decision_kurtosis` are what the other
+# arm reports instead -- see `decision_gain` under `[receiver_comparer]` for the
+# argument, and read the kurtosis column first.
 #
 # Which leaves the baseline comparer holding the mechanism that failed on the
 # other one. That is a scoping decision and not a verdict: `BilinearGRUComparer`
@@ -667,6 +668,39 @@ message_length = 7 # Only applies to Transformer comparers. Should be the same a
 # `test_topsim_*` and `unique_message_fraction` are what separate a protocol
 # from a one-bit shortcut; `decision_spread` in metrics.csv reports the readout's
 # own health.
+#
+# What standardising does not close, and it has since been observed. Pinning the
+# variance leaves the *shape* free, and the shape is a way out. BCE against a
+# coin-flip label costs `|s|/2 + ln(1 + exp(-|s|))`: quadratic in `s` near zero,
+# but only linear far out, while variance costs `s**2`. So an outlier is cheap
+# per unit of variance it absorbs, and the cheapest uninformative allocation at a
+# fixed spread is a few enormous scores with everything else at zero, where
+# sigmoid is 0.5 and the cost is ln 2. At gain 2.0, measured over 2e6 samples
+# with no information present anywhere:
+#
+#   shape    Gaussian  4% at ±10  1.8% at ±15  1% at ±20  → ∞
+#   nats     1.068     0.865      0.814        0.786      0.693
+#
+# `receiver-cross-attention-birds.csv` runs 0.875 → 0.810 across thirty epochs
+# and its ShapeWorld counterpart 0.828 → 0.765, both on that curve, both holding
+# `train_acc` at 0.5000 to four places throughout, both leaving the speaker inert
+# (`pool_effective_examples` never departs 4.99, or 10.0 on ShapeWorld). A
+# falling loss is therefore not evidence of anything on its own here.
+#
+# Hence `decision_kurtosis`, which is the column to read first. Excess kurtosis
+# of the readout, and the sign is the reading: negative means bimodal scores,
+# which is what discriminating looks like, with -2 the two-point floor; sustained
+# positive alongside `train_acc` at 0.5 is the failure above. Measured against
+# this comparer on a synthetic game, an informative message gave -2.0 at 100%
+# accuracy and a scrambled one +11..+23 at chance, while `decision_spread`
+# overlapped between the two (1.4-2.1 against 2.7-5.1) and could not tell them
+# apart.
+#
+# The fix, when there is a reading to justify it, is to change what the loss
+# buys rather than to raise the gain: normalise by `E|s|` rather than by the
+# standard deviation. BCE's far field is linear and so is an L1 budget, which
+# removes the mismatch that makes outliers cheap — at equal budget it reverses
+# the arbitrage, so spreading beats concentrating (0.98 against 1.44 nats).
 decision_gain = 2.0
 # 5, for head_dim 64 at the 320 width the Transformer comparer takes in rung 11
 # -- the same head dimension every attention module in the repo now has.

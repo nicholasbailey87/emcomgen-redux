@@ -596,6 +596,76 @@ def test_a_constant_readout_comes_out_at_one_half():
     assert torch.sigmoid(scores).mean().item() == pytest.approx(0.5, abs=0.02)
 
 
+def test_the_kurtosis_column_separates_the_shapes_the_spread_column_cannot():
+    """
+    `score_norm` pins the readout's variance and leaves its shape free, and the
+        shape is the remaining escape: BCE's cost is linear far from zero while
+        variance is quadratic, so a handful of outliers can meet the variance
+        budget while the bulk sits at sigmoid 0.5 and the loss walks to ln 2
+        carrying nothing.
+
+    So the column has to read shape, not size. Driven here with the two
+        distributions that matter rather than through training -- bimodal, which
+        is what a discriminating listener produces and which floors at -2, and
+        heavy-tailed, which is the escape. `decision_spread` is deliberately
+        asserted to be identical across both, because that is the point: it is
+        measuring the pre-norm size, which the two shapes share, and on the real
+        runs the two conditions overlapped on it (1.4-2.1 against 2.7-5.1).
+    """
+    comparer = _quiet_cross_comparer()
+    referents, messages = _inputs(comparer)
+    n = referents.shape[0] * referents.shape[1]
+
+    class _Shape(torch.nn.Module):
+        def __init__(self, values):
+            super().__init__()
+            self.values = values
+
+        def forward(self, x):
+            return self.values.reshape(*x.shape[:-1], 1)
+
+    bimodal = torch.where(torch.arange(n) % 2 == 0, 1.0, -1.0)
+
+    # 2% of the mass at +-7 and the rest at zero, matched to `bimodal`'s
+    #     standard deviation so only the shape differs.
+    heavy = torch.zeros(n)
+    heavy[: max(2, n // 50)] = 7.0
+    heavy[-max(2, n // 50):] = -7.0
+    heavy = heavy * (bimodal.std() / heavy.std())
+
+    readings = {}
+    for name, values in (("bimodal", bimodal), ("heavy", heavy)):
+        comparer.decision = _Shape(values)
+        with torch.no_grad():
+            comparer(referents, messages)
+        readings[name] = (comparer.decision_spread, comparer.decision_kurtosis)
+
+    assert readings["bimodal"][1] == pytest.approx(-2.0, abs=0.05)
+    assert readings["heavy"][1] > 5.0
+    assert readings["bimodal"][0] == pytest.approx(readings["heavy"][0], rel=1e-3)
+
+
+def test_a_constant_readout_reports_no_kurtosis_rather_than_zero():
+    """
+    The fourth standardised moment divides by the spread to the fourth, so a
+        constant readout -- the state this class is built to send to sigmoid
+        0.5 -- makes it 0/0. NaN is the honest reading: a point mass has no
+        shape. A silent 0.0 would read as "Gaussian, nothing to see", which is
+        the failure this column exists to avoid.
+    """
+    comparer = _quiet_cross_comparer()
+
+    class _Constant(torch.nn.Module):
+        def forward(self, x):
+            return torch.full((*x.shape[:-1], 1), 3.7)
+
+    comparer.decision = _Constant()
+    with torch.no_grad():
+        comparer(*_inputs(comparer))
+
+    assert math.isnan(comparer.decision_kurtosis)
+
+
 def test_the_readout_still_carries_gradient_to_the_message():
     """
     The failure mode this whole change is aimed at is a listener that stops

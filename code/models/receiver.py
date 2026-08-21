@@ -403,6 +403,36 @@ class TransformerCrossAttentionComparer(nn.Module):
             score is a scaled cosine like this one and has the same exposure;
             that it has not been fixed here is a scoping decision, not a
             statement that it is safe.
+
+        What `score_norm` does *not* close, and why `decision_kurtosis` exists
+
+        Standardising pins the second moment. It leaves the fourth free, and
+            the fourth is a way out. BCE against a coin-flip label costs
+            `|s|/2 + ln(1 + exp(-|s|))`: quadratic near zero, linear far out.
+            Variance costs `s**2`. So an outlier absorbs a lot of the variance
+            budget for comparatively little loss, and the cheapest way to be
+            uninformative at a fixed spread is a handful of enormous scores
+            with everything else at zero -- where sigmoid is 0.5 and the cost
+            is `ln 2`. At `decision_gain = 2` the uninformative loss falls from
+            1.068 (Gaussian) to 0.865 (4% at +-10) to 0.786 (1% at +-20),
+            approaching `ln 2` from above, information-free throughout.
+
+        That is what happened. `receiver-cross-attention-birds.csv` opens at
+            0.875 and reaches 0.810 over 30 epochs; ShapeWorld runs 0.828 ->
+            0.765. Both sit on that curve, both hold `train_acc` at 0.5000 to
+            four places for every epoch, and both leave the speaker inert --
+            `pool_effective_examples` never departs 4.99 (10.0 on ShapeWorld).
+            Same destination as `issue.csv`, one moment further out.
+
+        So the readout reports `decision_kurtosis`, and the sign is the
+            reading: negative when the listener is discriminating (bimodal
+            scores, floor -2), positive when it is not. On a synthetic game run
+            against this module, informative and scrambled messages separated
+            -2.0 from +11..+23 while `decision_spread` overlapped. Fixing this
+            properly means changing what the loss buys -- an `E|s|` budget
+            rather than an `E[s**2]` one matches BCE's linear far field and
+            reverses the arbitrage -- but that is a change to make with a
+            reading in hand, which is what this column is for.
         """
         super().__init__()
         self.d_model = kwargs["d_model"]
@@ -721,6 +751,38 @@ class TransformerCrossAttentionComparer(nn.Module):
         #     `train_score_scale` traced in `issue.csv`.
         self.decision_spread = float("nan")
 
+        # Excess kurtosis of the readout, and the column that actually reads
+        #     health. `score_norm` pins the second moment; it does not pin the
+        #     fourth, and the fourth is where the remaining escape lives.
+        #
+        # BCE against a coin-flip label costs `|s|/2 + ln(1 + exp(-|s|))` --
+        #     quadratic in `s` near zero, but only *linear* far out. Variance
+        #     costs `s**2`. So under a fixed variance budget an outlier is cheap
+        #     per unit of variance it absorbs, and the cheapest uninformative
+        #     allocation is to put a few scores enormously far out and leave
+        #     everything else at zero, where sigmoid is 0.5 and the loss is
+        #     `ln 2`. At `decision_gain = 2` that walks the loss from 1.068
+        #     (Gaussian) down through 0.865 (4% at +-10) to 0.786 (1% at +-20),
+        #     approaching `ln 2` from above, with no information anywhere.
+        #
+        # Measured on this module, on a synthetic game where the listener is
+        #     handed a message that names the target concept and one where the
+        #     message is scrambled. Everything else identical:
+        #
+        #         informative   acc 1.000   loss 0.127   excess kurtosis -2.0
+        #         scrambled     acc ~0.50   loss ~0.9    excess kurtosis +11..+23
+        #
+        #     The sign is the reading. A listener with something to say drives
+        #     the scores bimodal and kurtosis towards -2, the two-point limit;
+        #     one with nothing to say goes heavy-tailed. `decision_spread` was
+        #     1.4-2.1 and 2.7-5.1 across those same two runs -- overlapping, and
+        #     so unable to tell them apart on its own.
+        #
+        # Sustained positive excess kurtosis with `train_acc` at 0.5 is the
+        #     failure `receiver-cross-attention-birds.csv` and
+        #     `receiver-cross-attention-shapeworld.csv` ran for thirty epochs.
+        self.decision_kurtosis = float("nan")
+
     def _attention(self):
         """
         One bare `MHAttention` at this module's width, built the same way three
@@ -852,7 +914,25 @@ class TransformerCrossAttentionComparer(nn.Module):
         #     `AttentionPrototyper` already reports `pool_effective_examples`
         #     exactly this way, and a metric nobody can read is how the last
         #     collapse ran for a whole smoke test.
-        self.decision_spread = scores.detach().float().std().item()
+        detached = scores.detach().float()
+        spread = detached.std()
+        self.decision_spread = spread.item()
+
+        # Excess kurtosis over the same flattened batch, which is the moment
+        #     `score_norm` leaves free. See `__init__` for why it is the column
+        #     that separates a listener that is discriminating from one that is
+        #     buying its way to `ln 2` with outliers.
+        #
+        # Guarded because the fourth standardised moment divides by `spread`
+        #     to the fourth, and a genuinely constant readout -- which this
+        #     class is built to send to sigmoid 0.5 -- makes that 0/0. NaN is
+        #     the honest value there: the shape of a point mass is not defined,
+        #     and a silent 0.0 would read as "Gaussian, nothing to see".
+        if spread > 1e-6:
+            standardised = (detached - detached.mean()) / spread
+            self.decision_kurtosis = (standardised ** 4).mean().item() - 3.0
+        else:
+            self.decision_kurtosis = float("nan")
 
         # 6. Standardise over the flattened batch, then set the volume once.
         #
