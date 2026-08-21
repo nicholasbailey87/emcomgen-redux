@@ -16,6 +16,10 @@ Things can get a bit funky if you don't install the required packages in the rig
 
 Other instructions for getting started still apply per the original repository: https://github.com/jayelm/emergent-generalization, see below
 
+## When a run sits at chance
+
+See [`diagnostics/`](diagnostics/README.md). A pair stuck at 0.5 accuracy and a loss near ln 2 offers no evidence about which of its parts is at fault, because every one of them fails that way. Those scripts build the real modules from a real rung config and run them on a synthetic task with a known answer, so a failure has one cause rather than five. No dataset, no GPU, about a minute on a laptop.
+
 # README from the original repository below
 
 ## Setup
