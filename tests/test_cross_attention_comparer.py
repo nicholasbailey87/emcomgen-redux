@@ -146,17 +146,31 @@ def _object_share(scores_or_states):
 
 
 def test_the_staged_walkthrough_matches_the_forward_pass():
+    """
+    The readout is rebuilt here as `decision -> score_norm -> decision_gain`,
+        which is what `forward` does now. It used to be
+        `F.normalize(decision.weight)` against a learnable `score_scale`; see
+        test_score_scale.py for why that changed.
+
+    `score_norm` has to be run on the same flattening `forward` uses -- one
+        statistic across every slot, not one per slot -- so this reproduces the
+        `reshape` rather than calling the module on the `(batch, n_obj)` tensor,
+        which would not even be a valid shape for `BatchNorm1d(1)`.
+
+    Both calls run in train mode, so both normalise by their own batch
+        statistics. Running the rebuild first would otherwise leave the running
+        estimates one update further along than `forward` expects, and the two
+        would differ for a reason that has nothing to do with the stages.
+    """
     comparer = _comparer()
     referents, messages = _inputs(comparer)
     with torch.no_grad():
         refined = _stages(comparer, referents, messages)["refined referents"]
         normed = comparer.decision_layer_norm(refined)
-        direction = torch.nn.functional.normalize(
-            comparer.decision.weight, dim=-1
-        )
-        rebuilt = comparer.score_scale * (
-            normed @ direction.squeeze(0) + comparer.decision.bias
-        )
+        scores = comparer.decision(normed).squeeze(-1)
+        rebuilt = comparer.decision_gain * comparer.score_norm(
+            scores.reshape(-1, 1)
+        ).reshape(scores.shape)
         actual = comparer(referents, messages)
 
     assert torch.allclose(rebuilt, actual, atol=1e-6)

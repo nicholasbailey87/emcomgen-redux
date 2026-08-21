@@ -251,9 +251,21 @@ polarity_embedding_lr = 2e-3
 # floor -- that was tried in `e3fcabd` and cost fifteen epochs before `29b18ea`
 # removed it.
 #
-# Applies only to `BilinearGRUComparer`; `build_models` skips it for
-# `TransformerCrossAttentionComparer`, whose score comes from a `decision`
-# linear rather than a normalised dot product and which has no such parameter.
+# Applies only to `BilinearGRUComparer`, and `build_models` gates on that class
+# rather than on finding the parameter. `TransformerCrossAttentionComparer` no
+# longer has a learnable scale at all: it standardises its readout and
+# multiplies by a fixed `decision_gain`, because on rungs 11 and 12 the scale
+# this key exists to move went monotonically to 0.27 and pinned `train_loss` at
+# ln 2 for thirty epochs. `train_score_scale` is therefore a bilinear-only
+# column now, and `decision_spread` is what the other arm reports instead --
+# see `decision_gain` under `[receiver_comparer]` for the argument.
+#
+# Which leaves the baseline comparer holding the mechanism that failed on the
+# other one. That is a scoping decision and not a verdict: `BilinearGRUComparer`
+# is the ablation's baseline listener, its score is a scaled cosine with the
+# same first-order exposure to "become less confident", and changing its readout
+# would invalidate every rung rather than the two under investigation. Worth
+# revisiting once the fixed-gain readout has been seen to work.
 score_scale_lr = 2e-3
 
 [scheduler]
@@ -600,6 +612,62 @@ dropout = 0.1 # The listener's only dropout, and in both comparers it masks
 layers = 1
 bidirectional = false
 message_length = 7 # Only applies to Transformer comparers. Should be the same as sender_language_model.message_length
+
+# The volume `TransformerCrossAttentionComparer` states its conclusion at, and
+# the whole of it: that comparer standardises its readout with a BatchNorm and
+# then multiplies by this number, which never moves. Read by that class only —
+# `BilinearGRUComparer` keeps the learnable `log_score_scale` this replaces, and
+# ignores this key.
+#
+# Why fixed rather than learned. BCE will always reduce a loss it cannot
+# otherwise reduce by becoming less confident, and that pressure is first-order
+# where learning a useful direction is not, so a learnable volume collapses
+# first and starves everything upstream of it. Twice, now: once through
+# `decision.weight`'s magnitude (scores sd 0.42 -> 0.016 inside one epoch) and
+# once through `log_score_scale` (rungs 11 and 12, monotone to 0.27 over 30
+# epochs, `train_loss` pinned at ln 2 throughout). This is the speaker's
+# conclusion applied to the listener: set the gain, don't learn it.
+#
+# Why a BatchNorm and not simply a frozen scalar. Freezing closes the scalar and
+# leaves the shape: the listener can still go quiet by shrinking the *spread* of
+# its readout — rotating towards where the candidates do not differ — which
+# reaches the same ln 2 by a slower route and without a column to show for it.
+# Standardising renormalises that straight back out, and sends a genuinely
+# constant readout to exactly 0, which sigmoids to 0.5. There is no longer a
+# resting place at chance.
+#
+# Why 2.0. This sets how confident an untrained listener is forced to be, and
+# therefore how much a confident error costs. Untrained BCE against balanced
+# labels, measured over 2e6 samples:
+#
+#   gain   1.0    2.0    3.0    6.0     (ln 2 = 0.693)
+#   nats   0.805  1.067  1.394  2.496
+#
+# and a build of the rung 12 comparer opens at 1.061, matching the 2.0 row. All
+# of them are above ln 2, which is the point: there is no setting at which
+# chance is free, so the run starts worse than chance and has to earn its way
+# down.
+#
+# 2.0 rather than 6.0 because the cost is not symmetric. 6.0 opens at 2.5 nats
+# and puts `sigmoid` on its saturated tails almost everywhere, where
+# `dL/dz = sigmoid(z) - y` is +/-1 whatever `z` is, so the loss stops
+# distinguishing "slightly wrong" from "badly wrong" and degenerates towards a
+# sign signal. Gradients stay bounded either way — this costs calibration, not
+# stability — but a stronger forcing function is not what is scarce here. Raise
+# it if a run sits at 1.07 without moving; that would be evidence the listener
+# is comfortable rather than stuck.
+#
+# What to watch, and it is not accuracy. Removing the resting place forces the
+# listener to be confident about something; it does not make the message the
+# route. In a concept game the positives are images of one species, and
+# `referent_self_attention` is the machinery for clustering the set without
+# reading anything — permutation-equivariance means that yields the partition
+# but not which half is positive, so the pair need smuggle only one bit through
+# the channel to convert it into high accuracy. That would read as success.
+# `test_topsim_*` and `unique_message_fraction` are what separate a protocol
+# from a one-bit shortcut; `decision_spread` in metrics.csv reports the readout's
+# own health.
+decision_gain = 2.0
 # 5, for head_dim 64 at the 320 width the Transformer comparer takes in rung 11
 # -- the same head dimension every attention module in the repo now has.
 #

@@ -204,16 +204,29 @@ def build_models(dataloaders, config):
             "polarity_embedding_lr",
         )
 
-    # The listener's scale. Ungated, unlike the speaker's polarity tag: both
-    #     comparers carry `log_score_scale` now, so there is no class for which
-    #     the key is inapplicable and nothing left for a gate to distinguish.
-    #     That puts `split_out_parameter`'s `RuntimeError` back on duty as a
-    #     live guard -- a rename says so instead of leaving the knob quietly
-    #     doing nothing, which is what the old `isinstance` check would have
-    #     done for the comparer it excluded.
+    # The listener's scale, and gated again -- on the comparer this time, for
+    #     the reason the polarity tag is gated on the speaker.
+    #     `TransformerCrossAttentionComparer` no longer has a learnable scale at
+    #     all: it standardises its readout and multiplies by a fixed
+    #     `decision_gain`, so there is nothing for a rate to apply to and the
+    #     key is genuinely inapplicable, exactly as `heads` is inapplicable to a
+    #     GRU speaker. This comment previously argued the opposite, on the
+    #     grounds that both comparers carried `log_score_scale`; that stopped
+    #     being true when the collapse it was meant to make legible turned out
+    #     to need closing rather than measuring.
+    #
+    # Gating rather than deleting the knob, because `BilinearGRUComparer` keeps
+    #     its scale and is the ablation's baseline listener. Gating on the class
+    #     that *has* the parameter rather than on finding it also leaves
+    #     `split_out_parameter`'s `RuntimeError` on duty where it can still
+    #     fire: a rename inside `BilinearGRUComparer` says so, instead of
+    #     leaving the knob quietly doing nothing.
     score_scale_lr = config['optimiser'].get('score_scale_lr', base_lr)
 
-    if score_scale_lr != base_lr:
+    if (
+        score_scale_lr != base_lr
+        and isinstance(pair.receiver.comparer, receiver.BilinearGRUComparer)
+    ):
         optimiser = split_out_parameter(
             optimiser,
             pair,

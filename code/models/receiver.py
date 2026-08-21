@@ -6,7 +6,6 @@ import math
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 import broccoli
 
@@ -341,7 +340,7 @@ class TransformerCrossAttentionComparer(nn.Module):
             constants are derived for.
 
         ---
-        Why the readout is normalised and the scale is a separate scalar
+        Why the readout is batch-normalised at a fixed gain
 
         `decision` used to be a bare `nn.Linear(d_model, 1)`, which made one
             vector both the *direction* the head reads out and the *volume* it
@@ -359,12 +358,51 @@ class TransformerCrossAttentionComparer(nn.Module):
             that would make it informative, which is why thirty epochs did not
             escape it.
 
-        So the direction is normalised to a unit vector in `forward` -- which
-            leaves its gradient orthogonal to itself, making the magnitude
-            inert -- and the magnitude lives in `log_score_scale`, exactly as
-            `bilinear`'s magnitude is divided out by `message_layer_norm` and
-            replaced by `BilinearGRUComparer.log_score_scale`. Same defect,
-            same fix, one module later.
+        The first answer to that was to normalise the direction to a unit
+            vector and move the volume into a single learnable scalar,
+            `log_score_scale`. It made the collapse *legible* -- one column,
+            with a known ceiling of `score_scale_lr * steps` log-units an epoch
+            -- but it did not remove the pressure, and the run went down the
+            same hole more slowly. `issue.csv` is the second round: rung 12 at
+            30 epochs with `train_loss` pinned at ln 2, `train_acc` at 0.4998
+            and `score_scale` sliding 0.914 -> 0.273, monotone, sign-consistent,
+            never recovering. Rung 11 did the same.
+
+        Worse, the accuracy column could not see it. `train.py` reads the
+            decision as `lis_scores > 0`, and a strictly positive scale leaves
+            `s * (u + b) > 0` equivalent to `u + b > 0`, so the listener walked
+            the loss to ln 2 without changing a single prediction.
+
+        So the volume is no longer a parameter at all. `decision` is called
+            directly, its output is standardised by `score_norm` over the
+            flattened batch, and the result is multiplied by the fixed
+            `decision_gain`. Three things follow, and the third is the one the
+            scalar could not give:
+
+          - `decision.weight`'s magnitude is inert without needing
+            `F.normalize`. Scaling it by `c` scales the pre-norm logits by `c`,
+            which scales the batch mean and the batch standard deviation by `c`
+            too, and the quotient is unchanged. Only its direction learns.
+          - A *constant* readout has zero variance, leaves `score_norm` at
+            exactly 0 and sigmoids to 0.5. Going quiet is no longer a way down.
+          - A *shrinking spread* is renormalised straight back out. That is the
+            route a pinned scalar would have left open -- collapse by rotating
+            the readout towards where the candidates do not differ -- and it is
+            why this is a batch norm rather than a frozen `score_scale`.
+
+        The gain is set rather than learned, which is what the ablation
+            concluded for the speaker's side of the same problem: a learnable
+            gain cannot rescue a channel, because a lone scalar under AdamW
+            travels at most `lr * steps` and will spend that budget going
+            whichever way is locally cheap. See `DEFAULT.toml`'s
+            `decision_gain` for why it opens at 2.0 rather than higher.
+
+        `BilinearGRUComparer` deliberately keeps its `log_score_scale`. It is
+            the ablation's baseline listener, and changing its readout would
+            invalidate every rung rather than the two under investigation. Its
+            score is a scaled cosine like this one and has the same exposure;
+            that it has not been fixed here is a scoping decision, not a
+            statement that it is safe.
         """
         super().__init__()
         self.d_model = kwargs["d_model"]
@@ -390,6 +428,7 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.ff_inner_dropout = kwargs["ff_inner_dropout"]
         self.ff_outer_dropout = kwargs["ff_outer_dropout"]
         self.self_attention_dropout = kwargs["self_attention_dropout"]
+        self.decision_gain = kwargs["decision_gain"]
 
         # `layers` is the message encoder's depth, and nothing else's. It used
         #     to be a total split between a reading stack and a fusion stack,
@@ -473,8 +512,12 @@ class TransformerCrossAttentionComparer(nn.Module):
         #     `test_the_referent_norm_is_not_a_global_rescale` pins on the
         #     other comparer.
         #
-        # An affine would also be a second route to score magnitude alongside
-        #     `log_score_scale`, which is the route this class exists to close.
+        # An affine here would also be a route to *global* score magnitude, and
+        #     `score_norm` divides that straight back out -- so unlike the
+        #     per-object argument above, that half of the case is now carried
+        #     downstream rather than by this flag. Left affine-free anyway: a
+        #     gain the readout renormalises away is a parameter that can only
+        #     drift, and the per-object argument is the load-bearing one.
         self.referent_layer_norm = nn.LayerNorm(
             self.d_model, elementwise_affine=False, eps=LAYER_NORM_EPS
         )
@@ -563,43 +606,120 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.referent_self_attention = self._attention()
         self.referent_self_attention_norm = nn.RMSNorm(self.d_model)
 
-        # Parameter-free, and not optional. broccoli's post-norm is
-        #     `nn.RMSNorm(d_model)` with `elementwise_affine=True` by default,
-        #     so `referent_self_attention_norm` above carries a learnable gain
-        #     -- a second, unbounded route to score magnitude that BCE would
-        #     drive the collapse through instead. That affine cannot simply be
-        #     turned off: the same class is used by `encoding` and by the
-        #     speaker's stacks, where it is wanted. So the readout normalises
-        #     downstream of it.
+        # Parameter-free, and not optional -- but for a narrower reason than it
+        #     used to have. broccoli's post-norm is `nn.RMSNorm(d_model)` with
+        #     `elementwise_affine=True` by default, so
+        #     `referent_self_attention_norm` above carries a learnable gain.
+        #     `score_norm` now divides any *global* gain out, so that is no
+        #     longer the argument; this norm is here because it equalises the
+        #     candidates' lengths, which nothing downstream can do. Without it
+        #     `scores` is `|refined_j| * cos(theta_j)` and an object can be read
+        #     loudly for being large rather than for matching -- the same defect
+        #     as `test_the_referent_norm_is_not_a_global_rescale`, one stage
+        #     later. With it, every candidate is read at norm `sqrt(d)` and only
+        #     the angle can separate them.
         self.decision_layer_norm = nn.LayerNorm(
             self.d_model, elementwise_affine=False, eps=LAYER_NORM_EPS
         )
 
-        # Held as an `nn.Linear` for its initialisation and its
-        #     `reset_parameters`, but deliberately never *called* -- `forward`
-        #     normalises `weight` first. Calling it directly would restore the
-        #     free magnitude this class was rewritten to remove, so if you find
-        #     yourself writing `self.decision(...)`, that is the bug.
-        self.decision = nn.Linear(self.d_model, 1, bias=True)
-
-        # The one thing that sets how loudly this listener states a conclusion,
-        #     and the exact counterpart of `BilinearGRUComparer`'s. Opens at
-        #     1.0, which is calibrated rather than arbitrary: `decision_layer_norm`
-        #     leaves `refined` at norm `sqrt(d)` and the readout direction is a
-        #     unit vector, so their product opens at unit variance and BCE
-        #     within a hair of `ln 2`.
+        # Called directly, and `bias=False` on purpose. `score_norm` subtracts
+        #     the batch mean, which absorbs any constant this layer could add,
+        #     so a bias here would have identically zero gradient -- a dead
+        #     parameter that reads as a live one.
         #
-        # Stored as a log for the reasons given on the other comparer, plus one
-        #     specific to this class: a linear scale does not stop at zero. At
-        #     `score_scale_lr = 2e-3` AdamW moves a lone scalar about `lr` a
-        #     step, so from 1.0 it would reach zero in 500 steps -- under three
-        #     CUB epochs -- and then go negative, inverting the readout's sign
-        #     while the loss looked unremarkable. `exp` forbids that, and bounds
-        #     the descent to `score_scale_lr * steps` log-units, which is what
-        #     makes the collapse this class just had visible in
-        #     `train_score_scale` rather than recoverable only by algebra on the
-        #     fourth decimal place of `train_loss`.
-        self.log_score_scale = nn.Parameter(torch.zeros(()))
+        # This layer used to be held but never called, because its weight's
+        #     magnitude was a free route to score volume. It is not one now:
+        #     scaling `weight` by `c` scales the pre-norm logits, their mean and
+        #     their standard deviation by `c` alike, and `score_norm` returns
+        #     the same quotient. The `F.normalize` that used to enforce that is
+        #     therefore redundant, and calling the layer is the intended path.
+        self.decision = nn.Linear(self.d_model, 1, bias=False)
+
+        # What replaces `log_score_scale`, and the reason this class no longer
+        #     has a volume knob at all. Standardises the readout over the
+        #     flattened batch, after which `decision_gain` sets the volume once
+        #     and does not move. See the class docstring for the argument, and
+        #     `DEFAULT.toml`'s `decision_gain` for the opening value.
+        #
+        # Both arguments are load-bearing, and each closes a different failure.
+        #     They interact, so they are stated together rather than separately:
+        #
+        #   - `1`, not `n_obj`. `forward` flattens to `(batch * n_obj, 1)` so
+        #     that one statistic is shared by every slot. This is the half that
+        #     depends on the data layout: referent order *is* the label vector
+        #     here -- `data.util.split_spk_lis` writes positives into the first
+        #     half of each agent's view -- so slot `j`'s label is the *same* on
+        #     every game, and its mean across a batch is therefore the answer
+        #     rather than a nuisance offset. `BatchNorm1d(n_obj)` subtracts it.
+        #
+        #     That is not a leak, it is a ceiling, and a hard one: centring each
+        #     slot puts about half of that slot's batch on either side of zero,
+        #     while its true label never moves, so `train.py`'s `scores > 0`
+        #     lands at chance no matter how good the listener is. Measured on
+        #     scores constructed to be perfect: 1.000 accuracy flattened, 0.475
+        #     per-slot. The flattened norm has no such effect, because only the
+        #     pooled mean is pinned and an individual slot is free to sit
+        #     entirely above or below it.
+        #
+        #   - `affine=False`. At one feature broccoli's affine is exactly one
+        #     learnable gain and one learnable bias, which is the escape hatch
+        #     this change exists to remove. Turning it on rebuilds
+        #     `log_score_scale` behind the norm.
+        #
+        #     Note the two arguments swap places if both are changed at once.
+        #     Per-slot *with* an affine is no longer a ceiling but a shortcut --
+        #     the per-slot bias re-adds what the per-slot mean removed, and the
+        #     optimal setting is `+b` on the positive half and `-b` on the
+        #     negative, which scores perfectly without reading the message at
+        #     all. That is the hazard `_attention`'s `causal=False` comment
+        #     guards against, reached by a different door. Neither setting is
+        #     safe to relax on its own reasoning.
+        #
+        # `track_running_stats` is left on, and this is the first module in the
+        #     repo to depend on module mode for anything more than dropout.
+        #     `train.py` calls `pair.train(mode=training)` at the top of every
+        #     pass, so the train pass normalises by batch statistics and
+        #     accumulates the running estimates while the two eval passes
+        #     normalise by those estimates and leave them alone. That is what
+        #     keeps eval deterministic per example and keeps test data out of
+        #     the statistics; if that call is ever removed, this module is what
+        #     it breaks first, and it breaks silently.
+        #
+        # `eps` is torch's default, and deliberately *not* `LAYER_NORM_EPS` --
+        #     which is worth a line only because every other norm in this file
+        #     passes that constant, so the omission would otherwise read as one.
+        #
+        # 1e-12 there is set so a LayerNorm keeps normalising a legitimately
+        #     small operand: a backbone really can emit RMS 0.01, and that is
+        #     signal. Here a near-zero spread is not signal. `decision` reads a
+        #     layer-normed input, so nothing legitimate puts the readout at
+        #     1e-6, and at that `eps` a *constant* readout comes back at sigmoid
+        #     0.85 -- float32's rounding in a mean over 160 identical values is
+        #     ~1e-6, divided by `sqrt(1e-12)` = 1e-6. The default sends the same
+        #     constant to sigmoid 0.5002, which is the behaviour this class
+        #     exists to have.
+        self.score_norm = nn.BatchNorm1d(1, affine=False)
+
+        # Metrics only, in the idiom of `AttentionPrototyper`'s
+        #     `pool_effective_examples` and `SenderTransformerLM`'s
+        #     `polarity_separation`: set on every `forward`, read by `train.py`.
+        #
+        # The standard deviation of the readout *before* `score_norm`, which is
+        #     the column that replaces `train_score_scale`. Post-norm spread is
+        #     pinned at `decision_gain` by construction and reports nothing.
+        #     Pre-norm spread is where a collapse would have to show up now,
+        #     and it is the only quantity `score_norm`'s scale-invariance does
+        #     not already make unreadable. It opens around 0.57; `score_norm`
+        #     holds its output at `decision_gain` unchanged down to about a
+        #     tenth of that and starts attenuating instead of renormalising
+        #     around a hundredth, so a reading in the thousandths means the
+        #     invariance below is no longer doing what the comment claims.
+        #
+        # Not expected to be flat. It is free to wander, because nothing in the
+        #     loss rewards its magnitude either way; what would be a finding is
+        #     a monotone descent towards zero, which is the shape
+        #     `train_score_scale` traced in `issue.csv`.
+        self.decision_spread = float("nan")
 
     def _attention(self):
         """
@@ -654,16 +774,6 @@ class TransformerCrossAttentionComparer(nn.Module):
             source_size=None,
             scaling="d",
         )
-
-    @property
-    def score_scale(self):
-        """
-        The multiplier applied to the normalised readout, always positive. Read
-            here rather than exponentiating at the use site, so `forward` and
-            the metrics column cannot drift apart. Counterpart of
-            `BilinearGRUComparer.score_scale`.
-        """
-        return self.log_score_scale.exp()
 
     def _residual(self, stream, attended, norm):
         """
@@ -728,25 +838,49 @@ class TransformerCrossAttentionComparer(nn.Module):
             self.referent_self_attention_norm,
         )
 
-        # 5. Read out along a direction of unit length, at a volume set by one
-        #    scalar. `F.normalize` leaves `decision.weight`'s gradient
-        #    orthogonal to itself, so its magnitude is inert and cannot become
-        #    a second route to confidence.
+        # 5. Read out. Every candidate is at norm `sqrt(d)` after
+        #    `decision_layer_norm`, so `scores` is an angle and nothing else --
+        #    no object can be read loudly for being large.
         refined = self.decision_layer_norm(refined)
-        direction = F.normalize(self.decision.weight, dim=-1) # (1, d_model)
-        scores = refined @ direction.squeeze(0) # (batch, n_objects)
+        scores = self.decision(refined).squeeze(-1) # (batch, n_objects)
 
-        # The bias sits *inside* the scale, which is what keeps `score_scale`
-        #     a pure temperature. The decision boundary is `scores = -bias`
-        #     either way round, but only this way is it independent of the
-        #     scale: `s * (u + b)` crosses zero where `u = -b` whatever `s` is,
-        #     where `s * u + b` crosses at `u = -b/s` and so moves the boundary
-        #     every time the listener's confidence changes -- which would make
-        #     `b` something the head has to re-learn against `s` rather than
-        #     once. `train.py` reads the binary decision as `scores > 0` and the
-        #     reference-game decision as an argmax, and this leaves both
-        #     invariant, as on `BilinearGRUComparer`.
-        return self.score_scale * (scores + self.decision.bias)
+        # Read before `score_norm`, because after it the spread is pinned at
+        #     `decision_gain` and says nothing. See `__init__`.
+        #
+        # `.item()` in a forward pass costs a sync and a graph break under
+        #     `torch.compile`, which is on. Paid deliberately and not novel:
+        #     `AttentionPrototyper` already reports `pool_effective_examples`
+        #     exactly this way, and a metric nobody can read is how the last
+        #     collapse ran for a whole smoke test.
+        self.decision_spread = scores.detach().float().std().item()
+
+        # 6. Standardise over the flattened batch, then set the volume once.
+        #
+        # Flattened to `(batch * n_obj, 1)` so that one statistic covers every
+        #     slot: `score_norm` is deliberately `BatchNorm1d(1)` and not
+        #     `BatchNorm1d(n_obj)`, because referent order is the label vector
+        #     and per-slot statistics would hand it over. `__init__` carries
+        #     that argument in full.
+        #
+        # `reshape` rather than `view` because `refined` reaches here through
+        #     attention outputs that are not guaranteed contiguous.
+        scores = self.score_norm(
+            scores.reshape(-1, 1)
+        ).reshape(scores.shape)
+
+        # No bias term. `score_norm` has already removed the batch mean, so any
+        #     constant added here would be subtracted straight back out --
+        #     which is why `decision` is built with `bias=False`. The decision
+        #     boundary is `scores = 0`, and `decision_gain` is strictly
+        #     positive, so `train.py`'s `lis_scores > 0` and its reference-game
+        #     argmax are both invariant to it, as they were to `score_scale`.
+        #
+        # That invariance is why accuracy could not see the old collapse, and
+        #     it is unchanged here. The difference is that there is no longer a
+        #     parameter whose descent the loss could reward: the gain is fixed,
+        #     and anything the readout does to shrink its own spread is
+        #     renormalised away before it arrives.
+        return self.decision_gain * scores
 
     def reset_parameters(self):
         # Every submodule holding a parameter, including the two adapters and
@@ -769,7 +903,11 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.referent_self_attention_norm.reset_parameters()
         self.decision_layer_norm.reset_parameters()
         self.decision.reset_parameters()
-        nn.init.zeros_(self.log_score_scale)
+        # Clears the running mean and variance as well as the (absent) affine,
+        #     so a reset listener does not keep statistics estimated by the one
+        #     it replaces. `receiver_reset_interval` is 0.0 today, so this is
+        #     dormant -- listed for the same mirror reason as the norms above.
+        self.score_norm.reset_parameters()
 
 
 class Receiver(nn.Module):

@@ -17,6 +17,7 @@ import torch.nn as nn
 import models
 import models.backbone
 import models.sender
+import models.receiver
 
 import parse_config
 import util
@@ -500,28 +501,52 @@ def run(
                     batch_size=batch_size,
                 )
 
-            # `score_scale` is the listener's half of the same story, and is
-            # read the same way. `logit_scale` says how audibly the speaker
-            # states a message; this says how confidently the listener acts on
-            # one. Both dip during bootstrapping for the same reason -- neither
-            # agent should commit while the message is still noise -- and
-            # 29b18ea measured the separation that tells a productive dip from a
+            # The listener's half of the same story, and the two comparers now
+            # answer it with different columns because they no longer have the
+            # same mechanism. Dispatched on the class rather than by `hasattr`,
+            # for the reason the pooling columns above are: a fallback would
+            # turn a rename into a silently-NaN column, and a silently-NaN
+            # column is how the cross-attention comparer's collapse went
+            # unnoticed for a whole smoke test.
+            #
+            # `score_scale` -- `BilinearGRUComparer` only, which keeps its
+            # learnable scale. `logit_scale` says how audibly the speaker states
+            # a message; this says how confidently the listener acts on one.
+            # Both dip during bootstrapping for the same reason -- neither agent
+            # should commit while the message is still noise -- and 29b18ea
+            # measured the separation that tells a productive dip from a
             # collapse: a healthy speaker fell ~0.2 log-units and returned
             # within a few epochs, where the arm that died fell 0.94 and never
             # did. There is deliberately no floor on either; e3fcabd tried one
             # and it cost fifteen epochs.
             #
-            # Read straight off the comparer, with no `hasattr` fallback:
-            # every comparer carries one now, so a fallback could only turn a
-            # rename into a silently-NaN column -- and a silently-NaN column is
-            # how the cross-attention comparer's collapse went unnoticed for a
-            # whole smoke test. Unlike the pooling columns above, there is no
-            # class here for which the quantity is genuinely inapplicable.
+            # `decision_spread` -- `TransformerCrossAttentionComparer` only,
+            # which has no scale to report because `score_norm` and a fixed
+            # `decision_gain` replaced it. This is the standard deviation of its
+            # readout *before* that normalisation; after it the spread is
+            # `decision_gain` by construction and carries no information. It is
+            # not a scale and should not be read like one: it is free to wander,
+            # and what would be a finding is a monotone descent towards zero,
+            # which is the shape `score_scale` traced on rungs 11 and 12 before
+            # this change.
+            #
+            # Each is genuinely inapplicable to the other class, so each is NaN
+            # on the runs that do not have it -- the same situation as
+            # `pool_score_norm` under `AveragePrototyper`, and not the same as a
+            # fallback hiding a rename.
             if training:
-                stats.update(
-                    score_scale=pair.receiver.comparer.score_scale.item(),
-                    batch_size=batch_size,
-                )
+                comparer = pair.receiver.comparer
+
+                if isinstance(comparer, models.receiver.BilinearGRUComparer):
+                    stats.update(
+                        score_scale=comparer.score_scale.item(),
+                        batch_size=batch_size,
+                    )
+                else:
+                    stats.update(
+                        decision_spread=comparer.decision_spread,
+                        batch_size=batch_size,
+                    )
 
         if training:
             if batch_i % config['optimiser']['log_interval'] == 0:
