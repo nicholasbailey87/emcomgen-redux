@@ -272,6 +272,24 @@ def run(
 
     collect = compute_topsim and speaking
 
+    def optimiser_step(loss):
+        """
+        Called from inside the loop and once more after it, for a trailing
+        partial accumulation. Both paths have to agree, which is why they are
+        one function. Unscale then clip, per
+        https://docs.pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping
+        """
+        scaler.unscale_(optimizer)
+        clip_gradients(pair, config['optimiser']['clip_grad_norm'])
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step(loss.item())
+        optimizer.zero_grad()
+
+    # Bound before the loop so the flush below reads a defined name on an
+    # empty split.
+    backpropped = True
+
     if training:
         optimizer.zero_grad()
 
@@ -364,17 +382,11 @@ def run(
             if training:
                 scaler.scale(this_loss / config['optimiser']['accumulator_steps']).backward()
 
-                if (batch_i + 1) % config['optimiser']['accumulator_steps'] == 0:
-                    # Unscale then clip, per https://docs.pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping
-                    scaler.unscale_(optimizer)
-                    clip_gradients(pair, config['optimiser']['clip_grad_norm'])
-                    scaler.step(optimizer)
-                    scaler.update()
-                    scheduler.step(this_loss.item())
-                    optimizer.zero_grad()
-                    backpropped = True
-                else:
-                    backpropped = False
+                backpropped = (
+                    (batch_i + 1) % config['optimiser']['accumulator_steps'] == 0
+                )
+                if backpropped:
+                    optimiser_step(this_loss)
 
             stats.update(
                 loss=this_loss.item(), acc=this_acc, batch_size=batch_size,
@@ -422,13 +434,7 @@ def run(
                 log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats)
 
     if training and not backpropped:
-        # Unscale then clip, per https://docs.pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping
-        scaler.unscale_(optimizer)
-        clip_gradients(pair, config['optimiser']['clip_grad_norm'])
-        scaler.step(optimizer)
-        scaler.update()
-        scheduler.step(this_loss.item())
-        optimizer.zero_grad()
+        optimiser_step(this_loss)
 
     # Compute metrics + collect generation language
     metrics = stats.averages()
