@@ -12,10 +12,6 @@ from torch import nn
 
 from gradboard.optimiser import get_optimiser
 
-def is_transformer_param(name):
-    return name.startswith("sender.transformer") or name.startswith("sender.cls_emb")
-
-
 def split_out_parameter(optimiser, pair, suffix, lr, config_key):
     """
     Move every parameter of `pair` whose name ends in `suffix` into a parameter
@@ -60,6 +56,35 @@ def split_out_parameter(optimiser, pair, suffix, lr, config_key):
     )
 
     return optimiser
+
+
+# `(config key, parameter suffix, applies to)`, in the order the groups are
+#     added. The test gates on the architecture rather than on finding the
+#     parameter: a GRU speaker has no polarity tag, and
+#     `TransformerCrossAttentionComparer` has no learnable score scale, so for
+#     those the key is inapplicable rather than broken. See docs/training.md --
+#     and do not read a gate as a verdict on the parameter.
+SPLIT_LEARNING_RATES = (
+    (
+        "logit_scale_lr",
+        "log_logit_scale",
+        lambda pair: True,
+    ),
+    (
+        "polarity_embedding_lr",
+        "polarity_embedding",
+        lambda pair: isinstance(
+            pair.sender.language_model, sender.SenderTransformerLM
+        ),
+    ),
+    (
+        "score_scale_lr",
+        "log_score_scale",
+        lambda pair: isinstance(
+            pair.receiver.comparer, receiver.BilinearGRUComparer
+        ),
+    ),
+)
 
 
 def build_models(dataloaders, config):
@@ -148,49 +173,13 @@ def build_models(dataloaders, config):
 
     base_lr = config['optimiser']['lr']
 
-    logit_scale_lr = config['optimiser'].get('logit_scale_lr', base_lr)
+    for config_key, suffix, applies_to in SPLIT_LEARNING_RATES:
+        lr = config['optimiser'].get(config_key, base_lr)
 
-    if logit_scale_lr != base_lr:
-        optimiser = split_out_parameter(
-            optimiser, pair, "log_logit_scale", logit_scale_lr, "logit_scale_lr"
-        )
-
-    # Gated on the speaker class rather than on finding the parameter: a GRU
-    #     speaker has no polarity tag, so the key is inapplicable rather than
-    #     broken. See docs/training.md.
-    polarity_embedding_lr = config['optimiser'].get(
-        'polarity_embedding_lr', base_lr
-    )
-
-    if (
-        polarity_embedding_lr != base_lr
-        and isinstance(pair.sender.language_model, sender.SenderTransformerLM)
-    ):
-        optimiser = split_out_parameter(
-            optimiser,
-            pair,
-            "polarity_embedding",
-            polarity_embedding_lr,
-            "polarity_embedding_lr",
-        )
-
-    # Gated on the comparer, for the reason the polarity tag is gated on the
-    #     speaker: `TransformerCrossAttentionComparer` has no learnable scale.
-    #     See docs/training.md -- and do not read the gate as a verdict on the
-    #     parameter.
-    score_scale_lr = config['optimiser'].get('score_scale_lr', base_lr)
-
-    if (
-        score_scale_lr != base_lr
-        and isinstance(pair.receiver.comparer, receiver.BilinearGRUComparer)
-    ):
-        optimiser = split_out_parameter(
-            optimiser,
-            pair,
-            "log_score_scale",
-            score_scale_lr,
-            "score_scale_lr",
-        )
+        if lr != base_lr and applies_to(pair):
+            optimiser = split_out_parameter(
+                optimiser, pair, suffix, lr, config_key
+            )
 
     return {
         "pair": pair,
