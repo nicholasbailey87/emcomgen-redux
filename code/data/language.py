@@ -41,3 +41,16 @@ def init_vocab(langs):
         "eos_token": EOS_TOKEN,
         "sos_token": SOS_TOKEN,
     }
+
+
+def rows_to_text(idxs, tokenize, join=False):
+    """
+    Turn rows of token ids into text. The three callers differ only in
+    `tokenize` -- where a row stops and how an id becomes a token.
+    """
+    texts = [tokenize(row) for row in idxs]
+
+    if join:
+        return [" ".join(toks) for toks in texts]
+
+    return texts

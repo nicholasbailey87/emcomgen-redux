@@ -7,6 +7,7 @@ from PIL import Image
 import pandas as pd
 
 
+from . import language
 from . import util
 from . import image_util as iu
 
@@ -367,15 +368,12 @@ class CUBDataset:
         return img_html
 
     def to_text(self, idxs, join=True):
-        texts = []
-        for lang in idxs:
-            toks = []
-            toks.append("<s>")
-            for i in lang[1:-1]:
-                toks.append(str(i.item()))
-            toks.append("</s>")
-            if join:
-                texts.append(" ".join(toks))
-            else:
-                texts.append(toks)
-        return texts
+        """A CUB "sentence" is the class id repeated: nothing to look up."""
+        def tokenize(lang):
+            return (
+                [language.SOS_TOKEN]
+                + [str(i.item()) for i in lang[1:-1]]
+                + [language.EOS_TOKEN]
+            )
+
+        return language.rows_to_text(idxs, tokenize, join=join)

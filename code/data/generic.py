@@ -106,11 +106,16 @@ class ConceptDataset:
             lis_inp = silhouette(lis_inp)
         return spk_inp, lis_inp
 
+    def _game_language(self, i, pos_i):
+        return self.lang_idx[i]
+
+    def _game_percent_novel(self):
+        return self.percent_novel
+
     @util.return_index
     def __getitem__(self, i):
         img = self.x[i]
         label = self.labels[i]
-        lang = self.lang_idx[i]
         md = self.metadata[i]
 
         assert img.shape[0] % 2 == 0
@@ -125,14 +130,18 @@ class ConceptDataset:
             # `self.x[i]` is a view onto the shared array. See docs/data.md.
             img = np.array(img)
 
+        pos_i = 0
+
         if self.reference_game:
             # Choose a single random target
             if self.augment:
                 pos_i = np.random.randint(midp)
-            else:
-                pos_i = 0
             # Re-assign positive examples
             img[:midp] = img[pos_i]
+
+        # After the target is chosen, before the shuffles: a reference game's
+        # language depends on which image was picked.
+        lang = self._game_language(i, pos_i)
 
         if self.augment:
             # Shuffle positives by themselves
@@ -149,25 +158,22 @@ class ConceptDataset:
             img = F.interpolate(img, (self.image_size, self.image_size))
 
         spk_inp, spk_label, lis_inp, lis_label = util.split_spk_lis(
-            img, label, self.n_examples, percent_novel=self.percent_novel
+            img, label, self.n_examples, percent_novel=self._game_percent_novel()
         )
         spk_inp, lis_inp = self._apply_silhouette(spk_inp, lis_inp)
         return (spk_inp, spk_label, lis_inp, lis_label, lang, md)
 
     def to_text(self, idxs, join=True):
-        texts = []
-        for lang in idxs:
+        def tokenize(lang):
             toks = []
             for i in lang:
                 i = i.item()
                 if i == self.w2i[language.PAD_TOKEN]:
                     break
                 toks.append(self.i2w.get(i, language.UNK_TOKEN))
-            if join:
-                texts.append(" ".join(toks))
-            else:
-                texts.append(toks)
-        return texts
+            return toks
+
+        return language.rows_to_text(idxs, tokenize, join=join)
 
     def to_idx(self, langs):
         # Add SOS, EOS

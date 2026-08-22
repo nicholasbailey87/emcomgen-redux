@@ -9,6 +9,8 @@ import json
 import importlib.metadata
 import toml
 import warnings
+
+import data.language
 from collections import defaultdict
 
 # Dependencies whose version changes the model, and so has to be recorded
@@ -141,17 +143,14 @@ def update_with_prefix(d, new_d, prefix):
 
 
 def to_emergent_text(idxs, join=False, eos=None):
-    texts = []
-    for lang in idxs:
+    """`eos` is inclusive: the terminator is kept and the row stops after it."""
+    def tokenize(lang):
         toks = []
         for i in lang:
             i_item = i.item()
-            i = str(i_item)
-            toks.append(i)
+            toks.append(str(i_item))
             if eos is not None and i_item == eos:
                 break
-        if join:
-            texts.append(" ".join(toks))
-        else:
-            texts.append(toks)
-    return texts
+        return toks
+
+    return data.language.rows_to_text(idxs, tokenize, join=join)

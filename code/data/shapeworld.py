@@ -239,54 +239,20 @@ class ShapeWorldDataset(generic.ConceptDataset):
         if self.shapes is not None:
             self.shape_lang_idx, self.shape_lang_len = self.shapes_to_idx()
 
-    @util.return_index
-    def get_reference_game(self, i):
-        # Copied because the shuffles below write in place; see the matching
-        # note in `generic.ConceptDataset.__getitem__`.
-        img = np.array(self.x[i])
-        label = self.labels[i]
-        md = self.metadata[i]
-
-        midp = img.shape[0] // 2
-
-        # Choose a single random target
-        if self.augment:
-            pos_i = np.random.randint(midp)
-        else:
-            pos_i = 0
-
-        # lang to be the shape of the positive target
-        lang = self.shape_lang_idx[i, pos_i]
-        # Re-assign positive examples
-        img[:midp] = img[pos_i]
-
-        if self.augment:
-            # Shuffle positives by themselves
-            pos_order = np.random.permutation(midp)
-            img[:midp] = img[:midp][pos_order]
-            # Shuffle negatives by themselves
-            neg_order = np.random.permutation(midp)
-            img[midp:] = img[midp:][neg_order]
-
-        img = torch.from_numpy(img)
-        label = torch.from_numpy(label)
-
-        if self.image_size is not None and self.image_size != img.shape[2]:
-            img = F.interpolate(img, (self.image_size, self.image_size))
-
-        spk_inp, spk_label, lis_inp, lis_label = util.split_spk_lis(
-            img, label, self.n_examples, percent_novel=0.0
-        )
-        # `percent_novel = 0.0` hands back the *same* tensor for both agents;
-        # `silhouette` returns a new one, so the independent rolls are safe.
-        spk_inp, lis_inp = self._apply_silhouette(spk_inp, lis_inp)
-        return (spk_inp, spk_label, lis_inp, lis_label, lang, md)
-
-    def __getitem__(self, i):
+    def _game_language(self, i, pos_i):
+        """The target image's shape, not the concept: the positives are copies."""
         if self.reference_game:
-            return self.get_reference_game(i)
-        else:
-            return super().__getitem__(i)
+            return self.shape_lang_idx[i, pos_i]
+        return super()._game_language(i, pos_i)
+
+    def _game_percent_novel(self):
+        """
+        0.0 hands back the *same* tensor to both agents; `silhouette` returns a
+        new one, so the independent rolls downstream are still safe.
+        """
+        if self.reference_game:
+            return 0.0
+        return super()._game_percent_novel()
 
     def shapes_to_idx(self):
         n = len(self.shapes)
