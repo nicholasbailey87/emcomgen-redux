@@ -42,18 +42,17 @@ position-invariant, which BatchNorm was not.
 """
 
 import math
-import os
-import sys
 
 import pytest
 import torch
 from torch.nn import functional as F
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
+import _bootstrap  # noqa: F401
+from _bootstrap import config_section
 
-import data.language  # noqa: E402
-import models.sender as S  # noqa: E402
-from parse_config import get_config  # noqa: E402
+import data.language
+import models.sender as S
+from parse_config import get_config
 
 
 # ---------------------------------------------------------------- fixtures --
@@ -88,9 +87,7 @@ def _logit_shapes(vocabulary, seed=0):
 
 
 def _language_model_config(**overrides):
-    settings = dict(get_config()["sender_language_model"])
-    settings.update(overrides)
-    return settings
+    return config_section("sender_language_model", **overrides)
 
 
 def _gru_speaker(**overrides):

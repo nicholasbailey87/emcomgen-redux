@@ -24,15 +24,13 @@ shape-from-silhouette rather than the shape-from-colour-image competence eval
 requires, so `silhouette_p_sender = 0` has to leave the sender's view untouched.
 """
 
-import os
-import sys
 
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "code"))
+import _bootstrap  # noqa: F401
 
-from data.generic import ConceptDataset, silhouette  # noqa: E402
+from data.generic import ConceptDataset, silhouette
 
 # The six ShapeWorld colours, as rendered.
 COLOURS = np.array(

@@ -42,19 +42,18 @@ by its own gradient alone.
 
 import math
 import os
-import sys
 import tempfile
 
 import torch
 import torch.nn as nn
 import torchvision
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "code"))
+import _bootstrap  # noqa: F401
 
-import parse_config  # noqa: E402
-import models.builder  # noqa: E402
-import train  # noqa: E402
-from models.backbone import vision  # noqa: E402
+import parse_config
+import models.builder
+import train
+from models.backbone import vision
 
 SHAPEWORLD_FEATS = (3, 64, 64)
 BIRDS_FEATS = (3, 224, 224)
@@ -370,7 +369,7 @@ def test_cross_attention_comparer_reset_covers_its_adapters():
     and the referent norm -- i.e. everything mapping the listener's two inputs
     into `d_model` -- while re-drawing everything downstream of them.
     """
-    import models.receiver as receiver  # noqa: E402
+    import models.receiver as receiver
 
     config = parse_config.get_config()
     kwargs = dict(config["receiver_comparer"])

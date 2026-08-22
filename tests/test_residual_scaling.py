@@ -24,25 +24,17 @@ encoder reads, and `TransformerCrossAttentionComparer` puts it between two
 encoder stacks.
 """
 
-import os
-import sys
 
 import pytest
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
+import _bootstrap  # noqa: F401
+from _bootstrap import config_section
 
-import models.model_util as model_util  # noqa: E402
-import models.receiver as R  # noqa: E402
-import models.sender as S  # noqa: E402
-from models.backbone.vision import ViT2  # noqa: E402
-from parse_config import get_config  # noqa: E402
-
-
-def _settings(section, **overrides):
-    settings = dict(get_config()[section])
-    settings.update(overrides)
-    return settings
+import models.model_util as model_util
+import models.receiver as R
+import models.sender as S
+from models.backbone.vision import ViT2
 
 
 # ------------------------------------------------------- 1. the arithmetic --
@@ -101,7 +93,7 @@ def test_a_stack_with_no_blocks_cannot_be_derived_from():
 def test_vit_resolves_from_its_own_depth(layers):
     backbone = ViT2(
         n_feats=(3, 64, 64),
-        **_settings("sender_feature_model", d_model=64, heads=2, layers=layers),
+        **config_section("sender_feature_model", d_model=64, heads=2, layers=layers),
     )
     alpha, beta = model_util.deepnorm_constants(layers)
 
@@ -121,7 +113,7 @@ def test_sender_transformer_lm_resolves_from_its_own_depth(layers, bidirectional
     """
     language_model = S.SenderTransformerLM(
         64,
-        **_settings(
+        **config_section(
             "sender_language_model",
             d_model=64,
             token_embedding_size=64,
@@ -156,7 +148,7 @@ def test_the_comparer_resolves_its_encoder_from_the_configured_depth(layers):
     and a fusion stack, which meant asking for one more block moved two.
     """
     comparer = R.TransformerCrossAttentionComparer(
-        64, **_settings("receiver_comparer", d_model=64, heads=4, layers=layers)
+        64, **config_section("receiver_comparer", d_model=64, heads=4, layers=layers)
     )
 
     assert (comparer.encoding_alpha, comparer.encoding_beta) == (
@@ -175,7 +167,7 @@ def test_the_hand_written_residuals_resolve_at_depth_one(layers):
     residuals it is not on.
     """
     comparer = R.TransformerCrossAttentionComparer(
-        64, **_settings("receiver_comparer", d_model=64, heads=4, layers=layers)
+        64, **config_section("receiver_comparer", d_model=64, heads=4, layers=layers)
     )
 
     assert (comparer.residual_alpha, comparer.residual_beta) == (
@@ -190,7 +182,7 @@ def test_a_pinned_number_reaches_both_residual_groups():
     """
     comparer = R.TransformerCrossAttentionComparer(
         64,
-        **_settings(
+        **config_section(
             "receiver_comparer", d_model=64, heads=4, layers=4, alpha=2.0, beta=0.25
         ),
     )
@@ -204,7 +196,7 @@ def test_the_comparer_still_runs_at_its_resolved_scaling():
     Construction is not the risk on its own -- these multiply tensors inside
     every block, so a resolved value has to survive a forward pass.
     """
-    settings = _settings("receiver_comparer", d_model=64, heads=4, layers=4)
+    settings = config_section("receiver_comparer", d_model=64, heads=4, layers=4)
     comparer = R.TransformerCrossAttentionComparer(32, **settings)
     scores = comparer(
         torch.randn(2, 6, 32),

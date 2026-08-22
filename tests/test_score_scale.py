@@ -70,23 +70,20 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
+import _bootstrap  # noqa: F401
 
-import models.builder  # noqa: E402
-import models.receiver as R  # noqa: E402
-import parse_config  # noqa: E402
+import models.builder
+import models.receiver as R
+import parse_config
 
-CONFIG_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "experiments", "ablation", "configs"
-)
+from _bootstrap import CONFIG_DIR, config_section, rung
 
 REFERENT_DIM = 512
 BATCH, N_OBJ, SEQ = 8, 20, 7
 
 
 def _comparer(referent_dim=REFERENT_DIM, **overrides):
-    config = parse_config.get_config()["receiver_comparer"]
-    config = {**config, **overrides}
+    config = config_section("receiver_comparer", **overrides)
     torch.manual_seed(0)
     return R.BilinearGRUComparer(referent_dim, **config)
 
@@ -98,10 +95,11 @@ def _cross_comparer(referent_dim=REFERENT_DIM, **overrides):
         and does not divide `heads = 5`. See the note beside `heads` in
         DEFAULT.toml.
     """
-    config = parse_config.get_config(
-        os.path.join(CONFIG_DIR, "11_shapeworld_receiver_cross_attention.toml")
-    )["receiver_comparer"]
-    config = {**config, **overrides}
+    config = config_section(
+        "receiver_comparer",
+        rung("11_shapeworld_receiver_cross_attention.toml"),
+        **overrides,
+    )
     torch.manual_seed(0)
     return R.TransformerCrossAttentionComparer(referent_dim, **config)
 

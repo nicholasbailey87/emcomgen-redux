@@ -33,28 +33,31 @@ fixed-length buffer with the tail held at zero, which is exact only if the mask
 holds, so the test that checks the mask is also the test that checks the buffer.
 """
 
-import os
-import sys
 
 import pytest
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
+import _bootstrap  # noqa: F401
+from _bootstrap import config_section
 
-import models.sender as S  # noqa: E402
-from parse_config import get_config  # noqa: E402
+import models.sender as S
+from parse_config import get_config
 
 D_MODEL = 320
 HEADS = 5  # head_dim 64, as everywhere
 
 
 def _settings(**overrides):
-    settings = dict(get_config()["sender_language_model"])
-    settings.update(
-        d_model=D_MODEL, token_embedding_size=D_MODEL, heads=HEADS, layers=2
+    return config_section(
+        "sender_language_model",
+        **{
+            "d_model": D_MODEL,
+            "token_embedding_size": D_MODEL,
+            "heads": HEADS,
+            "layers": 2,
+            **overrides,
+        },
     )
-    settings.update(overrides)
-    return settings
 
 
 def _speaker(**overrides):

@@ -20,20 +20,17 @@ architectural change is too wide to catch the thing this file exists to catch.
 """
 
 import os
-import sys
 
 import pytest
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
+import _bootstrap  # noqa: F401
 
-import broccoli.transformer  # noqa: E402
-import models.builder  # noqa: E402
-import parse_config  # noqa: E402
+import broccoli.transformer
+import models.builder
+import parse_config
 
-CONFIG_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "experiments", "ablation", "configs"
-)
+from _bootstrap import CONFIG_DIR
 
 SHAPEWORLD_FEATS = (3, 64, 64)
 BIRDS_FEATS = (3, 224, 224)

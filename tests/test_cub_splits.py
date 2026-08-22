@@ -37,15 +37,14 @@ a pair without a dataloader.
 
 import os
 import random
-import sys
 import tempfile
 
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "code"))
+import _bootstrap  # noqa: F401
 
-from data import cub  # noqa: E402
+from data import cub
 
 # `parse_config` is imported lazily, in `_cub_config` alone. The split logic
 # under test is pure -- dicts in, dicts out -- so everything here but the two

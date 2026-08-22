@@ -23,15 +23,13 @@ rather than the sender's own concept vectors, has to notice a sender that has
 collapsed onto a subset of the visual features.
 """
 
-import os
-import sys
 
 import numpy as np
 import ot
 from strsimpy.weighted_levenshtein import WeightedLevenshtein
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
-import emergence as E  # noqa: E402
+import _bootstrap  # noqa: F401
+import emergence as E
 
 
 SETS = ("s1", "s2", "s3", "s4", "s5", "s6")

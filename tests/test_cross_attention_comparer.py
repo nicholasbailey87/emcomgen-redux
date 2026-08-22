@@ -26,30 +26,27 @@ RMS-normalises its output, so `x + attn(x)` sums two tensors of norm `sqrt(d)`
 and the stream grows by `sqrt(2)` a stage.
 """
 
-import os
 import sys
 
 import pytest
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
+import _bootstrap  # noqa: F401
 
-import models.receiver as R  # noqa: E402
-import parse_config  # noqa: E402
+import models.receiver as R
 
-CONFIG_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "experiments", "ablation", "configs"
-)
+from _bootstrap import config_section, rung
 
 REFERENT_DIM = 320
 BATCH, N_OBJ = 32, 20
 
 
 def _comparer(**overrides):
-    config = parse_config.get_config(
-        os.path.join(CONFIG_DIR, "11_shapeworld_receiver_cross_attention.toml")
-    )["receiver_comparer"]
-    config = {**config, **overrides}
+    config = config_section(
+        "receiver_comparer",
+        rung("11_shapeworld_receiver_cross_attention.toml"),
+        **overrides,
+    )
     torch.manual_seed(0)
     return R.TransformerCrossAttentionComparer(REFERENT_DIM, **config).eval()
 

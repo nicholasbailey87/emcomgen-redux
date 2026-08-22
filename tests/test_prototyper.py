@@ -33,15 +33,13 @@ every other column of metrics.csv.
 """
 
 import math
-import os
-import sys
 
 import pytest
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
+import _bootstrap  # noqa: F401
 
-import models.sender as S  # noqa: E402
+import models.sender as S
 
 
 D_MODEL = 512
