@@ -19,8 +19,10 @@ from broccoli.rope import RotaryEmbedding
 
 class DecoderBlock(nn.Module):
     """
-    One decoder layer: causal self-attention, then cross-attention into a
-        memory, then a feedforward, each on its own residual branch.
+    One decoder layer: self-attention, then cross-attention into a memory, then
+        a feedforward, each on its own residual branch. `causal` masks the
+        self-attention and `cross_first` swaps the first two branches; the
+        defaults are the speaker's.
 
     Three branches, so a stack built from these must ask
         `model_util.deepnorm_constants` for `decoder=True`.
@@ -58,14 +60,25 @@ class DecoderBlock(nn.Module):
         post_norm=True,
         alpha=1.0,
         beta=1.0,
+        causal=True,
+        cross_first=False,
     ):
         """
         Args:
             seq_len: length of the sequence being decoded, including any
-                `bos_tokens` prefix. The causal mask is square over this.
+                `bos_tokens` prefix. The causal mask is square over this, and
+                is inert when `causal` is False.
             memory_len: length of the array being cross-attended into. Recorded
                 for the caller's benefit and sizes nothing: the cross-attention
                 is not causal, so it needs no mask.
+            causal: mask the self-attention left to right. True for a speaker
+                generating a sequence; False wherever the axis is a set rather
+                than an order, as the listener's candidates are. See
+                docs/architecture.md.
+            cross_first: read the memory before the sequence reads itself,
+                rather than after. The listener's referent stack wants this so
+                that candidates compare message-informed representations; a
+                speaker wants the default.
         """
         super().__init__()
 
@@ -81,6 +94,8 @@ class DecoderBlock(nn.Module):
 
         self.alpha = alpha
         self.beta = beta
+        self.causal = causal
+        self.cross_first = cross_first
 
         self.identity_probability = identity_probability
 
@@ -109,7 +124,7 @@ class DecoderBlock(nn.Module):
             d_model,
             n_heads,
             dropout=msa_dropout,
-            causal=True, # The whole point of the block
+            causal=causal,
             seq_len=seq_len,
             linear_module=linear_module,
             bos_tokens=bos_tokens,
@@ -183,38 +198,47 @@ class DecoderBlock(nn.Module):
             mask = 1.0
             alphas = self.alpha
 
-        process_x = self.pre_attention_norm(x) if self.pre_norm else x
-
-        processed = self.self_attention(process_x, process_x, process_x)
-        x, process_x = self._residual(
-            x,
-            processed,
-            mask,
-            alphas,
+        # Each branch keeps its own norms whichever order it runs in, so
+        #     `cross_first` reorders the joins and nothing else. The memory is
+        #     normalised by the caller, once, rather than per block.
+        attention = (
+            lambda h: self.self_attention(h, h, h),
             self.post_attention_norm if self.post_norm else None,
+            self.pre_attention_norm if self.pre_norm else None,
+        )
+        cross = (
+            lambda h: self.cross_attention(h, memory, memory),
+            self.post_cross_attention_norm if self.post_norm else None,
             self.pre_cross_attention_norm if self.pre_norm else None,
         )
-
-        # The memory is normalised by the caller, once, rather than per block.
-        processed = self.cross_attention(process_x, memory, memory)
-        x, process_x = self._residual(
-            x,
-            processed,
-            mask,
-            alphas,
-            self.post_cross_attention_norm if self.post_norm else None,
+        feedforward = (
+            self.ff,
+            self.post_mlp_norm if self.post_norm else None,
             self.pre_mlp_norm if self.pre_norm else None,
         )
 
-        processed = self.ff(process_x)
-        x, _ = self._residual(
-            x,
-            processed,
-            mask,
-            alphas,
-            self.post_mlp_norm if self.post_norm else None,
-            None,
+        branches = (
+            [cross, attention, feedforward]
+            if self.cross_first
+            else [attention, cross, feedforward]
         )
+
+        # The pre-norm each `_residual` is handed is the *next* branch's, which
+        #     is why the first one is applied here and the last one is None.
+        process_x = branches[0][2](x) if self.pre_norm else x
+
+        for i, (branch, post_norm_module, _) in enumerate(branches):
+            next_pre_norm = (
+                branches[i + 1][2] if i + 1 < len(branches) else None
+            )
+            x, process_x = self._residual(
+                x,
+                branch(process_x),
+                mask,
+                alphas,
+                post_norm_module,
+                next_pre_norm,
+            )
 
         return x
 
@@ -276,6 +300,8 @@ class TransformerDecoder(nn.Module):
         msa_scaling="d",
         alpha=1.0,
         beta=1.0,
+        causal=True,
+        cross_first=False,
     ):
         if relative_position_embedding and (source_size is None):
             raise ValueError(
@@ -300,6 +326,8 @@ class TransformerDecoder(nn.Module):
         self.return_bos_tokens = return_bos_tokens
         self.alpha = alpha
         self.beta = beta
+        self.causal = causal
+        self.cross_first = cross_first
 
         if self._bos_tokens:
             self._bos_token_embedding = nn.Parameter(
@@ -308,7 +336,13 @@ class TransformerDecoder(nn.Module):
         else:
             self._bos_token_embedding = None
 
-        self.full_sequence_length = self.seq_len + self._bos_tokens
+        # `seq_len` is only load-bearing for the causal mask and the absolute
+        #     position embedding, both of which a non-causal caller can decline
+        #     -- `absolute_position_embedding` already raises when it needs a
+        #     length and has none.
+        self.full_sequence_length = (
+            None if self.seq_len is None else self.seq_len + self._bos_tokens
+        )
 
         if absolute_position_embedding:
             self.absolute_position_embedding = nn.Embedding(
@@ -363,6 +397,8 @@ class TransformerDecoder(nn.Module):
                     post_norm=post_norm,
                     alpha=alpha,
                     beta=beta,
+                    causal=causal,
+                    cross_first=cross_first,
                 )
                 for i in range(n_layers)
             ]

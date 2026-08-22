@@ -8,22 +8,35 @@ Everything about this module's *scale* is in test_score_scale.py. What is here
 is the shape: which stage can see what, and whether the residual stream stays
 where DeepNorm's constants assume it is.
 
-Three claims, each of which failed in the version this replaces and each of
-which cost something measurable on the ablation's rungs 11 and 12.
+The module is two `TransformerDecoder` stacks. Four claims, each of which failed
+in some version this replaces and each of which cost something measurable on the
+ablation's rungs 11 and 12.
 
-The message reads the candidate set before it is encoded. Without that the
-encoder sees the message alone and can only build an absolute meaning, when the
-task is discriminative.
+The message reads the candidate set. Without that the message stack sees the
+message alone and can only build an absolute meaning, when the task is
+discriminative.
 
-Every stage joins its input back on. The old `cross_attention` had no residual,
-so a candidate reached the score only through near-uniform attention weights:
-between-object variance was 41.5% of the total going into that stage and 22.1%
-coming out, and it was the only stage that lost any. That is rung 11 taking
-four times as long as the baseline to become informative.
+The message reaches the scored stream in every referent block, not once. The
+structure before this one crossed it in exactly once, so the only thing that
+could separate two candidates was the difference between their attention weights
+over the message -- a small perturbation about a near-flat softmax, and second
+order at initialisation where the bilinear comparer's message term is first
+order. Rungs 11 to 14 sat at 0.5000 accuracy for thirty epochs.
+
+Every stage joins its input back on. An earlier `cross_attention` had no
+residual, so a candidate reached the score only through near-uniform attention
+weights: between-object variance was 41.5% of the total going into that stage
+and 22.1% coming out. That is rung 11 taking four times as long as the baseline
+to become informative.
 
 And the residuals are post-normed rather than added bare. `MHAttention` already
 RMS-normalises its output, so `x + attn(x)` sums two tensors of norm `sqrt(d)`
 and the stream grows by `sqrt(2)` a stage.
+
+Nothing here reads the referent ordering, and `test_no_stage_can_read_the_
+referent_ordering` is the test that says so: the referent stack is built
+`causal=False`, and a causal mask over candidates would let a score be read off
+a position rather than off the message.
 """
 
 import sys
@@ -82,15 +95,6 @@ def _stages(comparer, referents, messages):
         change to one that is not made to the other fails loudly instead of
         leaving these tests measuring a module nobody runs.
     """
-    # Each stage is snapshotted as it is produced, not at the end, because
-    #     broccoli's `TransformerEncoder.preprocess` adds its position
-    #     embedding with `x += position_embedding` (transformer.py:856) -- in
-    #     place, on the tensor handed to it. So `comparer.encoding(read)`
-    #     mutates `read`, and reading it afterwards gives the message *plus* a
-    #     position embedding. That is how this helper first reported the
-    #     residual stream at 1.42: `sqrt(2)`, and indistinguishable from what a
-    #     missing post-norm would look like. See the note in
-    #     `TransformerCrossAttentionComparer.forward`.
     seen = {}
 
     def record(name, tensor):
@@ -102,30 +106,11 @@ def _stages(comparer, referents, messages):
     referents = record("normed referents", comparer.input_dropout(referents))
 
     messages = comparer.message_adapter(messages)
-    read = record(
-        "message read against the set",
-        comparer._residual(
-            messages,
-            comparer.message_cross_attention(messages, referents, referents),
-            comparer.message_residual_norm,
-        ),
-    )
-    encoded = record("encoded message", comparer.encoding(read))
-    enriched = record(
-        "enriched referents",
-        comparer._residual(
-            referents,
-            comparer.referent_cross_attention(referents, encoded, encoded),
-            comparer.referent_residual_norm,
-        ),
+    encoded = record(
+        "encoded message", comparer.message_decoder(messages, referents)
     )
     record(
-        "refined referents",
-        comparer._residual(
-            enriched,
-            comparer.referent_self_attention(enriched, enriched, enriched),
-            comparer.referent_self_attention_norm,
-        ),
+        "refined referents", comparer.referent_decoder(referents, encoded)
     )
     return seen
 
@@ -144,23 +129,24 @@ def _object_share(scores_or_states):
 
 def test_the_staged_walkthrough_matches_the_forward_pass():
     """
-    The readout is rebuilt here as `decision_layer_norm -> decision`,
-        which is what `forward` does now. It used to be
-        `F.normalize(decision.weight)` against a learnable `score_scale`; see
-        test_score_scale.py for why that changed.
+    The readout is `decision` alone. It used to be
+        `F.normalize(decision.weight)` against a learnable `score_scale`, and
+        later `decision_layer_norm -> decision`; see test_score_scale.py for
+        the first change and docs/architecture.md for the second. The referent
+        stack's last post-norm is an `RMSNorm`, so the candidates already reach
+        the readout at equal length and the extra norm bought nothing.
 
     Nothing follows `decision`. There was briefly a `BatchNorm1d(1)` and a
         fixed gain between it and the return, which had to be rebuilt on the
         same flattening `forward` used and left this test sensitive to call
         order through the running estimates. Both are gone, so the rebuild is
-        two lines and order-independent.
+        one line and order-independent.
     """
     comparer = _comparer()
     referents, messages = _inputs(comparer)
     with torch.no_grad():
         refined = _stages(comparer, referents, messages)["refined referents"]
-        normed = comparer.decision_layer_norm(refined)
-        rebuilt = comparer.decision(normed).squeeze(-1)
+        rebuilt = comparer.decision(refined).squeeze(-1)
         actual = comparer(referents, messages)
 
     assert torch.allclose(rebuilt, actual, atol=1e-6)
@@ -172,10 +158,10 @@ def test_the_staged_walkthrough_matches_the_forward_pass():
 
 def test_the_encoded_message_depends_on_the_candidate_set():
     """
-    The point of reading the referents before encoding: the message's meaning
-        is allowed to be discriminative rather than absolute. Nothing else in
-        the suite would notice if that stage were removed, because the module
-        would still run and still score.
+    The point of the message stack's cross-attention: the message's meaning is
+        allowed to be discriminative rather than absolute. Nothing else in the
+        suite would notice if that branch were removed, because the module would
+        still run and still score.
     """
     comparer = _comparer()
     referents, messages = _inputs(comparer)
@@ -209,9 +195,10 @@ def test_the_score_still_depends_on_the_message():
 
 def test_referent_identity_survives_to_the_readout():
     """
-    The residual on the cross-attention, measured as the thing it protects.
-        Without it this stage roughly halved the between-object share of the
-        variance -- 0.415 in, 0.221 out -- and the score inherited the loss.
+    The residuals through the referent stack, measured as the thing they
+        protect. Without one on the cross-attention, that stage roughly halved
+        the between-object share of the variance -- 0.415 in, 0.221 out -- and
+        the score inherited the loss.
     """
     comparer = _comparer()
     referents, messages = _inputs(comparer)
@@ -227,7 +214,7 @@ def test_referent_identity_survives_to_the_readout():
 
 def test_the_scores_are_not_a_function_of_one_referent_alone():
     """
-    `referent_self_attention` is the only stage at which a score may depend on
+    The referent stack's self-attention is the only place a score may depend on
         the rest of the set, and it is what a criterion like "the odd one out"
         would need. Perturbing one candidate must move the others' scores.
     """
@@ -275,18 +262,16 @@ def test_no_stage_can_read_the_referent_ordering():
 @pytest.mark.parametrize(
     "stage",
     [
-        "message read against the set",
         "encoded message",
-        "enriched referents",
         "refined referents",
     ],
 )
 def test_the_residual_stream_does_not_grow(stage):
     """
-    Every join is `RMSNorm(alpha * x + beta * attended)`, so each one leaves the
-        stream at unit RMS per token. Replace any of them with a bare `x +
-        attn(x)` and this fails at `sqrt(2)`, because `MHAttention` has already
-        normalised what it returns.
+    Every join inside a `DecoderBlock` is `RMSNorm(alpha * x + beta * branch)`,
+        so each stack leaves its stream at unit RMS per token. Replace any of
+        them with a bare `x + attn(x)` and this fails at `sqrt(2)`, because
+        `MHAttention` has already normalised what it returns.
     """
     comparer = _comparer()
     referents, messages = _inputs(comparer)
@@ -305,13 +290,12 @@ def test_a_bare_add_would_have_grown_it():
     comparer = _comparer()
     referents, messages = _inputs(comparer)
     with torch.no_grad():
-        adapted = comparer.referent_layer_norm(
-            comparer.referent_adapter(referents)
+        stages = _stages(comparer, referents, messages)
+        adapted = stages["normed referents"]
+        encoded = stages["encoded message"]
+        attended = comparer.referent_decoder.blocks[0].cross_attention(
+            adapted, encoded, encoded
         )
-        encoded = comparer.encoding(
-            comparer.message_adapter(messages)
-        )
-        attended = comparer.referent_cross_attention(adapted, encoded, encoded)
         bare = adapted + attended
 
     assert bare.pow(2).mean(dim=-1).sqrt().mean().item() > 1.3
@@ -321,26 +305,87 @@ def test_a_bare_add_would_have_grown_it():
 # Construction.
 # --------------------------------------------------------------------------
 
-def test_layers_is_the_encoder_depth_and_nothing_elses():
+def test_each_depth_key_sizes_its_own_stack_and_nothing_else():
     """
-    It used to be a total split between a reading stack and a fusion stack, so
-        `layers = 5` bought a 3-layer encoder and asking for one more block
-        moved two.
+    One key was once a total, split inside the module between two stacks, so
+        asking for one more block moved two. Two keys, each a block count of the
+        stack it is named for, is what stops that recurring.
     """
-    for layers in (1, 3, 4, 7):
-        assert len(_comparer(layers=layers).encoding.blocks) == layers
+    comparer = _comparer(message_layers=2, referent_layers=5)
+
+    assert len(comparer.message_decoder.blocks) == 2
+    assert len(comparer.referent_decoder.blocks) == 5
+
+
+def test_each_stack_gets_deepnorm_for_its_own_depth():
+    """
+    `decoder=True`, because these blocks have three residual branches rather
+        than two, and at its own depth, because the stacks are sized
+        independently. Resolving both from one number would scale the shallower
+        stack's branches as if it were the deeper one.
+    """
+    comparer = _comparer(message_layers=2, referent_layers=5)
+
+    assert comparer.message_alpha == pytest.approx((3 * 2) ** 0.25)
+    assert comparer.message_beta == pytest.approx((12 * 2) ** -0.25)
+    assert comparer.referent_alpha == pytest.approx((3 * 5) ** 0.25)
+    assert comparer.referent_beta == pytest.approx((12 * 5) ** -0.25)
 
 
 def test_stochastic_depth_is_suppressed_only_at_a_single_layer():
     """
     `depthwise_linear_stochastic_depth` spreads the rate linearly across
         layers, so a one-layer stack would get a single rate of 0.0 anyway. It
-        used to be gated on `layers // 2 > 1`, which silenced it at `layers = 3`
-        -- a live depth for this module.
+        used to be gated on `layers // 2 > 1`, which silenced it at three layers
+        -- a live depth for this module. Asked of each stack separately, so a
+        one-block stack beside a deep one still gets nothing.
     """
-    assert _comparer(layers=1).stochastic_depth == 0.0
+    single = _comparer(message_layers=1, referent_layers=4)
+    assert single.message_stochastic_depth == 0.0
+    assert single.referent_stochastic_depth > 0.0
+
     for layers in (2, 3, 4):
-        assert _comparer(layers=layers).stochastic_depth > 0.0
+        deep = _comparer(message_layers=layers, referent_layers=layers)
+        assert deep.message_stochastic_depth > 0.0
+        assert deep.referent_stochastic_depth > 0.0
+
+
+def test_the_referent_stack_is_not_causal_and_reads_the_message_first():
+    """
+    Two settings that `DecoderBlock` defaults the other way, because its default
+        caller is a speaker generating a sequence.
+
+    `causal=False` is what `test_no_stage_can_read_the_referent_ordering` above
+        measures the consequence of; this is the same claim read off the
+        construction, so a regression names itself rather than showing up as a
+        permutation failure.
+
+    `cross_first` puts the message ahead of the candidates reading each other,
+        so what the self-attention compares is message-informed. That
+        self-attention is the route to the concept game's clustering shortcut,
+        which is reachable with the message scrambled entirely.
+    """
+    comparer = _comparer()
+
+    for block in comparer.referent_decoder.blocks:
+        assert block.causal is False
+        assert block.self_attention.causal is False
+        assert block.cross_first is True
+
+    for block in comparer.message_decoder.blocks:
+        assert block.cross_first is False
+
+
+def test_the_referent_stack_carries_no_positional_information():
+    """
+    The other half of the ordering guard. A rotary embedding on the candidate
+        axis would let a block index its own sequence even without a mask.
+    """
+    comparer = _comparer()
+
+    assert comparer.referent_decoder.absolute_position_embedding is None
+    for block in comparer.referent_decoder.blocks:
+        assert block.rotary_embedding is None
 
 
 def test_reset_parameters_leaves_nothing_trained():

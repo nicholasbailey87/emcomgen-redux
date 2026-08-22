@@ -615,10 +615,22 @@ dropout = 0.1 # The listener's only dropout, and in both comparers it masks
               # The referents arrive clean, which is what makes that the side
               # where a mask regularises rather than compounds.
 layers = 1
+# The two Transformer comparer depths, in blocks. `layers` above is
+# `BilinearGRUComparer`'s GRU depth and is read by nothing else; these are read
+# only by `TransformerCrossAttentionComparer`, which builds one decoder stack
+# from each and resolves that stack's DeepNorm constants from its own count.
+#
+# 1 and 1 here because a default should be the smallest thing that runs, not a
+# guess at a good shape: every rung that builds this class states both, and the
+# sizing argument lives with them -- see `[receiver_comparer]` in rung 11.
+message_layers = 1  # Only applies to Transformer comparers
+referent_layers = 1 # Only applies to Transformer comparers
 bidirectional = false
 message_length = 7 # Only applies to Transformer comparers. Should be the same as sender_language_model.message_length
-# 5, for head_dim 64 at the 320 width the Transformer comparer takes in rung 11
-# -- the same head dimension every attention module in the repo now has.
+# 5, which is *not* what the Transformer comparer uses: it takes 256 wide with 4
+# heads from rung 11, for the head dimension of 64 that every attention module in
+# the repo now has. This default is here so the key exists, not because anything
+# reads it at 5.
 #
 # Note this does not divide the `d_model = 1024` above, and that is not the
 # contradiction it looks like: the two describe different modules. 1024 is
@@ -633,12 +645,11 @@ message_length = 7 # Only applies to Transformer comparers. Should be the same a
 heads = 5 # Only applies to Transformer comparers
 utility_tokens = 0 # Only applies to Transformer comparers
 ff_inner_size = 576 # Only applies to Transformer comparers
-stochastic_depth = 0.1 # Only applies to Transformer comparers, and only to
-                       # the message encoder: the three attention stages around
-                       # it are bare `MHAttention`, with no branch to drop.
-                       # Suppressed entirely at `layers = 1`, where a linear
-                       # depth ramp would give a single rate of 0.0 anyway --
-                       # see `TransformerCrossAttentionComparer`.
+stochastic_depth = 0.1 # Only applies to Transformer comparers, where both
+                       # decoder stacks take it. Asked of each stack separately
+                       # and suppressed in either one that is a single block
+                       # deep, where a linear depth ramp would give one rate of
+                       # 0.0 anyway -- see `TransformerCrossAttentionComparer`.
 # Attention dropout. Named per attention type, and kept strictly separate from
 # the `dropout` above, which regularises the two operands of the comparison
 # rather than anything inside a module. `self_attention_dropout` reaches every

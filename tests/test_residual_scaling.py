@@ -141,54 +141,66 @@ def test_the_two_deepnorm_forms_are_not_the_same():
 
 
 @pytest.mark.parametrize("layers", [1, 2, 4, 7])
-def test_the_comparer_resolves_its_encoder_from_the_configured_depth(layers):
+def test_the_comparer_resolves_each_stack_from_its_own_depth(layers):
     """
-    `layers` is the message encoder's depth and nothing else's, so it derives
-    from the whole of it. It used to be a total split between a reading stack
-    and a fusion stack, which meant asking for one more block moved two.
-    """
-    comparer = R.TransformerCrossAttentionComparer(
-        64, **config_section("receiver_comparer", d_model=64, heads=4, layers=layers)
-    )
-
-    assert (comparer.encoding_alpha, comparer.encoding_beta) == (
-        model_util.deepnorm_constants(layers)
-    )
-
-
-@pytest.mark.parametrize("layers", [1, 4, 10])
-def test_the_hand_written_residuals_resolve_at_depth_one(layers):
-    """
-    The three attention stages around the encoder are bare sublayers, not
-    `EncoderBlock`s, and DeepNorm's depth argument counts attention-plus-
-    feedforward layers. Two attention sublayers with no feedforward are one
-    layer's worth of residual path, so these do not move with `layers` -- and
-    if they ever start to, the encoder's depth would be silently rescaling
-    residuals it is not on.
-    """
-    comparer = R.TransformerCrossAttentionComparer(
-        64, **config_section("receiver_comparer", d_model=64, heads=4, layers=layers)
-    )
-
-    assert (comparer.residual_alpha, comparer.residual_beta) == (
-        model_util.deepnorm_constants(1)
-    )
-
-
-def test_a_pinned_number_reaches_both_residual_groups():
-    """
-    Pinning is documented as passing straight through, and there are now two
-    places for it to pass through to.
+    Two stacks, two depths, two pairs. The depth key of one must not reach the
+    other's scaling -- there was once a single key that was a total split
+    between two stacks, so asking for one more block moved two.
     """
     comparer = R.TransformerCrossAttentionComparer(
         64,
         **config_section(
-            "receiver_comparer", d_model=64, heads=4, layers=4, alpha=2.0, beta=0.25
+            "receiver_comparer", d_model=64, heads=4,
+            message_layers=layers, referent_layers=1,
         ),
     )
 
-    assert (comparer.encoding_alpha, comparer.encoding_beta) == (2.0, 0.25)
-    assert (comparer.residual_alpha, comparer.residual_beta) == (2.0, 0.25)
+    assert (comparer.message_alpha, comparer.message_beta) == (
+        model_util.deepnorm_constants(layers, decoder=True)
+    )
+    assert (comparer.referent_alpha, comparer.referent_beta) == (
+        model_util.deepnorm_constants(1, decoder=True)
+    )
+
+
+@pytest.mark.parametrize("layers", [1, 4, 10])
+def test_the_comparer_asks_for_the_decoder_form(layers):
+    """
+    Both stacks are built from `DecoderBlock`, which has three residual branches
+    to a block rather than two, so they take `(3N)^0.25` and `(12N)^-0.25`. The
+    encoder form would scale their branches as if a block held two sublayers,
+    which is the wrong constant by a factor that grows with depth.
+    """
+    comparer = R.TransformerCrossAttentionComparer(
+        64,
+        **config_section(
+            "receiver_comparer", d_model=64, heads=4,
+            message_layers=layers, referent_layers=layers,
+        ),
+    )
+
+    assert (comparer.message_alpha, comparer.message_beta) != (
+        model_util.deepnorm_constants(layers, decoder=False)
+    )
+    assert comparer.message_alpha == pytest.approx((3 * layers) ** 0.25)
+    assert comparer.message_beta == pytest.approx((12 * layers) ** -0.25)
+
+
+def test_a_pinned_number_reaches_both_stacks():
+    """
+    Pinning is documented as passing straight through, and there are two places
+    for it to pass through to.
+    """
+    comparer = R.TransformerCrossAttentionComparer(
+        64,
+        **config_section(
+            "receiver_comparer", d_model=64, heads=4, message_layers=4,
+            referent_layers=2, alpha=2.0, beta=0.25,
+        ),
+    )
+
+    assert (comparer.message_alpha, comparer.message_beta) == (2.0, 0.25)
+    assert (comparer.referent_alpha, comparer.referent_beta) == (2.0, 0.25)
 
 
 def test_the_comparer_still_runs_at_its_resolved_scaling():
@@ -196,7 +208,10 @@ def test_the_comparer_still_runs_at_its_resolved_scaling():
     Construction is not the risk on its own -- these multiply tensors inside
     every block, so a resolved value has to survive a forward pass.
     """
-    settings = config_section("receiver_comparer", d_model=64, heads=4, layers=4)
+    settings = config_section(
+        "receiver_comparer", d_model=64, heads=4,
+        message_layers=2, referent_layers=2,
+    )
     comparer = R.TransformerCrossAttentionComparer(32, **settings)
     scores = comparer(
         torch.randn(2, 6, 32),

@@ -146,24 +146,24 @@ def test_neither_bilinear_operand_norm_has_an_affine():
 
 def test_the_cross_attention_norms_that_must_be_affine_free_are():
     """
-    Two of them, for two different reasons. `referent_layer_norm` because an
-        affine there is a second route to score magnitude; `decision_layer_norm`
-        because the RMSNorm immediately above it *does* carry a learnable gain
-        -- broccoli's post-norm default, and not ours to turn off since the same
-        class is used by `encoding` and by the speaker's stacks. That gain is
-        a route to global score magnitude, and `decision_layer_norm` is now the
-        only thing standing between it and the score. It was briefly not the
-        only thing -- a standardised readout divided any global gain back out --
-        so if this test is ever read as belt-and-braces, note that the braces
-        were removed on purpose. The RMSNorm's affine is asserted here too, so
-        that this test is what fails first if it ever goes away.
+    `referent_layer_norm` has no affine because one there is a second route to
+        score magnitude, and because the adapter above it is `bias=False`
+        precisely so this norm can divide the backbone's scale out exactly.
+
+    The last thing before the readout is instead the referent stack's own
+        post-norm, an `RMSNorm` carrying broccoli's default learnable gain --
+        not ours to turn off, since the same class is used by every stack in the
+        repo. That gain is a route to global score magnitude and it is
+        deliberately open: `decision_spread` watches it, and two attempts to
+        close it are in docs/anecdotes.md. What the RMSNorm still does
+        structurally is equalise the candidates against *each other*, which is
+        the part that has to hold, so its affine is asserted here as present
+        rather than absent.
     """
     comparer = _cross_comparer()
 
     assert comparer.referent_layer_norm.weight is None
-    assert comparer.decision_layer_norm.weight is None
-    assert comparer.decision_layer_norm.bias is None
-    assert comparer.referent_self_attention_norm.weight is not None
+    assert comparer.referent_decoder.blocks[-1].post_mlp_norm.weight is not None
 
 
 def test_the_referent_adapter_has_no_bias():
@@ -297,7 +297,9 @@ def test_an_unnormalised_referent_would_have_hijacked_the_value_mixture():
         encoded = comparer.message_adapter(messages)
 
         def stage_one(values):
-            return comparer.message_cross_attention(encoded, values, values)
+            return comparer.message_decoder.blocks[0].cross_attention(
+                encoded, values, values
+            )
 
         raw = stage_one(adapted)
         raw_inflated = stage_one(adapted_inflated)
@@ -334,9 +336,9 @@ def test_the_untrained_score_opens_at_a_width_independent_magnitude(
 
     On `BilinearGRUComparer` that is what `1/sqrt(referent_embedding_size)`
         buys against a scale opening at 1.0. On the cross-attention comparer it
-        is `decision_layer_norm`, which puts every candidate at norm `sqrt(d)`
-        whatever the backbone emitted, so `decision`'s default init sets the
-        opening and the referent width does not -- see
+        is the referent stack's last post-norm, which puts every candidate at
+        unit RMS whatever the backbone emitted, so `decision`'s default init
+        sets the opening and the referent width does not -- see
         `test_the_readout_opens_below_a_confident_wrong_answer`.
     """
     comparer = build(referent_dim=referent_dim)
@@ -532,8 +534,8 @@ def test_the_readout_opens_below_a_confident_wrong_answer():
         width is sd ~0.59 and BCE ~0.73 -- just above ln 2, which is the
         bilinear comparer's regime and the one that bootstraps. Bounded rather
         than pinned, because the number is now an emergent property of
-        `nn.Linear`'s default init and `decision_layer_norm`'s output scale,
-        and pinning it would make this a change-detector for PyTorch.
+        `nn.Linear`'s default init and the referent stack's post-norm output
+        scale, and pinning it would make this a change-detector for PyTorch.
     """
     comparer = _quiet_cross_comparer()
     with torch.no_grad():

@@ -238,10 +238,10 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
     (the default) resolves them at construction from that stack's own `layers`,
     as `(2N)^(1/4)` and `(8N)^(-1/4)`; a number pins them instead, and `1.0` is
     the no-scaling identity every run before this used. The cross-attention
-    comparer resolves them twice: its message encoder takes `layers`, and the
-    three bare attention stages around it take depth 1, since DeepNorm's depth
-    argument counts attention-plus-feedforward layers and those stages have no
-    feedforward. Derived rather than configured because two constants restated
+    comparer resolves them twice, once per decoder stack, from `message_layers`
+    and `referent_layers` — and in the decoder form, `(3N)^(1/4)` and
+    `(12N)^(-1/4)`, since those blocks carry a cross-attention branch as well.
+    Derived rather than configured because two constants restated
     per config is an invitation to leave them at values belonging to a depth the
     stack no longer has.
 - `[receiver_comparer] dropout`: the listener's **only** dropout, and the

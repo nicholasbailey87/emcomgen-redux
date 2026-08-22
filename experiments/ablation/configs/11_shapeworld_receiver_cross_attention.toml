@@ -77,36 +77,43 @@ feature_model = "ViT2"
 comparer = "TransformerCrossAttentionComparer"
 
 [receiver_comparer]
-# Only `layers` is set here. This module's width is free of every other width in
-# the run -- it adapts the referents (`referent_adapter`) and the message
-# (`message_adapter`) into its own space -- so it could be sized to hit a budget
-# exactly, and used to be, at 256 wide with a feedforward inner size of 256.
+# This module's width is free of every other width in the run -- it adapts the
+# referents (`referent_adapter`) and the message (`message_adapter`) into its
+# own space -- so it is sized to buy depth rather than to match the repo's other
+# transformers. The module is now two decoder stacks, and depth is the thing
+# that matters to it: every block is another crossing of the message into the
+# stream the scores are read off, where the structure it replaced had exactly
+# one. Width bought nothing at that margin.
 #
-# It takes DEFAULT's 320 / 5 heads / 554 instead, so that every transformer in
-# the repo is one width, one head dimension (64) and one feedforward proportion
-# (1.73), and depth is the only thing that varies between them. Sizing this one
-# to a target meant either an inner size of 256 -- a proportion of 1.0 where
-# everything else is 1.73 -- or 443, which would have put it 1.30x over the
-# comparer it replaces. Neither is worth an exact match.
+# So 256 wide with a feedforward inner size of 320, against DEFAULT's 320 / 5
+# heads / 576. That keeps the repo-wide head dimension of 64 -- hence 4 heads
+# rather than 5, and 256 % 4 == 0 where 256 % 5 is not -- and gives up the
+# repo-wide feedforward proportion of 1.73, taking 1.25 instead. The proportion
+# is the one thing here that is not shared with the other stacks, and it is what
+# pays for the extra blocks.
 #
-# 4 layers is then the closest depth: 5,272,606 parameters on both datasets,
-# against `BilinearGRUComparer`'s 5,015,553 on the ViT referents of rungs 9 and
-# 10, or 1.05x. That is looser than the 1.01x the
-# hand-sized version reached, but tighter than the vision arms, which sit at
-# 0.91x and 1.11x because a ViT's patch tokeniser scales with image size.
+# 3 and 3 is then the depth: 4,781,727 parameters, against
+# `BilinearGRUComparer`'s 5,015,553 on the ViT referents of rungs 9 and 10, or
+# 0.95x -- tighter than the 1.05x the previous structure managed at 5,272,606.
+# 2 and 2 would be 0.65x and 4 and 4 would be 1.26x, so 3 is the only depth
+# inside the 10% the ladder aims at, and the two stacks are held equal for want
+# of a reason to favour either.
 #
-# `layers` is the message encoder's depth and nothing else's. It used to be a
-# total, split inside the module between a reading stack and a fusion stack, so
-# asking for one more block moved two and `layers = 5` bought a 3-layer encoder.
-# The module now has one stack -- three bare attention stages surround it, at
-# fixed cost -- so the number means what it says. 3 layers would be 0.86x and 5
-# would be 1.24x; 4 is the only depth inside the 10% the ladder aims at.
+# `message_layers` and `referent_layers` are block counts, and each stack's
+# DeepNorm constants are resolved from its own -- `decoder=True`, so three
+# sublayers to the block. At 3 that is alpha 1.732, beta 0.408.
 #
-# `d_model` is the only width restated here. DEFAULT's 1024 in that section is
-# `BilinearGRUComparer`'s hidden size, not this class's; `heads`,
-# `ff_inner_size` and the rest are read only by this class and are inherited.
-d_model = 320
-layers = 4
+# `token_embedding_size` is restated because the listener's embedding is built
+# from it in `builder.py` and then adapted into `d_model`; matching the two
+# keeps the adapter square. DEFAULT's 1024 `d_model` in that section is
+# `BilinearGRUComparer`'s hidden size, not this class's; `stochastic_depth`,
+# `activation` and the rest are read only by this class and are inherited.
+d_model = 256
+heads = 4
+ff_inner_size = 320
+token_embedding_size = 256
+message_layers = 3
+referent_layers = 3
 
 # `true`, and for the same reason rung 7 sets it on `[sender_language_model]`:
 # no transformer in this ladder runs a causal mask. The key is shared with
@@ -115,8 +122,9 @@ layers = 4
 # instead turns it into `causal = not bidirectional` on the stack that encodes
 # the incoming message (`receiver.py`). Masking that stack left to right models
 # a listener that must commit to an interpretation of symbol 1 before seeing
-# symbol 5, which is not the listening task -- the message arrives whole, and
-# the three attention stages around it are already `causal=False`.
+# symbol 5, which is not the listening task -- the message arrives whole. The
+# referent stack is unconditionally non-causal and does not read this key at
+# all: its sequence axis is the candidate set, whose order is the label vector.
 bidirectional = true
 
 [scheduler]

@@ -219,12 +219,17 @@ configuration DeepNorm's decoder form was derived for, so it asks for
 
 `layers` is the depth of the residual path being scaled. For a stack split into
 sub-stacks, each resolves its own. `TransformerCrossAttentionComparer` resolves
-two pairs: one at `layers` for its message encoder, and one at **depth 1** for
-its three hand-written residuals. DeepNorm's depth argument counts
-attention-plus-feedforward *layers*, and those three are bare attention
-sublayers — one on the message stream, two on the referent stream. A stream of
-two attention sublayers and no feedforward is one layer's worth of residual path,
-so 1 is the honest depth for both.
+two pairs, one per decoder stack: `message_layers` for the stack that encodes the
+message and `referent_layers` for the stack that scores the candidates. Both ask
+for `decoder=True`, because a `DecoderBlock` carries three residual branches
+rather than two — self-attention, cross-attention and feedforward — so the
+sublayer count is `3N` and the constants are `(3N)^(1/4)` and `(12N)^(-1/4)`.
+
+The depth passed is the block count, not a multiple of it: `deepnorm_constants`
+does the three-per-block accounting itself. An earlier version of this module had
+three hand-written residuals resolved at depth 1, on the argument that bare
+attention sublayers with no feedforward are one layer's worth of residual path;
+those residuals are gone, and with them the special case.
 
 `ViT2` derives from `layers` alone, which counts the transformer blocks; the
 initial feedforward residual path it also scales with `alpha` and `beta` is one

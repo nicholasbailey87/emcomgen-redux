@@ -288,8 +288,11 @@ epochs.
 
 **`decision_spread`** — `TransformerCrossAttentionComparer` only, which has no
 learnable scale to report: its readout is a plain `nn.Linear(d_model, 1)` and the
-volume lives in that weight. Simply the standard deviation of the scores, opening
-around 0.57.
+volume lives in that weight. Simply the standard deviation of the scores. It
+opened around 0.57 under the four-stage structure this module replaced; the two
+decoder stacks have not been measured, and the opening is in any case an
+emergent property of `nn.Linear`'s init against a post-norm input rather than a
+number anything pins.
 
 A **monotone descent towards zero** is the finding: BCE reduces a loss it cannot
 otherwise reduce by becoming less confident, and nothing in this readout stops it.

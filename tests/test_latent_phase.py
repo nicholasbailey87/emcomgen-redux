@@ -269,6 +269,23 @@ def test_reset_parameters_restores_the_tag_and_the_diagnostic():
 
 # ---------------------------------------------------------------- the arms --
 
+def test_the_decoder_arm_is_causal():
+    """
+    `DecoderBlock` gained `causal` and `cross_first` so the listener's comparer
+    could build non-causal stacks from it, and both default to the speaker's
+    setting. This arm's whole justification is that symbol `i` is conditioned on
+    symbols `< i`, and a default that drifted would take that away silently:
+    nothing in a loss curve distinguishes an unmasked decoder from the parallel
+    arm wearing the wrong config.
+    """
+    speaker = _speaker()
+
+    for block in speaker.decoder.blocks:
+        assert block.causal is True
+        assert block.self_attention.causal is True
+        assert block.cross_first is False
+
+
 def test_each_arm_builds_only_its_own_modules():
     """
     The two arms are one class, so the thing that stops them blurring is that

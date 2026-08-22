@@ -373,13 +373,16 @@ def test_cross_attention_comparer_reset_covers_its_adapters():
 
     config = parse_config.get_config()
     kwargs = dict(config["receiver_comparer"])
-    kwargs["layers"] = 2  # so the fusion stack is non-empty
+    # So neither stack is a single block, where a depth ramp would be inert.
+    kwargs["message_layers"] = 2
+    kwargs["referent_layers"] = 2
     # `d_model` has to be overridden, as it is everywhere this class is built
     # outside a rung config. DEFAULT's 1024 is `BilinearGRUComparer`'s hidden
     # size, and the section's `heads` describes this class instead -- the two
     # numbers belong to different modules, so the pair does not satisfy
-    # broccoli's `d_model % n_heads == 0`. 320 is the width rung 11 uses.
-    kwargs["d_model"] = 320
+    # broccoli's `d_model % n_heads == 0`. 256 and 4 heads is what rung 11 uses.
+    kwargs["d_model"] = 256
+    kwargs["heads"] = 4
     comparer = receiver.TransformerCrossAttentionComparer(512, **kwargs)
 
     _perturb(comparer)
@@ -389,13 +392,8 @@ def test_cross_attention_comparer_reset_covers_its_adapters():
         "referent_adapter",
         "message_adapter",
         "referent_layer_norm",
-        "message_cross_attention",
-        "message_residual_norm",
-        "referent_cross_attention",
-        "referent_residual_norm",
-        "referent_self_attention",
-        "referent_self_attention_norm",
-        "decision_layer_norm",
+        "message_decoder",
+        "referent_decoder",
         "decision",
     ):
         module = getattr(comparer, name)

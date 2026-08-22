@@ -426,15 +426,29 @@ two it is being asked to be robust to. The referents arrive clean.
 
 ### `TransformerCrossAttentionComparer`
 
-Four stages:
+Two `TransformerDecoder` stacks, each reading the other's stream as memory:
 
-1. **The message queries the candidate set** (`message_cross_attention`).
-2. **`encoding`** refines that reading in context (a broccoli
-   `TransformerEncoder`).
-3. **Each candidate queries the refined message** (`referent_cross_attention`).
-4. **The candidates query each other** (`referent_self_attention`).
+1. **`message_decoder`** — `message_layers` blocks of self-attention,
+   cross-attention into the candidate set, then a feedforward.
+2. **`referent_decoder`** — `referent_layers` blocks of cross-attention into the
+   encoded message, then self-attention across the candidates, then a
+   feedforward. `cross_first`, so the message comes before the candidates
+   compare each other.
 
-Then a normalised linear readout scores each one.
+Then a plain linear readout scores each one.
+
+**Why two stacks rather than four bare stages.** The structure this replaces
+crossed the message into the referent stream exactly once, at a single
+cross-attention. Everything common across candidates cancels at the readout, so
+the only thing that could separate two of them was the difference between their
+attention weights over the message — a small perturbation about a near-flat
+softmax at initialisation, where `BilinearGRUComparer`'s `obj·W·m` is first
+order and differs per candidate from step zero. Rungs 11 to 14 sat at 0.5000 for
+thirty epochs while rung 10, which is rung 12 with the bilinear comparer and
+nothing else changed, learned. `comparer_probe.py` shows the old module solving
+a fixed noise-free protocol in under 200 steps, so what failed was not the
+comparer's capacity but its ability to bootstrap against a speaker that had not
+learned yet. `M` crossings instead of one is the response.
 
 **Why the message reads the referents before it is encoded.** Without that first
 pass the encoder sees the message alone, so the best it can build is an
@@ -469,22 +483,27 @@ it a candidate reaches the score only through near-uniform attention weights, an
 this stage halved the between-object share of the variance (0.415 going in, 0.221
 coming out) at init.
 
-**`layers` is the message encoder's depth and nothing else's.** It used to be a
-total split between a reading stack and a fusion stack, which meant `layers = 5`
-bought a 3-layer encoder and asking for one more block moved two.
+**`message_layers` and `referent_layers` are block counts, one per stack.** A
+single key was once a total split between two stacks, which meant asking for one
+more block moved two. Each stack also resolves its DeepNorm constants from its
+own count and with `decoder=True`, since a `DecoderBlock` has three residual
+branches rather than two: at three blocks that is `alpha = 1.732`,
+`beta = 0.408`.
 
-**Stochastic depth is suppressed below two layers.**
-`depthwise_linear_stochastic_depth` spreads the rate linearly across layers, so a
-one-layer stack would get a single rate of 0.0 regardless. The three hand-written
-residuals get none — they are not `EncoderBlock`s and have no branch to drop.
+**Stochastic depth is suppressed below two layers,** asked of each stack
+separately. `depthwise_linear_stochastic_depth` spreads the rate linearly across
+layers, so a one-block stack would get a single rate of 0.0 regardless.
 
-**Attention is never causal, and that is not negotiable** for the two stages
-whose sequence axis is the referent set. In this codebase referent *order is the
-label vector*: `data.util.split_spk_lis` writes positives into the first half of
-each agent's view and negatives into the second, and the augmentation permutes
-only *within* each half. Anything that could index its own sequence axis could
-learn "the first half are targets" and score perfectly while ignoring the
-message. With no position embedding and no mask, all three attentions are
+**The referent stack is never causal, and that is not negotiable.** In this
+codebase referent *order is the label vector*: `data.util.split_spk_lis` writes
+positives into the first half of each agent's view and negatives into the
+second, and the augmentation permutes only *within* each half. Anything that
+could index its own sequence axis could learn "the first half are targets" and
+score perfectly while ignoring the message. `DecoderBlock` defaults to
+`causal=True` because its other caller is a speaker generating a sequence, so
+this stack passes `causal=False` explicitly and takes no positional embedding of
+any kind; both are asserted in
+`tests/test_cross_attention_comparer.py`. With neither, it is
 permutation-equivariant and cannot read the ordering at all.
 `BilinearGRUComparer` is immune for a different reason: it scores each referent
 in isolation and never sees the set.
@@ -505,7 +524,8 @@ given.** broccoli's `project_qkv` RMS-normalises Q and K per head, so the
 attention *logits* are already free of the vision model's scale, and
 `MHAttention.out_norm` handles a uniformly louder backbone (measured: the whole
 set at 10× moves the output by 0.0%). What neither handles is *per-object*
-magnitude. At `message_cross_attention` the referents are the values; V is not
+magnitude. In the message stack's cross-attention the referents are the values;
+V is not
 normed anywhere, so the attention output is a magnitude-weighted mixture: one
 candidate 50× larger than its neighbours moves that output by 116% without this
 norm and by 0.0% with it, and no downstream norm can undo it because the
@@ -521,15 +541,19 @@ perturbation is neither the size nor the shape the knob names. As on
 `BilinearGRUComparer`, only the referents are masked; attention dropout is a
 separate setting (`receiver_comparer.cross_attention_dropout`).
 
-**`decision_layer_norm` is parameter-free and not optional, on two counts.**
-broccoli's post-norm is `nn.RMSNorm(d_model)` with `elementwise_affine=True` by
-default, so `referent_self_attention_norm` carries a learnable gain, and this
-norm is the only thing standing between it and global score volume. It also
-equalises the candidates' lengths, which nothing downstream ever could. Without
-it, `scores` is `|refined_j| · cos(θ_j)` and an object can be read loudly for
-being large rather than for matching — the same defect as the referent-norm case,
-one stage later. With it, every candidate is read at norm `sqrt(d)` and only the
-angle can separate them.
+**There is no separate norm before the readout, and there used to be.** The
+argument for `decision_layer_norm` was that it equalised the candidates' lengths
+— otherwise `scores` is `|refined_j| · cos(θ_j)` and an object can be read loudly
+for being large rather than for matching, the same defect as the referent-norm
+case one stage later. The referent stack's last block ends in a post-norm, which
+is `nn.RMSNorm(d_model)` and normalises per position, so the candidates already
+reach the readout at equal length and that argument is answered structurally.
+
+What the extra norm also did was sit between the post-norm's learnable gain and
+global score volume. That route is now open, which is deliberate: it is the same
+volume-collapse route the readout's free weight magnitude leaves open, watched by
+`decision_spread` rather than closed. See [anecdotes.md](anecdotes.md) for the
+two attempts to close it.
 
 **The readout is a plain `nn.Linear(d_model, 1)` with a bias and a free weight
 magnitude.** That makes one vector both the *direction* the head reads out and

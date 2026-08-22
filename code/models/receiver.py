@@ -10,6 +10,7 @@ import torch.nn as nn
 import broccoli
 
 from . import model_util
+from . import transformer_decoder
 
 # Mirrors `sender.LAYER_NORM_EPS`, and load-bearing for the same reason: below
 #     the 1e-5 default the normaliser quietly stops normalising and the score's
@@ -167,15 +168,17 @@ class TransformerCrossAttentionComparer(nn.Module):
         **kwargs
     ):
         """
-        Compare an embedded message against a set of candidate referents by
-            reading each against the other, twice.
+        Compare an embedded message against a set of candidate referents with
+            two decoder stacks, each reading the other's stream as memory.
 
-        The message reads the candidate set first (`message_cross_attention`),
-            so that `encoding` refines a meaning that already knows what it is
-            choosing between; then each candidate reads the refined message
-            (`referent_cross_attention`); then the candidates read each other
-            (`referent_self_attention`); then a normalised linear readout
-            scores each one.
+        `message_decoder` runs `message_layers` blocks of self-attention,
+            cross-attention into the candidate set, and a feedforward, so the
+            meaning it refines is discriminative rather than absolute.
+            `referent_decoder` then runs `referent_layers` blocks the other way
+            round -- cross-attention into the refined message *first*, then the
+            candidates read each other, then a feedforward -- so the message
+            crosses into the scored stream once per block rather than once in
+            total, and the candidates compare message-informed representations.
 
         `decision` is a plain `nn.Linear(d_model, 1)`, so the listener can turn
             its own volume down and BCE rewards it for doing so. That route is
@@ -191,7 +194,8 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.referent_embedding_size = referent_embedding_size
         self.message_length = kwargs["message_length"]
         self.dropout = kwargs["dropout"]
-        self.layers = kwargs["layers"]
+        self.message_layers = kwargs["message_layers"]
+        self.referent_layers = kwargs["referent_layers"]
         self.heads = kwargs["heads"]
         self.utility_tokens = kwargs["utility_tokens"]
         self.bidirectional = kwargs["bidirectional"]
@@ -210,27 +214,31 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.ff_outer_dropout = kwargs["ff_outer_dropout"]
         self.self_attention_dropout = kwargs["self_attention_dropout"]
 
-        # `layers` is the message encoder's depth, and nothing else's.
-        self.encoding_alpha, self.encoding_beta = (
+        # One pair per stack, at that stack's own depth. `decoder=True` counts
+        #     three sublayers to the block, which is what these are, so what is
+        #     passed is the block count and not a multiple of it. See
+        #     docs/broccoli.md.
+        self.message_alpha, self.message_beta = (
             model_util.resolve_residual_scaling(
-                kwargs["alpha"], kwargs["beta"], self.layers
+                kwargs["alpha"], kwargs["beta"], self.message_layers,
+                decoder=True,
+            )
+        )
+        self.referent_alpha, self.referent_beta = (
+            model_util.resolve_residual_scaling(
+                kwargs["alpha"], kwargs["beta"], self.referent_layers,
+                decoder=True,
             )
         )
 
-        # One pair for the three hand-written residuals, resolved at depth 1:
-        #     bare attention sublayers are one layer's worth of residual path.
-        #     See docs/broccoli.md.
-        self.residual_alpha, self.residual_beta = (
-            model_util.resolve_residual_scaling(
-                kwargs["alpha"], kwargs["beta"], 1
-            )
+        # Suppressed unless a stack is deep enough for a depth ramp to mean
+        #     anything, and asked of each stack separately for the same reason
+        #     the scalings are.
+        self.message_stochastic_depth = (
+            kwargs["stochastic_depth"] if self.message_layers > 1 else 0.0
         )
-
-        # Suppressed unless the encoder is deep enough for a depth ramp to mean
-        #     anything. The three residuals below get none -- they are not
-        #     `EncoderBlock`s and have no branch to drop.
-        self.stochastic_depth = (
-            kwargs["stochastic_depth"] if self.layers > 1 else 0.0
+        self.referent_stochastic_depth = (
+            kwargs["stochastic_depth"] if self.referent_layers > 1 else 0.0
         )
 
         # The listener's regulariser, masking the referents only, and placed
@@ -259,15 +267,19 @@ class TransformerCrossAttentionComparer(nn.Module):
             self.d_model
         )
 
-        # Stage 1: the message queries the candidate set.
-        self.message_cross_attention = self._attention()
-        self.message_residual_norm = nn.RMSNorm(self.d_model)
-
-        # Stage 2: refine that reading in context.
-        self.encoding = broccoli.transformer.TransformerEncoder(
-            self.message_length, # seq_len can be none as length-invariant
+        # The message reads the candidate set. `causal` follows
+        #     `bidirectional` exactly as the encoder it replaces did: the
+        #     message arrives whole, so nothing here masks it left to right.
+        #     The referents are this stack's memory, which is what
+        #     `referent_layer_norm` above is for -- a post-norm stack
+        #     normalises its own stream and never its memory.
+        self.message_decoder = transformer_decoder.TransformerDecoder(
+            self.message_length,
+            # `memory_len` is recorded for the caller and sizes nothing; the
+            #     candidate count is a property of the game, not of this module.
+            None,
             self.d_model,
-            self.layers,
+            self.message_layers,
             self.heads,
             # Pinned False, and no longer a config option; every stack here
             #     runs rotary. See docs/broccoli.md.
@@ -275,7 +287,7 @@ class TransformerCrossAttentionComparer(nn.Module):
             relative_position_embedding=self.relative_position_embedding,
             # Pinned at 1.0, not configurable -- see `ViT2` for the argument.
             positional_heads=1.0,
-            # Derived from the data, not configured separately: this block
+            # Derived from the data, not configured separately: this stack
             #     reads the message, so its source is the message length.
             source_size=(self.message_length,),
             # `ff_ratio` None so that `ff_inner_size` is the live knob; note
@@ -284,17 +296,15 @@ class TransformerCrossAttentionComparer(nn.Module):
             ff_inner_size=self.ff_inner_size,
             activation=self.activation,
             activation_kwargs=None,
-            ff_linear_module_up=None,
-            ff_linear_module_down=None,
             # Pinned rather than promoted: this argument can never take effect.
             #     Use the inner/outer knobs instead. See docs/broccoli.md.
             ff_dropout=0.0,
             ff_inner_dropout=self.ff_inner_dropout,
             ff_outer_dropout=self.ff_outer_dropout,
             msa_dropout=self.self_attention_dropout,
-            stochastic_depth=self.stochastic_depth,
+            cross_attention_dropout=self.cross_attention_dropout,
+            stochastic_depth=self.message_stochastic_depth,
             depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
-            causal=not self.bidirectional,
             linear_module=nn.Linear,
             bos_tokens=self.utility_tokens,
             knocking_heads=self.knocking_heads,
@@ -302,38 +312,69 @@ class TransformerCrossAttentionComparer(nn.Module):
             pre_norm=self.pre_norm,
             post_norm=self.post_norm,
             msa_scaling="d",
-            alpha=self.encoding_alpha,
-            beta=self.encoding_beta,
+            alpha=self.message_alpha,
+            beta=self.message_beta,
+            causal=not self.bidirectional,
+            cross_first=False,
         )
 
-        # Stage 3: each candidate queries the refined message.
-        self.referent_cross_attention = self._attention()
-        self.referent_residual_norm = nn.RMSNorm(self.d_model)
-
-        # Stage 4: the candidates query each other, which is the only stage at
-        #     which a score can depend on the rest of the set.
-        self.referent_self_attention = self._attention()
-        self.referent_self_attention_norm = nn.RMSNorm(self.d_model)
-
-        # Parameter-free, and not optional: it is the only thing between the
-        #     preceding post-norm's learnable gain and global score volume, and
-        #     it equalises the candidates' lengths so `scores` is an angle. See
-        #     docs/architecture.md.
-        self.decision_layer_norm = nn.LayerNorm(
-            self.d_model, elementwise_affine=False, eps=LAYER_NORM_EPS
+        # Each candidate reads the refined message, then the candidates read
+        #     each other -- `cross_first`, so what the self-attention compares
+        #     has already been informed by the message. That self-attention is
+        #     the only stage at which a score can depend on the rest of the set,
+        #     and the only route to the concept game's clustering shortcut.
+        #
+        # `causal=False` is not negotiable, and `relative_position_embedding`
+        #     is False for the same reason: referent order is the label vector,
+        #     so anything able to index its own sequence axis could ignore the
+        #     message. `test_no_stage_can_read_the_referent_ordering` pins it.
+        self.referent_decoder = transformer_decoder.TransformerDecoder(
+            # `seq_len` sizes the causal mask, which is off here, and the
+            #     absolute position embedding, which is not built.
+            None,
+            self.message_length,
+            self.d_model,
+            self.referent_layers,
+            self.heads,
+            absolute_position_embedding=False,
+            relative_position_embedding=False,
+            positional_heads=1.0,
+            source_size=None,
+            ff_ratio=None,
+            ff_inner_size=self.ff_inner_size,
+            activation=self.activation,
+            activation_kwargs=None,
+            ff_dropout=0.0,
+            ff_inner_dropout=self.ff_inner_dropout,
+            ff_outer_dropout=self.ff_outer_dropout,
+            msa_dropout=self.self_attention_dropout,
+            cross_attention_dropout=self.cross_attention_dropout,
+            stochastic_depth=self.referent_stochastic_depth,
+            depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
+            linear_module=nn.Linear,
+            bos_tokens=0,
+            knocking_heads=False,
+            return_bos_tokens=False,
+            pre_norm=self.pre_norm,
+            post_norm=self.post_norm,
+            msa_scaling="d",
+            alpha=self.referent_alpha,
+            beta=self.referent_beta,
+            causal=False,
+            cross_first=True,
         )
 
         # A bias, and a weight whose magnitude is free. Both were removed once
-        #     and restored; `decision_layer_norm` above is the only structural
-        #     guard left, which is why its affine-free flag is asserted in
-        #     `test_the_cross_attention_norms_that_must_be_affine_free_are`
-        #     rather than merely commented. See docs/anecdotes.md.
+        #     and restored; see docs/anecdotes.md. It reads straight off the
+        #     referent stack's last post-norm, which is an `RMSNorm` and so
+        #     already equalises the candidates' lengths -- no object can be read
+        #     loudly for being large. That norm's gain is learnable, so global
+        #     volume stays free, which is the route `decision_spread` watches.
         self.decision = nn.Linear(self.d_model, 1)
 
         # Metrics only: set on every `forward`, read by `train.py`. The standard
-        #     deviation of the scores, opening around 0.57. A monotone descent
-        #     towards zero is the finding, not wandering. See
-        #     docs/measurement.md.
+        #     deviation of the scores. A monotone descent towards zero is the
+        #     finding, not wandering. See docs/measurement.md.
         self.decision_spread = float("nan")
 
         # Excess kurtosis of the scores, and the column to read first. Negative
@@ -341,44 +382,6 @@ class TransformerCrossAttentionComparer(nn.Module):
         #     positive alongside chance accuracy is a listener with nothing to
         #     say. See docs/measurement.md.
         self.decision_kurtosis = float("nan")
-
-    def _attention(self):
-        """
-        One bare `MHAttention` at this module's width, built the same way three
-            times. Bare rather than an `EncoderBlock` because the residual and
-            its post-norm are written out in `forward`, where the two streams
-            they join are visible.
-        """
-        return broccoli.transformer.MHAttention(
-            self.d_model,
-            self.heads,
-            # Architecture internals, deliberately not `self.dropout`. See
-            #     docs/broccoli.md.
-            dropout=self.cross_attention_dropout,
-            # Inert while `causal=False`, and that is not negotiable: referent
-            #     order is the label vector, so anything able to index its own
-            #     sequence axis could ignore the message. See
-            #     docs/architecture.md.
-            causal=False,
-            seq_len=self.message_length,
-            linear_module=nn.Linear,
-            bos_tokens=0,
-            knocking_heads=False,
-            # No positional information in any of the three; `positional_heads`
-            #     is inert here and pinned at the repo-wide 1.0. See
-            #     docs/architecture.md.
-            rotary_embedding=None,
-            positional_heads=1.0,
-            source_size=None,
-            scaling="d",
-        )
-
-    def _residual(self, stream, attended, norm):
-        """
-        DeepNorm's post-norm residual, written out because these three joins
-            are between two different streams rather than inside one block.
-        """
-        return norm(self.residual_alpha * stream + self.residual_beta * attended)
 
     def forward(
         self,
@@ -399,41 +402,18 @@ class TransformerCrossAttentionComparer(nn.Module):
 
         messages = self.message_adapter(messages)
 
-        # 1. The message reads the candidate set, so what `encoding` refines is
-        #    a discriminative meaning rather than an absolute one.
-        messages = self._residual(
-            messages,
-            self.message_cross_attention(messages, referents, referents),
-            self.message_residual_norm,
-        )
+        # 1. The message reads the candidate set, block by block, so what
+        #    comes out is a discriminative meaning rather than an absolute one.
+        encoded_messages = self.message_decoder(messages, referents)
 
-        # 2. Refine it. Note this *mutates* `messages`: broccoli's
-        #    `TransformerEncoder.preprocess` adds its position embedding in
-        #    place. Harmless because nothing reads `messages` again -- take a
-        #    copy first if a second residual is ever added.
-        encoded_messages = self.encoding(messages)
+        # 2. Each candidate reads the refined message, then the candidates read
+        #    each other, once per block. This stack's memory arrives normalised
+        #    from the stack above's own last post-norm.
+        refined = self.referent_decoder(referents, encoded_messages)
 
-        # 3. Each candidate reads the refined message. The residual is what
-        #    carries referent identity to the readout linearly.
-        enriched = self._residual(
-            referents,
-            self.referent_cross_attention(
-                referents, encoded_messages, encoded_messages
-            ),
-            self.referent_residual_norm,
-        )
-
-        # 4. The candidates read each other.
-        refined = self._residual(
-            enriched,
-            self.referent_self_attention(enriched, enriched, enriched),
-            self.referent_self_attention_norm,
-        )
-
-        # 5. Read out. Every candidate is at norm `sqrt(d)` after
-        #    `decision_layer_norm`, so `scores` is an angle and nothing else --
-        #    no object can be read loudly for being large.
-        refined = self.decision_layer_norm(refined)
+        # 3. Read out. That last post-norm is an `RMSNorm`, so the candidates
+        #    reach this at equal length and no object can be read loudly for
+        #    being large.
         scores = self.decision(refined).squeeze(-1) # (batch, n_objects)
 
         # `.item()` in a forward pass costs a sync and a graph break under
@@ -465,14 +445,8 @@ class TransformerCrossAttentionComparer(nn.Module):
         self.referent_adapter.reset_parameters()
         self.referent_layer_norm.reset_parameters()
         self.message_adapter.reset_parameters()
-        self.message_cross_attention.reset_parameters()
-        self.message_residual_norm.reset_parameters()
-        self.encoding.reset_parameters()
-        self.referent_cross_attention.reset_parameters()
-        self.referent_residual_norm.reset_parameters()
-        self.referent_self_attention.reset_parameters()
-        self.referent_self_attention_norm.reset_parameters()
-        self.decision_layer_norm.reset_parameters()
+        self.message_decoder.reset_parameters()
+        self.referent_decoder.reset_parameters()
         self.decision.reset_parameters()
 
 
