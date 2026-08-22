@@ -8,13 +8,8 @@ class InvalidConfig(Exception):
 
 def recursive_update(store: dict, items: dict) -> dict:
     """
-    Takes two dicts and updates the first with the contents of the second,
-      merging the values of any keys whose values are dictionaries in
-      both `store` and `items`
-    
-    Args:
-      store: the dictionary to be updated
-      items: the dictionary providing the updates
+    Update `store` in place with `items`, merging recursively where both hold a
+      dict at the same key.
     """
     for k, v in items.items():
         if (k in store) and isinstance(store[k], dict):
@@ -46,7 +41,8 @@ class SafeDict(dict):
 
 def validate_config(config: dict) -> bool:
     """
-    Check that the config doesn't contradict itself and has the necessary arguments.
+    Check that the config doesn't contradict itself and has the necessary
+    arguments. See docs/training.md.
     """
 
     if config['use_lang'] and (config['copy_receiver'] or config['receiver_only']):
@@ -64,9 +60,7 @@ def validate_config(config: dict) -> bool:
             "reference_game_xent=true requires reference_game=true"
         )
 
-    # There is no joint-training objective in this codebase. This used to be
-    # checked once per batch inside the training loop; rejecting the config up
-    # front fails in the same cases, but before any work is done.
+    # There is no joint-training objective in this codebase.
     if config['joint_training']:
         raise InvalidConfig(
             "`joint_training` is not implemented and must be false."
@@ -82,9 +76,8 @@ def validate_config(config: dict) -> bool:
             "`receiver_comparer` message length."            
         )
     
-    # Checked here rather than left to the speaker's constructor: `SafeDict`
-    # only warns on a missing key and hands back None, which would fail
-    # confusingly deep inside the decode instead of at parse time.
+    # Checked here rather than in the speaker's constructor: `SafeDict` only
+    # warns on a missing key and hands back None.
     init_energy = config['sender_language_model'].get('init_energy')
     if init_energy is None or not 0.0 < init_energy <= 1.0:
         raise InvalidConfig(
@@ -108,22 +101,8 @@ def get_config(
     defaults: str = str(Path(__file__).resolve().parents[1] / "DEFAULT.toml"),
 ):
     """
-    This function gets a custom experiment config by combining some default
-        parameters with a TOML file specified by the user.
-
-    First get the plain defaults and the dataset-specific defaults.
-
-    Then create a provisional custom config by overwriting the generic
-        default config with the provided custom config.
-    
-    Parse the required data set from the provisional custom config (we don't
-        parse directly from the provided custom TOML file just in case it doesn't
-        specify a data set) and create an updated default by overwriting
-        parameters in the generic default with the parameters from the
-        data-specific defaults.
-    
-    Create the final custom config by overwriting any parameters in the updated
-        defaults that are also found in the custom TOML.
+    Combine `DEFAULT.toml` with the user's experiment TOML. See
+        docs/training.md for the resolution order.
     """
 
     defaults = parse_toml(defaults)
@@ -142,10 +121,8 @@ def get_config(
     else:
         custom_config = dict()
            
-    # Which family of defaults to apply is decided by the dataset's *name*, not
-    # its location: `train.py` later rewrites this to a fast-storage path.
-    # ShapeWorld has several variants (`shapeworld_40`, `shapeworld_ref`, ...)
-    # which all share the same defaults.
+    # Decided by the dataset's *name*, not its location: `train.py` later
+    # rewrites this to a fast-storage path.
     dataset_name = Path(provisional_config['data']['dataset']).name
     if dataset_name == 'cub':
         recursive_update(active_defaults, birds_defaults)

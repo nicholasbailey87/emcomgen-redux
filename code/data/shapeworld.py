@@ -20,10 +20,7 @@ COLORS_DICT = {v: k for k, v in enumerate(COLORS)}
 N_FEATS = len(SHAPES) + len(COLORS)
 
 
-# Only the splits the run actually consumes. There is no val split because there
-# is no best-epoch selection: training runs to a fixed endpoint and the
-# per-epoch metrics.csv trajectory is the deliverable. `_same` splits are
-# optional (see the tolerance in `load`).
+# Only the splits the run consumes; `_same` splits are optional. See docs/data.md.
 SPLITS = ["train", "test", "test_same"]
 
 
@@ -81,10 +78,6 @@ def extract_shapes(worlds):
 
 def load(config, fast=False):
     datas = {}
-    # if config['sender']['arguments']['image_encoder'] == "PretrainedResNet18":
-    #     # Need larger images
-    #     image_size = 224
-    # else:
     image_size = 64
 
     for split in SPLITS:
@@ -103,8 +96,7 @@ def load(config, fast=False):
             fast=fast,
             into_memory=config['data']['load_shapeworld_into_memory'],
             # `extract_shapes` returns per-*image* descriptors, which disagree
-            # with a subsampled (40-image) store. Only reference games consume
-            # them, and those use the separate `shapeworld_ref` dataset.
+            # with a subsampled store. See docs/data.md.
             need_shapes=config['reference_game'],
         )
 
@@ -130,9 +122,7 @@ def load(config, fast=False):
             augment=split == "train",
             percent_novel=config['data']['percent_novel'],
             reference_game=config['reference_game'],
-            # Training-time only. Eval is never silhouetted, so the reported
-            # numbers stay comparable to the paper's and to the `probe_shape.py`
-            # sweep, which measures the sender on un-augmented images.
+            # Training-time only; eval is never silhouetted. See docs/data.md.
             silhouette_p_sender=(
                 config['data']['silhouette_p_sender'] if split == "train" else 0.0
             ),
@@ -144,12 +134,6 @@ def load(config, fast=False):
             **dataset_kwargs,
         )
 
-    # No cross-game-type eval datasets. The run trains and evaluates a single
-    # game framing (concept, i.e. `percent_novel = 1.0`), under which the
-    # speaker and listener see fully disjoint targets *and* distractors. That
-    # disjointness is an intrinsic control against context-dependent degenerate
-    # codes, which is what the cross-eval passes were guarding against, so
-    # building 12 extra eval datasets bought nothing but I/O.
     return datasets
 
 
@@ -160,11 +144,7 @@ def load_split(dataset, split, fast=False, into_memory=False, need_shapes=False)
     else:
         # Try hdf5
         data = h5py.File(data_file.replace(".npz", ".hdf5"), "r")
-    # `extract_shapes` is per *image*, so it only agrees with the store when the
-    # images have not been subsampled; it is consumed solely by
-    # `get_reference_game`/`shapes_to_idx`, which concept games never call. It is
-    # now the only consumer of the world files, so concept games skip parsing
-    # them altogether.
+    # Only reference games consume the world files. See docs/data.md.
     if fast or not need_shapes:
         shapes = None
     else:
@@ -261,9 +241,8 @@ class ShapeWorldDataset(generic.ConceptDataset):
 
     @util.return_index
     def get_reference_game(self, i):
-        # Copied because the re-assignment/shuffles below write in place, and
-        # with the store in memory `self.x[i]` is a view onto the shared array
-        # (see the matching note in `generic.ConceptDataset.__getitem__`).
+        # Copied because the shuffles below write in place; see the matching
+        # note in `generic.ConceptDataset.__getitem__`.
         img = np.array(self.x[i])
         label = self.labels[i]
         md = self.metadata[i]
@@ -299,8 +278,7 @@ class ShapeWorldDataset(generic.ConceptDataset):
             img, label, self.n_examples, percent_novel=0.0
         )
         # `percent_novel = 0.0` hands back the *same* tensor for both agents;
-        # `silhouette` returns a new one, so an independent roll per agent is
-        # still safe here.
+        # `silhouette` returns a new one, so the independent rolls are safe.
         spk_inp, lis_inp = self._apply_silhouette(spk_inp, lis_inp)
         return (spk_inp, spk_label, lis_inp, lis_label, lang, md)
 

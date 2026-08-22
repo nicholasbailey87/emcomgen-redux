@@ -12,17 +12,14 @@ import warnings
 from collections import defaultdict
 
 # Dependencies whose version changes the model, and so has to be recorded
-#     alongside the results. broccoli and gradboard are installed from git.
+#     alongside the results. See docs/training.md.
 PINNED_DEPENDENCIES = ("broccoli-ml", "gradboard", "torch", "torchvision")
 
 
 def current_git_hash():
     """
-    Get the hash of the latest commit in this repository. Does not account for unstaged changes.
-    Returns
-    -------
-    git_hash : ``str``, optional
-        The string corresponding to the current git hash if known, else ``None`` if something failed.
+    The hash of the latest commit in this repository, and whether the working
+        tree is dirty. ``(None, None)`` if git could not be reached.
     """
     unstaged_changes = False
     try:
@@ -53,20 +50,7 @@ class Statistics:
             self.meters[k].update(v, batch_size)
 
     def averages(self):
-        """
-        Compute averages from meters. Handle tensors vs floats (always return a
-        float)
-
-        Parameters
-        ----------
-        meters : Dict[str, util.AverageMeter]
-            Dict of average meters, whose averages may be of type ``float`` or ``torch.Tensor``
-
-        Returns
-        -------
-        metrics : Dict[str, float]
-            Average value of each metric
-        """
+        """Averages of every meter, always as ``float``."""
         metrics = {m: vs.avg for m, vs in self.meters.items()}
         metrics = {
             m: v if isinstance(v, float) else v.item() for m, v in metrics.items()
@@ -107,22 +91,13 @@ class AverageMeter:
 
 def dependency_versions(packages=PINNED_DEPENDENCIES):
     """
-    Record the installed version of every dependency that can change the model,
-        so a finished run says which architecture produced it.
+    Installed version of every dependency that can change the model. See
+        docs/training.md.
 
-    `current_git_hash` covers this repository only, which is not enough: the
-        model is mostly broccoli's, and broccoli's version has moved
-        underneath this repository before without any commit here to show for
-        it. For anything installed from git, pip records the resolved commit
-        in the distribution's `direct_url.json`, so the exact source is
-        recoverable even if the requirement was written as a branch or a tag.
-
-    Returns
-    -------
-    versions : ``dict``
-        Package name -> ``{"version": str}``, plus ``"commit"`` where the
-        package was installed from a VCS. Values are always strings, since
-        this ends up in `config.toml` and TOML cannot represent None.
+    Returns:
+        Package name -> ``{"version": str}``, plus ``"commit"`` where the package
+            was installed from a VCS. Values are always strings, since this ends
+            up in ``config.toml`` and TOML cannot represent None.
     """
     versions = {}
     for package in packages:
@@ -135,7 +110,7 @@ def dependency_versions(packages=PINNED_DEPENDENCIES):
         record = {"version": distribution.version}
 
         # `read_text` returns None for a missing file, but raises for a
-        #     distribution installed in a layout without a metadata directory.
+        #     distribution installed without a metadata directory.
         try:
             direct_url = distribution.read_text("direct_url.json")
         except OSError:
@@ -152,9 +127,7 @@ def dependency_versions(packages=PINNED_DEPENDENCIES):
 
 
 def save_args(args_dict, exp_dir):
-    # Note: no longer need `args_dict = vars(args)` as args will now already
-    # be a dict, see train.py. Also we output to moth json and toml to support
-    # original and new functionality.
+    # Output to both json and toml to support original and new functionality.
     args_dict["git_hash"], args_dict["git_unstaged_changes"] = current_git_hash()
     args_dict["dependency_versions"] = dependency_versions()
     with open(os.path.join(exp_dir, "args.json"), "w") as f:

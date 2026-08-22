@@ -37,19 +37,15 @@ class ViT2(nn.Module):
         self.pooling_kernel_stride = int(self.pooling_kernel_size / 2)
         self.pooling_padding = self.pooling_kernel_stride
 
-        # As in `receiver.py` and `sender.py`, every broccoli argument is set
-        #     explicitly, including the inert ones, because broccoli's defaults
-        #     have changed underneath this repository before. See the note at
-        #     the top of `receiver.py`.
+        # Every broccoli argument is set explicitly, including the inert ones.
+        #     See docs/broccoli.md.
         self.backbone = ViT(
             input_size=n_feats[1:],
             image_classes=self.d_model, # Just return an overall embedding
             in_channels=n_feats[0],
             initial_batch_norm=True,
-            # The whole `cnn_*` group is inert while `cnn` is False: broccoli
-            #     swaps in an Identity and the image goes straight to pooling.
-            #     Pinned so that flipping `cnn` on is a deliberate act with
-            #     visible settings, rather than silently adopting defaults.
+            # The whole `cnn_*` group is inert while `cnn` is False, and pinned
+            #     so that flipping `cnn` on is a deliberate act.
             cnn=False,
             cnn_out_channels=16,
             cnn_kernel_size=3,
@@ -67,14 +63,9 @@ class ViT2(nn.Module):
             pooling_kernel_stride=self.pooling_kernel_stride,
             pooling_padding=self.pooling_padding,
             transformer_feedforward_first=True,
-            # On, because broccoli 30.1.0 carries the residual with
-            #     `ResizeAndPadPatches`: it bilinearly downscales each patch to
-            #     the largest volume that fits `d_model` and zero-pads the rest,
-            #     so the skip connection no longer ties `d_model` to the patch
-            #     size. It was off here on the older assumption that it did.
-            #     The resizer has no parameters, so this costs nothing but the
-            #     interpolation, and it only raises below `d_model` = 3
-            #     (`in_channels`), which no config approaches.
+            # On: broccoli 30.1.0 carries the residual with
+            #     `ResizeAndPadPatches`, so `d_model` is no longer tied to the
+            #     patch size. See docs/broccoli.md.
             transformer_initial_ff_residual_path=True,
             transformer_initial_ff_linear_module_up=None,
             transformer_initial_ff_linear_module_down=None,
@@ -87,47 +78,21 @@ class ViT2(nn.Module):
             transformer_ff_linear_module_down=None,
             transformer_pre_norm=kwargs["pre_norm"],
             transformer_post_norm=kwargs["post_norm"],
-            # Pinned False, and no longer a config option. Every stack here runs
-            #     rotary, which encodes position where it is used -- as a
-            #     rotation of the query and key subspace -- rather than as a
-            #     vector added to the residual stream once at the input. A
-            #     rotation of part of the vector is sufficient for relative
-            #     position, so an absolute embedding on top is not covering
-            #     anything RoPE leaves out; it is a second, differently-shaped
-            #     answer to the same question, learned from scratch, and one
-            #     that has to be re-learned for every sequence length. broccoli
-            #     agrees: its own `ViT` defaults to exactly this pair, False
-            #     absolute and True relative.
-            #
-            # It cost ~190k parameters a rung, most of it two 289-position
-            #     tables in the ViT2 backbones.
+            # Pinned False, and no longer a config option; every stack here
+            #     runs rotary. See docs/broccoli.md.
             transformer_absolute_position_embedding=False,
             transformer_relative_position_embedding=kwargs[
                 "relative_position_embedding"
             ],
             # Pinned at 1.0, so every head receives axial RoPE, and no longer
-            #     configurable. At any fraction below 1 broccoli splits the head
-            #     axis -- `math.ceil(fraction * n_heads)` heads take RoPE and the
-            #     rest are carried through a second value projection and
-            #     concatenated back -- so the size of the partition moved
-            #     whenever `heads` moved, which made it a hidden confound in a
-            #     study that varies width. At the full head count every one of
-            #     those splits collapses to the identity path.
-            #
-            # Note broccoli's docstrings say the fraction is applied with
-            #     `floor`; the code is `math.ceil`. Another reason not to sit on
-            #     a fraction.
+            #     configurable. See docs/broccoli.md.
             transformer_positional_heads=1.0,
             transformer_embedding_size=self.d_model,
             transformer_layers=kwargs["layers"],
             transformer_heads=kwargs["heads"],
-            # `ff_ratio` must be None here or it wins. broccoli's `ViT` resolves
-            #     the two in the *opposite* order to `FeedforwardBlock`: the
-            #     block takes `int(ratio * width) if inner_size is None else
-            #     inner_size`, so the explicit size wins there, but `ViT` takes
-            #     `if transformer_ff_ratio is not None:` and derives the inner
-            #     size from the ratio, discarding whatever was passed here. Left
-            #     as a number, this promotion would be silently dead.
+            # `ff_ratio` must be None here or it wins -- `ViT` resolves the two
+            #     in the *opposite* order to `FeedforwardBlock`. See
+            #     docs/broccoli.md.
             transformer_ff_ratio=None,
             transformer_ff_inner_size=kwargs["ff_inner_size"],
             transformer_bos_tokens=kwargs["utility_tokens"],
@@ -136,13 +101,8 @@ class ViT2(nn.Module):
             transformer_activation=get_activation(kwargs["activation"]),
             transformer_activation_kwargs=None,
             transformer_msa_scaling="d",
-            # Not configurable, and pinned rather than promoted: broccoli's
-            # `FeedforwardBlock` uses this only as a fallback --
-            # `inner_dropout if inner_dropout is not None else dropout` -- and
-            # `TransformerEncoder` always forwards `ff_inner_dropout` and
-            # `ff_outer_dropout`, which default to 0.0 rather than None. So this
-            # argument can never take effect, and TOML has no way to write the
-            # None that would let it. Use the inner/outer knobs instead.
+            # Pinned rather than promoted: this argument can never take effect.
+            #     Use the inner/outer knobs instead. See docs/broccoli.md.
             transformer_ff_dropout=0.,
             transformer_ff_inner_dropout=kwargs["ff_inner_dropout"],
             transformer_ff_outer_dropout=kwargs["ff_outer_dropout"],
@@ -151,49 +111,16 @@ class ViT2(nn.Module):
             transformer_depthwise_linear_stochastic_depth=kwargs[
                 "depthwise_linear_stochastic_depth"
             ],
-            # Pinned `False`, and deliberately not a config key. `image_classes`
-            #     above is `d_model`, so what broccoli calls the logits is this
-            #     backbone's output *embedding*, and this flag would put an
-            #     `nn.BatchNorm1d(d_model, affine=False)` on it as the last
-            #     operation before the prototyper or the comparer ever sees it.
-            #
-            # Both objections are ones this repository already accepted one
-            #     level down, when `layer_norm_logits` replaced an
-            #     `nn.BatchNorm1d` over the vocabulary logits: BatchNorm keeps
-            #     running statistics, so train and eval normalise by different
-            #     numbers and every `test_` column is read through an estimate
-            #     the training pass never used; and it couples to the batch,
-            #     which means it also couples to `accumulator_steps`.
-            #
-            # The batch coupling is worse here than it was there. The listener
-            #     forwards `batch * n_objects` images in one flat call, so this
-            #     normalised targets and distractors from *different games*
-            #     against each other -- a referent's embedding depended on which
-            #     other candidates happened to share its batch. The speaker has
-            #     the same shape one step earlier, where the pooled positives
-            #     and negatives of unrelated games meet in the same statistic.
-            #
-            # Turning it off leaves this backbone's output unnormalised:
-            #     `SequencePool` into a plain `Linear`. That is the intended
-            #     state, not an oversight. Whichever consumer needs the referent
-            #     at a controlled magnitude should normalise it where the score
-            #     is formed -- `SenderTransformerLM.referent_layer_norm` and
-            #     `TransformerCrossAttentionComparer.referent_layer_norm` both
-            #     already do -- rather than have one flag inside the vision model
-            #     decide it for every consumer at once, per batch, differently at
-            #     eval. Note `BilinearGRUComparer` has no such norm, so its score
-            #     now inherits whatever magnitude the backbone emits.
+            # Pinned False, and deliberately not a config key. This backbone's
+            #     output is left unnormalised on purpose; whichever consumer
+            #     needs a controlled magnitude normalises it where the score is
+            #     formed. See docs/broccoli.md.
             batch_norm_logits=False,
             logit_projection_layer=nn.Linear,
             linear_module=nn.Linear,
             head=SequencePoolClassificationHead,
-            # Residual branch scaling, resolved against this stack's depth
-            #     when the config asks for `"deepnorm"` -- see
-            #     `model_util.deepnorm_constants`. Derived from `layers` alone,
-            #     which counts the transformer blocks; the initial feedforward
-            #     residual path this backbone also scales with `alpha` and
-            #     `beta` is one branch outside that count, and a quarter root is
-            #     forgiving enough that it is not worth a second constant.
+            # Residual branch scaling, resolved against this stack's depth when
+            #     the config asks for `"deepnorm"`. See docs/broccoli.md.
             alpha=self.alpha,
             beta=self.beta,
         )
@@ -203,16 +130,7 @@ class ViT2(nn.Module):
         return self.backbone(x)
 
     def reset_parameters(self):
-        """
-        Delegate to broccoli's `ViT`, which resets its own encoder and head.
-
-        Without this, `Receiver.reset_parameters` raises `AttributeError` for
-            any rung using a ViT listener, and `Sender.reset_parameters` --
-            which guards on `hasattr` -- silently left the whole speaker
-            backbone untouched instead. Every other feature model here defines
-            the method, so its absence was the odd one out rather than a
-            deliberate opt-out.
-        """
+        """Delegate to broccoli's `ViT`, which resets its own encoder and head."""
         self.backbone.reset_parameters()
 
 
@@ -386,17 +304,8 @@ class ConvBlock(nn.Module):
         return out
 
     def reset_parameters(self):
-        # Reproduce construction exactly, which is PyTorch's own initialisation
-        #     followed by `init_layer` overriding the weights -- `__init__`
-        #     builds the layers (so `nn.Conv2d.__init__` seeds weight *and*
-        #     bias) and only then calls this method. Going straight to
-        #     `init_layer` skipped the conv biases, which it does not touch, and
-        #     the BatchNorm running statistics, which are buffers rather than
-        #     parameters. Both were then carried across a reset.
-        # `parametrized_layers` also holds the ReLU and (when pooling) the
-        #     MaxPool2d, neither of which has parameters or a
-        #     `reset_parameters`, so select the two types that do rather than
-        #     excluding types one at a time.
+        # Reproduce construction exactly: PyTorch's own initialisation, then
+        #     `init_layer` overriding the weights. See docs/anecdotes.md.
         for layer in self.parametrized_layers:
             if isinstance(layer, (nn.Conv2d, nn.BatchNorm2d)):
                 layer.reset_parameters()
@@ -684,25 +593,7 @@ class ResNet(nn.Module):
             small_input_stem: replace the ImageNet stem -- 7x7 stride 2 followed
                 by a 3x3 stride-2 maxpool -- with a 3x3 stride-1 convolution and
                 no pooling, as SimCLR does for CIFAR-10 (Chen et al. 2020,
-                arXiv:2002.05709, its CIFAR-10 appendix: "we replace the first
-                7x7 Conv of stride 2 with 3x3 Conv of stride 1, and also remove
-                the first max pooling operation"). He et al. 2015 section 4.2 is
-                the underlying precedent, though their CIFAR network is a
-                separate architecture rather than a modified ResNet.
-
-                The stock stem discards 4x resolution before any residual block
-                runs. On ImageNet's 224px that is proportionate; on ShapeWorld's
-                64px it leaves 16x16 into stage 1 and a 2x2 map at the end,
-                which the adaptive pool then averages to a single position. What
-                survives that is colour, and what does not is shape -- which is
-                precisely the wrong bias for a study whose known failure mode is
-                the speaker learning to name colours. With this stem the final
-                map is 8x8 at 64px, so the pool has 64 positions to average
-                rather than 4.
-
-                Cheaper, too, though only just: 3*3*3*64 = 1,728 parameters
-                against 7*7*3*64 = 9,408, and the maxpool has none. The point is
-                the resolution, not the 7,680 parameters.
+                arXiv:2002.05709). See docs/architecture.md.
         """
         # list_of_num_layers specifies number of layers in each stage
         # list_of_out_dims specifies number of output channel for each stage
@@ -739,14 +630,7 @@ class ResNet(nn.Module):
 
         if flatten:
             # Adaptive rather than `AvgPool2d(7)`, which hardcodes a 224px input.
-            #     Below that the pooling window is larger than the feature map
-            #     and the forward pass errors; above it a single 7x7 window
-            #     silently *crops* the map rather than pooling it (at 320px the
-            #     map is 10x10 and three rows and columns are discarded), which
-            #     also leaves `final_feat_dim` wrong. Numerically identical at
-            #     224, where the map is exactly 7x7. This matches torchvision's
-            #     `resnet18`, which is otherwise this network exactly: same
-            #     layout, same stride placement, same fan-out init.
+            #     Numerically identical at 224. See docs/architecture.md.
             avgpool = nn.AdaptiveAvgPool2d((1, 1))
             trunk.append(avgpool)
             trunk.append(Flatten())
@@ -762,23 +646,9 @@ class ResNet(nn.Module):
 
     def reset_parameters(self):
         """
-        Re-initialise every layer exactly as `__init__` did.
-
-        This used to walk `self.trunk` and call `reset_parameters()` on anything
-            that had one. `SimpleBlock` defines no such method, so the eight
-            residual blocks -- 11.1M of the 11.18M parameters -- were skipped
-            entirely, and the two layers that *were* reached (the stem conv and
-            BN) got PyTorch's defaults, which for `Conv2d` is kaiming *uniform*
-            rather than the fan-out normal `init_layer` applies at construction.
-            One tensor of sixty was reset, with the wrong distribution.
-
-        Recursing over `self.modules()` reaches the blocks, and going through
-            `init_layer` keeps a reset indistinguishable from a fresh build.
-
-        BatchNorm running statistics are buffers rather than parameters, so they
-            are reset too: leaving them would carry the pre-reset feature
-            distribution across the reset, which is not what
-            `receiver_reset_interval` is asking for.
+        Re-initialise every layer exactly as `__init__` did, buffers included.
+            Recursing over `self.modules()` is what reaches the residual blocks;
+            see docs/anecdotes.md.
         """
         for module in self.modules():
             if isinstance(module, (nn.Conv2d, nn.BatchNorm2d)):
@@ -839,15 +709,9 @@ def ResNet18SmallInput(*args, **kwargs):
     """
     `ResNet18` with SimCLR's small-image stem -- see `ResNet.__init__`.
 
-    A separate factory rather than a flag on `ResNet18` because `ResNet18` is
-        pinned tensor-for-tensor against `torchvision.models.resnet18` by
-        `tests/test_backbones.py`, and because the backbone is selected by name
-        from the config (`getattr(vision, config['sender']['feature_model'])`),
-        so a name is the whole of the registration.
-
-    Both factories swallow their arguments, as every backbone factory here does:
-        `builder.py` splats the entire `[*_feature_model]` section into them and
-        none of it applies to a ResNet.
+    A separate factory rather than a flag because the backbone is selected by
+        name from the config, so a name is the whole of the registration. Both
+        factories swallow their arguments, as every backbone factory here does.
     """
     return ResNet(
         SimpleBlock,

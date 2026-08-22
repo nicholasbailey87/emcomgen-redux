@@ -22,23 +22,9 @@ def split_out_parameter(optimiser, pair, suffix, lr, config_key):
         group of its own at `lr`, leaving every other parameter where
         `get_optimiser` put it.
 
-    Done after the fact rather than by asking `get_optimiser` for it because
-        that function keys its groups on `(lr, weight_decay)` and takes a single
-        `lr`. The parameters this is used for currently share a group with every
-        other undecayed parameter -- `log_logit_scale` because it is
-        0-dimensional and `polarity_embedding` because `gradboard`'s
-        `EXCLUDE_FROM_WEIGHT_DECAY` matches "embedding", so both fall to the
-        `weight_decay coefficient = 0.0` branch -- and retagging that group would
-        drag the biases and norms along with it.
-
-    Must run before `PASS` is constructed. The scheduler deep-copies the groups
-        once at construction and thereafter scales each group from its *own*
-        recorded base lr, so the override rides the schedule shape correctly and
-        is not flattened by it -- but a group added afterwards would not appear
-        in `original_param_groups` and would break the `strict=True` zip.
-
-    New groups are appended, so group 0 remains the main one that `PASS.lr`
-        reports. Calling this more than once is fine for the same reason.
+    Must run before `PASS` is constructed, which deep-copies the groups once and
+        thereafter scales each from its own recorded base lr. See
+        docs/training.md.
 
     Args:
         optimiser: the optimiser returned by `get_optimiser`
@@ -67,13 +53,8 @@ def split_out_parameter(optimiser, pair, suffix, lr, config_key):
     for group in optimiser.param_groups:
         group["params"] = [p for p in group["params"] if id(p) not in identities]
 
-    # `weight_decay` 0.0 to match what `get_optimiser` gave both of these, and
-    #     for the same reason in each case. The scale is a log, so decay would
-    #     pull `exp` towards 1, and a scale of 1 is not a meaningful anchor --
-    #     `init_energy` solves to 0.839 for birds and 0.802 for ShapeWorld, so
-    #     landing near 1 would be an accident of vocabulary. The polarity tag is
-    #     zero-initialised, so decay would be a force pulling it back to the
-    #     zero it is trying to leave.
+    # `weight_decay` 0.0 to match what `get_optimiser` gave both of these; see
+    #     docs/training.md.
     optimiser.add_param_group(
         {"params": selected, "lr": lr, "weight_decay": 0.0}
     )
@@ -84,8 +65,7 @@ def split_out_parameter(optimiser, pair, suffix, lr, config_key):
 def build_models(dataloaders, config):
     n_feats = dataloaders["train"].dataset.n_feats
 
-    # Putting these additional checks in as this stuff
-    #     should never apply in my experiments
+    # None of this applies in these experiments.
     assert not config['receiver_only']
     assert not config['copy_receiver']
     assert not config['share_language_model']
@@ -175,19 +155,9 @@ def build_models(dataloaders, config):
             optimiser, pair, "log_logit_scale", logit_scale_lr, "logit_scale_lr"
         )
 
-    # Deliberately not tied to `logit_scale_lr`, though `DEFAULT.toml` opens
-    #     them at the same value. `log_logit_scale` exists on *both* speakers,
-    #     so raising it to help the polarity tag would also retune the GRU
-    #     baseline's channel and shift the comparison the ablation is there to
-    #     make. Two keys, one number, and either can move alone.
-    #
-    # Gated on the speaker class rather than on finding the parameter, because
-    #     the two failures need different answers. A GRU speaker has no polarity
-    #     tag by construction -- it reads `torch.cat(prototypes, 1)` and is told
-    #     which is which -- so the key is simply inapplicable, exactly as
-    #     `[sender_language_model]`'s `heads` and `ff_ratio` are, and skipping is
-    #     right. A Transformer speaker missing the parameter is a rename, and
-    #     `split_out_parameter` raises.
+    # Gated on the speaker class rather than on finding the parameter: a GRU
+    #     speaker has no polarity tag, so the key is inapplicable rather than
+    #     broken. See docs/training.md.
     polarity_embedding_lr = config['optimiser'].get(
         'polarity_embedding_lr', base_lr
     )
@@ -204,27 +174,10 @@ def build_models(dataloaders, config):
             "polarity_embedding_lr",
         )
 
-    # The listener's scale, and gated again -- on the comparer this time, for
-    #     the reason the polarity tag is gated on the speaker.
-    #     `TransformerCrossAttentionComparer` has no learnable scale: its
-    #     readout is a plain `nn.Linear(d_model, 1)` whose weight carries the
-    #     volume, so there is no lone scalar for a rate to apply to and the key
-    #     is genuinely inapplicable, exactly as `heads` is inapplicable to a GRU
-    #     speaker. This comment previously argued the opposite, on the grounds
-    #     that both comparers carried `log_score_scale`.
-    #
-    # Do not read the gate as a verdict on the scale. That comparer lost its
-    #     scale to a rewrite that standardised the readout at a fixed gain,
-    #     which closed the collapse it was aimed at and stopped four rungs
-    #     learning at all -- see `diagnostics/README.md`. What survived the
-    #     revert was the absence of the parameter, not an argument against it.
-    #
-    # Gating rather than deleting the knob, because `BilinearGRUComparer` keeps
-    #     its scale and is the ablation's baseline listener. Gating on the class
-    #     that *has* the parameter rather than on finding it also leaves
-    #     `split_out_parameter`'s `RuntimeError` on duty where it can still
-    #     fire: a rename inside `BilinearGRUComparer` says so, instead of
-    #     leaving the knob quietly doing nothing.
+    # Gated on the comparer, for the reason the polarity tag is gated on the
+    #     speaker: `TransformerCrossAttentionComparer` has no learnable scale.
+    #     See docs/training.md -- and do not read the gate as a verdict on the
+    #     parameter.
     score_scale_lr = config['optimiser'].get('score_scale_lr', base_lr)
 
     if (

@@ -8,11 +8,8 @@ import torch.nn as nn
 from broccoli.activation import ReLU, GELU, SquaredReLU, SwiGLU
 
 
-# Name -> broccoli activation, so that `activation` can be set from a TOML
-#     config. This mirrors the map broccoli's own `ViT.__init__` applies to
-#     string arguments, and deliberately offers the same four options.
-#     `TransformerEncoder` has no such map and takes the class (or, for the
-#     GLU variants, the factory) directly, so the lookup has to happen here.
+# Name -> broccoli activation, so `activation` can be set from a TOML config.
+#     `TransformerEncoder` takes the class directly, so the lookup happens here.
 ACTIVATIONS = {
     "ReLU": ReLU,
     "GELU": GELU,
@@ -22,16 +19,7 @@ ACTIVATIONS = {
 
 
 def get_activation(name):
-    """
-    Look up a broccoli activation by name.
-
-    Raises
-    ------
-    ValueError
-        If `name` is not a known activation. A config typo should say what the
-        valid options are, rather than surfacing as a bare KeyError from deep
-        inside model construction.
-    """
+    """Look up a broccoli activation by name. See docs/broccoli.md."""
     try:
         return ACTIVATIONS[name]
     except KeyError:
@@ -41,53 +29,18 @@ def get_activation(name):
         )
 
 
-# Sentinel for the `alpha` and `beta` residual-scaling settings: resolve them
-#     from the stack's own depth rather than restating two constants in every
-#     config that changes `layers`. Either setting may be given as a number
-#     instead, which pins it.
+# Sentinel for `alpha`/`beta`: resolve them from the stack's own depth. Either
+#     may be given as a number instead, which pins it. See docs/broccoli.md.
 DEEPNORM = "deepnorm"
 
 
 def deepnorm_constants(layers, decoder=False):
     """
-    DeepNorm's residual scaling for a post-norm stack `layers` deep, from Wang
-        et al. (2022), *"DeepNet: Scaling Transformers to 1,000 Layers"*
-        (https://arxiv.org/abs/2203.00555).
+    DeepNorm's residual scaling for a post-norm stack `layers` deep (Wang et al.
+        2022, https://arxiv.org/abs/2203.00555).
 
-        encoder: `alpha = (2N)^(1/4)`, `beta = (8N)^(-1/4)`
-        decoder: `alpha = (3N)^(1/4)`, `beta = (12N)^(-1/4)`
-
-    Which form is right is decided by the block, not by what the stack is
-        called: DeepNorm's decoder constants assume a cross-attention sublayer
-        inside *every* block, so a block with three residual branches takes the
-        decoder form and a block with two takes the encoder form.
-
-    Most stacks here are the encoder case, and not by accident.
-        `SenderTransformerLM`'s latent arm runs one cross-attention over the
-        prototypes to build the sequence its encoder then reads, and
-        `TransformerCrossAttentionComparer` runs one between two encoder
-        stacks. In both, the cross-attention sits outside the residual path
-        whose depth this is correcting for, so it is not a sublayer and the
-        encoder constants are the right ones.
-
-    The exception is `transformer_decoder.DecoderBlock`, which
-        `SenderTransformerLM` builds for its autoregressive arm. That one does
-        cross-attend into the latent memory inside every block, which is the
-        configuration DeepNorm's decoder form was derived for, so it asks for
-        `decoder=True`.
-
-    broccoli applies `beta` as a forward multiplier on the branch rather than
-        as an initialisation scaling on its projections, and the post-norm
-        `RMSNorm` that follows carries a learnable gain -- so a branch that
-        earns it can learn its way back out of the opening ratio. The constants
-        set where a stack *starts*, not a ceiling it is held to.
-
-    Args:
-        layers: the number of blocks on the residual path being scaled. For a
-            stack that is split into sub-stacks, this is the depth of the
-            sub-stack, resolved once per sub-stack.
-        decoder: whether every block carries a cross-attention sublayer, i.e.
-            three residual branches rather than two.
+    `decoder` selects the three-branch form, i.e. a cross-attention sublayer
+        inside every block. See docs/broccoli.md for which stacks are which.
 
     Returns:
         (alpha, beta)
@@ -109,28 +62,11 @@ def resolve_residual_scaling(alpha, beta, layers, decoder=False):
     """
     Resolve the configured `alpha` and `beta` against a stack's depth.
 
-    Each is either a number, which is passed through untouched, or the string
-        `DEEPNORM`, which is replaced by `deepnorm_constants(layers, decoder)`.
-        Mixing the two is allowed: pinning one while deriving the other is a
-        coherent thing to want, and refusing it would only push the arithmetic
-        back into the config.
-
-    Args:
-        alpha: configured skip scaling, a number or `DEEPNORM`
-        beta: configured branch scaling, a number or `DEEPNORM`
-        layers: depth of the residual path these scale
-        decoder: passed through to `deepnorm_constants`; see there for when the
-            decoder form is the right one. Inert unless something is `DEEPNORM`.
+    Each is either a number, passed through untouched, or the string `DEEPNORM`,
+        replaced by `deepnorm_constants(layers, decoder)`. Mixing is allowed.
 
     Returns:
         (alpha, beta), both floats
-
-    Raises
-    ------
-    ValueError
-        If either is a string other than `DEEPNORM`. A typo should say what it
-        should have been rather than reaching broccoli as a string and failing
-        somewhere inside a forward pass.
     """
     for name, value in (("alpha", alpha), ("beta", beta)):
         if isinstance(value, str) and value != DEEPNORM:

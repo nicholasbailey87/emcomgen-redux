@@ -1,6 +1,8 @@
 """
-Train an RNN decoder to make binary predictions;
-then train an RNN language model to generate sequences
+Train a sender/receiver pair on a reference or concept game.
+
+Entry point: ``python train.py --config <toml> [--seed N] [--no_resume]``.
+See docs/training.md.
 """
 from torch.amp import GradScaler, autocast
 
@@ -39,12 +41,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-def get_true_lang(
-        batch,
-        dataset,
-        # args isn't used in this function, so we commented it out
-        # args,
-        join=True):
+def get_true_lang(batch, dataset, join=True):
     spk_inp, spk_y, lis_inp, lis_y, true_lang, md, idx = batch
     true_lang_text = dataset.to_text(true_lang, join=join)
     return true_lang_text
@@ -79,28 +76,13 @@ def compute_language_metrics(
     """
     The topsim report over concept prototypes (``emergence.topsim_report``).
 
-    Measurement is per *concept prototype*, not per image. One point per concept
-    is what the chapter's signal sets are about -- a language is compositional to
-    the extent that the form of the utterance for a concept tracks that concept's
-    meaning. Pairing individual images would put many pairs at meaning distance
-    zero (same concept, different image) against a non-zero signal distance,
-    which only depresses the correlation, and the soft signal distances are
-    O(n^2) in a Python loop so 2000 images is ~2M pairs.
-
-    A concept's prototype is: the modal token sequence its instances emitted, the
-    mean of the contextual symbol embeddings of *every* instance that emitted
-    that sequence (the soft distances need embeddings paired with real symbols,
-    and averaging over the instances that emitted them rather than taking one
-    arbitrary instance is what keeps a single epoch's reading stable), and the
-    mean of its instances' concept vectors.
-
-    Concepts are capped at ``max_concepts``; capping images instead would starve
-    each concept of the instances the modal message is drawn from.
+    Measurement is per *concept prototype*, not per image; a prototype is the
+    modal token sequence its instances emitted, the mean of the contextual
+    symbol embeddings of every instance that emitted it, and the mean of the
+    instances' concept vectors. See docs/measurement.md.
 
     ``ground_truth_meaning`` says whether the concept keys are logical forms, in
-    which case the ``topsim_gt_`` family is reported against them too. CUB keys
-    are bare class ids, which have no internal structure to take a word-level
-    edit distance over.
+    which case the ``topsim_gt_`` family is reported against them too.
     """
     concepts = np.asarray(concepts, dtype=np.float64)
 
@@ -123,10 +105,8 @@ def compute_language_metrics(
     for key in keys:
         idx = groups[key]
         message = representative_message([messages[i] for i in idx])
-        # Every source emitted `message`, so these all have the same length and
-        # stack cleanly. Embeddings are positionally aligned with the full
-        # content sequence; slice in case an EOS trimmed this message short.
-        # `emergence` re-normalises, so the mean needs no rescaling here.
+        # Every source emitted `message`, so these all stack cleanly. Slice in
+        # case an EOS trimmed this message short.
         sources = [i for i in idx if list(messages[i]) == message]
         proto_messages.append(message)
         proto_embeddings.append(
@@ -177,23 +157,9 @@ def log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats):
 
 
 # The submodules gradients are clipped over, in place of one norm across the
-#     whole pair. `torch.nn.utils.clip_grad_norm_` scales every gradient by the
-#     single factor `max_norm / total_norm`, so a global call hands every module
-#     a coefficient set by whichever module dominates the norm -- and the
-#     listener's comparer dominates it heavily (~90% of the squared norm at
-#     init, against ~0% for the speaker's vision model, whose gradient reaches
-#     it through the whole language model and the straight-through Gumbel
-#     sample). The coefficient then carries the comparer's batch-to-batch
-#     fluctuation into every other module, which is noise added to gradients
-#     that are already the weakest in the pair.
-#
-# Clipping per module makes each coefficient depend only on that module's own
-#     gradient. It does not change the *ratio* between modules -- a uniform
-#     rescale never did, and AdamW normalises per coordinate anyway -- what it
-#     removes is the cross-module noise coupling.
-#
-# The groups partition the pair; `_OTHER` catches anything a future
-#     architecture adds, so no parameter can silently go unclipped.
+#     whole pair. See docs/training.md. The groups partition the pair; the
+#     `other` group in `clip_gradients` catches anything a future architecture
+#     adds, so no parameter can silently go unclipped.
 CLIP_GROUPS = (
     ("sender_vision", lambda pair: pair.sender.feat_model),
     ("sender_prototyper", lambda pair: pair.sender.prototyper),
@@ -206,7 +172,8 @@ CLIP_GROUPS = (
 
 def clip_gradients(pair, max_norm):
     """
-    Clip each submodule's gradients to `max_norm` independently.
+    Clip each submodule's gradients to `max_norm` independently. See
+        docs/training.md.
 
     Args:
         pair: the sender/receiver `Pair`, with gradients already unscaled
@@ -214,8 +181,7 @@ def clip_gradients(pair, max_norm):
 
     Returns:
         A dict of module name -> that module's gradient norm *before* clipping,
-            for logging. Every group is reported, including ones that did not
-            reach the ceiling.
+            for logging. Every group is reported.
     """
     grouped = set()
     norms = {}
@@ -244,7 +210,6 @@ def run(
     dataloaders,
     scheduler,
     scaler,
-    # args,
     config,
     random_state=None,
     compute_topsim=False,
@@ -255,31 +220,23 @@ def run(
     Parameters
     ----------
     split : ``str``
-        The dataloader split to use. Also determines model behavior if e.g.
-        ``split == 'train'`` then model will be in train mode/optimizer will be
-        run.
+        The dataloader split to use. Also determines model behavior: if
+        ``split == 'train'`` the model is in train mode and the optimizer runs.
     epoch : ``int``
         current epoch
-    model : ``torch.nn.Module``
-        the model you are training/evaling
+    pair : ``models.base.Pair``
+        the sender/receiver pair being trained or evaluated
     optimizer : ``torch.nn.optim.Optimizer``
         the optimizer
-    criterion : ``torch.nn.loss``
-        the loss function
     dataloaders : ``dict[str, torch.utils.data.DataLoader]``
-        Dictionary of dataloaders whose keys are the names of the ``split``s
-        and whose values are the corresponding dataloaders
-    args : ``argparse.Namespace``
-        Arguments for this experiment run
+        Dictionary of dataloaders keyed by split name
     random_state : ``np.random.RandomState``
         The numpy random state in case anything stochastic happens during the
         run
     compute_topsim : ``bool``
         If true, drive the sender through ``speak`` so that message, symbol
         embeddings and concepts all come from one forward pass, collect them,
-        and compute the topsim report at the end. Set on the eval passes only;
-        topsim is a property of the language, so there is no point computing it
-        mid-training-pass, and the extra tensor is wasted work.
+        and compute the topsim report at the end. Set on the eval passes only.
 
     Returns
     -------
@@ -350,10 +307,8 @@ def run(
                 sender_emb = pair.sender(spk_inp, spk_y)
                 lis_scores = pair.receiver(lis_inp, sender_emb)
             elif collect:
-                # `speak` returns message, symbol embeddings and concepts from a
-                # single forward pass. Calling the accessors separately would
-                # resample the vision dropout mask and (for the autoregressive
-                # GRU) the message, so the three would not correspond.
+                # One forward pass, so message, embeddings and concepts
+                # correspond. See docs/architecture.md.
                 lang, symbol_embs, concepts = pair.sender.speak(spk_inp, spk_y)
 
                 lis_scores = pair.receiver(lis_inp, lang)
@@ -393,19 +348,13 @@ def run(
                 lang_text = ["N/A" for _ in range(batch_size)]
 
             true_lang_text = get_true_lang(
-                batch,
-                dataloader.dataset,
-                # commented out argument `args`, see definition above
-                join=False
+                batch, dataloader.dataset, join=False
             )
             true_lang_text_joined = [" ".join(t) for t in true_lang_text]
 
             # Game difficulty/other metadata indicator
             all_lang.extend(zip(lang_text, true_lang_text, per_game_acc, md.numpy()))
 
-            # Collect (message, symbol embeddings, concept) for the topsim
-            # suite. Only on the eval passes (compute_topsim), where the sender
-            # was driven through `speak`.
             if collect:
                 all_messages.extend(models.sender.trim_messages(lang_i.tolist()))
                 all_symbol_embs.extend(symbol_embs.detach().cpu().float().numpy())
@@ -432,61 +381,9 @@ def run(
                 combined_loss=this_loss.item()
             )
 
-            # The speaker measures its channel once per batch, on the train pass
-            # only. Logging it is how the channel stops being an invisible
-            # property of the architecture: at a fixed `logit_scale`,
-            # `realised_survival` reports what each speaker's own logit *shape*
-            # buys it, so it is a finding rather than a restatement of a target,
-            # and it is expected to climb over a run as the speaker grows
-            # confident.
-            #
-            # `logit_scale` and `logit_spread` are read together with it, and
-            # say which of two things a falling survival means: a flatter
-            # policy, which is the speaker's own doing, or a collapsing scale.
-            # They are indistinguishable in survival alone. `logit_scale` is
-            # the one that answers it now -- `logit_spread` measures the
-            # emittable logits *before* `layer_norm_logits`, which divides that
-            # magnitude straight back out, so since 87c1027 split sharpness off
-            # into its own parameter the spread reports the shape's size rather
-            # than the channel's.
-            #
-            # `logit_scale` is also the number `logit_scale_lr` exists to move,
-            # and the prediction is quantitative: birds opens at 0.839 and the
-            # scale cannot travel faster than `lr * steps`, so at 2e-3 over 156
-            # steps an epoch its ceiling is 0.31 log-units per epoch. Observed
-            # travel against that ceiling reads off directly how sign-consistent
-            # the gradient is, which is not recoverable from when accuracy
-            # happens to move.
-            #
-            # `sampling_tau` is logged because the coupling in 17ae9f9 and its
-            # retirement in 3b3b857 are both untested. It is a function of the
-            # scale and of `training_progress` alone, so it carries no new
-            # information in principle -- but it is the quantity that sets how
-            # much straight-through bias the run is paying, and reconstructing
-            # it after the fact from two other columns and a cosine is the sort
-            # of thing nobody does.
-            #
-            # The prototyper is measured on the same pass and for the same
-            # reason. `pool_effective_examples` is `1 / sum(p^2)` over its
-            # attention weights, so it reads in examples: it opens at the
-            # number of positive examples, where the pooling is uniform and the
-            # prototype is exactly the mean, and falls towards 1 as the pooler
-            # commits to particular images. `pool_score_norm` is the scoring
-            # vector that carries that departure, and opens at exactly zero.
-            # Without the pair of them, "the pooler found something" and "the
-            # pooler stayed at the mean" are the same row, and the difference
-            # between rung 3 and rung 1 would only be visible in a checkpoint.
-            # Both are NaN for `AveragePrototyper`'s score norm, which has no
-            # scoring vector to report.
-            #
-            # `polarity_separation` is the same kind of column for the
-            # Transformer speaker's `polarity_embedding`: the distance between
-            # its two rows, which is the only part of the tag the cross-attention
-            # can act on, opening at exactly zero. Without it, a speaker that
-            # learned to tell its positive prototype from its negative one and a
-            # speaker that never used the tag are the same row. NaN for
-            # `SenderGRULM`, which is handed the distinction by `init_h` and has
-            # nothing to learn.
+            # The speaker's channel and prototyper, measured once per batch on
+            # the train pass only. See docs/measurement.md for how to read each
+            # column and which are NaN on which architecture.
             if training and speaking:
                 language_model = pair.sender.language_model
                 prototyper = pair.sender.prototyper
@@ -501,57 +398,10 @@ def run(
                     batch_size=batch_size,
                 )
 
-            # The listener's half of the same story, and the two comparers now
-            # answer it with different columns because they no longer have the
-            # same mechanism. Dispatched on the class rather than by `hasattr`,
-            # for the reason the pooling columns above are: a fallback would
-            # turn a rename into a silently-NaN column, and a silently-NaN
-            # column is how the cross-attention comparer's collapse went
-            # unnoticed for a whole smoke test.
-            #
-            # `score_scale` -- `BilinearGRUComparer` only, which keeps its
-            # learnable scale. `logit_scale` says how audibly the speaker states
-            # a message; this says how confidently the listener acts on one.
-            # Both dip during bootstrapping for the same reason -- neither agent
-            # should commit while the message is still noise -- and 29b18ea
-            # measured the separation that tells a productive dip from a
-            # collapse: a healthy speaker fell ~0.2 log-units and returned
-            # within a few epochs, where the arm that died fell 0.94 and never
-            # did. There is deliberately no floor on either; e3fcabd tried one
-            # and it cost fifteen epochs.
-            #
-            # `decision_spread` -- `TransformerCrossAttentionComparer` only,
-            # which has no learnable scale to report: its readout is a plain
-            # `nn.Linear(d_model, 1)` and the volume lives in that weight. This
-            # is simply the standard deviation of the scores, and it is the
-            # column that watches the same failure `score_scale` watches on the
-            # other comparer, one level less indirectly.
-            #
-            # A *monotone descent towards zero* is the finding: BCE reduces a
-            # loss it cannot otherwise reduce by becoming less confident, and
-            # nothing in this readout stops it. Wandering is not that. Rung 10
-            # carries the identical exposure and its `score_scale` falls
-            # 0.856 -> 0.238 across thirty epochs while `train_acc` climbs, so
-            # it is sign-consistent descent alongside a flat `train_acc` that
-            # says something, not the direction alone.
-            #
-            # `decision_kurtosis` -- same class, and the one to read first.
-            # Excess kurtosis of the scores. Negative means they are bimodal,
-            # which is what discriminating looks like (-2 is the two-point
-            # floor); sustained positive alongside `train_acc` at 0.5 is a
-            # listener with nothing to say, and is what
-            # `receiver-cross-attention-birds.csv` and its ShapeWorld
-            # counterpart ran for thirty epochs. Measured against this module on
-            # a synthetic game, an informative message gave -2.0 and a scrambled
-            # one +11..+23, while `decision_spread` overlapped between the two
-            # and could not separate them. NaN when the readout has collapsed to
-            # a constant, where the fourth standardised moment is 0/0 --
-            # `decision_spread` is the column that names that state.
-            #
-            # Each is genuinely inapplicable to the other class, so each is NaN
-            # on the runs that do not have it -- the same situation as
-            # `pool_score_norm` under `AveragePrototyper`, and not the same as a
-            # fallback hiding a rename.
+            # The listener's half. Dispatched on the class rather than by
+            # `hasattr`, so a rename raises instead of quietly producing a NaN
+            # column. Each column is genuinely inapplicable to the other class.
+            # See docs/measurement.md.
             if training:
                 comparer = pair.receiver.comparer
 
@@ -587,17 +437,13 @@ def run(
         columns=["lang", "true_lang", "acc", "md"],
     )
 
-    # How much the language compresses. A speaker that has learned to say
-    # something reuses messages across instances of a concept; one whose channel
-    # is too noisy to learn through emits a near-unique message every game, so
-    # this reads close to 1.0 while accuracy sits at chance.
+    # How much the language compresses. See docs/measurement.md.
     if speaking and len(all_lang) > 0:
         metrics["unique_message_fraction"] = (
             all_lang["lang"].nunique() / len(all_lang)
         )
 
     if collect and all_messages:
-        # The topsim report over the concept prototypes of this eval split.
         concept_keys = concept_keys_from_true_lang(
             all_true_lang, dataloader.dataset.name
         )
@@ -688,9 +534,8 @@ if __name__ == "__main__":
     if args.no_resume:
         config['resume'] = False
 
-    # Resolve dataset logical names ('cub'/'shapeworld'/'shapeworld_ref') to
-    # their location on fast storage. This must happen *after* get_config(),
-    # which branches on the original '../data/cub' string to pick birds defaults.
+    # Must happen *after* get_config(), which branches on the original dataset
+    # string to pick the birds defaults. See docs/training.md.
     data_fast_storage = paths.data_fast_storage()
     output_root = paths.output_root()
     emcomgen_data = data_fast_storage / "emcomgen" / "data"
@@ -699,9 +544,7 @@ if __name__ == "__main__":
             basename = Path(config['data'][key]).name
             config['data'][key] = str(emcomgen_data / basename)
 
-    # Results are arranged by experiment:
-    #   <output_root>/<experiment>/<config_stem>_seed<seed>/
-    # where <experiment> is the experiments/<exp>/configs/<file>.toml parent.
+    # <output_root>/<experiment>/<config_stem>_seed<seed>/
     experiment = Path(args.config).resolve().parents[1].name
     config_stem = Path(args.config).stem
     exp_dir = str(output_root / experiment / f"{config_stem}_seed{seed}")
@@ -756,9 +599,6 @@ if __name__ == "__main__":
     metrics_path = os.path.join(exp_dir, "metrics.csv")
     start_epoch = 0
 
-    # The metrics dict is rebuilt from scratch each epoch, so nothing in it needs
-    # to survive a resume. Earlier epoch rows live in metrics.csv on disk, which
-    # we append to rather than rebuild, so they survive a resume.
     metrics = {}
 
     if config.get('resume', False) and os.path.exists(checkpoint_path):
@@ -772,18 +612,12 @@ if __name__ == "__main__":
 
         print(f"Resumed at epoch {start_epoch}")
 
-    # A fresh start (--no_resume, or no checkpoint to resume from) must not append
-    # onto a stale metrics.csv from a previous run, since we now append per epoch.
+    # A fresh start must not append onto a stale metrics.csv.
     if start_epoch == 0 and os.path.exists(metrics_path):
         os.remove(metrics_path)
     elif os.path.exists(metrics_path):
-        # Resuming appends rows under whatever header is already on disk, and
-        # `to_csv(mode="a")` checks nothing against it. A run started before this
-        # run's splits existed -- a birds run from before `cub.py` built
-        # `test_same`, say -- has no `test_same_*` columns, so resuming it here
-        # would write wider rows under a narrower header and silently misalign
-        # every column from that row on. The failure is invisible until someone
-        # reads the CSV months later, so refuse rather than append.
+        # A header written by a run with different splits cannot hold this run's
+        # rows, and `to_csv(mode="a")` checks nothing. See docs/training.md.
         with open(metrics_path) as f:
             header = f.readline().rstrip("\n").split(",")
 
@@ -824,10 +658,8 @@ if __name__ == "__main__":
 
         metrics["epoch"] = epoch
 
-        # Position in the speaker's tau schedule. Set here rather than derived
-        #     inside the speaker so that it is recovered from the epoch counter
-        #     on resume, and so a speaker used outside a training loop keeps the
-        #     configured `tau`. See `SenderGRULM.sampling_tau`.
+        # Position in the speaker's tau schedule, set here so it is recovered
+        #     from the epoch counter on resume. See `SenderGRULM.sampling_tau`.
         model_config['pair'].sender.language_model.training_progress = (
             epoch / max(config['scheduler']['epochs'] - 1, 1)
         )
@@ -836,16 +668,8 @@ if __name__ == "__main__":
         train_metrics, lang = run("train", epoch, *run_args)
         util.update_with_prefix(metrics, train_metrics, "train")
 
-        # Eval on the novel (`test`) and held-out seen (`test_same`) concepts.
-        # jayelm's naming: "same" means the concepts are the same ones training
-        # used, so `test_same` is the paper's Acc (Seen) column and `test` is
-        # Acc (Unseen). Both datasets ship both splits, but the skip below stays:
-        # ShapeWorld tolerates a `test_same` file being absent on disk, so the
-        # split remains optional in principle.
-        #
-        # A single game framing means no cross-eval, and a fixed training
-        # endpoint means no val split, so this is two passes rather than twelve.
-        # Topsim is computed on both.
+        # Eval on the novel (`test`) and held-out seen (`test_same`) concepts;
+        # `test_same` is the paper's Acc (Seen). See docs/data.md.
         split_metrics = defaultdict(list)
         for split in ["test", "test_same"]:
             if split not in dataloaders:
@@ -871,22 +695,10 @@ if __name__ == "__main__":
             "test_avg",
         )
 
-        # Wall-clock time the epoch finished, matching vit's `timestamp` column,
-        # so a run's pace can be read off metrics.csv after the fact.
         metrics["timestamp"] = datetime.now().isoformat()
 
-        # Append this epoch's row to metrics.csv (write the header only for a new
-        # file). Appending — rather than rewriting from an in-memory list — is
-        # what lets earlier rows survive a resume.
-        #
-        # The columns are checked against the header on disk first. The splits
-        # check at the top of this function catches a run whose *splits* have
-        # changed, but any new metric does the same damage for the same reason:
-        # `to_csv(mode="a")` writes values in this row's key order under
-        # whatever header is already there, so a run resumed across a change in
-        # what is measured — `pool_effective_examples` arriving mid-flight, say
-        # — silently misaligns every column from that row on, and nothing shows
-        # it until someone reads the file months later.
+        # Appending is what lets earlier rows survive a resume, so the columns
+        # are checked against the header on disk first. See docs/training.md.
         if os.path.exists(metrics_path):
             with open(metrics_path) as f:
                 existing_columns = f.readline().rstrip("\n").split(",")
@@ -909,8 +721,8 @@ if __name__ == "__main__":
         )
 
         # Checkpoint after the row is on disk so the model/optimiser state stays
-        # in sync with metrics.csv on resume. As in vit, a crash between these
-        # two writes can re-emit one row, which is benign.
+        # in sync with metrics.csv on resume. A crash between the two writes can
+        # re-emit one row, which is benign.
         torch.save(
             {
                 "epoch": epoch + 1,  # resume at the NEXT epoch
@@ -919,9 +731,8 @@ if __name__ == "__main__":
             checkpoint_path,
         )
 
-    # Fixed endpoint: there is no best-epoch selection, so the deliverables are
-    # the final model, the language it produces, and the per-epoch trajectory
-    # already in metrics.csv. Skipped when resuming a run that is already done.
+    # Fixed endpoint: no best-epoch selection. Skipped when resuming a run that
+    # is already done.
     if start_epoch < config['scheduler']['epochs']:
         torch.save(
             model_config['pair'].state_dict(),

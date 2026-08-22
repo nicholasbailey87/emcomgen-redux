@@ -1,16 +1,12 @@
 """
 Resolve the shared storage paths declared in the repo-root ``config.json``.
 
-A single JSON file at the repo root declares ``data_slow_storage`` /
-``data_fast_storage`` / ``output_root``. SLURM jobs read ``data_fast_storage``
-(staged data) and ``output_root`` (where results are written, arranged by
-experiment).
+See docs/training.md.
 """
-
 import json
 from pathlib import Path
 
-# Repo root is the parent of this file's directory (code/paths.py -> repo root).
+# code/paths.py -> repo root.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_JSON = REPO_ROOT / "config.json"
 

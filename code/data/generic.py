@@ -29,22 +29,11 @@ def silhouette(imgs):
     """
     Render each image as a white-on-black silhouette of its object.
 
-    ShapeWorld's six colours (red, blue, green, yellow, white, gray) sit at six
-    distinct luma values -- roughly 29, 76, 128, 150, 226, 255 -- so a plain
-    grayscale conversion does not remove colour, it re-encodes it as a single
-    scalar that one conv filter can threshold. Thresholding does remove it: with
-    a single object on a black ground every colour renders identically, so the
-    mutual information between colour and pixels is zero by construction rather
-    than by hoping two distributions overlap.
-
-    The threshold is half of each image's own peak luma. A fixed threshold would
-    not do, because blue peaks at 0.114 while white peaks at 1.0; taking it
-    relative to the peak binarises both, and puts the cut below the anti-aliased
-    edge pixels either way.
-
     `imgs` is (n, C, H, W) with a black background. dtype and range are
     preserved, so uint8 images come back in {0, 255} and float images in
     {0.0, 1.0}. Returns a new tensor; the input is left untouched.
+
+    See docs/data.md.
     """
     if imgs.shape[1] != 3:
         raise ValueError(f"expected 3 channels, got shape {tuple(imgs.shape)}")
@@ -108,18 +97,8 @@ class ConceptDataset:
 
     def _apply_silhouette(self, spk_inp, lis_inp):
         """
-        Silhouette each agent's whole view, or neither, per game.
-
-        The roll is per *game*, not per image: with 10 targets in a set, rolling
-        per image would leave ~(1-p) x 10 of them coloured and the colour cue
-        recoverable from the set, which is not the intervention. Silhouetting
-        the whole view is what makes shape the only available cue.
-
-        The two rolls are independent, so the pair of rates selects the regime:
-        (0, p) silhouettes only the receiver, (p, 0) only the sender, (p, p)
-        either or both. Each agent's view is a full side of the game, so one
-        roll already covers both polarities and, in the concept game, the
-        disjoint half that agent sees.
+        Silhouette each agent's whole view, or neither, per game. The two rolls
+        are independent. See docs/data.md.
         """
         if self.silhouette_p_sender and np.random.rand() < self.silhouette_p_sender:
             spk_inp = silhouette(spk_inp)
@@ -142,13 +121,8 @@ class ConceptDataset:
         assert np.all(~label[midp:])
 
         if self.reference_game or self.augment:
-            # The shuffles below write in place. When the store is in memory
-            # (`load_shapeworld_into_memory`), `self.x[i]` is a *view* onto the
-            # shared array, so writing through it would permanently permute the
-            # dataset -- and, worse, break copy-on-write for forked dataloader
-            # workers, which would each end up copying every row they touch.
-            # Copy the row instead; it is ~0.5 MB and costs nothing next to the
-            # forward pass.
+            # The shuffles below write in place, and with the store in memory
+            # `self.x[i]` is a view onto the shared array. See docs/data.md.
             img = np.array(img)
 
         if self.reference_game:

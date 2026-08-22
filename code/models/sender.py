@@ -1,31 +1,15 @@
 """
-Speaker models. This includes speakers with a GRU-based language model as
-    originally presented in "Emergent Communication of Generalizations"
-    (https://arxiv.org/abs/2106.02668) and speakers with causal or non-causal
-    Transformer language models. The intention is to show that
-    Transformer-based speakers can be just as successful in tasks and show
-    equal or greater compositionality.
+Speaker models: a GRU language model as in "Emergent Communication of
+    Generalizations" (https://arxiv.org/abs/2106.02668), and Transformer
+    language models in two arms.
 
-`SenderTransformerLM` is two architectures behind one flag, and the flag is
-    `bidirectional`, exactly as it is on `SenderGRULM`:
+`SenderTransformerLM` is two architectures behind one flag, `bidirectional`:
+    `false` is an autoregressive Transformer decoder, `true` is Perceiver IO.
+    Both are built here because they share everything up to the latent array.
+    See docs/architecture.md.
 
-    `false`, the default -- an autoregressive Transformer decoder. A learned
-        query cross-attends the two prototypes into a latent memory, and
-        `layers` decoder blocks then generate the message one symbol at a time,
-        each conditioned on the symbols before it and cross-attending back into
-        that memory. Causal in the sense the GRU is causal, and comparable to it
-        on generation regime as well as on parameters.
-
-    `true` -- Perceiver IO. The same cross-attention into the same latent array,
-        then `layers` blocks of self-attention over the latents, then a second
-        learned query reading them back out as every symbol at once. Nothing is
-        conditioned on anything; the message has an order only because its slots
-        are numbered.
-
-    Both are built here rather than split into two classes because they share
-        everything up to the latent array -- the polarity tag, the encoder
-        cross-attention, the logit scale and its diagnostics -- and because the
-        ablation configs select between them by setting one key.
+The Gumbel channel -- `layer_norm_logits`, `logit_scale`, `uniform_weight`,
+    `sampling_tau` and their diagnostics -- is documented in docs/channel.md.
 """
 
 import math
@@ -49,10 +33,8 @@ from . import transformer_decoder
 def trim_messages(token_id_rows):
     """
     Turn rows of decoded token ids into ragged content-token sequences: drop the
-    leading SOS and truncate at the first EOS. The language model masks the
-    reserved tokens (PAD/SOS/EOS/UNK) mid-sequence, so the surviving tokens are
-    all real symbols. Accepts anything iterable-of-iterables (e.g. a CPU tensor
-    via ``.tolist()``); returns a list of python int lists.
+    leading SOS and truncate at the first EOS. Accepts anything
+    iterable-of-iterables; returns a list of python int lists.
     """
     sos, eos = data.language.SOS_IDX, data.language.EOS_IDX
     trimmed = []
@@ -69,20 +51,12 @@ def trim_messages(token_id_rows):
     return trimmed
 
 
-# Well below `F.layer_norm`'s 1e-5 default, so that the normaliser keeps
-#     normalising as a speaker's logit scale collapses rather than handing the
-#     channel a quietly weaker scale. Safe in fp32, which is where autocast runs
-#     LayerNorm anyway, and a genuinely constant logit vector still yields zeros
-#     rather than NaN. See the note in `layer_norm_logits`.
+# Well below `F.layer_norm`'s 1e-5 default, so the normaliser keeps normalising
+#     as a speaker's logit scale collapses. See docs/channel.md.
 LAYER_NORM_EPS = 1e-12
 
-# The bisection in `logit_scale`. The sample is drawn once from a fixed seed and
-#     reused at every step, so the solve is deterministic and reproducible across
-#     machines, and exactly monotone in the scale. 2^16 samples put the resolved
-#     scale within about 0.5% of its large-sample limit, which is far inside the
-#     precision anyone reasons about the operating point to. The bracket spans
-#     six orders of magnitude and is searched geometrically; 48 steps close it to
-#     better than one part in 10^4.
+# The bisection in `logit_scale`, sized so the solve is deterministic and
+#     resolves to better than one part in 10^4. See docs/channel.md.
 ENERGY_SOLVE_SAMPLES = 65536
 ENERGY_SOLVE_SEED = 0
 ENERGY_SOLVE_STEPS = 48
@@ -95,82 +69,14 @@ def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
     Normalise the *emittable* vocabulary logits to zero mean and unit variance,
         per example and per position.
 
-    Only the last `vocabulary` columns are normalised. The leading four reserved
-        slots (PAD/SOS/EOS/UNK) are concatenated back untouched: they are masked
-        to -inf immediately afterwards so their values are irrelevant, but they
-        must not be allowed to pollute the mean and standard deviation of the
-        tokens that can actually be emitted.
+    Only the last `vocabulary` columns are normalised; the four reserved slots
+        are concatenated back untouched, so they cannot pollute the statistics
+        of the tokens that can actually be emitted.
 
-    This replaces an `nn.BatchNorm1d` over the same columns. LayerNorm is the
-        right normaliser here because the property wanted is that every speaker
-        arrives at the exploration gain with logits of comparable *magnitude*,
-        and LayerNorm delivers that per example rather than on average over a
-        batch. It is also position-invariant for both speakers by construction
-        (BatchNorm annihilated per-position offsets in the GRU, which sees one
-        position per call, but preserved them in the Transformer, which sees all
-        of them at once), has no running statistics so train and eval agree, and
-        does not couple to `accumulator_steps`.
-
-    Functional, and with neither affine parameter: the transform is therefore
-        argmax-preserving, so it changes no eval-time message, and nothing is
-        added to the `state_dict` here.
-
-    The speaker's two learnable channel parameters live on opposite sides of
-        this function, and which side each sits on is the whole design:
-
-        - The *token prior* is `outputs2vocab.bias`, pre-norm. It is divided by
-          the incoming standard deviation along with everything else, so its
-          influence stays proportional to the input-dependent signal rather than
-          competing with it outright. That bound is the reason it goes here. A
-          post-norm beta would have nothing holding it, and could grow until it
-          beat the signal outright -- which is the always-emit-one-token
-          language these runs keep collapsing into
-          (`test_unique_message_fraction` of 0.005 across 200 games). The price
-          of the bound is that the prior is weakest late and strongest at
-          initialisation, when `Wh` is still small; treat it as scaffolding,
-          since a trained `W` can carry token preferences in its row norms
-          without help.
-        - The *sharpness* is `log_logit_scale`, post-norm, a single scalar per
-          speaker. It has to be post-norm to mean anything at all, since this
-          function pins the variance and would divide any pre-norm scaling
-          straight back out. That is not hypothetical: with a constant scale the
-          birds speaker spent 55 epochs growing `logit_spread` from 0.41 to
-          1.62, saw every bit of it normalised away, and held
-          `realised_survival` at 0.18 with train accuracy at chance for the
-          whole span.
-
-    A scalar rather than LayerNorm's gamma vector, because sharpness is one
-        degree of freedom and a per-token gamma spreads it over `vocabulary` of
-        them -- which then also have to serve as a token prior, and the shape
-        that suits the listener is not the shape that maximises sharpness. One
-        parameter per job. It also keeps the argmax-preservation above, which a
-        per-token gain would cost.
-
-    `eps` is 1e-12 rather than the 1e-5 default, and that is load-bearing.
-        `F.layer_norm` divides by `sqrt(var + eps)`, so scale invariance holds
-        only while the incoming variance is large against `eps`; below that the
-        normaliser quietly stops normalising and the emittable logits come out
-        *smaller* than unit variance. `log_logit_scale` is learned, not solved per
-        batch, so it can only absorb that at whatever rate gradient descent
-        manages -- where the per-batch solve it replaced absorbed it
-        immediately and silently.
-
-    This is not hypothetical, and the headroom is much smaller than the raw
-        logit scales quoted in 1510a55 suggest. A freshly built GRU speaker
-        emits pre-norm logits with a standard deviation of ~0.24, not the 1 to
-        159 measured on unnormalised ladder arms, and at the 1e-5 default the
-        normaliser starts giving out below ~0.01 — a margin of roughly 24x, not
-        the three orders of magnitude previously claimed here. Shrinking that
-        speaker's output layer 1000x drops realised survival from 0.43 to 0.09;
-        a channel that noisy then starves the gradient that would restore the
-        logits, so it runs away. Observed on a birds run whose
-        `realised_survival` fell 0.47 -> 0.17 over 22 epochs.
-
-    At 1e-12 the same 1000x collapse leaves survival at 0.43, unchanged to four
-        decimal places, and the normaliser holds down to a standard deviation of
-        ~1e-6. `tests/test_exploration.py` pins both the invariance and where it
-        finally stops. `logit_spread` in metrics.csv is the column that makes a
-        collapse visible rather than something inferred after the fact.
+    Functional and affine-free, so the transform is argmax-preserving and adds
+        nothing to the `state_dict`. The speaker's two learnable channel
+        parameters sit on opposite sides of it, and `eps` is load-bearing --
+        see docs/channel.md.
 
     Args:
         logits: (..., vocabulary + 4), reserved tokens first
@@ -190,20 +96,12 @@ def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
 
 def initial_logit_sample(vocabulary: int) -> torch.Tensor:
     """
-    A fixed draw of the logits a *freshly initialised* speaker produces.
-
-    After `layer_norm_logits` the emittable logits are zero mean and unit
-        variance, and at initialisation they are also i.i.d. standard normal:
-        random weights put the referent through a linear projection whose rows
-        are independent, so nothing correlates the vocabulary dimension yet.
-        This is the one place in the scheme where the Gaussian assumption is a
-        fact about the model rather than a proxy for one — which is why the
-        operating point is defined at initialisation and not anywhere later.
+    A fixed draw of the logits a *freshly initialised* speaker produces, which
+        after `layer_norm_logits` are i.i.d. standard normal.
 
     Drawn once from a fixed seed and reused across the whole bisection in
-        `logit_scale`, so the solve is deterministic (the same config always
-        resolves to the same scale, on any machine) and exactly monotone in the
-        scale, which is what makes bisection valid.
+        `logit_scale`, so the solve is deterministic and exactly monotone in the
+        scale. See docs/channel.md.
 
     Args:
         vocabulary: number of emittable tokens
@@ -227,16 +125,15 @@ def initial_energy(
     The fraction of the maximum possible entropy a fresh speaker's per-position
         distribution retains, once scaled and uniform-mixed.
 
-    `H(p) / log2(V)`, so 1.0 is a uniform speaker that has committed to nothing
-        and 0.0 is one that emits a single token with certainty. This is the
-        quantity `init_energy` names, and `logit_scale` inverts.
+    `H(p) / log2(V)`, so 1.0 is a uniform speaker and 0.0 one that emits a
+        single token with certainty. This is what `init_energy` names.
 
     Args:
         scale: the multiplier applied to the normalised logits
         vocabulary: number of emittable tokens
         uniform_weight: as in `flatten_logit_distribution`
-        sample: reuse a draw from `initial_logit_sample`, rather than taking a
-            fresh one — the bisection passes the same sample at every step
+        sample: reuse a draw from `initial_logit_sample` rather than taking a
+            fresh one -- the bisection passes the same sample at every step
 
     Returns:
         The retained entropy fraction, in [0, 1]
@@ -260,124 +157,22 @@ def logit_scale(
 ) -> float:
     """
     The constant the normalised logits are multiplied by before sampling,
-        resolved so that a fresh speaker retains `init_energy` of its maximum
-        entropy.
+        resolved by bisection so that a fresh speaker retains `init_energy` of
+        its maximum entropy.
 
-    This is the exploration control. `F.gumbel_softmax(..., hard=True)` emits
-        `argmax(logits + g)` with `g ~ Gumbel(0, 1)`, whose standard deviation is
-        a fixed 1.283, so how much of the speaker's distribution survives the
-        noise is set by the size of the logits relative to that. LayerNorm pins
-        them to unit variance for every speaker, and this says what that unit is
-        worth. Larger scale, sharper distribution, less entropy.
-
-    ---
-    Why entropy, and why at initialisation
-    ---
-
-    The point of a noisy channel here is not fidelity, it is *bootstrapping*. A
-        fresh speaker's argmax is very nearly input-independent — it has learned
-        nothing, so its preferred token barely varies with the referent. If that
-        argmax is transmitted reliably, the speaker emits one message for every
-        input, confidently, from the first batch, and the listener co-adapts to
-        that degenerate language before the speaker's embeddings are worth
-        grounding anything on. High entropy at the start is what prevents this:
-        near-random messages carry no premature structure to co-adapt to, and
-        the pair sharpens together as the embeddings become worth using.
-
-    So the knob is deliberately expressed as *entropy retained*, not as channel
-        capacity or as a symbol error rate. Both of those were tried and both
-        mislead:
-
-        - Capacity (mutual information over its maximum) runs the wrong way
-          round. High capacity means a sharp, low-entropy speaker, i.e. *less*
-          room to bootstrap — so a config asking for "80% capacity" is asking
-          for the opposite of what it sounds like.
-        - "Fraction of symbols flipped" presupposes a correct symbol. At
-          initialisation there is no correct symbol: argmax is not an intended
-          message, it is an accident of the initialisation. Counting departures
-          from it as errors imports a notion of correctness that does not exist
-          yet.
-
-    Entropy has neither problem. It is a property of the distribution alone, it
-        needs no reference symbol, and it runs the way intuition does: higher
-        means flatter means more room to explore.
-
-    ---
-    Why a numerical solve, and why no `ln(V)` term
-    ---
-
-    An earlier version of this used a closed form, `coefficient * ln(V)`, on the
-        argument that a winner must beat the largest of `V` Gumbel draws and
-        `E[max_i g_i] = ln V + gamma`. That is the right correction for holding a
-        *survival rate* constant across vocabularies, but it badly overshoots for
-        holding *entropy* constant. Measured over V = 8..256, the scale that
-        holds entropy fixed varies only 1.2-1.4x, while `scale / ln(V)` varies
-        about 2x — so dividing by `ln(V)` introduces roughly four times more
-        vocabulary dependence than it removes. The residual really is
-        logarithmic, but with a much smaller coefficient: at 80% retained,
-        `scale ~= 0.87 + 0.12 * ln(V)` fits to about 2% over that range.
-
-    Rather than fit that, the scale is solved for numerically. It costs one
-        bisection at construction, it is exact for any `(V, w)` instead of
-        approximate over the range someone happened to check, and it puts the
-        design decision itself in the config rather than a coefficient that
-        encodes it. `initial_logit_sample` makes the solve deterministic.
-
-    ---
-    What the other end is
-    ---
-
-    `uniform_weight` (w) owns the trained end: mixing caps a slot's winner at
-        `1 - w + w/V` however sharp the logits get, which at w = 0.02 is a floor
-        of about 0.05 on retained entropy. The two knobs barely interact. Mixing
-        only matters when some token holds much more than `w/V`, so at the flat
-        end this scale is the whole story and `uniform_weight` changes nothing
-        measurable; at the sharp end the cap binds and the scale stops mattering.
-
-    Where a run actually lands between the two is a finding, reported by
-        `realised_survival` and `logit_spread`, not a design input. Do not
-        calibrate this against an assumed trained shape — that number is
-        unmeasured, `uniform_weight` already bounds it, and letting it into the
-        chain sets the operating point from a guess.
-
-    ---
-    Rederiving the default
-    ---
-
-    Reference points, for birds (V=20, w=0.02), all computable from
-        `initial_energy` above:
-
-        retained entropy   0.94   0.90   0.85   0.77   0.62   0.57
-        scale              0.64   0.84   1.05   1.37   1.99   2.23
-        argmax probability 0.14   0.19   0.23   0.31   0.45   0.49
-
-    The default of 0.9 is set from the one trajectory that has been measured. A
-        birds run started at 0.62 retained (the `ln V` scheme's 0.66
-        coefficient), and then *flattened itself* for 35 epochs, reaching about
-        0.94 retained, before accuracy left chance on the way back up at around
-        0.82-0.85. Read as a policy that is annealing rather than one that is
-        stuck, the descent is a cost: the run spent 35 epochs travelling to an
-        entropy it could have been started at. 0.9 starts it near where it
-        chose to go, and short of the 0.94 extreme, where messages carry so
-        little that there may be nothing for the listener to learn from.
-
-    That is a design decision taken from a single run, not a derived bound, and
-        it should be revisited when there are more. What is *not* a free choice
-        is the direction: lower than about 0.6 reproduces the premature-sharpening
-        failure this scheme exists to avoid.
+    This is the exploration control. Why entropy rather than capacity or a
+        symbol error rate, why a numerical solve rather than a closed form, and
+        how the default was arrived at are all in docs/channel.md.
 
     Args:
         init_energy: `sender_language_model.init_energy` from the config,
-            a fraction in (0, 1] — 0.9 means "retain 90% of maximum entropy"
+            a fraction in (0, 1] -- 0.9 means "retain 90% of maximum entropy"
         vocabulary: number of emittable tokens
         uniform_weight: as in `flatten_logit_distribution`
 
     Returns:
-        The multiplier, a plain float. It is the speaker's *initial* scale:
-            each speaker stores its log in `log_logit_scale` and learns from
-            there, so this fixes where a run opens -- and so still equalises the
-            opening channel across architectures -- but not where it settles.
-            Where it settles is reported by `realised_survival`.
+        The multiplier, a plain float. It is the speaker's *initial* scale: each
+            speaker stores its log in `log_logit_scale` and learns from there.
     """
     sample = initial_logit_sample(vocabulary)
 
@@ -413,12 +208,10 @@ def mask_reserved_tokens(logits: torch.Tensor) -> torch.Tensor:
         emitted mid-message. SOS and EOS are attached by the caller instead, so
         messages are fixed-length.
 
-    Out of place, because this now runs directly on the output of the vocabulary
-        projection (or of batch norm), and writing -inf into that in place would
-        be modifying a tensor autograd still needs.
-
-    Runs before the exploration noise so that the uniform mixture is spread over
-        the emittable tokens only — see `flatten_logit_distribution`.
+    Out of place, because this runs on the output of the vocabulary projection
+        and writing -inf into that in place would modify a tensor autograd still
+        needs. Runs before the exploration noise so the uniform mixture is
+        spread over the emittable tokens only.
 
     Args:
         logits: (..., vocabulary + 4), reserved tokens first
@@ -436,22 +229,17 @@ def flatten_logit_distribution(
     uniform_weight: float
 ) -> torch.Tensor:
     """
-    Returns a weighted average of
+    Mix a uniform distribution into `logits` at weight `uniform_weight`, in log
+        space.
 
     The uniform component is spread over the emittable tokens only, i.e. those
-        not already masked to -inf by `mask_reserved_tokens`. Spreading it over
-        all `vocabulary + 4` slots and masking afterwards would throw away the
-        4/(V+4) of it that landed on reserved tokens, so a nominal weight of
-        0.1 would deliver 0.078. Masked positions stay masked.
-
-    Args:
-        logits: some provided unnormalised log probabilities
-        uniform_weight: the relative weight to give the uniform distribution
-            when mixing it in to the provided logits
+        not already masked to -inf; spreading it over all `vocabulary + 4` slots
+        and masking afterwards would silently deliver less than the nominal
+        weight. Masked positions stay masked.
 
     Returns:
-        A torch.Tensor of logits where the absolute differences between
-            logits is reduced - i..e. a less "certain" distribution
+        Logits whose absolute differences are reduced, i.e. a less certain
+            distribution
     """
     emittable = torch.isfinite(logits)
     normalised_logits = F.log_softmax(logits, dim=-1)
@@ -464,7 +252,7 @@ def flatten_logit_distribution(
     # Mix the log distributions, like log( w * uniform + (1-w) * model ).
     # Masked entries are -inf in both components, and `logsumexp` of two -inf
     #     backpropagates NaN, so they are mixed as a finite placeholder and the
-    #     mask is restored afterwards. `torch.where` routes the gradient to the
+    #     mask restored afterwards. `torch.where` routes the gradient to the
     #     selected branch only, so the placeholder never reaches the speaker.
     placeholder = torch.zeros_like(logits)
     combined_logits = torch.stack(
@@ -488,26 +276,15 @@ def mean_winning_probability(
     uniform_weight: float,
 ) -> torch.Tensor:
     """
-    The fraction of symbols that survive the Gumbel noise, averaged over slots.
+    The fraction of symbols that survive the Gumbel noise, averaged over slots,
+        i.e. the `realised_survival` column.
 
-    `F.gumbel_softmax(logits, hard=True)` emits `argmax(logits + g)` with
-        `g ~ Gumbel(0, 1)`, and by the Gumbel-max identity the probability that
-        slot's arg-max is unchanged by the noise is exactly the winning token's
-        softmax probability. So survival can be read straight off a softmax: no
-        Monte Carlo over noise draws, no assumed logit distribution, and no
-        seed. `tests/test_exploration.py` pins the identity.
+    By the Gumbel-max identity this is just the winning token's softmax
+        probability, so no Monte Carlo is needed; `tests/test_exploration.py`
+        pins the identity. Applies the real pipeline in the real order -- scale
+        first, then the uniform mixture -- so the mixture's bounds hold.
 
-    Applies the real sampling pipeline in the real order — scale first, then the
-        uniform mixture — so that the mixture's bounds hold. Mixing first and
-        scaling afterwards destroys them.
-
-    This is purely a measurement. It used to be the inner loop of a solve that
-        chose the scale to hit a requested rate; now the scale is the speaker's
-        own learned `logit_scale`, so what this reports is the joint result of
-        that scale and the logit *shape* it is applied to. Logged per epoch as
-        `realised_survival`, and expected to move over a run rather than sit on
-        a target. Pass the scale detached -- this is a diagnostic and should not
-        be on the graph.
+    Purely a measurement; pass the scale detached.
 
     Args:
         logits: (..., vocabulary + 4), reserved tokens already masked to -inf
@@ -530,12 +307,10 @@ class AveragePrototyper(nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__()
 
-        # Not state: per-batch diagnostics, read by `train.py` for metrics.csv,
-        #     and defined here as well as on `AttentionPrototyper` so that the
-        #     two arms write the same columns and can be read side by side.
-        #     Averaging *is* pooling with uniform weights, so the effective
-        #     count is the number of examples by construction; there is no
-        #     scoring vector, so its norm is undefined rather than zero.
+        # Per-batch diagnostics, defined here as well as on
+        #     `AttentionPrototyper` so both arms write the same columns.
+        #     Averaging is pooling with uniform weights, so the effective count
+        #     is the example count and there is no scoring vector to report.
         self.pool_effective_examples = float("nan")
         self.pool_score_norm = float("nan")
 
@@ -543,13 +318,10 @@ class AveragePrototyper(nn.Module):
         """
         Args:
             samples: a tensor of shape (batch, n_examples, embedding size)
-                where each example is an embedded image. n_examples must
-                be even. The first n_examples / 2 examples are positive
-                examples and the remainder are negative examples.
-            labels: the labels for the examples provided. This argument
-                exists for backwards compatibility, but is not used for
-                anything as the first half of provided examples is always
-                positive and the second half negative. See `samples` definition.
+                where each example is an embedded image. n_examples must be
+                even; the first half are positive and the rest negative.
+            labels: unused -- the first half of provided examples is always
+                positive. See `samples`.
         """
         n_pos_ex = samples.size(1) // 2
 
@@ -573,67 +345,27 @@ class AttentionPrototyper(nn.Module):
         scoring direction per polarity, softmaxed over the examples -- rather
         than averaging them.
 
-    Two departures from a bare `SequencePool`, both there to stop the *softmax
-        over examples* inheriting the same problem the softmax over tokens had
-        before `layer_norm_logits`: a pre-softmax input whose magnitude is set
-        by the backbone rather than by anything learned.
-
-    - **Zero-initialised scoring weights.** Scores are then equal across
-      examples, the softmax is exactly uniform, and the prototype is exactly
-      the mean -- so this rung opens at `AveragePrototyper`'s behaviour and can
-      only depart from it where the loss pays for the departure. That is what
-      an ablation rung should isolate. Left at broccoli's default init the
-      opening pooling is an arbitrary weighting, and how arbitrary depends on
-      the feature scale: with a random scoring direction the softmax's
-      sharpness goes as the between-example standard deviation of the
-      embeddings, so at Conv4's scale a fresh pooler is within a whisker of
-      selecting one example, while at a normalised backbone's it is within a
-      few percent of the mean. Two arms of the ladder then differ in their
-      pooling as well as in the thing being ablated.
-
-      Zeroing a weight matrix is safe here in a way it is not for a hidden
-      layer: there is one output unit, so no symmetry between units to break,
-      and `dL/dW = sum_i (dL/ds_i) x_i` depends on the examples rather than on
-      `W`, so it is non-zero as soon as the examples differ and the loss cares
-      which of them carries weight. The softmax Jacobian at uniform weights,
-      `(1/n)(delta_ij - 1/n)`, is full rank on the zero-sum subspace and
-      transmits it. Only the bias is inert -- a constant added to every score
-      cancels in the softmax, so it has exactly zero gradient -- and it is
-      zeroed too, to say so.
-
-    - **A parameter-free `LayerNorm` on the scoring path only.** The pooled
-      *values* are the raw embeddings, so prototype magnitude is unchanged and
-      whatever the backbone emits still reaches the language model intact; only
-      the scores are computed from normalised examples. This is what makes the
-      rate of departure from the mean comparable across arms. Growth in the
-      scoring vector's norm buys score spread in units of the embeddings'
-      scale, so without it an arm on a large-magnitude backbone leaves the mean
-      tens of times faster than one on a normalised backbone -- the same
-      architecture-dependence, relocated from where the pooling starts to how
-      fast it moves. `elementwise_affine=False` on purpose: a learnable gain
-      here would be one more route to score magnitude that differs by arm,
-      which is the thing being removed.
+    Two departures from a bare `SequencePool`, both there to stop the softmax
+        over examples inheriting a pre-softmax magnitude set by the backbone:
+        zero-initialised scoring weights, so the rung opens at
+        `AveragePrototyper`'s behaviour exactly; and a parameter-free
+        `LayerNorm` on the scoring path only, so the *rate* of departure from
+        the mean is comparable across arms. See docs/architecture.md.
     """
 
     def __init__(self, d_model, *args, **kwargs):
         super().__init__()
         self.d_model = d_model
 
-        # Scoring path only -- see the class docstring. Shared by both
-        #     polarities because it has no parameters to share.
+        # Scoring path only. Shared by both polarities because it has no
+        #     parameters to share.
         self.score_norm = nn.LayerNorm(d_model, elementwise_affine=False)
 
         self.pos_pool = broccoli.vit.SequencePool(d_model)
         self.neg_pool = broccoli.vit.SequencePool(d_model)
 
-        # Not state: per-batch diagnostics, read by `train.py` for metrics.csv.
-        #     `pool_effective_examples` is `1 / sum(p^2)` over the attention
-        #     weights, i.e. how many examples the prototype is actually built
-        #     from -- the number of examples at initialisation, falling towards
-        #     1 as the pooler commits. `pool_score_norm` is the scoring
-        #     vector's norm, which is what carries that departure and starts at
-        #     exactly zero. Without them, "the pooler learned something" and
-        #     "the pooler stayed at the mean" are the same row in metrics.csv.
+        # Per-batch diagnostics, read by `train.py` for metrics.csv. See
+        #     docs/measurement.md.
         self.pool_effective_examples = float("nan")
         self.pool_score_norm = float("nan")
 
@@ -687,12 +419,9 @@ class AttentionPrototyper(nn.Module):
         self.pos_pool.reset_parameters()
         self.neg_pool.reset_parameters()
 
-        # After broccoli's own reset, not instead of it: `SequencePool` may
-        #     grow parameters this does not know about, and they should still
-        #     be initialised the way broccoli intends. Only the scoring
-        #     projection is overridden, and only here rather than in broccoli,
-        #     where `SequencePoolClassificationHead` uses the same module and
-        #     wants the usual init.
+        # After broccoli's own reset, not instead of it, so any parameter
+        #     `SequencePool` grows is still initialised the way broccoli
+        #     intends. Only the scoring projection is overridden.
         with torch.no_grad():
             for pool in (self.pos_pool, self.neg_pool):
                 pool.attention[0].weight.zero_()
@@ -722,12 +451,8 @@ class SenderGRULM(nn.Module):
         self.directions = 2 if self.bidirectional else 1
 
         # Learned, and stored as its log so that `exp` keeps it strictly
-        #     positive: a negative scale would invert the speaker's preferences
-        #     rather than flatten them, and only a positive one is
-        #     argmax-preserving. `init_energy` still fixes where it starts, and
-        #     so still equalises the opening channel across architectures --
-        #     what it no longer does is fix where the speaker stays. Read
-        #     through the `logit_scale` property below.
+        #     positive. `init_energy` fixes where it starts, not where it stays.
+        #     See docs/channel.md.
         self.initial_logit_scale = logit_scale(
             kwargs["init_energy"], self.vocabulary, self.uniform_weight
         )
@@ -735,29 +460,20 @@ class SenderGRULM(nn.Module):
             torch.tensor(self.initial_logit_scale).log()
         )
 
-        # Not state: per-batch diagnostics, read by `train.py` for metrics.csv.
+        # Per-batch diagnostics, read by `train.py` for metrics.csv.
         #     `logit_spread` is the standard deviation of the emittable logits
-        #     *before* normalisation, and exists to disambiguate the two ways
-        #     `realised_survival` can fall: the speaker learning a flatter
-        #     policy, which is a finding, or its logit scale collapsing towards
-        #     the LayerNorm epsilon, which is a fault. Both look identical in
-        #     `realised_survival` alone.
+        #     *before* normalisation. See docs/measurement.md.
         self.realised_survival = float("nan")
         self.logit_spread = float("nan")
 
-        # Declared here as well as on `SenderTransformerLM` so that the two
-        #     speakers write the same columns to metrics.csv. This speaker is
-        #     told which prototype is which -- `init_h` reads the concatenation,
-        #     so each polarity has its own weight columns -- and so has nothing
-        #     to learn and nothing to report. NaN rather than 0.0: the tag is
-        #     not-applicable here, not unused.
+        # Declared here as well as on `SenderTransformerLM` so the two speakers
+        #     write the same columns. This one is told which prototype is which
+        #     by `init_h`, so the tag is not-applicable rather than unused.
         self.polarity_separation = float("nan")
 
-        # Fraction of training elapsed, set once per epoch by `train.py`. Not
-        #     state: it is a position in a schedule, recovered from the epoch
-        #     counter on resume rather than checkpointed. 0.0 until told
-        #     otherwise, so a speaker used outside a training loop -- ACRe, the
-        #     tests, an interactive session -- samples at the configured `tau`.
+        # Fraction of training elapsed, set once per epoch by `train.py`. A
+        #     position in a schedule, not state: recovered from the epoch counter
+        #     on resume. See `sampling_tau`.
         self.training_progress = 0.0
 
         self.gru = nn.GRU(
@@ -771,8 +487,7 @@ class SenderGRULM(nn.Module):
         )
 
         # The bias here is the speaker's token prior, and it is pre-norm on
-        #     purpose -- see `layer_norm_logits` for why that side is the safe
-        #     one and what it costs.
+        #     purpose -- see docs/channel.md.
         self.outputs2vocab = nn.Linear(
             self.d_model * self.directions,
             self.vocabulary + 4 # +4 for PAD, SOS, EOS, UNK
@@ -792,9 +507,8 @@ class SenderGRULM(nn.Module):
 
     def reset_logit_scale(self):
         """
-        Put the learned scale back to the value `init_energy` solved for. Kept
-            separate so `reset_parameters` restores it like any other parameter
-            rather than leaving a trained channel behind a fresh speaker.
+        Put the learned scale back to the value `init_energy` solved for, so a
+            reset does not leave a trained channel behind a fresh speaker.
         """
         with torch.no_grad():
             self.log_logit_scale.fill_(math.log(self.initial_logit_scale))
@@ -810,68 +524,11 @@ class SenderGRULM(nn.Module):
             weight = (1 + cos(pi * training_progress)) / 2
             tau    = configured_tau * (1 + weight * (ratio - 1))
 
-        So a run opens fully coupled and ends at exactly the configured `tau`,
-            where the surrogate is an honest picture of the sharpness the
-            listener actually receives. The cosine is flat early, which is what
-            makes a single schedule work across datasets that take off at very
-            different times: at 100 epochs the weight is still 0.97 at epoch 11,
-            where ShapeWorld leaves chance, and 0.65 at epoch 40, where birds
-            does. Both take off fully coupled and the coupling retires over the
-            last third.
-
-        Being open-loop is the point, not a compromise. Driving the schedule
-            from `realised_survival` or from accuracy would track the model
-            rather than the clock, but it would also hand every rung of the
-            ablation a different tau schedule -- so arms would differ in their
-            estimator as well as their architecture, which is the confound the
-            ladder exists to avoid.
-
-        The ratio is floored at 1, so `tau` never falls below the configured
-            value. Below the opening scale the coupling runs backwards: the
-            surrogate becomes `softmax(s0 * L + s0 * g / s)`, whose noise term
-            grows as the scale shrinks. Measured at V = 20, scale 0.35, that
-            takes the surrogate from 4.9 effective tokens to 2.0 while the token
-            it favours matches the noiseless argmax only 9% of the time -- a
-            confident gradient pointing at noise. `tau` is monotone and cannot
-            change *which* token is favoured, only how hard the gradient commits
-            to it, so there is nothing to be gained in that direction.
-
-        `tau` shapes the soft sample the straight-through estimator
-            differentiates; it leaves the hard forward sample alone, which is an
-            argmax and so invariant to it. With `tau` held constant while the
-            speaker sharpens, the surrogate sharpens with it and the gradient
-            collapses onto whichever token won the Gumbel draw: measured over
-            unit-variance logits at V = 20, the effective number of tokens
-            carrying gradient falls from 4.9 at the opening scale to 1.6 by a
-            scale of 6, with the winner holding 0.80 of the mass. The losing
-            tokens then receive almost nothing, so the speaker stops being told
-            what the alternatives were worth exactly as its channel becomes
-            good enough to use them.
-
-        Scaling `tau` with the scale holds that open instead -- the same
-            measurement gives 9.0 to 9.5 effective tokens across the range,
-            since the surrogate reduces to `softmax(L + g / scale)` and `L` is
-            pinned to unit variance by `layer_norm_logits`.
-
-        The ratio is against `initial_logit_scale` rather than raw, so that a
-            fresh speaker samples at exactly the configured `tau` and this
-            changes nothing at initialisation. It diverges only as the speaker
-            moves its own scale, which is the behaviour being added.
-
-        Detached, and that is not optional. `gumbel_softmax` divides the logits
-            by it, and the reserved slots are -inf by then, so a differentiable
-            tau puts `inf` into the gradient with respect to the scale and NaN
-            into the step -- the same failure fccba0f fixed for the scale
-            itself. It is also the right semantics: the scale is learned through
-            the forward channel, while tau only shapes the estimator, and a
-            speaker that could tune its own gradient estimator would have every
-            reason to soften it rather than to communicate better.
-
-        The cost is straight-through bias: the surrogate stays softer than the
-            hard sample the listener actually receives, so the speaker
-            differentiates a policy slightly different from the one it plays.
-            Straight-through is biased at any `tau`, so this is a change of
-            degree.
+        A run opens fully coupled and ends at exactly the configured `tau`. The
+            schedule is open-loop on purpose, the ratio is floored at 1, and the
+            scale is detached -- a differentiable tau would put inf into the
+            gradient w.r.t. the scale. All of that, and what the coupling buys,
+            is in docs/channel.md.
         """
         ratio = torch.clamp(
             self.logit_scale.detach() / self.initial_logit_scale, min=1.0
@@ -883,10 +540,8 @@ class SenderGRULM(nn.Module):
     def logit_scale(self):
         """
         The multiplier applied to the normalised logits before sampling, always
-            positive. Stored as its log so gradient descent cannot walk it
-            through zero; read it here rather than exponentiating at the use
-            sites, so the two of them and the survival diagnostic cannot drift
-            apart.
+            positive. Read here rather than exponentiating at the use sites, so
+            they and the survival diagnostic cannot drift apart.
         """
         return self.log_logit_scale.exp()
 
@@ -899,20 +554,17 @@ class SenderGRULM(nn.Module):
         Run the decoding loop once, returning both the message and the symbol
             embeddings that produced it.
 
-        Unlike `SenderTransformerLM`, whose embeddings are a function of the
-            prototypes alone, this speaker is autoregressive: each embedding
-            depends on the symbols sampled before it, so embeddings and
-            message only correspond when they come from the *same* call.
-            `forward` discards the embeddings, so any analysis needing the two
-            to be paired must call this directly (as `Sender.speak` does).
+        This speaker is autoregressive, so each embedding depends on the symbols
+            sampled before it and the two only correspond when they come from
+            the *same* call. `forward` discards the embeddings, so any analysis
+            needing them paired must call this directly, as `Sender.speak` does.
 
         Returns:
             lang_tensor: (batch, message_length, vocabulary + 4)
-            symbol_embeddings: (batch, message_length - 2, d_model *
-                directions), one dense contextual vector per content symbol,
-                taken before the vocabulary projection and sampling, or None
-                when `return_states` is False. Stacking them is a copy the
-                training path has no use for, so `forward` opts out.
+            symbol_embeddings: (batch, message_length - 2, d_model * directions),
+                one dense contextual vector per content symbol, taken before the
+                vocabulary projection and sampling, or None when `return_states`
+                is False.
         """
         batch_size = prototypes[0].size(0)
         device = prototypes[0].device
@@ -928,8 +580,8 @@ class SenderGRULM(nn.Module):
 
         lang = []
         symbol_embeddings = []
-        # Pre-gain logits for every position, kept so the exploration gain can
-        #     be recalibrated once per batch rather than once per position.
+        # Pre-gain logits for every position, kept so the diagnostics are pooled
+        #     once per batch rather than once per position.
         survival_logits = []
         spread_steps = []
 
@@ -956,56 +608,36 @@ class SenderGRULM(nn.Module):
             logits = self.outputs2vocab(step_embedding) # Shape: (B, V)
 
             if self.training:
-                # Before normalisation, which is the whole point of it: this is
-                #     the scale the normaliser has to work with.
+                # Before normalisation, which is the whole point of it.
                 spread_steps.append(
                     logits[..., 4:].detach().float().std(-1).mean()
-                )
+                                )
 
-            # This must come before the scale and the uniform weight mixing: it
-            #     is what fixes the magnitude the scale is expressed against,
-            #     and it would otherwise mess up the mixture.
+            # Before the scale and the mixture: this is what fixes the magnitude
+            #     the scale is expressed against.
             normalised = layer_norm_logits(logits, self.vocabulary)
 
             # Masking comes first so that the uniform mixture below is spread
             #     over the emittable tokens only.
             logits = mask_reserved_tokens(normalised)
 
-            # Exploration is a training-time device only, so that the eval
-            #     passes measure the learned policy rather than a deliberately
-            #     noised one. Mirrors jayelm's emergent-generalization, which
-            #     zeroes `uniform_weight` whenever the split is not `train`.
+            # Exploration is a training-time device only, so the eval passes
+            #     measure the learned policy. Mirrors jayelm.
             if self.training:
                 survival_logits.append(logits.detach())
 
-                # Scale first, mixture second. The scale sets how much of the
-                #     fixed 1.283-sd Gumbel noise the logits stand up to.
-                #     Scaling *after* the mixture would undo the bounds the
-                #     mixture exists to impose.
-                # Scale the *unmasked* logits and re-mask, rather than
-                #     multiplying the masked tensor. `d(logits * scale)/d(scale)`
-                #     is the logits themselves, so scaling after the mask sends
-                #     -inf into the gradient w.r.t. the scale; the upstream
-                #     gradient at those slots is zero, and `-inf * 0` is NaN. The
-                #     AMP `GradScaler` reads that as an overflow and skips the
-                #     step -- every step, so the whole pair sits frozen at
-                #     initialisation. Invisible in the loss, which just idles;
-                #     `logit_spread` bit-identical across epochs is the tell.
-                #     Harmless while the scale was a constant, since there was no
-                #     gradient path to it at all.
+                # Scale first, mixture second, and scale the *unmasked* logits
+                #     before re-masking: scaling the masked tensor sends -inf
+                #     into the gradient w.r.t. the scale, which becomes NaN and
+                #     makes `GradScaler` skip every step. See docs/channel.md.
                 logits = mask_reserved_tokens(normalised * self.logit_scale)
 
                 if self.uniform_weight > 0.0:
                     logits = flatten_logit_distribution(logits, self.uniform_weight)
 
-                # 5. Gumbel-Softmax (hard=True)
-                # This handles `argmax(logits + noise)` + straight-through gradient.
-                # Note `tau` rescales the *soft* sample only: the hard forward sample
-                #     is an argmax and so is invariant to it. It is a gradient knob,
-                #     not an exploration knob — `logit_scale` is the latter, and
-                #     `uniform_weight` puts a floor under it. Because the scale is
-                #     a constant, the ratio between the two is fixed for the whole
-                #     run, so the estimator sits at one operating point throughout.
+                # `argmax(logits + noise)` with a straight-through gradient.
+                #     `tau` rescales the *soft* sample only; the hard forward
+                #     sample is an argmax and so invariant to it.
                 predicted_onehot = F.gumbel_softmax(
                     logits,
                     tau=self.sampling_tau,
@@ -1013,9 +645,8 @@ class SenderGRULM(nn.Module):
                     dim=-1
                 )
             else:
-                # Greedy autoregressive decoding: eval measures the policy, so
-                #     no noise, no mixture, no scale. The reserved tokens are
-                #     -inf, so the argmax can never select one.
+                # Greedy: eval measures the policy. The reserved tokens are -inf,
+                #     so the argmax can never select one.
                 predicted_onehot = F.one_hot(
                     logits.argmax(-1), self.vocabulary + 4
                 ).to(logits.dtype)
@@ -1024,9 +655,8 @@ class SenderGRULM(nn.Module):
             lang.append(predicted_onehot.unsqueeze(1))
             gru_in = (predicted_onehot.unsqueeze(1)) @ self.token_embedding.weight # (B, 1, D)
 
-        # One measurement per batch, after sampling, on the pooled logits of
-        #     every position. Doing it per position instead would read each
-        #     position's statistics alone.
+        # Pooled over positions after the loop: per position instead would read
+        #     each position's statistics alone.
         if self.training:
             self.realised_survival = mean_winning_probability(
                 torch.stack(survival_logits, 1).float(),
@@ -1054,10 +684,9 @@ class SenderGRULM(nn.Module):
         **kwargs
     ):
         """
-        We don't include options for greedy or epsilon-greedy generation as
-            the former is only used in the parts of the code that relate to
-            ACRe and the latter are by default not used (and are not
-            commented upon in the original paper).
+        No greedy or epsilon-greedy generation options: the former is only used
+            by the ACRe parts of the original code, and the latter is off by
+            default and not discussed in the original paper.
         """
         return self.decode(prototypes, return_states=False)[0]
 
@@ -1079,8 +708,10 @@ class SenderTransformerLM(nn.Module):
         **kwargs
     ):
         """
-        ...
-        
+        A Transformer speaker in two arms, selected by `bidirectional`: an
+            autoregressive decoder (False) or Perceiver IO (True). See
+            docs/architecture.md.
+
         https://arxiv.org/abs/2502.20604
         """
         super().__init__()
@@ -1115,17 +746,9 @@ class SenderTransformerLM(nn.Module):
         self.self_attention_dropout = kwargs["self_attention_dropout"]
         self.cross_attention_dropout = kwargs["cross_attention_dropout"]
         # Resolved against this stack's own depth when the config asks for
-        #     `"deepnorm"`, so that changing `layers` cannot leave the residual
-        #     scaling behind at a value derived for a different depth.
-        #
-        # Which DeepNorm form is right follows from the arm, and the two differ.
-        #     The latent arm's blocks have two residual branches -- its
-        #     cross-attentions run once each, outside the stack, to build the
-        #     sequence it reads and to read it back out -- so it takes the
-        #     encoder constants. The decoder arm cross-attends into the latent
-        #     memory inside every block, three branches, which is the
-        #     configuration DeepNorm's decoder constants were derived for. See
-        #     `model_util.deepnorm_constants`.
+        #     `"deepnorm"`. The two arms take different DeepNorm forms: the
+        #     decoder arm cross-attends inside every block, the latent arm does
+        #     not. See docs/broccoli.md.
         self.alpha, self.beta = model_util.resolve_residual_scaling(
             kwargs["alpha"],
             kwargs["beta"],
@@ -1133,9 +756,8 @@ class SenderTransformerLM(nn.Module):
             decoder=not self.bidirectional,
         )
 
-        # A constant, resolved once: nothing about it is learned or calibrated,
-        #     so there is no buffer here and nothing enters the `state_dict`.
-        # Learned and log-parameterised, as in `SenderGRULM`, see there.
+        # Learned and log-parameterised, as in `SenderGRULM`; the resolved
+        #     initial value is a constant and enters no `state_dict`.
         self.initial_logit_scale = logit_scale(
             kwargs["init_energy"], self.vocabulary, self.uniform_weight
         )
@@ -1143,23 +765,14 @@ class SenderTransformerLM(nn.Module):
             torch.tensor(self.initial_logit_scale).log()
         )
 
-        # Not state: per-batch diagnostics, read by `train.py` for metrics.csv.
+        # Per-batch diagnostics, read by `train.py` for metrics.csv.
         #     `logit_spread` is the standard deviation of the emittable logits
-        #     *before* normalisation, and exists to disambiguate the two ways
-        #     `realised_survival` can fall: the speaker learning a flatter
-        #     policy, which is a finding, or its logit scale collapsing towards
-        #     the LayerNorm epsilon, which is a fault. Both look identical in
-        #     `realised_survival` alone.
+        #     *before* normalisation. See docs/measurement.md.
         self.realised_survival = float("nan")
         self.logit_spread = float("nan")
         # `norm(e_pos - e_neg)`, the only part of `polarity_embedding` the
-        #     cross-attention can act on: a constant added to both rows shifts
-        #     every key and value alike and cannot separate them. Opens at
-        #     exactly zero, by the zero-init below, so "the speaker learned to
-        #     tell its prototypes apart" and "the speaker never used the tag"
-        #     are different rows rather than the same one. Read next to
-        #     `pool_score_norm`, which reports the same kind of thing for the
-        #     prototyper.
+        #     cross-attention can act on, opening at exactly zero. See
+        #     docs/measurement.md.
         self.polarity_separation = float("nan")
 
         # See `SenderGRULM`.
@@ -1188,27 +801,10 @@ class SenderTransformerLM(nn.Module):
 
         # The length of the latent array the self-attention stack runs over, as
         #     distinct from the message it eventually produces. This is the
-        #     Perceiver IO shape: a learned query array cross-attends into the
-        #     byte array (here the two prototypes), a self-attention stack
-        #     processes the result, and a *second* learned query reads that
-        #     latent array back out at whatever length the task wants.
-        #
-        # Perceiver's own reason for the split does not apply -- its latent
-        #     array is *smaller* than its input so the quadratic attention stays
-        #     affordable, whereas a byte array of two prototypes is smaller than
-        #     anything. The reason it earns its place here is bandwidth.
-        #     `MHAttention` has no residual (it returns
-        #     `out_norm(out_proj(attention))`) and there are exactly two keys,
-        #     so each query position's entire dependence on the referents is one
-        #     softmax weight per head. The referents therefore reach the
-        #     language model through `heads * latent_length` scalars and nothing
-        #     else -- 20 of them under the pre-`latent_message_multiplier`
-        #     configuration. Lengthening the query array is the only knob that
-        #     widens that without touching `message_length`.
-        #
-        # Rounded rather than floored so the knob is symmetric about the
-        #     integers; at the configured 2.0 it is exact for every message
-        #     length anyway.
+        #     Perceiver IO shape, and it is here for bandwidth: the referents
+        #     reach the language model through `heads * latent_length` softmax
+        #     weights and nothing else. Rounded rather than floored so the knob
+        #     is symmetric about the integers. See docs/architecture.md.
         self.latent_length = round(
             self.content_length * self.latent_message_multiplier
         )
@@ -1222,11 +818,8 @@ class SenderTransformerLM(nn.Module):
             )
 
         # The encoder query: what to ask the prototypes, `latent_length` times.
-        #     Built in both arms -- it is what turns two prototypes into an
-        #     array wide enough to read from, and the decoder arm needs that
-        #     just as much as the latent arm does. See `latent_length` above for
-        #     the bandwidth argument, which is about the cross-attention rather
-        #     than about what happens downstream of it.
+        #     Built in both arms -- it is what turns two prototypes into an array
+        #     wide enough to read from.
         self.query = nn.Parameter(
             torch.empty(self.latent_length, self.d_model)
         )
@@ -1236,110 +829,46 @@ class SenderTransformerLM(nn.Module):
         self.latent_layer_norm = nn.LayerNorm(self.d_model)
 
         if self.bidirectional:
-            # The decoder query: which symbol slot each output is. Splitting the
-            #     two is what lets the latent array be a different length from
-            #     the message -- with a single query array those are necessarily
-            #     the same number, which is what tied the two together before.
-            #
-            # Latent arm only. The decoder arm has no use for a query per symbol
-            #     slot: its positions are the symbols already emitted, and their
-            #     order comes from the absolute position embedding and the
-            #     rotary self-attention inside the stack.
+            # Latent arm only: which symbol slot each output is. Splitting this
+            #     from `query` is what lets the latent array be a different
+            #     length from the message. The decoder arm gets its order from
+            #     its own position embedding and rotary self-attention instead.
             self.output_query = nn.Parameter(
                 torch.empty(self.content_length, self.d_model)
             )
 
             self.output_query_layer_norm = nn.LayerNorm(self.d_model)
         else:
-            # Decoder arm only, and new to this class: the parallel arm never
-            #     reads a symbol back, so it never needed one. `SenderGRULM` has
-            #     carried the equivalent since the start -- see the note at its
-            #     own `token_embedding`, and note both speakers feed the *soft*
-            #     one-hot through it (`onehot @ weight` rather than an index
-            #     lookup) so that the straight-through gradient reaches the
-            #     step that produced the symbol.
-            #
-            # Sized at `d_model`, not `token_embedding_size`. The two are
-            #     required to be equal for this class anyway (the check above
-            #     rejects them differing, via `referent_embedding_size`), and
-            #     writing the width the stack actually consumes keeps the
-            #     dependency visible.
+            # Decoder arm only: the parallel arm never reads a symbol back.
+            #     Sized at `d_model`, which the check above requires to equal
+            #     `token_embedding_size` anyway. Both speakers feed the *soft*
+            #     one-hot through this so the straight-through gradient reaches
+            #     the step that produced the symbol.
             self.token_embedding = nn.Embedding(
                 self.vocabulary + 4, # +4 for PAD, SOS, EOS, UNK
                 self.d_model
             )
 
         # A learned tag marking which row of the prototype sequence is the
-        #     positive concept and which is the negative one. Row 0 is
-        #     positive, row 1 negative, matching the order `Sender.speak` and
-        #     `Sender.forward` hand over and `Sender.get_prototypes` asserts.
+        #     positive concept and which is the negative one. Row 0 is positive,
+        #     row 1 negative. Without it this speaker cannot read that order at
+        #     all: the cross-attention below is bit-identical under swapping the
+        #     two keys.
         #
-        # Without it this speaker cannot read that order at all. The
-        #     cross-attention below carries no positional or rotary embedding
-        #     on its key side -- correctly, since two prototypes have no
-        #     sequence to encode -- so its output is a weighted *sum* over the
-        #     keys and is bit-identical under swapping them. The ordering is
-        #     there in the tensor; there was no parameter that could condition
-        #     on it. `SenderGRULM` has never had this problem: `init_h` reads
-        #     `torch.cat(prototypes, 1)`, so each polarity lands in its own
-        #     slice of the input and gets its own weight columns.
-        #
-        # What survived the symmetry was a content cue -- positives are a tight
-        #     cluster and negatives a diverse one, so the negative prototype
-        #     sits nearer the global mean with a smaller norm -- and
-        #     `referent_layer_norm` normalises each prototype independently
-        #     over its feature axis, which divides that norm difference out
-        #     before the attention ever sees it. Only direction was left, and at
-        #     initialisation not even that: an untrained backbone makes both
-        #     prototypes the mean of noise. So the cost was heaviest exactly
-        #     during bootstrapping, where this speaker started with zero
-        #     polarity information while the GRU had it for free.
-        #
-        # Added *after* the norm rather than before, which is the opposite of
-        #     where a ViT puts its position embedding, and for a reason that
-        #     does not apply to a ViT: there the embedding rides a residual
-        #     stream re-read by every pre-norm block, whereas here the
-        #     prototypes are normalised once, consumed by one cross-attention
-        #     and discarded. Inside a single LayerNorm the tag and the content
-        #     compete for one unit budget, so growing the tag enough to be read
-        #     reliably suppresses the prototype it is tagging. After the norm
-        #     the two scales are independent.
-        #
-        # Zero-init so the rung opens at the previous behaviour exactly, in the
-        #     same spirit as `AttentionPrototyper`'s scoring weights: departure
-        #     has to be paid for by the loss. The gradients still separate the
-        #     two rows -- `dL/de_i` is the gradient at row `i` of the sequence,
-        #     and the rows differ in content -- so there is no symmetry to
-        #     break. Not normalised or otherwise scale-pinned: a unit-norm tag
-        #     would be `sqrt(d_model)` and so exactly as loud as a whole normed
-        #     prototype, which is an arbitrary number rather than a principled
-        #     one, and nothing here needs the cross-arm scale comparability that
-        #     earned `AttentionPrototyper` its parameter-free norm.
-        #
-        # The name matters: `gradboard`'s `EXCLUDE_FROM_WEIGHT_DECAY` matches
-        #     "embedding" as a substring, so this lands at `weight_decay=0.0`.
-        #     A 2-D parameter would otherwise be decayed -- and decayed *up*, by
-        #     `sqrt(in_features)/sqrt(d_base)` -- which on a zero-init tag is a
-        #     force pulling it back to the zero it is trying to leave. Renaming
-        #     it to anything without "embedding" in it reintroduces that
-        #     silently. `polarity_embedding_lr` in `[optimiser]` is the other
-        #     half of the same concern; see `DEFAULT.toml`.
+        # Added after the norm, zero-initialised, and not scale-pinned; the name
+        #     must keep "embedding" in it or `gradboard` will start decaying it.
+        #     See docs/architecture.md for all four.
         self.polarity_embedding = nn.Parameter(
             torch.zeros(2, self.d_model)
         )
 
-        # As in `receiver.py`, every broccoli argument is set explicitly, including
-        #     the inert ones, because broccoli's defaults have changed underneath
-        #     this repository before. See the note at the top of that module.
+        # Every broccoli argument is set explicitly, including the inert ones.
+        #     See docs/broccoli.md.
         self.cross_attention = broccoli.transformer.MHAttention(
             self.d_model,
             self.heads,
             # Attention internals get their own setting, never the speaker's
-            #     `dropout`, which regularises the prototypes going in. This
-            #     used to read `self.dropout` while the listener's matching
-            #     cross-attention took a separate constant, so raising the
-            #     speaker's input regularisation silently rewired its attention
-            #     and the two agents were regularised on different terms.
+            #     `dropout`, which regularises the prototypes going in.
             dropout=self.cross_attention_dropout,
             causal=False, # Whole image informs whole latent array
             seq_len=self.latent_length,
@@ -1347,77 +876,50 @@ class SenderTransformerLM(nn.Module):
             bos_tokens=0,
             knocking_heads=False,
             # No positional information here: the query carries its own order
-            #     and the prototypes are an unordered pair. `positional_heads`
-            #     is inert while `rotary_embedding` is None, and is pinned at
-            #     the repo-wide 1.0 anyway so that turning rotary on here could
-            #     not quietly introduce a head partition. Note broccoli defaults
-            #     it to 0.25 on `MHAttention` and 0.5 on `TransformerEncoder`,
-            #     so the two are not the same.
+            #     and the prototypes are an unordered pair. `positional_heads` is
+            #     inert and pinned at the repo-wide 1.0; see docs/broccoli.md.
             rotary_embedding=None,
             positional_heads=1.0,
             source_size=None,
             scaling="d",
         )
 
-        # The two arms. `bidirectional` chooses between them, and on this
-        #     speaker it selects an architecture rather than a mask -- see
-        #     the class docstring and `DEFAULT.toml`.
+        # The two arms. On this speaker `bidirectional` selects an architecture
+        #     rather than a mask.
         if self.bidirectional:
             self.transformer = broccoli.transformer.TransformerEncoder(
                 self.latent_length,
                 self.d_model,
                 self.layers,
                 self.heads,
-# Pinned False, and no longer a config option. Both arms run
-                #     rotary, which encodes position as a rotation of the query
-                #     and key subspace at the point of use; an absolute table
-                #     added once at the input is a second answer to the same
-                #     question, not a complement to it. See `ViT2`.
+                # Pinned False, and no longer a config option; both arms run
+                #     rotary. See docs/broccoli.md.
                 absolute_position_embedding=False,
                 relative_position_embedding=self.relative_position_embedding,
-                # Pinned at 1.0 and no longer configurable -- see `ViT2` for the
-                #     argument. Every head takes axial RoPE, so the head partition
-                #     that used to move with `heads` is gone.
+                # Pinned at 1.0 and no longer configurable; see docs/broccoli.md.
                 positional_heads=1.0,
-                # Derived, not configured: the sequence this block runs over is the
-                #     *latent* array, which is `latent_message_multiplier` times the
-                #     message's content length. See `latent_length`.
+                # Derived, not configured: this block runs over the *latent*
+                #     array. See `latent_length`.
                 source_size=(self.latent_length,),
-                # `ff_ratio` None so that `ff_inner_size` is the live knob:
-                #     `FeedforwardBlock` takes `int(ratio * width) if inner_size is
-                #     None else inner_size`. Note this precedence is the reverse of
-                #     broccoli's `ViT`, which discards the explicit size unless the
-                #     ratio is None -- see the comment at that call site.
+                # `ff_ratio` None so that `ff_inner_size` is the live knob; note
+                #     broccoli's `ViT` resolves the two the other way round. See
+                #     docs/broccoli.md.
                 ff_ratio=None,
                 ff_inner_size=self.ff_inner_size,
                 activation=self.activation,
                 activation_kwargs=None,
                 ff_linear_module_up=None,
                 ff_linear_module_down=None,
-                # Not configurable, and pinned rather than promoted: broccoli's
-                # `FeedforwardBlock` uses this only as a fallback --
-                # `inner_dropout if inner_dropout is not None else dropout` -- and
-                # `TransformerEncoder` always forwards `ff_inner_dropout` and
-                # `ff_outer_dropout`, which default to 0.0 rather than None. So this
-                # argument can never take effect, and TOML has no way to write the
-                # None that would let it. Use the inner/outer knobs instead.
+                # Pinned rather than promoted: this argument can never take
+                #     effect. Use the inner/outer knobs. See docs/broccoli.md.
                 ff_dropout=0.0,
                 ff_inner_dropout=self.ff_inner_dropout,
                 ff_outer_dropout=self.ff_outer_dropout,
                 msa_dropout=self.self_attention_dropout,
                 stochastic_depth=self.stochastic_depth,
                 depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
-                # Never causal, and no longer configurable. This used to read
-                #     `not self.bidirectional`, which masked the *latent* array
-                #     left to right -- and the latent array is not a sequence in
-                #     time. It is read back out in one shot by `output_query`
-                #     below, so latent index 0 is no earlier than latent index 9
-                #     in any sense the task can see. All that mask did was hide
-                #     most of the image from the low-index latents, which is
-                #     exactly what `self.cross_attention` above declares it does
-                #     not want ("Whole image informs whole latent array").
-                #     Ordering the message is the decoder arm's job, and it does
-                #     it by conditioning rather than by masking this.
+                # Never causal, and no longer configurable: the latent array is
+                #     not a sequence in time. See docs/broccoli.md.
                 causal=False,
                 linear_module=nn.Linear,
                 bos_tokens=self.utility_tokens,
@@ -1431,22 +933,11 @@ class SenderTransformerLM(nn.Module):
             )
 
             # Perceiver IO's decoder: `content_length` learned queries read the
-            #     processed latent array and return one vector per symbol slot. This
-            #     is what makes `latent_length` free of `message_length` -- the
-            #     output length is set here and nowhere else, so `decode` and
-            #     everything downstream of it are untouched by the multiplier.
-            #
-            # Built at 1.0 as well as above it, deliberately. The knob's job is to
-            #     vary the latent width and nothing else; if 1.0 also removed a
-            #     module then a sweep over it would confound two changes at once,
-            #     and the `state_dict` shape would move with the knob, so
-            #     checkpoints could not be compared across sweep points. At 1.0 this
-            #     is a learned re-read of an array of its own length -- redundant,
-            #     but honestly so.
-            #
-            # Every broccoli argument set explicitly, including the inert ones, as
-            #     for `self.cross_attention` above; see the note at the top of
-            #     `receiver.py` for why.
+            #     processed latent array and return one vector per symbol slot,
+            #     which is what makes `latent_length` free of `message_length`.
+            #     Built at multiplier 1.0 as well as above it, deliberately, so
+            #     the `state_dict` shape does not move with the knob. See
+            #     docs/architecture.md.
             self.decode_attention = broccoli.transformer.MHAttention(
                 self.d_model,
                 self.heads,
@@ -1457,14 +948,8 @@ class SenderTransformerLM(nn.Module):
                 bos_tokens=0,
                 knocking_heads=False,
                 # No positional information on the key side: the latent array's
-                #     order is already baked into it by `self.transformer`, and the
-                #     output query carries its own. `positional_heads` is inert
-                #     while `rotary_embedding` is None, and is pinned at the
-                #     repo-wide 1.0 like every other site, so that turning rotary
-                #     on here could not quietly introduce a head partition. Note
-                #     broccoli's own defaults differ by class -- 0.25 on
-                #     `MHAttention`, 0.5 on `TransformerEncoder` -- so neither is
-                #     a value to inherit.
+                #     order is already baked in and the output query carries its
+                #     own. `positional_heads` is inert here and pinned at 1.0.
                 rotary_embedding=None,
                 positional_heads=1.0,
                 source_size=None,
@@ -1473,48 +958,28 @@ class SenderTransformerLM(nn.Module):
         else:
             # The decoder arm. Same `layers` blocks, spent at message length
             #     rather than at latent length, and cross-attending into the
-            #     latent array from inside every one of them instead of reading
-            #     it once at the end.
-            #
-            # Note what is *not* here: no self-attention stack over the latents.
-            #     The latent array is what `self.cross_attention` above produced
-            #     and nothing else touches it, so it is a memory rather than a
-            #     representation -- the processing all happens on the message
-            #     side. `latent_message_multiplier` still sets its length, and
-            #     still buys the same thing it buys in the other arm, since the
-            #     bandwidth argument at `latent_length` is about the
-            #     cross-attention into two prototypes and is indifferent to what
-            #     reads the result.
-            #
-            # The two arms are not the same size at the same `layers`: a decoder
-            #     block carries a cross-attention the encoder block does not, so
-            #     it costs about 4*d_model^2 more -- 1,354,951 against 944,711 at
-            #     320 wide with `ff_inner_size = 554`. The ablation rungs
-            #     therefore run this arm at 4 layers and the latent arm at 5,
-            #     which is what puts both within 2% of the GRU baseline. See the
-            #     rung headers.
+            #     latent memory from inside every one of them. There is no
+            #     self-attention stack over the latents here, so the latent array
+            #     is a memory rather than a representation. Note the two arms are
+            #     not the same size at the same `layers`. See
+            #     docs/architecture.md.
             self.decoder = transformer_decoder.TransformerDecoder(
                 self.content_length,
                 self.latent_length,
                 self.d_model,
                 self.layers,
                 self.heads,
-# Pinned False, and no longer a config option. Both arms run
-                #     rotary, which encodes position as a rotation of the query
-                #     and key subspace at the point of use; an absolute table
-                #     added once at the input is a second answer to the same
-                #     question, not a complement to it. See `ViT2`.
+                # Pinned False, and no longer a config option; both arms run
+                #     rotary. See docs/broccoli.md.
                 absolute_position_embedding=False,
                 relative_position_embedding=self.relative_position_embedding,
-                # Pinned at 1.0, as on the latent arm's stack; see there.
+                # Pinned at 1.0, as on the latent arm's stack.
                 positional_heads=1.0,
                 # The message, not the latent array: these blocks run over the
-                #     symbols emitted so far. This is the one argument whose
-                #     value differs in kind between the arms rather than in
-                #     number, and it is the whole difference between them.
+                #     symbols emitted so far, which is the whole difference
+                #     between the arms.
                 source_size=(self.content_length,),
-                # `ff_ratio` None so that `ff_inner_size` is the live knob -- as
-                #     on the latent arm's stack, see there.
+                # `ff_ratio` None so that `ff_inner_size` is the live knob.
                 ff_ratio=None,
                 ff_inner_size=self.ff_inner_size,
                 activation=self.activation,
@@ -1523,10 +988,7 @@ class SenderTransformerLM(nn.Module):
                 ff_inner_dropout=self.ff_inner_dropout,
                 ff_outer_dropout=self.ff_outer_dropout,
                 msa_dropout=self.self_attention_dropout,
-                # The per-block cross-attention takes the speaker's
-                #     cross-attention setting, so that every cross-attention in
-                #     this speaker -- the one into the prototypes and the
-                #     `layers` into the latent memory -- is regularised on one
+                # Every cross-attention in this speaker is regularised on one
                 #     knob rather than two.
                 cross_attention_dropout=self.cross_attention_dropout,
                 stochastic_depth=self.stochastic_depth,
@@ -1542,7 +1004,7 @@ class SenderTransformerLM(nn.Module):
                 beta=self.beta,
             )
 
-        # Pre-norm token prior, as in `SenderGRULM`, see there.
+        # Pre-norm token prior, as in `SenderGRULM`; see docs/channel.md.
         self.outputs2vocab = nn.Linear(
             self.d_model,
             self.vocabulary + 4 # +4 for PAD, SOS, EOS, UNK
@@ -1556,15 +1018,11 @@ class SenderTransformerLM(nn.Module):
     ):
         """
         Read the two prototypes into a latent array of `latent_length`
-            positions. Shared by both arms: it is the only place the referents
-            enter the language model at all, and neither arm changes it.
+            positions. Shared by both arms.
 
         Returns:
-            latents: (batch, latent_length, d_model), unnormalised. The callers
-                normalise, because the two arms want it at different points --
-                the latent arm feeds the raw array to its self-attention stack
-                and norms afterwards, the decoder arm norms once and hands the
-                result to every block as a fixed memory.
+            latents: (batch, latent_length, d_model), *unnormalised* -- the two
+                arms want it normalised at different points.
         """
         batch_size = prototypes[0].size(0)
 
@@ -1596,21 +1054,16 @@ class SenderTransformerLM(nn.Module):
         The latent arm's whole forward pass: one vector per symbol slot, a
             function of the prototypes alone.
 
-        Latent arm only, and deliberately not given a decoder-arm branch. The
-            decoder arm's embeddings are not a function of the prototypes --
-            each depends on the symbols sampled before it -- so there is no
-            honest signature this method could have there, and the loop that
-            produces them lives in `decode` for the same reason
-            `SenderGRULM`'s does.
+        Latent arm only, and deliberately not given a decoder-arm branch --
+            there the embeddings depend on the symbols sampled before them, so
+            no honest signature exists and the loop lives in `decode`.
         """
         batch_size = prototypes[0].size(0)
 
         latents = self.encode(prototypes)
 
-        # Process: self-attention over the latents, and only the latents. The
-        #     prototypes are not re-read -- unlike Perceiver proper, whose
-        #     signature is iterated cross-attention back into the same byte
-        #     array, this is a single pass, as in Perceiver IO.
+        # Self-attention over the latents, and only the latents: a single pass,
+        #     as in Perceiver IO, rather than Perceiver's iterated re-reads.
         latents = self.transformer(latents)
 
         output_query = self.output_query.unsqueeze(0).expand(
@@ -1619,8 +1072,8 @@ class SenderTransformerLM(nn.Module):
             self.d_model
         )
 
-        # Decode: `content_length` queries read the latent array back out, which
-        #     is what fixes the message length regardless of `latent_length`.
+        # `content_length` queries read the latent array back out, which is what
+        #     fixes the message length regardless of `latent_length`.
         return self.decode_attention(
             self.output_query_layer_norm(output_query),
             self.latent_layer_norm(latents),
@@ -1629,9 +1082,8 @@ class SenderTransformerLM(nn.Module):
 
     def reset_logit_scale(self):
         """
-        Put the learned scale back to the value `init_energy` solved for. Kept
-            separate so `reset_parameters` restores it like any other parameter
-            rather than leaving a trained channel behind a fresh speaker.
+        Put the learned scale back to the value `init_energy` solved for, so a
+            reset does not leave a trained channel behind a fresh speaker.
         """
         with torch.no_grad():
             self.log_logit_scale.fill_(math.log(self.initial_logit_scale))
@@ -1647,68 +1099,11 @@ class SenderTransformerLM(nn.Module):
             weight = (1 + cos(pi * training_progress)) / 2
             tau    = configured_tau * (1 + weight * (ratio - 1))
 
-        So a run opens fully coupled and ends at exactly the configured `tau`,
-            where the surrogate is an honest picture of the sharpness the
-            listener actually receives. The cosine is flat early, which is what
-            makes a single schedule work across datasets that take off at very
-            different times: at 100 epochs the weight is still 0.97 at epoch 11,
-            where ShapeWorld leaves chance, and 0.65 at epoch 40, where birds
-            does. Both take off fully coupled and the coupling retires over the
-            last third.
-
-        Being open-loop is the point, not a compromise. Driving the schedule
-            from `realised_survival` or from accuracy would track the model
-            rather than the clock, but it would also hand every rung of the
-            ablation a different tau schedule -- so arms would differ in their
-            estimator as well as their architecture, which is the confound the
-            ladder exists to avoid.
-
-        The ratio is floored at 1, so `tau` never falls below the configured
-            value. Below the opening scale the coupling runs backwards: the
-            surrogate becomes `softmax(s0 * L + s0 * g / s)`, whose noise term
-            grows as the scale shrinks. Measured at V = 20, scale 0.35, that
-            takes the surrogate from 4.9 effective tokens to 2.0 while the token
-            it favours matches the noiseless argmax only 9% of the time -- a
-            confident gradient pointing at noise. `tau` is monotone and cannot
-            change *which* token is favoured, only how hard the gradient commits
-            to it, so there is nothing to be gained in that direction.
-
-        `tau` shapes the soft sample the straight-through estimator
-            differentiates; it leaves the hard forward sample alone, which is an
-            argmax and so invariant to it. With `tau` held constant while the
-            speaker sharpens, the surrogate sharpens with it and the gradient
-            collapses onto whichever token won the Gumbel draw: measured over
-            unit-variance logits at V = 20, the effective number of tokens
-            carrying gradient falls from 4.9 at the opening scale to 1.6 by a
-            scale of 6, with the winner holding 0.80 of the mass. The losing
-            tokens then receive almost nothing, so the speaker stops being told
-            what the alternatives were worth exactly as its channel becomes
-            good enough to use them.
-
-        Scaling `tau` with the scale holds that open instead -- the same
-            measurement gives 9.0 to 9.5 effective tokens across the range,
-            since the surrogate reduces to `softmax(L + g / scale)` and `L` is
-            pinned to unit variance by `layer_norm_logits`.
-
-        The ratio is against `initial_logit_scale` rather than raw, so that a
-            fresh speaker samples at exactly the configured `tau` and this
-            changes nothing at initialisation. It diverges only as the speaker
-            moves its own scale, which is the behaviour being added.
-
-        Detached, and that is not optional. `gumbel_softmax` divides the logits
-            by it, and the reserved slots are -inf by then, so a differentiable
-            tau puts `inf` into the gradient with respect to the scale and NaN
-            into the step -- the same failure fccba0f fixed for the scale
-            itself. It is also the right semantics: the scale is learned through
-            the forward channel, while tau only shapes the estimator, and a
-            speaker that could tune its own gradient estimator would have every
-            reason to soften it rather than to communicate better.
-
-        The cost is straight-through bias: the surrogate stays softer than the
-            hard sample the listener actually receives, so the speaker
-            differentiates a policy slightly different from the one it plays.
-            Straight-through is biased at any `tau`, so this is a change of
-            degree.
+        A run opens fully coupled and ends at exactly the configured `tau`. The
+            schedule is open-loop on purpose, the ratio is floored at 1, and the
+            scale is detached -- a differentiable tau would put inf into the
+            gradient w.r.t. the scale. All of that, and what the coupling buys,
+            is in docs/channel.md.
         """
         ratio = torch.clamp(
             self.logit_scale.detach() / self.initial_logit_scale, min=1.0
@@ -1720,10 +1115,8 @@ class SenderTransformerLM(nn.Module):
     def logit_scale(self):
         """
         The multiplier applied to the normalised logits before sampling, always
-            positive. Stored as its log so gradient descent cannot walk it
-            through zero; read it here rather than exponentiating at the use
-            sites, so the two of them and the survival diagnostic cannot drift
-            apart.
+            positive. Read here rather than exponentiating at the use sites, so
+            they and the survival diagnostic cannot drift apart.
         """
         return self.log_logit_scale.exp()
 
@@ -1736,41 +1129,19 @@ class SenderTransformerLM(nn.Module):
             on the symbols already emitted and on the latent memory.
 
         A step-for-step mirror of `SenderGRULM.decode` from the sampling
-            onwards -- same normalisation order, same mask-then-explore order,
-            same scale-the-unmasked-logits-then-remask discipline, same greedy
-            eval branch, same per-step accumulation of the diagnostics pooled
-            once at the end. All of the reasoning behind those is written out
-            there; this method deliberately does not restate it, so that the two
-            speakers cannot drift apart with only one of them documented.
-
-        What differs is what carries the state. The GRU threads a hidden state
-            through the loop; this threads the symbols themselves, re-reading
-            the whole prefix through the stack at every step.
-
-        Why re-read rather than extend: broccoli's `MHAttention` asserts
-            `query_tokens == seq_len` whenever it is causal, so a growing prefix
-            is not something the module will accept. The loop therefore runs the
-            stack over a full-length sequence every step, with the positions
-            after the cursor held at zero. The causal mask makes those positions
-            unable to reach the ones before them, so they are inert and the
-            result is exactly what a growing prefix would have given. The cost
-            is `content_length` passes over a `content_length` sequence -- five
-            of them at ShapeWorld's message length, over a stack a few million
-            parameters wide, which is not worth a KV cache.
-
-        Note the input sequence is built fresh at each step rather than written
-            into in place. In-place would be the obvious way to do it and it
-            does not work: the previous step's forward pass has already saved
-            that tensor for backward, so mutating it makes autograd refuse.
+            onwards, and deliberately does not restate the reasoning behind the
+            ordering there. What differs is that this threads the symbols
+            themselves rather than a hidden state, re-reading the whole prefix
+            through the stack at every step -- see docs/architecture.md for why
+            re-reading is exact, and why the input is rebuilt rather than
+            written into in place.
 
         Returns: as `decode`.
         """
         batch_size = prototypes[0].size(0)
         device = prototypes[0].device
 
-        # Normalised once, here, rather than inside each block: it is the same
-        #     array for every block and every step, so norming it per block
-        #     would repeat identical work `layers * content_length` times.
+        # Normalised once, here, rather than inside each block.
         memory = self.latent_layer_norm(self.encode(prototypes))
 
         lang = []
@@ -1787,10 +1158,9 @@ class SenderTransformerLM(nn.Module):
         sos_onehot[:, 0, data.language.SOS_IDX] = 1.0
         lang.append(sos_onehot)
 
-        # Through the embedding matrix rather than an index lookup, as in
-        #     `SenderGRULM.decode`: the sampled one-hots that follow are soft in
-        #     the backward pass, and a matmul is what lets the straight-through
-        #     gradient reach the step that produced them.
+        # Through the embedding matrix rather than an index lookup: the sampled
+        #     one-hots that follow are soft in the backward pass, and a matmul is
+        #     what lets the straight-through gradient reach them.
         emitted = [(sos_onehot @ self.token_embedding.weight)[:, 0, :]] # (B, D)
 
         padding = torch.zeros(
@@ -1847,17 +1217,12 @@ class SenderTransformerLM(nn.Module):
             lang.append(predicted_onehot.unsqueeze(1))
 
             # The last symbol is never fed back -- there is nothing left to
-            #     condition -- so the sequence stays `content_length` long and
-            #     position 0 stays the SOS.
+            #     condition -- so position 0 stays the SOS.
             if i + 1 < self.content_length:
                 emitted.append(predicted_onehot @ self.token_embedding.weight)
 
         if self.training:
-            # Pooled over positions after the loop, as in `SenderGRULM.decode`:
-            #     per position instead would read each position's statistics
-            #     alone. The other arm can take these straight off its logits
-            #     because it emits every position in one shot; this one has to
-            #     stack them, exactly as the GRU does.
+            # Pooled over positions after the loop, as in `SenderGRULM.decode`.
             self.realised_survival = mean_winning_probability(
                 torch.stack(survival_logits, 1).float(),
                 self.logit_scale.detach(),
@@ -1876,21 +1241,18 @@ class SenderTransformerLM(nn.Module):
         prototypes
     ):
         """
-        Produce a message and the symbol embeddings that produced it. Mirrors
-            `SenderGRULM.decode`, and dispatches on the arm.
+        Produce a message and the symbol embeddings that produced it, and
+            dispatch on the arm.
 
-        The two arms differ in exactly the way the GRU's docstring warns about.
-            The latent arm is not autoregressive: its embeddings are a function
-            of the prototypes alone and do not depend on which symbols were
-            sampled. The decoder arm is, so its embeddings and its message only
-            correspond when they come from the *same* call, as the GRU's do.
-            Either way this method returns them together, so callers can treat
-            all three speakers identically.
+        The latent arm's embeddings are a function of the prototypes alone; the
+            decoder arm's depend on the symbols sampled before them, so there
+            they correspond only within one call. Either way both come back
+            together, so callers can treat all three speakers identically.
 
         Returns:
             onehot: (batch, message_length, vocabulary + 4)
-            symbol_embeddings: (batch, message_length - 2, d_model), one
-                dense contextual vector per content symbol, taken before the
+            symbol_embeddings: (batch, message_length - 2, d_model), one dense
+                contextual vector per content symbol, taken before the
                 vocabulary projection and sampling
         """
         if not self.bidirectional:
@@ -1904,34 +1266,30 @@ class SenderTransformerLM(nn.Module):
         logits = self.outputs2vocab(symbol_embeddings)
 
         if self.training:
-            # Before normalisation — as in `SenderGRULM.decode`, see there.
+            # Before normalisation — as in `SenderGRULM.decode`.
             self.logit_spread = (
                 logits[..., 4:].detach().float().std(-1).mean().item()
             )
 
-            # A parameter norm rather than a per-batch quantity, so it does not
-            #     depend on this pass at all; recorded here because `train.py`
-            #     reads the speaker's diagnostics once per training batch and
-            #     this keeps every column on the same clock.
+            # A parameter norm rather than a per-batch quantity, recorded here
+            #     so every column stays on the same clock.
             with torch.no_grad():
                 self.polarity_separation = (
                     self.polarity_embedding[0] - self.polarity_embedding[1]
                 ).norm().item()
 
-        # This must come before the scale and the uniform weight mixing — as in
-        #     `SenderGRULM.decode`, see the notes there.
+        # Before the scale and the mixture — as in `SenderGRULM.decode`.
         normalised = layer_norm_logits(logits, self.vocabulary)
 
-        # Mask first, then explore, training-time only — as in
-        #     `SenderGRULM.decode`, see the notes there.
+        # Mask first, then explore, training-time only.
         logits = mask_reserved_tokens(normalised)
 
         if self.training:
             survival_logits = logits.detach()
 
-            # Scale first, mixture second, and scale the unmasked logits so
-            #     that -inf stays out of the gradient w.r.t. the scale; see
-            #     `SenderGRULM.decode` for what that costs if you get it wrong.
+            # Scale first, mixture second, and scale the unmasked logits so that
+            #     -inf stays out of the gradient w.r.t. the scale. See
+            #     docs/channel.md.
             logits = mask_reserved_tokens(normalised * self.logit_scale)
 
             if self.uniform_weight > 0.0:
@@ -1944,14 +1302,14 @@ class SenderTransformerLM(nn.Module):
                 dim=-1
             )
 
-            # This speaker emits every position in one shot, so its logits are
+            # This arm emits every position in one shot, so its logits are
             #     already pooled over positions.
             self.realised_survival = mean_winning_probability(
                 survival_logits.float(), self.logit_scale.detach(), self.uniform_weight
             ).item()
         else:
-            # Greedy: eval measures the policy. The reserved tokens are -inf,
-            #     so the argmax can never select one.
+            # Greedy: eval measures the policy. The reserved tokens are -inf, so
+            #     the argmax can never select one.
             onehot_content = F.one_hot(
                 logits.argmax(-1), self.vocabulary + 4
             ).to(logits.dtype)
@@ -1977,8 +1335,7 @@ class SenderTransformerLM(nn.Module):
         self.query_layer_norm.reset_parameters()
         self.referent_layer_norm.reset_parameters()
         self.latent_layer_norm.reset_parameters()
-        # Zero, not a draw: see `polarity_embedding` for why this rung has to
-        #     open at the untagged speaker's behaviour exactly.
+        # Zero, not a draw: this rung opens at the untagged speaker's behaviour.
         nn.init.zeros_(self.polarity_embedding)
         self.cross_attention.reset_parameters()
 
@@ -2008,22 +1365,17 @@ class Sender(nn.Module):
         prototype_dropout: float= 0.5
     ):
         """
-        An agent that will receive one or more positive examples of a concept and
-            one or more negative examples of a concept and will produce an utterance
-            intended to communicate the concept
+        An agent that receives positive and negative examples of a concept and
+            produces an utterance intended to communicate it.
 
         Args:
-            feat_model: The module used to produce embeddings from referents
-            prototyper: The module used to create prototypes from positive and
-                negative examples of referents
-            language_model: The module used to create utterances based on prototypes
-            vision_dropout: Dropout probability between the `feat_model` and the
-                `prototyper`, i.e. on per-image embeddings, before pooling
-            prototype_dropout: Dropout probability between the `prototyper` and
-                the `language_model`, i.e. on the pooled concept vectors. This
-                is where jayelm's single `--dropout` sits (on the speaker side);
-                dropping features before the pool is much weaker, since the
-                average over n/2 examples largely restores them.
+            feat_model: produces embeddings from referents
+            prototyper: builds prototypes from positive and negative examples
+            language_model: builds utterances from prototypes
+            vision_dropout: dropout on per-image embeddings, before pooling
+            prototype_dropout: dropout on the pooled concept vectors. This is
+                where jayelm's single `--dropout` sits; the pre-pool mask is the
+                weaker of the two. See docs/architecture.md.
         """
         super().__init__()
         self.feat_model = feat_model
@@ -2035,11 +1387,8 @@ class Sender(nn.Module):
 
     def embed_images(self, samples):
         """
-        Embed all the referent images in a batch.
-        Input size is (batch, referents, image dim 1, image dim 2, etc.)
-        We reshape to (batch_size * n_obj, *rest) to get a batch of images, then
-            send them through the computer vision model, then reshape back to the
-            shape needed for the task.
+        Embed every referent image in a batch, reshaping (batch, referents, ...)
+            to a flat batch of images and back.
         """
         batch_size = samples.shape[0]
         n_obj = samples.shape[1]
@@ -2072,21 +1421,14 @@ class Sender(nn.Module):
     def speak(self, samples, targets):
         """
         Produce a message, the symbol embeddings behind it, and the concepts
-            that prompted it, all from a single pass.
-
-        This is what compositionality analysis needs: the soft signal
-            distances compare symbol embeddings between symbols that were
-            actually emitted, and semantic distance is measured between the
-            concepts, so all three must come from the same forward pass.
-            Fetching them through separate calls would resample both the
-            vision dropout mask and (for the GRU speaker) the message itself.
+            that prompted it, all from a single pass -- which is what
+            compositionality analysis needs. See docs/architecture.md.
 
         Returns:
             messages: (batch, message_length, vocabulary + 4)
-            symbol_embeddings: (batch, message_length - 2, embedding size),
-                one dense contextual vector per content symbol, positionally
-                aligned with the content symbols of `messages`, i.e. with the
-                output of `trim_messages`
+            symbol_embeddings: (batch, message_length - 2, embedding size), one
+                dense contextual vector per content symbol, positionally aligned
+                with the output of `trim_messages`
             concepts: (batch, 2 * referent embedding size)
         """
         prototypes = self.get_prototypes(samples, targets)
@@ -2100,8 +1442,7 @@ class Sender(nn.Module):
         **kwargs
     ):
         # Prototype once and reuse: a second `get_prototypes` call would re-run
-        #     the vision model under a fresh `vision_dropout` mask, so the
-        #     returned concepts would not be the ones that produced the message.
+        #     the vision model under a fresh `vision_dropout` mask.
         prototypes = self.get_prototypes(samples, targets)
 
         messages = self.language_model(
@@ -2112,11 +1453,9 @@ class Sender(nn.Module):
         return messages, torch.cat(prototypes, 1)
 
     def reset_parameters(self):
-        # No `hasattr` guard, matching `Receiver.reset_parameters`. The guard
-        #     existed for `ViT2`, which had no `reset_parameters`; it now does,
-        #     and every other feature model already did. A guard here turns a
-        #     missing method into a silently skipped backbone rather than an
-        #     error, which is how the speaker's ViT went unreset.
+        # No `hasattr` guard, matching `Receiver.reset_parameters`: a guard turns
+        #     a missing method into a silently skipped backbone. See
+        #     docs/anecdotes.md.
         self.feat_model.reset_parameters()
         self.prototyper.reset_parameters()
         self.language_model.reset_parameters()
