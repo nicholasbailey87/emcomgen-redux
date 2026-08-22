@@ -214,21 +214,38 @@ Design details, each load-bearing:
   discarded. Inside a single LayerNorm the tag and the content compete for one
   unit budget, so growing the tag enough to be read reliably suppresses the
   prototype it is tagging. After the norm the two scales are independent.
-- **Zero-initialised**, so the rung opens at the previous behaviour exactly, in
-  the same spirit as `AttentionPrototyper`'s scoring weights: departure has to be
-  paid for by the loss. The gradients still separate the two rows — `dL/de_i` is
-  the gradient at row `i` of the sequence, and the rows differ in content — so
-  there is no symmetry to break.
-- **Not normalised or otherwise scale-pinned.** A unit-norm tag would be
-  `sqrt(d_model)` and so exactly as loud as a whole normed prototype, which is an
-  arbitrary number rather than a principled one, and nothing here needs the
-  cross-arm scale comparability that earned `AttentionPrototyper` its
-  parameter-free norm.
+- **An antipodal draw**, one `randn_like` vector for row 0 and its negation for
+  row 1. Only `e_pos - e_neg` reaches the attention, so an antipodal pair buys
+  twice the readable separation per unit of tag magnitude that two independent
+  draws would; near-orthogonality, which is what independent draws in `d_model`
+  dimensions actually give you, is a property nothing here wants. The pair is a
+  starting point and not a constraint: `dL/de_i` is the gradient at row `i` of
+  the sequence and the rows differ in content, so nothing holds `e_neg` at
+  `-e_pos` once training starts.
+
+  This replaces a zero init, which opened the rung at the untagged speaker's
+  behaviour exactly, in the spirit of `AttentionPrototyper`'s scoring weights.
+  What that cost was a traverse: the tag had to climb out of zero at a rate
+  bounded by `lr * steps` before the cross-attention could read it at all, and
+  the climb sat in exactly the bootstrapping window where the GRU speaker has
+  its polarities free — the same shape of bottleneck the logit scale turned out
+  to have. The zero-init runs left zero rather than sticking at it, reaching
+  0.16 to 0.79 over thirty epochs, so the traverse was a delay rather than a
+  trap.
+- **Scaled by what it is added to, not pinned to a number.** `randn_like` is at
+  per-element unit variance, which is exactly what `referent_layer_norm` emits
+  when it is reset, so the tag opens at the scale of the prototype it marks with
+  no constant to choose and none to keep in step with `d_model`. That puts the
+  opening separation at `2 * sqrt(d_model)` — about 64 at the configured 1024,
+  roughly twice a normed prototype's norm. Loud, but along a *single* random
+  direction out of `d_model` rather than broadband, so the cross-attention can
+  attenuate that one direction if the loss wants the content back.
 - **The name matters.** `gradboard`'s `EXCLUDE_FROM_WEIGHT_DECAY` matches
   `"embedding"` as a substring, so this lands at `weight_decay = 0.0`. A 2-D
   parameter would otherwise be decayed — and decayed *up*, by
-  `sqrt(in_features)/sqrt(d_base)` — which on a zero-init tag is a force pulling
-  it back to the zero it is trying to leave. Renaming it to anything without
+  `sqrt(in_features)/sqrt(d_base)` — which is a force on the tag that answers to
+  neither the loss nor the scale of what it is added to. Renaming it to anything
+  without
   "embedding" in it reintroduces that silently. `polarity_embedding_lr` in
   `[optimiser]` is the other half of the same concern.
 

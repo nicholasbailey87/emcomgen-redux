@@ -531,9 +531,11 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     Transformer speaker's `polarity_embedding`, the learned tag that marks which
     of its prototypes is the positive concept. Only the *difference* between the
     rows can do anything: a constant added to both shifts every key and value
-    alike and cannot separate them. It opens at exactly zero, so this column is
-    what separates "the speaker learned to tell its prototypes apart" from "the
-    speaker never used the tag".
+    alike and cannot separate them. It opens at `2 * sqrt(d_model)`, the tag
+    being an antipodal draw at the scale of the layer-normed prototype it is
+    added to, so this column reads as how far the loss pulls the tag down from
+    a starting point louder than any run has settled at — not, as it did under
+    the old zero init, as whether the tag was ever used at all.
     NaN for `SenderGRULM`, which is handed the distinction by `init_h` — it
     reads `torch.cat(prototypes, 1)`, so each polarity gets its own weight
     columns — and so has nothing to learn and nothing to report. Without the tag

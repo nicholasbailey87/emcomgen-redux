@@ -257,9 +257,12 @@ averaging *is* pooling with uniform weights.
 **`polarity_separation`** — `norm(e_pos − e_neg)` for the Transformer speaker's
 `polarity_embedding`. A constant added to both rows shifts every key and value
 alike and cannot separate them, so the distance between the rows is the only part
-of the tag the cross-attention can act on. Opens at exactly zero. Without it, a
-speaker that learned to tell its positive prototype from its negative one and a
-speaker that never used the tag are the same row. NaN for `SenderGRULM`, which is
+of the tag the cross-attention can act on. Opens at `2 * sqrt(d_model)`: the tag
+is an antipodal draw at the scale of the layer-normed prototype it is added to,
+so the column reads as how far the loss pulls the tag *down* from a start louder
+than any run has settled at, rather than — as under the old zero init — whether
+the tag was ever used at all. Zero-init runs reached 0.16 to 0.79 over thirty
+epochs, which is the band to compare a descent against. NaN for `SenderGRULM`, which is
 handed the distinction by `init_h` and has nothing to learn.
 
 It is a *parameter* norm rather than a per-batch quantity, so it does not depend

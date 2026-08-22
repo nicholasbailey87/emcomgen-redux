@@ -90,8 +90,9 @@ The new group takes `weight_decay = 0.0` to match what `get_optimiser` gave both
 of these, and for the same reason in each case. The scale is a log, so decay
 would pull `exp` towards 1, and a scale of 1 is not a meaningful anchor —
 `init_energy` solves to 0.839 for birds and 0.802 for ShapeWorld, so landing near
-1 would be an accident of vocabulary. The polarity tag is zero-initialised, so
-decay would be a force pulling it back to the zero it is trying to leave.
+1 would be an accident of vocabulary. The polarity tag opens at the scale of the
+layer-normed prototype it is added to, so decay would be a force on it that
+answers to neither the loss nor that scale.
 
 If the suffix matches nothing, `split_out_parameter` raises rather than silently
 doing nothing — the error names the config key so a rename says which knob went

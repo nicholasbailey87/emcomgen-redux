@@ -197,24 +197,27 @@ logit_scale_lr = 2e-3
 # there to make. These two want to be separable, and one of them is
 # Transformer-only.
 #
-# It is here for the same reason as the rate above. The tag is zero-initialised,
-# so like the logit scale it has a distance to cover before it does anything at
-# all, and until it has covered it the speaker cannot distinguish "the concept
-# is X" from "the concept is not-X" except through whatever content cue survives
-# `referent_layer_norm`. At initialisation nothing does: an untrained backbone
-# makes both prototypes the mean of noise. So the traverse sits in exactly the
-# bootstrapping window where the GRU speaker gets the same information for free,
-# and the arms are least comparable while it lasts.
+# It was originally here for the same reason as the rate above: the tag was
+# zero-initialised, so like the logit scale it had a distance to cover before it
+# did anything at all, and that traverse sat in exactly the bootstrapping window
+# where the GRU speaker gets its polarities free from `init_h`. The tag now
+# opens as an antipodal draw at `referent_layer_norm`'s own scale, so there is
+# no distance to cover and that argument is retired.
 #
-# Unlike the logit scale there is no arithmetic here yet, because there is no
-# target to compute one against. The scale's ceiling is known -- `init_energy`
-# fixes where it starts and `uniform_weight` caps where it usefully ends -- but
-# how large a tag the cross-attention needs is set by whatever scale
+# What is left is the direction the tag has to move *in*. It opens louder than
+# any run has settled at -- separation `2 * sqrt(d_model)`, against the 0.16 to
+# 0.79 the zero-init runs reached -- so the rate now buys the descent rather
+# than the climb, and it still wants to be a key of its own for the reason
+# above: `log_logit_scale` lives on both speakers, and retuning the tag through
+# it would move the GRU baseline's channel and with it the comparison the
+# ablation exists to make.
+#
+# There is no arithmetic here, because there is no target to compute one
+# against. How large a tag the cross-attention wants is set by whatever scale
 # `referent_layer_norm` hands it, which is a property of the trained backbone.
-# `polarity_separation` in metrics.csv is the readout: if it is still near zero
-# late in a run, either the speaker found the content cue sufficient or this
-# rate is too low, and the two are told apart by whether the Transformer arm's
-# accuracy tracks the GRU's over the first few epochs.
+# `polarity_separation` in metrics.csv is the readout, and it now answers a
+# different question than it used to: not whether the tag ever left zero, but
+# where the loss pulls it down to and whether it settles at all.
 #
 # Applies only to `SenderTransformerLM`; `build_models` skips it for a GRU
 # speaker, which is told its polarities apart by `init_h`.

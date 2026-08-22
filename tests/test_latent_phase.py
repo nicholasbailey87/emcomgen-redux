@@ -143,25 +143,41 @@ def test_the_gru_speaker_ignores_the_multiplier():
 
 # --------------------------------------------------------- the polarity tag --
 
-def test_the_tag_opens_at_zero():
+def test_the_tag_opens_antipodal_at_the_prototype_scale():
     """
-    So the rung starts at the untagged speaker's behaviour exactly and departs
-    only where the loss pays for it, as `AttentionPrototyper`'s scoring weights
-    do.
+    One draw, negated for the negative row. Only `e_pos - e_neg` reaches the
+    cross-attention, so an antipodal pair buys twice the readable separation per
+    unit of tag magnitude that two independent draws would, and there is no
+    traverse out of zero before the tag can be read at all.
+
+    The scale is the draw's own: the tag is summed with `referent_layer_norm`'s
+    output, which is at per-element unit variance when that norm is reset, so
+    `randn_like` already lands at the scale of the thing it is tagging. That
+    fixes the opening separation at `2 * sqrt(d_model)` up to sampling noise,
+    which is why the tolerances below are loose rather than exact.
     """
     speaker = _speaker()
 
     assert torch.equal(
-        speaker.polarity_embedding, torch.zeros(2, D_MODEL)
+        speaker.polarity_embedding[0], -speaker.polarity_embedding[1]
     )
+    assert (speaker.polarity_embedding != 0).any()
+    assert speaker.polarity_embedding.std().item() == pytest.approx(1.0, rel=0.2)
+
+    separation = (
+        speaker.polarity_embedding[0] - speaker.polarity_embedding[1]
+    ).norm().item()
+    assert separation == pytest.approx(2 * D_MODEL ** 0.5, rel=0.15)
+
     assert speaker.polarity_separation != speaker.polarity_separation  # NaN
 
 
 def test_without_the_tag_the_prototypes_are_interchangeable():
     """
-    The bug the tag exists for, stated as the property that used to hold. At
-    zero the encoder cross-attention is still a plain weighted sum over two
-    unmarked keys, so swapping them changes nothing.
+    The bug the tag exists for, stated as the property that used to hold. With
+    the tag zeroed the encoder cross-attention is a plain weighted sum over two
+    unmarked keys, so swapping them changes nothing. Zeroing it by hand rather
+    than relying on the init, which now opens at a draw.
 
     Against `encode` rather than against a whole forward pass, because that is
     where the tag acts and where the symmetry lives. It also makes the test arm
@@ -172,6 +188,7 @@ def test_without_the_tag_the_prototypes_are_interchangeable():
     positive, negative = _prototypes()
 
     with torch.no_grad():
+        speaker.polarity_embedding.zero_()
         forwards = speaker.encode((positive, negative))
         backwards = speaker.encode((negative, positive))
 
@@ -194,10 +211,11 @@ def test_a_learned_tag_tells_the_prototypes_apart():
 
 def test_the_two_tag_rows_receive_different_gradients():
     """
-    Zero-init is safe here only if the rows separate. They do because the
-    gradient at each row is the gradient of the sequence position it was added
-    to, and the two prototypes differ in content -- there is no symmetry between
-    the rows to break, unlike a zero-initialised hidden layer.
+    The rows open antipodal and have to stay free to move apart from there. They
+    do because the gradient at each row is the gradient of the sequence position
+    it was added to, and the two prototypes differ in content -- nothing ties
+    `e_neg` to `-e_pos` after the init, so the pair is a starting point rather
+    than a constraint.
     """
     speaker = _speaker()
 
@@ -234,12 +252,15 @@ def test_reset_parameters_restores_the_tag_and_the_diagnostic():
     speaker = _speaker()
 
     with torch.no_grad():
-        speaker.polarity_embedding.normal_(std=1.0)
+        speaker.polarity_embedding[1].copy_(speaker.polarity_embedding[0])
     speaker.polarity_separation = 12.0
 
     speaker.reset_parameters()
 
-    assert torch.equal(speaker.polarity_embedding, torch.zeros(2, D_MODEL))
+    assert torch.equal(
+        speaker.polarity_embedding[0], -speaker.polarity_embedding[1]
+    )
+    assert (speaker.polarity_embedding != 0).any()
     assert speaker.polarity_separation != speaker.polarity_separation  # NaN
 
 
