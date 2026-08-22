@@ -429,81 +429,45 @@ class AttentionPrototyper(nn.Module):
                     pool.attention[0].bias.zero_()
 
 
-class SenderGRULM(nn.Module):
-    def __init__(
-        self,
-        referent_embedding_size,
-        **kwargs
-    ):
-        super().__init__()
-        self.referent_embedding_size = referent_embedding_size
-        self.token_embedding_size = kwargs["token_embedding_size"]
-        self.d_model = kwargs["d_model"]
-        self.vocabulary = kwargs["vocabulary"]
-        self.message_length = kwargs["message_length"]
-        # The configured tau. The tau actually passed to `gumbel_softmax` is
-        #     the `sampling_tau` property below, which tracks the learned scale.
-        self.tau = kwargs["tau"]
-        self.uniform_weight = kwargs["uniform_weight"]
-        self.dropout = kwargs["dropout"]
-        self.layers = kwargs["layers"]
-        self.bidirectional = kwargs["bidirectional"]
-        self.directions = 2 if self.bidirectional else 1
+class GumbelChannel:
+    """
+    The exploration channel both speakers send through. See docs/channel.md.
 
-        # Learned, and stored as its log so that `exp` keeps it strictly
-        #     positive. `init_energy` fixes where it starts, not where it stays.
-        #     See docs/channel.md.
+    A mixin rather than a submodule: `log_logit_scale` stays registered on the
+        speaker itself, so `state_dict` keys -- and every checkpoint written
+        against them -- are unchanged.
+    """
+
+    def _init_channel(self, init_energy, vocabulary, uniform_weight):
+        """
+        Call from `__init__` where the parameter should be created: creation
+            order fixes which RNG draw every later parameter gets, so moving
+            this moves a speaker's initialisation.
+        """
+        # Stored as its log so that `exp` keeps it strictly positive.
         self.initial_logit_scale = logit_scale(
-            kwargs["init_energy"], self.vocabulary, self.uniform_weight
+            init_energy, vocabulary, uniform_weight
         )
         self.log_logit_scale = nn.Parameter(
             torch.tensor(self.initial_logit_scale).log()
         )
 
-        # Per-batch diagnostics, read by `train.py` for metrics.csv.
-        #     `logit_spread` is the standard deviation of the emittable logits
-        #     *before* normalisation. See docs/measurement.md.
-        self.realised_survival = float("nan")
-        self.logit_spread = float("nan")
-
-        # Declared here as well as on `SenderTransformerLM` so the two speakers
-        #     write the same columns. This one is told which prototype is which
-        #     by `init_h`, so the tag is not-applicable rather than unused.
-        self.polarity_separation = float("nan")
-
         # Fraction of training elapsed, set once per epoch by `train.py`. A
         #     position in a schedule, not state: recovered from the epoch counter
-        #     on resume. See `sampling_tau`.
+        #     on resume.
         self.training_progress = 0.0
 
-        self.gru = nn.GRU(
-            self.token_embedding_size,
-            self.d_model,
-            num_layers=self.layers,
-            bias=True,
-            batch_first=True,
-            dropout=self.dropout,
-            bidirectional=self.bidirectional
-        )
+        self.reset_channel_diagnostics()
 
-        # The bias here is the speaker's token prior, and it is pre-norm on
-        #     purpose -- see docs/channel.md.
-        self.outputs2vocab = nn.Linear(
-            self.d_model * self.directions,
-            self.vocabulary + 4 # +4 for PAD, SOS, EOS, UNK
-        )
-
-        self.init_h = nn.Linear(
-            2 * referent_embedding_size, 
-            self.layers * self.directions * self.d_model
-        )
-        
-        self.token_embedding = nn.Embedding(
-            self.vocabulary + 4, # +4 for PAD, SOS, EOS, UNK
-            self.token_embedding_size
-        )
-
-        self.reset_parameters()
+    def reset_channel_diagnostics(self):
+        """
+        Per-batch diagnostics for metrics.csv. On both speakers so the two write
+            the same columns; `polarity_separation` is not-applicable rather
+            than unused on the GRU. See docs/measurement.md.
+        """
+        self.realised_survival = float("nan")
+        self.logit_spread = float("nan")
+        self.polarity_separation = float("nan")
 
     def reset_logit_scale(self):
         """
@@ -544,6 +508,124 @@ class SenderGRULM(nn.Module):
             they and the survival diagnostic cannot drift apart.
         """
         return self.log_logit_scale.exp()
+
+    def reserved_onehot(self, index, batch_size, device):
+        onehot = torch.zeros(
+            batch_size,
+            1,
+            self.vocabulary + 4, # +4 for PAD, SOS, EOS, UNK
+            device=device
+        )
+        onehot[:, 0, index] = 1.0
+        return onehot
+
+    def logit_spread_of(self, logits):
+        """Taken *before* normalisation, which is the whole point of it."""
+        return logits[..., 4:].detach().float().std(-1).mean()
+
+    def sample_symbols(self, logits):
+        """
+        Turn one step's (or one message's) logits into symbols.
+
+        Returns `(onehot, pre_gain_logits)` -- the masked, normalised, *un*scaled
+            logits the survival diagnostic is measured from, or None outside
+            training. Callers pool it over positions themselves.
+
+        The order is not interchangeable. Scaling the *masked* logits rather
+            than re-masking after the scale sends `-inf` into the gradient
+            w.r.t. the scale, which becomes NaN and makes `GradScaler` skip
+            every step -- silently, except for a frozen `logit_spread`. See
+            docs/channel.md.
+        """
+        normalised = layer_norm_logits(logits, self.vocabulary)
+        masked = mask_reserved_tokens(normalised)
+
+        if not self.training:
+            # Greedy: eval measures the policy. The reserved tokens are -inf, so
+            #     the argmax can never select one.
+            return (
+                F.one_hot(masked.argmax(-1), self.vocabulary + 4).to(masked.dtype),
+                None,
+            )
+
+        scaled = mask_reserved_tokens(normalised * self.logit_scale)
+
+        if self.uniform_weight > 0.0:
+            scaled = flatten_logit_distribution(scaled, self.uniform_weight)
+
+        # `argmax(logits + noise)` with a straight-through gradient. `tau`
+        #     rescales the *soft* sample only; the hard forward sample is an
+        #     argmax and so invariant to it.
+        onehot = F.gumbel_softmax(
+            scaled,
+            tau=self.sampling_tau,
+            hard=True,
+            dim=-1
+        )
+
+        return onehot, masked.detach()
+
+    def record_survival(self, pre_gain_logits):
+        self.realised_survival = mean_winning_probability(
+            pre_gain_logits.float(),
+            self.logit_scale.detach(),
+            self.uniform_weight,
+        ).item()
+
+
+class SenderGRULM(GumbelChannel, nn.Module):
+    def __init__(
+        self,
+        referent_embedding_size,
+        **kwargs
+    ):
+        super().__init__()
+        self.referent_embedding_size = referent_embedding_size
+        self.token_embedding_size = kwargs["token_embedding_size"]
+        self.d_model = kwargs["d_model"]
+        self.vocabulary = kwargs["vocabulary"]
+        self.message_length = kwargs["message_length"]
+        # The configured tau. The tau actually passed to `gumbel_softmax` is
+        #     the `sampling_tau` property below, which tracks the learned scale.
+        self.tau = kwargs["tau"]
+        self.uniform_weight = kwargs["uniform_weight"]
+        self.dropout = kwargs["dropout"]
+        self.layers = kwargs["layers"]
+        self.bidirectional = kwargs["bidirectional"]
+        self.directions = 2 if self.bidirectional else 1
+
+        self._init_channel(
+            kwargs["init_energy"], self.vocabulary, self.uniform_weight
+        )
+
+        self.gru = nn.GRU(
+            self.token_embedding_size,
+            self.d_model,
+            num_layers=self.layers,
+            bias=True,
+            batch_first=True,
+            dropout=self.dropout,
+            bidirectional=self.bidirectional
+        )
+
+        # The bias here is the speaker's token prior, and it is pre-norm on
+        #     purpose -- see docs/channel.md.
+        self.outputs2vocab = nn.Linear(
+            self.d_model * self.directions,
+            self.vocabulary + 4 # +4 for PAD, SOS, EOS, UNK
+        )
+
+        self.init_h = nn.Linear(
+            2 * referent_embedding_size, 
+            self.layers * self.directions * self.d_model
+        )
+        
+        self.token_embedding = nn.Embedding(
+            self.vocabulary + 4, # +4 for PAD, SOS, EOS, UNK
+            self.token_embedding_size
+        )
+
+        self.reset_parameters()
 
     def decode(
         self,
@@ -586,13 +668,9 @@ class SenderGRULM(nn.Module):
         spread_steps = []
 
         # Create and add SOS token
-        sos_onehot = torch.zeros(
-            batch_size,
-            1,
-            self.vocabulary + 4, # +4 for PAD, SOS, EOS, UNK
-            device=device
+        sos_onehot = self.reserved_onehot(
+            data.language.SOS_IDX, batch_size, device
         )  # Shape: (B, 1, V)
-        sos_onehot[:, 0, data.language.SOS_IDX] = 1.0
         lang.append(sos_onehot)
 
         gru_in = sos_onehot @ self.token_embedding.weight  # Shape: (B, 1, D)
@@ -608,48 +686,12 @@ class SenderGRULM(nn.Module):
             logits = self.outputs2vocab(step_embedding) # Shape: (B, V)
 
             if self.training:
-                # Before normalisation, which is the whole point of it.
-                spread_steps.append(
-                    logits[..., 4:].detach().float().std(-1).mean()
-                                )
+                spread_steps.append(self.logit_spread_of(logits))
 
-            # Before the scale and the mixture: this is what fixes the magnitude
-            #     the scale is expressed against.
-            normalised = layer_norm_logits(logits, self.vocabulary)
+            predicted_onehot, pre_gain = self.sample_symbols(logits)
 
-            # Masking comes first so that the uniform mixture below is spread
-            #     over the emittable tokens only.
-            logits = mask_reserved_tokens(normalised)
-
-            # Exploration is a training-time device only, so the eval passes
-            #     measure the learned policy. Mirrors jayelm.
             if self.training:
-                survival_logits.append(logits.detach())
-
-                # Scale first, mixture second, and scale the *unmasked* logits
-                #     before re-masking: scaling the masked tensor sends -inf
-                #     into the gradient w.r.t. the scale, which becomes NaN and
-                #     makes `GradScaler` skip every step. See docs/channel.md.
-                logits = mask_reserved_tokens(normalised * self.logit_scale)
-
-                if self.uniform_weight > 0.0:
-                    logits = flatten_logit_distribution(logits, self.uniform_weight)
-
-                # `argmax(logits + noise)` with a straight-through gradient.
-                #     `tau` rescales the *soft* sample only; the hard forward
-                #     sample is an argmax and so invariant to it.
-                predicted_onehot = F.gumbel_softmax(
-                    logits,
-                    tau=self.sampling_tau,
-                    hard=True,
-                    dim=-1
-                )
-            else:
-                # Greedy: eval measures the policy. The reserved tokens are -inf,
-                #     so the argmax can never select one.
-                predicted_onehot = F.one_hot(
-                    logits.argmax(-1), self.vocabulary + 4
-                ).to(logits.dtype)
+                survival_logits.append(pre_gain)
 
             # 6. Prepare next input
             lang.append(predicted_onehot.unsqueeze(1))
@@ -658,17 +700,13 @@ class SenderGRULM(nn.Module):
         # Pooled over positions after the loop: per position instead would read
         #     each position's statistics alone.
         if self.training:
-            self.realised_survival = mean_winning_probability(
-                torch.stack(survival_logits, 1).float(),
-                self.logit_scale.detach(),
-                self.uniform_weight,
-            ).item()
+            self.record_survival(torch.stack(survival_logits, 1))
             self.logit_spread = torch.stack(spread_steps).mean().item()
 
         # Add final EOS token
-        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 4, device=device)
-        eos_onehot[:, 0, data.language.EOS_IDX] = 1.0
-        lang.append(eos_onehot)
+        lang.append(
+            self.reserved_onehot(data.language.EOS_IDX, batch_size, device)
+        )
 
         # Concatenate
         lang_tensor = torch.cat(lang, 1)
@@ -696,12 +734,10 @@ class SenderGRULM(nn.Module):
         self.outputs2vocab.reset_parameters()
         self.token_embedding.reset_parameters()
         self.reset_logit_scale()
-        self.realised_survival = float("nan")
-        self.logit_spread = float("nan")
-        self.polarity_separation = float("nan")
+        self.reset_channel_diagnostics()
 
 
-class SenderTransformerLM(nn.Module):
+class SenderTransformerLM(GumbelChannel, nn.Module):
     def __init__(
         self,
         referent_embedding_size,
@@ -756,27 +792,9 @@ class SenderTransformerLM(nn.Module):
             decoder=not self.bidirectional,
         )
 
-        # Learned and log-parameterised, as in `SenderGRULM`; the resolved
-        #     initial value is a constant and enters no `state_dict`.
-        self.initial_logit_scale = logit_scale(
+        self._init_channel(
             kwargs["init_energy"], self.vocabulary, self.uniform_weight
         )
-        self.log_logit_scale = nn.Parameter(
-            torch.tensor(self.initial_logit_scale).log()
-        )
-
-        # Per-batch diagnostics, read by `train.py` for metrics.csv.
-        #     `logit_spread` is the standard deviation of the emittable logits
-        #     *before* normalisation. See docs/measurement.md.
-        self.realised_survival = float("nan")
-        self.logit_spread = float("nan")
-        # `norm(e_pos - e_neg)`, the only part of `polarity_embedding` the
-        #     cross-attention can act on, opening at exactly zero. See
-        #     docs/measurement.md.
-        self.polarity_separation = float("nan")
-
-        # See `SenderGRULM`.
-        self.training_progress = 0.0
 
         if self.referent_embedding_size != self.token_embedding_size:
             raise NotImplementedError(
@@ -1081,45 +1099,16 @@ class SenderTransformerLM(nn.Module):
             self.latent_layer_norm(latents),
         ) # (batch, self.content_length, self.d_model)
 
-    def reset_logit_scale(self):
+    def record_polarity_separation(self):
         """
-        Put the learned scale back to the value `init_energy` solved for, so a
-            reset does not leave a trained channel behind a fresh speaker.
+        `norm(e_pos - e_neg)`, the only part of `polarity_embedding` the
+            cross-attention can act on, opening at exactly zero. A parameter
+            norm rather than a per-batch quantity. See docs/measurement.md.
         """
         with torch.no_grad():
-            self.log_logit_scale.fill_(math.log(self.initial_logit_scale))
-
-    @property
-    def sampling_tau(self):
-        """
-        The temperature handed to `gumbel_softmax`: the configured `tau`,
-            adjusted towards `tau * logit_scale / initial_logit_scale` by a
-            cosine schedule over training.
-
-            ratio  = max(logit_scale / initial_logit_scale, 1)
-            weight = (1 + cos(pi * training_progress)) / 2
-            tau    = configured_tau * (1 + weight * (ratio - 1))
-
-        A run opens fully coupled and ends at exactly the configured `tau`. The
-            schedule is open-loop on purpose, the ratio is floored at 1, and the
-            scale is detached -- a differentiable tau would put inf into the
-            gradient w.r.t. the scale. All of that, and what the coupling buys,
-            is in docs/channel.md.
-        """
-        ratio = torch.clamp(
-            self.logit_scale.detach() / self.initial_logit_scale, min=1.0
-        )
-        weight = 0.5 * (1.0 + math.cos(math.pi * min(self.training_progress, 1.0)))
-        return self.tau * (1.0 + weight * (ratio - 1.0))
-
-    @property
-    def logit_scale(self):
-        """
-        The multiplier applied to the normalised logits before sampling, always
-            positive. Read here rather than exponentiating at the use sites, so
-            they and the survival diagnostic cannot drift apart.
-        """
-        return self.log_logit_scale.exp()
+            self.polarity_separation = (
+                self.polarity_embedding[0] - self.polarity_embedding[1]
+            ).norm().item()
 
     def decode_autoregressively(
         self,
@@ -1150,13 +1139,9 @@ class SenderTransformerLM(nn.Module):
         survival_logits = []
         spread_steps = []
 
-        sos_onehot = torch.zeros(
-            batch_size,
-            1,
-            self.vocabulary + 4, # +4 for PAD, SOS, EOS, UNK
-            device=device
+        sos_onehot = self.reserved_onehot(
+            data.language.SOS_IDX, batch_size, device
         )
-        sos_onehot[:, 0, data.language.SOS_IDX] = 1.0
         lang.append(sos_onehot)
 
         # Through the embedding matrix rather than an index lookup: the sampled
@@ -1169,12 +1154,7 @@ class SenderTransformerLM(nn.Module):
         )
 
         if self.training:
-            # A parameter norm rather than a per-batch quantity -- as in the
-            #     other arm, see `decode`.
-            with torch.no_grad():
-                self.polarity_separation = (
-                    self.polarity_embedding[0] - self.polarity_embedding[1]
-                ).norm().item()
+            self.record_polarity_separation()
 
         for i in range(self.content_length):
             decoder_input = torch.stack(
@@ -1188,32 +1168,12 @@ class SenderTransformerLM(nn.Module):
             logits = self.outputs2vocab(step_embedding) # (B, V + 4)
 
             if self.training:
-                spread_steps.append(
-                    logits[..., 4:].detach().float().std(-1).mean()
-                )
+                spread_steps.append(self.logit_spread_of(logits))
 
-            normalised = layer_norm_logits(logits, self.vocabulary)
-
-            logits = mask_reserved_tokens(normalised)
+            predicted_onehot, pre_gain = self.sample_symbols(logits)
 
             if self.training:
-                survival_logits.append(logits.detach())
-
-                logits = mask_reserved_tokens(normalised * self.logit_scale)
-
-                if self.uniform_weight > 0.0:
-                    logits = flatten_logit_distribution(logits, self.uniform_weight)
-
-                predicted_onehot = F.gumbel_softmax(
-                    logits,
-                    tau=self.sampling_tau,
-                    hard=True,
-                    dim=-1
-                )
-            else:
-                predicted_onehot = F.one_hot(
-                    logits.argmax(-1), self.vocabulary + 4
-                ).to(logits.dtype)
+                survival_logits.append(pre_gain)
 
             lang.append(predicted_onehot.unsqueeze(1))
 
@@ -1224,16 +1184,12 @@ class SenderTransformerLM(nn.Module):
 
         if self.training:
             # Pooled over positions after the loop, as in `SenderGRULM.decode`.
-            self.realised_survival = mean_winning_probability(
-                torch.stack(survival_logits, 1).float(),
-                self.logit_scale.detach(),
-                self.uniform_weight,
-            ).item()
+            self.record_survival(torch.stack(survival_logits, 1))
             self.logit_spread = torch.stack(spread_steps).mean().item()
 
-        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 4, device=device)
-        eos_onehot[:, 0, data.language.EOS_IDX] = 1.0
-        lang.append(eos_onehot)
+        lang.append(
+            self.reserved_onehot(data.language.EOS_IDX, batch_size, device)
+        )
 
         return torch.cat(lang, 1), torch.stack(symbol_embeddings, 1)
 
@@ -1267,60 +1223,24 @@ class SenderTransformerLM(nn.Module):
         logits = self.outputs2vocab(symbol_embeddings)
 
         if self.training:
-            # Before normalisation — as in `SenderGRULM.decode`.
-            self.logit_spread = (
-                logits[..., 4:].detach().float().std(-1).mean().item()
-            )
+            self.logit_spread = self.logit_spread_of(logits).item()
+            self.record_polarity_separation()
 
-            # A parameter norm rather than a per-batch quantity, recorded here
-            #     so every column stays on the same clock.
-            with torch.no_grad():
-                self.polarity_separation = (
-                    self.polarity_embedding[0] - self.polarity_embedding[1]
-                ).norm().item()
-
-        # Before the scale and the mixture — as in `SenderGRULM.decode`.
-        normalised = layer_norm_logits(logits, self.vocabulary)
-
-        # Mask first, then explore, training-time only.
-        logits = mask_reserved_tokens(normalised)
+        onehot_content, pre_gain = self.sample_symbols(logits)
 
         if self.training:
-            survival_logits = logits.detach()
-
-            # Scale first, mixture second, and scale the unmasked logits so that
-            #     -inf stays out of the gradient w.r.t. the scale. See
-            #     docs/channel.md.
-            logits = mask_reserved_tokens(normalised * self.logit_scale)
-
-            if self.uniform_weight > 0.0:
-                logits = flatten_logit_distribution(logits, self.uniform_weight)
-
-            onehot_content = F.gumbel_softmax(
-                logits,
-                tau=self.sampling_tau,
-                hard=True,
-                dim=-1
-            )
-
             # This arm emits every position in one shot, so its logits are
             #     already pooled over positions.
-            self.realised_survival = mean_winning_probability(
-                survival_logits.float(), self.logit_scale.detach(), self.uniform_weight
-            ).item()
-        else:
-            # Greedy: eval measures the policy. The reserved tokens are -inf, so
-            #     the argmax can never select one.
-            onehot_content = F.one_hot(
-                logits.argmax(-1), self.vocabulary + 4
-            ).to(logits.dtype)
+            self.record_survival(pre_gain)
 
-        sos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 4, device=device)
-        sos_onehot[:, 0, data.language.SOS_IDX] = 1.0
-        eos_onehot = torch.zeros(batch_size, 1, self.vocabulary + 4, device=device)
-        eos_onehot[:, 0, data.language.EOS_IDX] = 1.0
-
-        onehot = torch.cat([sos_onehot, onehot_content, eos_onehot], dim=1)
+        onehot = torch.cat(
+            [
+                self.reserved_onehot(data.language.SOS_IDX, batch_size, device),
+                onehot_content,
+                self.reserved_onehot(data.language.EOS_IDX, batch_size, device),
+            ],
+            dim=1,
+        )
 
         return onehot, symbol_embeddings
 
@@ -1354,9 +1274,7 @@ class SenderTransformerLM(nn.Module):
 
         self.outputs2vocab.reset_parameters()
         self.reset_logit_scale()
-        self.realised_survival = float("nan")
-        self.logit_spread = float("nan")
-        self.polarity_separation = float("nan")
+        self.reset_channel_diagnostics()
 
 
 class Sender(nn.Module):
