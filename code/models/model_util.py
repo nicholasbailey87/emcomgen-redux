@@ -2,9 +2,6 @@
 Model building utils
 """
 
-
-import torch.nn as nn
-
 from broccoli.activation import ReLU, GELU, SquaredReLU, SwiGLU
 
 
@@ -85,9 +82,3 @@ def resolve_residual_scaling(alpha, beta, layers, decoder=False):
         derived_alpha if alpha == DEEPNORM else float(alpha),
         derived_beta if beta == DEEPNORM else float(beta),
     )
-
-
-def reset_sequential(seq):
-    for layer in seq:
-        if isinstance(layer, nn.Linear):
-            layer.reset_parameters()
