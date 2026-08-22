@@ -41,6 +41,14 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+# Opt-in profiling state, set by `--profile-steps` and otherwise left alone.
+# `run` checks `_PROFILER is not None` once per batch, which costs an identity
+# comparison on a path that already does a `.item()` and a log check, so a
+# normal run is unaffected. See `profile_train_epoch`.
+_PROFILER = None
+_PROFILE_UNTIL = 0
+
+
 def get_true_lang(batch, dataset, join=True):
     spk_inp, spk_y, lis_inp, lis_y, true_lang, md, idx = batch
     true_lang_text = dataset.to_text(true_lang, join=join)
@@ -433,6 +441,16 @@ def run(
             if batch_i % config['optimiser']['log_interval'] == 0:
                 log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats)
 
+        # Profiling only, and inert unless `--profile-steps` was passed. The
+        # profiler's schedule advances a batch at a time, so it has to be
+        # stepped from inside the loop rather than wrapped around it, and the
+        # epoch is cut short once the schedule has finished -- a full epoch of
+        # trace is both unnecessary and unopenable.
+        if _PROFILER is not None:
+            _PROFILER.step()
+            if batch_i + 1 >= _PROFILE_UNTIL:
+                break
+
     if training and not backpropped:
         optimiser_step(this_loss)
 
@@ -506,6 +524,147 @@ def clean_language(all_lang_df):
     all_lang_df["true_lang"] = all_lang_df["true_lang"].apply(clean_true_lang)
 
 
+def profile_train_epoch(run_args, active_steps, trace_path):
+    """Profile the opening batches of a training epoch and write a Chrome trace.
+
+    Answers one question -- where the step time on an A100 actually goes -- for
+    a rung as configured, rather than for a backbone in isolation the way
+    `scripts/vit_throughput.py` and `scripts/vit_geometry_sweep.py` do. Rungs 11
+    and 13 put a `ViT2` on both agents, so for those the answer is close to the
+    whole picture; a rung with a ResNet on one side splits between the two.
+
+    The schedule discards three batches, warms up on three more, then records
+    `active_steps`. Discarding matters under `compile = true`: the first batches
+    pay for tracing and autotuning, and a trace of those measures the compiler.
+
+    Two summaries are printed. The op table is the raw ranking by device time.
+    The bucket breakdown is the one that answers "are we making good use of the
+    A100": it splits device time into matmul/convolution, attention, and the
+    fused pointwise and reduction kernels that Inductor emits. Arithmetic is
+    what the GPU is fast at, and a large pointwise share means the step is
+    moving memory rather than doing work -- which is the expected shape here,
+    given broccoli's attention carries a QK-norm and an output norm on top of
+    the block's own pre/post norms, and applies axial RoPE per layer.
+
+    Nothing is written except the trace, and no epoch completes, so this cannot
+    touch a checkpoint or a `metrics.csv`.
+    """
+    global _PROFILER, _PROFILE_UNTIL
+
+    wait, warmup = 3, 3
+    _PROFILE_UNTIL = wait + warmup + active_steps
+
+    # `training_progress` is set per epoch in the training loop, and drives the
+    # speaker's tau schedule. Set it here too so the profiled step is the step
+    # epoch 0 would run, not one with an unset attribute.
+    run_args[0].sender.language_model.training_progress = 0.0
+
+    profiler_schedule = torch.profiler.schedule(
+        wait=wait, warmup=warmup, active=active_steps, repeat=1
+    )
+    activities = [torch.profiler.ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        activities.append(torch.profiler.ProfilerActivity.CUDA)
+
+    # Named explicitly because a preemptible partition can hand back a card
+    # that is not the one the rungs are timed against, and the numbers below
+    # only mean anything against the GPU the experiment actually runs on.
+    device_name = (
+        torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+    )
+    logging.info(
+        f"Profiling {active_steps} steps after {wait + warmup} discarded, "
+        f"on {device_name}; trace -> {trace_path}"
+    )
+
+    with torch.profiler.profile(
+        activities=activities,
+        schedule=profiler_schedule,
+        record_shapes=True,
+        with_stack=False,
+        profile_memory=False,
+    ) as profiler:
+        _PROFILER = profiler
+        try:
+            run("train", 0, *run_args)
+        finally:
+            _PROFILER = None
+
+    Path(trace_path).parent.mkdir(parents=True, exist_ok=True)
+    profiler.export_chrome_trace(str(trace_path))
+
+    averages = profiler.key_averages()
+
+    # torch renamed the CUDA-time attributes to device-agnostic ones; accept
+    # either rather than pinning a torch version.
+    def device_time(entry):
+        for attribute in ("self_device_time_total", "self_cuda_time_total"):
+            if hasattr(entry, attribute):
+                return getattr(entry, attribute)
+        return 0.0
+
+    sort_key = (
+        "self_device_time_total"
+        if hasattr(averages[0], "self_device_time_total")
+        else "self_cuda_time_total"
+    )
+    print(averages.table(sort_by=sort_key, row_limit=30))
+
+    buckets = {
+        "matmul / conv": (
+            "gemm", "cutlass", "cublas", "conv", "wgrad", "dgrad", "implicit",
+            "sm80", "sm90", "ampere", "addmm", "bmm", "mm_",
+        ),
+        "attention": ("flash", "attention", "fmha", "mha"),
+        "pointwise / reduction": (
+            "triton_poi", "triton_red", "triton_per", "elementwise",
+            "reduce_kernel", "vectorized",
+        ),
+        "layout / copy": ("copy", "cat_", "permute", "contiguous", "transpose"),
+    }
+
+    totals = dict.fromkeys(buckets, 0.0)
+    totals["other"] = 0.0
+    grand_total = 0.0
+    for entry in averages:
+        # Device kernels only. CPU-side operator entries would be counted twice.
+        elapsed = device_time(entry)
+        if elapsed <= 0:
+            continue
+        grand_total += elapsed
+        name = entry.key.lower()
+        for bucket, needles in buckets.items():
+            if any(needle in name for needle in needles):
+                totals[bucket] += elapsed
+                break
+        else:
+            totals["other"] += elapsed
+
+    print("\nDevice time by kind of work")
+    print("-" * 40)
+    for bucket, elapsed in sorted(totals.items(), key=lambda kv: -kv[1]):
+        share = 100 * elapsed / grand_total if grand_total else 0.0
+        print(f"{bucket:>24}  {share:5.1f}%  {elapsed / 1e3:9.1f} ms")
+
+    # `compile = true` is expected to give several graphs rather than one -- the
+    # autoregressive decode loop, the Gumbel sampling and the per-batch `.cpu()`
+    # calls all break it. How many, and why, bounds what compile can fuse.
+    try:
+        import torch._dynamo.utils as dynamo_utils
+
+        breaks = dynamo_utils.counters.get("graph_break", {})
+        if breaks:
+            print("\nDynamo graph breaks")
+            print("-" * 40)
+            for reason, count in sorted(breaks.items(), key=lambda kv: -kv[1])[:10]:
+                print(f"{count:>6}  {reason}")
+    except Exception:  # diagnostics only; never fail a profiling run on this
+        pass
+
+    print(f"\nTrace written to {trace_path} -- open it at chrome://tracing "
+          f"or https://ui.perfetto.dev")
+
+
 if __name__ == "__main__":
     import argparse
     import random
@@ -527,6 +686,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--no_resume", action="store_true",
         help="Ignore any existing checkpoint and train from scratch."
+    )
+    parser.add_argument(
+        "--profile-steps", type=int, default=0,
+        help="Diagnostic. Profile this many training batches and exit without "
+             "training: writes a Chrome trace and prints where device time "
+             "goes. Six further batches are run and discarded first, so that "
+             "the trace is of the steady state rather than of `torch.compile` "
+             "warming up. Nothing else is written."
+    )
+    parser.add_argument(
+        "--profile-out", type=str, default=None,
+        help="Where the trace from --profile-steps goes. Defaults to "
+             "<exp_dir>/profile_trace.json."
     )
     args = parser.parse_args()
 
@@ -653,6 +825,16 @@ if __name__ == "__main__":
     )
 
     print("Starting to train")
+
+    # Diagnostic exit. Deliberately after the build, the compile and the
+    # checkpoint restore, so what is profiled is the step a resumed rung runs.
+    if args.profile_steps:
+        profile_train_epoch(
+            run_args,
+            args.profile_steps,
+            Path(args.profile_out or (Path(exp_dir) / "profile_trace.json")),
+        )
+        raise SystemExit(0)
 
     for epoch in range(start_epoch, config['scheduler']['epochs']):
         if (# No reset on epoch 0, but reset after epoch 2, epoch 4, etc
