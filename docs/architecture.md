@@ -450,6 +450,25 @@ a fixed noise-free protocol in under 200 steps, so what failed was not the
 comparer's capacity but its ability to bootstrap against a speaker that had not
 learned yet. `M` crossings instead of one is the response.
 
+Measured at initialisation, as the standard deviation of the change in scores
+when the message is replaced with noise, over the standard deviation of the
+scores themselves — how much of what separates the candidates comes from what
+was said. Mean of five seeds on a 16 × 20 game with correlated referents, both
+modules untrained:
+
+| | message share of score sd |
+|---|---|
+| four stages, 320 wide, 4 encoder layers | 0.299 |
+| two stacks, 256 wide, 3 + 3 blocks | 0.450 |
+
+Depth alone does not move it — 1, 2, 3, 4 and 6 blocks a side all land between
+0.45 and 0.52 — because DeepNorm damps each branch harder as the stack it is on
+gets deeper, and the extra crossings buy back roughly what the damping costs.
+The gain above is the structure, not the depth. Pinning `alpha = beta = 1.0`
+reaches 0.75 at three blocks, which is the knob if this ever needs to go
+further; it is not the default because the pinning gives up what DeepNorm is
+for, and because five seeds do not order the depths under it.
+
 **Why the message reads the referents before it is encoded.** Without that first
 pass the encoder sees the message alone, so the best it can build is an
 *absolute* meaning — "a red square" — when the task is discriminative and what
