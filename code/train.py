@@ -521,33 +521,32 @@ def run(
             # and it cost fifteen epochs.
             #
             # `decision_spread` -- `TransformerCrossAttentionComparer` only,
-            # which has no scale to report because `score_norm` and a fixed
-            # `decision_gain` replaced it. This is the standard deviation of its
-            # readout *before* that normalisation; after it the spread is
-            # `decision_gain` by construction and carries no information. It is
-            # not a scale and should not be read like one: it is free to wander,
-            # and what would be a finding is a monotone descent towards zero,
-            # which is the shape `score_scale` traced on rungs 11 and 12 before
-            # this change.
+            # which has no learnable scale to report: its readout is a plain
+            # `nn.Linear(d_model, 1)` and the volume lives in that weight. This
+            # is simply the standard deviation of the scores, and it is the
+            # column that watches the same failure `score_scale` watches on the
+            # other comparer, one level less indirectly.
+            #
+            # A *monotone descent towards zero* is the finding: BCE reduces a
+            # loss it cannot otherwise reduce by becoming less confident, and
+            # nothing in this readout stops it. Wandering is not that. Rung 10
+            # carries the identical exposure and its `score_scale` falls
+            # 0.856 -> 0.238 across thirty epochs while `train_acc` climbs, so
+            # it is sign-consistent descent alongside a flat `train_acc` that
+            # says something, not the direction alone.
             #
             # `decision_kurtosis` -- same class, and the one to read first.
-            # `score_norm` pins the readout's variance but not its shape, and
-            # BCE's cost is linear far from zero while variance is quadratic,
-            # so a listener with nothing to say can meet the variance budget
-            # with a few enormous outliers and leave the rest at sigmoid 0.5.
-            # That walks the loss towards `ln 2` carrying no information at all
-            # -- and unlike the old `score_scale` collapse it does move the loss
-            # column, so a falling loss is not evidence of anything on its own.
-            #
-            # Read the sign. Negative means the scores are bimodal, which is
-            # what discriminating looks like (-2 is the two-point floor).
-            # Sustained positive with `train_acc` at 0.5 is the failure that
+            # Excess kurtosis of the scores. Negative means they are bimodal,
+            # which is what discriminating looks like (-2 is the two-point
+            # floor); sustained positive alongside `train_acc` at 0.5 is a
+            # listener with nothing to say, and is what
             # `receiver-cross-attention-birds.csv` and its ShapeWorld
             # counterpart ran for thirty epochs. Measured against this module on
             # a synthetic game, an informative message gave -2.0 and a scrambled
             # one +11..+23, while `decision_spread` overlapped between the two
-            # -- which is why that column is not enough by itself. NaN when the
-            # readout is constant, where the fourth standardised moment is 0/0.
+            # and could not separate them. NaN when the readout has collapsed to
+            # a constant, where the fourth standardised moment is 0/0 --
+            # `decision_spread` is the column that names that state.
             #
             # Each is genuinely inapplicable to the other class, so each is NaN
             # on the runs that do not have it -- the same situation as

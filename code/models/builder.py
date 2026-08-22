@@ -206,14 +206,18 @@ def build_models(dataloaders, config):
 
     # The listener's scale, and gated again -- on the comparer this time, for
     #     the reason the polarity tag is gated on the speaker.
-    #     `TransformerCrossAttentionComparer` no longer has a learnable scale at
-    #     all: it standardises its readout and multiplies by a fixed
-    #     `decision_gain`, so there is nothing for a rate to apply to and the
-    #     key is genuinely inapplicable, exactly as `heads` is inapplicable to a
-    #     GRU speaker. This comment previously argued the opposite, on the
-    #     grounds that both comparers carried `log_score_scale`; that stopped
-    #     being true when the collapse it was meant to make legible turned out
-    #     to need closing rather than measuring.
+    #     `TransformerCrossAttentionComparer` has no learnable scale: its
+    #     readout is a plain `nn.Linear(d_model, 1)` whose weight carries the
+    #     volume, so there is no lone scalar for a rate to apply to and the key
+    #     is genuinely inapplicable, exactly as `heads` is inapplicable to a GRU
+    #     speaker. This comment previously argued the opposite, on the grounds
+    #     that both comparers carried `log_score_scale`.
+    #
+    # Do not read the gate as a verdict on the scale. That comparer lost its
+    #     scale to a rewrite that standardised the readout at a fixed gain,
+    #     which closed the collapse it was aimed at and stopped four rungs
+    #     learning at all -- see `diagnostics/README.md`. What survived the
+    #     revert was the absence of the parameter, not an argument against it.
     #
     # Gating rather than deleting the knob, because `BilinearGRUComparer` keeps
     #     its scale and is the ablation's baseline listener. Gating on the class

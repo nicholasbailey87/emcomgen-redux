@@ -252,21 +252,22 @@ polarity_embedding_lr = 2e-3
 # removed it.
 #
 # Applies only to `BilinearGRUComparer`, and `build_models` gates on that class
-# rather than on finding the parameter. `TransformerCrossAttentionComparer` no
-# longer has a learnable scale at all: it standardises its readout and
-# multiplies by a fixed `decision_gain`, because on rungs 11 and 12 the scale
-# this key exists to move went monotonically to 0.27 and pinned `train_loss` at
-# ln 2 for thirty epochs. `train_score_scale` is therefore a bilinear-only
-# column now, and `decision_spread` and `decision_kurtosis` are what the other
-# arm reports instead -- see `decision_gain` under `[receiver_comparer]` for the
-# argument, and read the kurtosis column first.
+# rather than on finding the parameter. `TransformerCrossAttentionComparer` has
+# no learnable scale to point this at: its readout is a plain
+# `nn.Linear(d_model, 1)` whose weight carries the volume, so there is no lone
+# scalar to give a rate of its own. `train_score_scale` is a bilinear-only
+# column, and `decision_spread` and `decision_kurtosis` are what the other arm
+# reports instead. Read the kurtosis column first.
 #
-# Which leaves the baseline comparer holding the mechanism that failed on the
-# other one. That is a scoping decision and not a verdict: `BilinearGRUComparer`
-# is the ablation's baseline listener, its score is a scaled cosine with the
-# same first-order exposure to "become less confident", and changing its readout
-# would invalidate every rung rather than the two under investigation. Worth
-# revisiting once the fixed-gain readout has been seen to work.
+# The scoping is not a verdict either way, and the history is worth knowing
+# before anyone extends this key to the other comparer. That scale falling
+# monotonically to 0.27 while `train_loss` sat at ln 2 is what prompted rewriting
+# the cross-attention readout to standardise itself at a fixed gain — which
+# closed the collapse exactly as designed and stopped four rungs learning at all.
+# The collapse is survivable: rung 10 does it here, `train_score_scale` falling
+# 0.856 -> 0.238 across thirty epochs while `train_acc` climbs 0.4975 -> 0.6351.
+# See `diagnostics/README.md` and the `TransformerCrossAttentionComparer`
+# docstring for the measurements.
 score_scale_lr = 2e-3
 
 [scheduler]
@@ -613,95 +614,6 @@ dropout = 0.1 # The listener's only dropout, and in both comparers it masks
 layers = 1
 bidirectional = false
 message_length = 7 # Only applies to Transformer comparers. Should be the same as sender_language_model.message_length
-
-# The volume `TransformerCrossAttentionComparer` states its conclusion at, and
-# the whole of it: that comparer standardises its readout with a BatchNorm and
-# then multiplies by this number, which never moves. Read by that class only —
-# `BilinearGRUComparer` keeps the learnable `log_score_scale` this replaces, and
-# ignores this key.
-#
-# Why fixed rather than learned. BCE will always reduce a loss it cannot
-# otherwise reduce by becoming less confident, and that pressure is first-order
-# where learning a useful direction is not, so a learnable volume collapses
-# first and starves everything upstream of it. Twice, now: once through
-# `decision.weight`'s magnitude (scores sd 0.42 -> 0.016 inside one epoch) and
-# once through `log_score_scale` (rungs 11 and 12, monotone to 0.27 over 30
-# epochs, `train_loss` pinned at ln 2 throughout). This is the speaker's
-# conclusion applied to the listener: set the gain, don't learn it.
-#
-# Why a BatchNorm and not simply a frozen scalar. Freezing closes the scalar and
-# leaves the shape: the listener can still go quiet by shrinking the *spread* of
-# its readout — rotating towards where the candidates do not differ — which
-# reaches the same ln 2 by a slower route and without a column to show for it.
-# Standardising renormalises that straight back out, and sends a genuinely
-# constant readout to exactly 0, which sigmoids to 0.5. There is no longer a
-# resting place at chance.
-#
-# Why 2.0. This sets how confident an untrained listener is forced to be, and
-# therefore how much a confident error costs. Untrained BCE against balanced
-# labels, measured over 2e6 samples:
-#
-#   gain   1.0    2.0    3.0    6.0     (ln 2 = 0.693)
-#   nats   0.805  1.067  1.394  2.496
-#
-# and a build of the rung 12 comparer opens at 1.061, matching the 2.0 row. All
-# of them are above ln 2, which is the point: there is no setting at which
-# chance is free, so the run starts worse than chance and has to earn its way
-# down.
-#
-# 2.0 rather than 6.0 because the cost is not symmetric. 6.0 opens at 2.5 nats
-# and puts `sigmoid` on its saturated tails almost everywhere, where
-# `dL/dz = sigmoid(z) - y` is +/-1 whatever `z` is, so the loss stops
-# distinguishing "slightly wrong" from "badly wrong" and degenerates towards a
-# sign signal. Gradients stay bounded either way — this costs calibration, not
-# stability — but a stronger forcing function is not what is scarce here. Raise
-# it if a run sits at 1.07 without moving; that would be evidence the listener
-# is comfortable rather than stuck.
-#
-# What to watch, and it is not accuracy. Removing the resting place forces the
-# listener to be confident about something; it does not make the message the
-# route. In a concept game the positives are images of one species, and
-# `referent_self_attention` is the machinery for clustering the set without
-# reading anything — permutation-equivariance means that yields the partition
-# but not which half is positive, so the pair need smuggle only one bit through
-# the channel to convert it into high accuracy. That would read as success.
-# `test_topsim_*` and `unique_message_fraction` are what separate a protocol
-# from a one-bit shortcut; `decision_spread` in metrics.csv reports the readout's
-# own health.
-#
-# What standardising does not close, and it has since been observed. Pinning the
-# variance leaves the *shape* free, and the shape is a way out. BCE against a
-# coin-flip label costs `|s|/2 + ln(1 + exp(-|s|))`: quadratic in `s` near zero,
-# but only linear far out, while variance costs `s**2`. So an outlier is cheap
-# per unit of variance it absorbs, and the cheapest uninformative allocation at a
-# fixed spread is a few enormous scores with everything else at zero, where
-# sigmoid is 0.5 and the cost is ln 2. At gain 2.0, measured over 2e6 samples
-# with no information present anywhere:
-#
-#   shape    Gaussian  4% at ±10  1.8% at ±15  1% at ±20  → ∞
-#   nats     1.068     0.865      0.814        0.786      0.693
-#
-# `receiver-cross-attention-birds.csv` runs 0.875 → 0.810 across thirty epochs
-# and its ShapeWorld counterpart 0.828 → 0.765, both on that curve, both holding
-# `train_acc` at 0.5000 to four places throughout, both leaving the speaker inert
-# (`pool_effective_examples` never departs 4.99, or 10.0 on ShapeWorld). A
-# falling loss is therefore not evidence of anything on its own here.
-#
-# Hence `decision_kurtosis`, which is the column to read first. Excess kurtosis
-# of the readout, and the sign is the reading: negative means bimodal scores,
-# which is what discriminating looks like, with -2 the two-point floor; sustained
-# positive alongside `train_acc` at 0.5 is the failure above. Measured against
-# this comparer on a synthetic game, an informative message gave -2.0 at 100%
-# accuracy and a scrambled one +11..+23 at chance, while `decision_spread`
-# overlapped between the two (1.4-2.1 against 2.7-5.1) and could not tell them
-# apart.
-#
-# The fix, when there is a reading to justify it, is to change what the loss
-# buys rather than to raise the gain: normalise by `E|s|` rather than by the
-# standard deviation. BCE's far field is linear and so is an L1 budget, which
-# removes the mismatch that makes outliers cheap — at equal budget it reverses
-# the arbitrage, so spreading beats concentrating (0.98 against 1.44 nats).
-decision_gain = 2.0
 # 5, for head_dim 64 at the 320 width the Transformer comparer takes in rung 11
 # -- the same head dimension every attention module in the repo now has.
 #

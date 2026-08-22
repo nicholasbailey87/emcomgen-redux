@@ -36,15 +36,30 @@ stop. Nor could accuracy see it -- `train.py` reads the decision as
 `scores > 0`, and a strictly positive scale leaves `s * (u + b) > 0` equivalent
 to `u + b > 0`, so the loss walked to ln 2 without a single prediction changing.
 
-So `TransformerCrossAttentionComparer` no longer has a volume parameter at all.
-`decision` is called directly, `score_norm` standardises its output over the
-flattened batch, and a fixed `decision_gain` sets the volume once. The tests
-below split accordingly: the shared properties stay parametrised over both
-classes, `log_score_scale`'s mechanism is now bilinear-only, and the batch-norm
-readout has a section of its own. `29b18ea` still explains why the surviving
-scale is free rather than floored: a healthy pair dips ~0.2 log-units below its
-opening while the message is still noise and comes back, and flooring that cost
-fifteen epochs.
+The third answer was to remove the volume parameter altogether: `decision`
+called directly, its output standardised by a `BatchNorm1d(1, affine=False)`
+over the flattened batch, a fixed `decision_gain` setting the volume once. It
+closed the collapse exactly as designed, and it stopped every rung carrying this
+comparer -- 11, 12, 13 and 14 -- from learning at all, at 0.5000 accuracy for
+thirty epochs apiece.
+
+So the readout is a plain `nn.Linear(d_model, 1)` again, on a layer-normed
+input, with the collapse route open and watched rather than closed.
+`diagnostics/bootstrap_probe.py` is why: the whole pair with only the vision
+models stubbed out, where at the config's own 1e-4 the bilinear baseline reaches
+accuracy 1.000, the standardised readout 0.606, and the plain readout 0.863 --
+the last taking off by the same route the baseline does, `polarity_separation`
+crossing 6-8 and the speaker's logit scale traversing behind it. A listener that
+cannot go quiet while the message is still noise never lets the speaker learn to
+send one.
+
+The tests below split accordingly: shared properties stay parametrised over both
+classes, `log_score_scale`'s mechanism is bilinear-only, and the cross-attention
+readout has a section of its own -- which now pins the *absence* of guards and
+the columns that watch what is unguarded. `29b18ea` still explains why the
+surviving bilinear scale is free rather than floored: a healthy pair dips ~0.2
+log-units below its opening while the message is still noise and comes back, and
+flooring that cost fifteen epochs.
 """
 
 import math
@@ -138,9 +153,12 @@ def test_the_cross_attention_norms_that_must_be_affine_free_are():
         because the RMSNorm immediately above it *does* carry a learnable gain
         -- broccoli's post-norm default, and not ours to turn off since the same
         class is used by `encoding` and by the speaker's stacks. That gain is
-        exactly the second route the readout normalisation exists to close, so
-        the affine on it is asserted here too: if it ever went away, this test
-        should be the thing that says the guard below it is now redundant.
+        a route to global score magnitude, and `decision_layer_norm` is now the
+        only thing standing between it and the score. It was briefly not the
+        only thing -- a standardised readout divided any global gain back out --
+        so if this test is ever read as belt-and-braces, note that the braces
+        were removed on purpose. The RMSNorm's affine is asserted here too, so
+        that this test is what fails first if it ever goes away.
     """
     comparer = _cross_comparer()
 
@@ -318,8 +336,10 @@ def test_the_untrained_score_opens_at_a_width_independent_magnitude(
 
     On `BilinearGRUComparer` that is what `1/sqrt(referent_embedding_size)`
         buys against a scale opening at 1.0. On the cross-attention comparer it
-        is `score_norm`, which makes the opening `decision_gain` exactly and by
-        construction -- see `test_the_readout_opens_at_the_gain`.
+        is `decision_layer_norm`, which puts every candidate at norm `sqrt(d)`
+        whatever the backbone emitted, so `decision`'s default init sets the
+        opening and the referent width does not -- see
+        `test_the_readout_opens_below_a_confident_wrong_answer`.
     """
     comparer = build(referent_dim=referent_dim)
     with torch.no_grad():
@@ -336,11 +356,13 @@ def test_untrained_bce_opens_within_reach_of_ln_2(build, referent_dim):
         shouting wrong answers makes muting the fast descent direction, which
         is the state `e3fcabd` was written about.
 
-    The two classes sit on opposite sides of ln 2 on purpose. The bilinear one
-        opens just under it, calibrated. The cross-attention one opens at 1.07
-        at `decision_gain = 2.0` -- deliberately *worse* than chance, because
-        the whole point of a fixed gain is that there is no setting at which
-        sitting at chance is free.
+    Both classes now open close to ln 2 from either side -- bilinear just
+        under, cross-attention at ~0.73 just over. They briefly did not: a fixed
+        `decision_gain` of 2.0 opened the cross-attention comparer at 1.07,
+        deliberately worse than chance on the argument that sitting at ln 2
+        should never be free. That argument is what
+        `test_the_readout_opens_below_a_confident_wrong_answer` records the
+        refutation of.
     """
     comparer = build(referent_dim=referent_dim)
     with torch.no_grad():
@@ -439,13 +461,18 @@ def test_reset_parameters_returns_the_scale_to_its_opening():
 
 
 # --------------------------------------------------------------------------
-# The batch-normalised readout. `TransformerCrossAttentionComparer` only.
+# The readout. `TransformerCrossAttentionComparer` only.
 #
-# Every test in this section runs in *train* mode, which is where `score_norm`
-#     normalises by batch statistics. At eval it uses its running estimates, so
-#     an untrained comparer in eval mode is passing the readout through
-#     `(x - 0) / 1` and none of these properties is being exercised. That is
-#     correct behaviour and is pinned separately below.
+# It is a plain `nn.Linear(d_model, 1)` on a layer-normed input, which is what
+#     it was before two attempts to take the volume out of the listener's hands
+#     -- `log_score_scale`, then a fixed-gain BatchNorm. The second closed the
+#     collapse it was written for and stopped four rungs learning at all. What
+#     these tests pin is therefore mostly the *absence* of guards, and the
+#     columns that watch what is no longer guarded.
+#
+# Tests here run in train mode because everything downstream of the readout
+#     (dropout, stochastic depth) is mode-dependent, and because that is the
+#     mode the collapse happens in.
 # --------------------------------------------------------------------------
 
 def _quiet_cross_comparer(**overrides):
@@ -467,120 +494,99 @@ def _quiet_cross_comparer(**overrides):
     ).train()
 
 
-def test_the_readout_has_no_volume_parameter():
+def test_the_readout_is_a_plain_linear_layer():
     """
-    The change itself. There is no scale to learn and no bias to add: the bias
-        would sit upstream of a mean subtraction and carry identically zero
-        gradient, which is a dead parameter that reads as a live one.
+    The design, stated as what it is not.
+
+    No `log_score_scale`: that was attempt one at holding the volume, and it
+        collapsed on rungs 11 and 12 exactly as it did on the bare layer. No
+        `score_norm` and no `decision_gain`: that was attempt two, which closed
+        the collapse and cost the run its ability to bootstrap -- with the
+        readout standardised, rung 12 sits at accuracy 0.606 in
+        `diagnostics/bootstrap_probe.py` where the same module with a plain
+        readout reaches 0.863 and the bilinear baseline reaches 1.000.
+
+    The bias is back because it was only ever dropped as a dead parameter: a
+        mean subtraction downstream absorbed any constant it could add, so its
+        gradient was identically zero. Nothing subtracts a mean now.
     """
     comparer = _cross_comparer(referent_dim=320)
 
     assert not hasattr(comparer, "log_score_scale")
-    assert comparer.decision.bias is None
+    assert not hasattr(comparer, "score_norm")
+    assert not hasattr(comparer, "decision_gain")
+    assert comparer.decision.bias is not None
 
 
-def test_the_score_norm_is_shared_across_slots_and_has_no_affine():
+def test_the_readout_opens_below_a_confident_wrong_answer():
     """
-    Both arguments are load-bearing, and each closes a different failure. See
-        `test_per_slot_statistics_would_cap_a_perfect_listener_at_chance` for
-        the first, and `receiver.py` for why relaxing either one on its own
-        reasoning is unsafe.
+    What the opening magnitude has to be, now that nothing sets it by
+        construction.
+
+    The standardised readout opened at exactly `decision_gain`, and at 2.0 that
+        put untrained BCE at 1.07 -- deliberately worse than chance, on the
+        argument that there should be no setting at which sitting at ln 2 is
+        free. That argument cost the run its bootstrap: a listener that must
+        commit through a fixed volume from step zero is committing before the
+        message carries anything.
+
+    A plain readout opens where its initialisation puts it, which on rung 11's
+        width is sd ~0.59 and BCE ~0.73 -- just above ln 2, which is the
+        bilinear comparer's regime and the one that bootstraps. Bounded rather
+        than pinned, because the number is now an emergent property of
+        `nn.Linear`'s default init and `decision_layer_norm`'s output scale,
+        and pinning it would make this a change-detector for PyTorch.
     """
-    comparer = _cross_comparer(referent_dim=320)
-
-    assert comparer.score_norm.num_features == 1
-    assert comparer.score_norm.affine is False
-    assert comparer.score_norm.weight is None
-    assert comparer.score_norm.bias is None
-
-
-def test_per_slot_statistics_would_cap_a_perfect_listener_at_chance():
-    """
-    Why `score_norm` is `BatchNorm1d(1)` on a flattened readout rather than
-        `BatchNorm1d(n_obj)`.
-
-    Slot `j` carries the same label on every game -- `data.util.split_spk_lis`
-        writes positives into the first half of each agent's view -- so its mean
-        across a batch *is* the answer, not a nuisance offset. Centring per slot
-        subtracts it, which puts about half of that slot's batch on either side
-        of zero while its true label never moves, and `train.py` reads the
-        decision as `scores > 0`.
-
-    So this is a ceiling rather than a leak: it does not let a listener cheat,
-        it stops a correct one from scoring. Asserted against scores built to be
-        perfect, so that the only thing the norm can do is take accuracy away.
-    """
-    labels = _labels()
-    scores = (labels * 2 - 1) * 3.0 + 0.3 * torch.randn(
-        BATCH, N_OBJ, generator=torch.Generator().manual_seed(0)
-    )
-
-    def accuracy(values):
-        return ((values > 0).float() == labels).float().mean().item()
-
-    assert accuracy(scores) == pytest.approx(1.0)
-
-    flattened = torch.nn.BatchNorm1d(1, affine=False).train()
-    through_flattened = flattened(scores.reshape(-1, 1)).reshape(scores.shape)
-
-    per_slot = torch.nn.BatchNorm1d(N_OBJ, affine=False).train()
-    through_per_slot = per_slot(scores)
-
-    assert accuracy(through_flattened) == pytest.approx(1.0)
-    assert accuracy(through_per_slot) < 0.6
-
-
-def test_the_readout_opens_at_the_gain():
     comparer = _quiet_cross_comparer()
     with torch.no_grad():
         scores = comparer(*_inputs(comparer))
 
-    assert scores.std().item() == pytest.approx(comparer.decision_gain, rel=0.02)
-    assert scores.mean().item() == pytest.approx(0.0, abs=1e-4)
+    loss = F.binary_cross_entropy_with_logits(scores, _labels()).item()
+
+    assert 0.2 < scores.std().item() < 1.5
+    assert math.log(2.0) < loss < 1.0
 
 
-def test_the_decision_head_cannot_reach_the_score_magnitude():
+def test_the_decision_head_can_reach_the_score_magnitude():
     """
-    The direct regression test for the CUB collapse, and the reason this is a
-        batch norm rather than a frozen scalar. Scaling `decision.weight` by
-        `c` scales the pre-norm logits, their mean and their standard deviation
-        by `c` alike, so the quotient is unchanged and the head can turn but
-        neither shout nor fall silent.
+    The guard that used to be here is gone, deliberately, and this test says so
+        rather than leaving its absence to be inferred.
 
-    Exact only in the limit, and the tolerance says which limit. `score_norm`
-        takes torch's default `eps`, so the denominator stops tracking the data
-        once the shrunken variance approaches 1e-5: from an opening sd of ~0.57
-        a 10x shrink is 0.16% attenuated, 100x is 13% and 10,000x is 98%.
+    While the readout was standardised, scaling `decision.weight` by `c` scaled
+        the pre-norm logits, their mean and their standard deviation alike, and
+        the quotient did not move -- the head could turn but neither shout nor
+        fall silent. That is the property `diagnostics/bootstrap_probe.py`
+        measured the cost of: it also stopped the listener going quiet while the
+        message was still noise, which is what the speaker needs it to do.
 
-    Asserted over 10x either way rather than over a range chosen to look
-        impressive. Going further would be testing `eps` rather than the
-        readout, and the deep end is not a slope the loss can descend anyway --
-        the gradient on the readout's overall magnitude is zero for as long as
-        the invariance holds, so there is nothing leading down to it.
+    So the collapse route documented in this module's docstring is open again.
+        `decision_spread` is what watches it, which is why the assertion below
+        is on that column and not only on the scores.
     """
     comparer = _quiet_cross_comparer()
     referents, messages = _inputs(comparer)
+
     with torch.no_grad():
         before = comparer(referents, messages)
+        opening_spread = comparer.decision_spread
+
         comparer.decision.weight.mul_(10.0)
+        comparer.decision.bias.mul_(10.0)
         loud = comparer(referents, messages)
-        comparer.decision.weight.mul_(0.01)
-        quiet = comparer(referents, messages)
 
-    assert torch.allclose(before, loud, rtol=5e-3, atol=1e-3)
-    assert torch.allclose(before, quiet, rtol=5e-3, atol=1e-3)
+    assert torch.allclose(loud, 10.0 * before, rtol=1e-4, atol=1e-5)
+    assert comparer.decision_spread == pytest.approx(10.0 * opening_spread, rel=1e-4)
 
 
-def test_a_constant_readout_comes_out_at_one_half():
+def test_a_constant_readout_is_reported_rather_than_hidden():
     """
-    What a frozen scalar could not have bought. `log_score_scale` closed the
-        route where the listener turns its volume down; this closes the route
-        where it shrinks the *spread* of its readout instead -- rotating towards
-        where the candidates do not differ, reaching the same ln 2 more slowly
-        and with no column to show for it.
+    The end state of the collapse, and what the columns say when it arrives.
 
-    A readout with no spread at all is the limit of that, and it lands on 0.5
-        rather than on a confident constant.
+    A standardised readout sent a constant to 0 and sigmoid 0.5, which is why
+        going quiet was not a way down. A plain one passes the constant
+        through, so the listener really can sit at a fixed answer -- and the
+        only defence is that it is visible: zero spread, and a kurtosis of NaN
+        rather than a 0.0 that would read as "Gaussian, nothing to see".
     """
     comparer = _quiet_cross_comparer()
 
@@ -592,25 +598,29 @@ def test_a_constant_readout_comes_out_at_one_half():
     with torch.no_grad():
         scores = comparer(*_inputs(comparer))
 
-    assert scores.abs().max().item() < 0.05
-    assert torch.sigmoid(scores).mean().item() == pytest.approx(0.5, abs=0.02)
+    assert torch.allclose(scores, torch.full_like(scores, 3.7))
+    assert comparer.decision_spread == pytest.approx(0.0, abs=1e-6)
+    assert math.isnan(comparer.decision_kurtosis)
 
 
 def test_the_kurtosis_column_separates_the_shapes_the_spread_column_cannot():
     """
-    `score_norm` pins the readout's variance and leaves its shape free, and the
-        shape is the remaining escape: BCE's cost is linear far from zero while
-        variance is quadratic, so a handful of outliers can meet the variance
-        budget while the bulk sits at sigmoid 0.5 and the loss walks to ln 2
-        carrying nothing.
+    Size and shape are different questions and the readout reports both,
+        because on the runs that mattered only one of them answered.
 
-    So the column has to read shape, not size. Driven here with the two
-        distributions that matter rather than through training -- bimodal, which
-        is what a discriminating listener produces and which floors at -2, and
-        heavy-tailed, which is the escape. `decision_spread` is deliberately
-        asserted to be identical across both, because that is the point: it is
-        measuring the pre-norm size, which the two shapes share, and on the real
-        runs the two conditions overlapped on it (1.4-2.1 against 2.7-5.1).
+    The column arrived with the standardised readout, where the escape was
+        specifically through the fourth moment -- under a pinned variance a
+        handful of outliers absorb the budget cheaply while the bulk sits at
+        sigmoid 0.5. That arbitrage went with the pin. What the column reads did
+        not: bimodal scores are what a discriminating listener produces and
+        floor at -2, heavy-tailed ones are what a listener with nothing to say
+        produces, and no amount of reading `decision_spread` distinguishes them.
+
+    Driven here with the two distributions directly rather than through
+        training, and `decision_spread` is asserted *identical* across both --
+        that is the point of the test. On the real runs the two conditions
+        overlapped on it (1.4-2.1 against 2.7-5.1) while kurtosis separated them
+        by sign.
     """
     comparer = _quiet_cross_comparer()
     referents, messages = _inputs(comparer)
@@ -645,27 +655,6 @@ def test_the_kurtosis_column_separates_the_shapes_the_spread_column_cannot():
     assert readings["bimodal"][0] == pytest.approx(readings["heavy"][0], rel=1e-3)
 
 
-def test_a_constant_readout_reports_no_kurtosis_rather_than_zero():
-    """
-    The fourth standardised moment divides by the spread to the fourth, so a
-        constant readout -- the state this class is built to send to sigmoid
-        0.5 -- makes it 0/0. NaN is the honest reading: a point mass has no
-        shape. A silent 0.0 would read as "Gaussian, nothing to see", which is
-        the failure this column exists to avoid.
-    """
-    comparer = _quiet_cross_comparer()
-
-    class _Constant(torch.nn.Module):
-        def forward(self, x):
-            return torch.full((*x.shape[:-1], 1), 3.7)
-
-    comparer.decision = _Constant()
-    with torch.no_grad():
-        comparer(*_inputs(comparer))
-
-    assert math.isnan(comparer.decision_kurtosis)
-
-
 def test_the_readout_still_carries_gradient_to_the_message():
     """
     The failure mode this whole change is aimed at is a listener that stops
@@ -682,44 +671,6 @@ def test_the_readout_still_carries_gradient_to_the_message():
 
     assert messages.grad is not None
     assert messages.grad.norm().item() > 0.0
-
-
-def test_eval_is_deterministic_and_leaves_the_statistics_alone():
-    """
-    `train.py` calls `pair.train(mode=training)` on every pass, which is what
-        keeps the two eval passes normalising by estimates gathered on train
-        data rather than by the test batch they happen to be in. This is the
-        first module in the repo to depend on that call for anything beyond
-        dropout, so it is pinned here.
-    """
-    comparer = _quiet_cross_comparer()
-    referents, messages = _inputs(comparer)
-
-    with torch.no_grad():
-        comparer(referents, messages)          # populate the running estimates
-        comparer.eval()
-        before = comparer.score_norm.running_mean.clone()
-        first = comparer(referents, messages)
-        second = comparer(referents, messages)
-
-    assert torch.equal(first, second)
-    assert torch.equal(before, comparer.score_norm.running_mean)
-
-
-def test_reset_parameters_clears_the_running_statistics():
-    comparer = _quiet_cross_comparer()
-    with torch.no_grad():
-        comparer(*_inputs(comparer))
-
-    assert comparer.score_norm.num_batches_tracked.item() > 0
-
-    comparer.reset_parameters()
-
-    assert comparer.score_norm.num_batches_tracked.item() == 0
-    assert torch.equal(
-        comparer.score_norm.running_mean,
-        torch.zeros_like(comparer.score_norm.running_mean),
-    )
 
 
 # --------------------------------------------------------------------------

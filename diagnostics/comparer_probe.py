@@ -36,15 +36,12 @@ The three things it can tell you, and they are different questions:
       that scores well this way has learned to cluster, not to talk.
 
 What to read. Accuracy and loss, but mainly `excess_kurt` -- the excess
-kurtosis of the scores. `TransformerCrossAttentionComparer` standardises its
-readout, which pins the variance and leaves the shape free, and the shape is
-where a listener with nothing to say goes: BCE's cost is linear far from zero
-while variance is quadratic, so a few enormous scores can absorb the whole
-variance budget while the bulk sits at sigmoid 0.5. Negative kurtosis means
-bimodal scores, which is what discriminating looks like; sustained positive
-with accuracy at 0.5 is the escape. See `diagnostics/README.md` for the
-readings this has produced, and `decision_gain` in `DEFAULT.toml` for the
-arithmetic.
+kurtosis of the scores, which reads their *shape* where accuracy and spread read
+their size. Negative means bimodal, which is what a discriminating listener
+produces and which floors at -2; sustained positive alongside accuracy at 0.5 is
+a listener with nothing to say, dumping its magnitude into a few outliers while
+the bulk sits at sigmoid 0.5. See `diagnostics/README.md` for the readings this
+has produced.
 
 Runs on CPU in about a minute. It builds the whole pair because that is what
 `models.builder` exposes, then uses only the comparer.
@@ -83,6 +80,13 @@ def parse_args():
         help="whether the message names the positive concept or an unrelated one",
     )
     parser.add_argument(
+        "--message-form", choices=("dense", "tokens"), default="dense",
+        help="dense gives each concept a random real-valued code, which is the "
+             "easiest signal there is; tokens gives it a one-hot symbol "
+             "sequence through the receiver's own embedding, which is the "
+             "shape and the entropy a real message actually has",
+    )
+    parser.add_argument(
         "--distractors", choices=("clustered", "varied"), default="clustered",
         help="clustered leaves one bit for the message; varied leaves the "
              "positives as the only repeated concept, which is the shortcut",
@@ -98,8 +102,8 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_comparer(config_path):
-    """The real module, built the way `train.py` builds it."""
+def build_receiver(config_path):
+    """The real modules, built the way `train.py` builds them."""
     config = parse_config.get_config(config_path)
     config["cuda"] = False
 
@@ -114,7 +118,7 @@ def build_comparer(config_path):
         dataset = _Dataset()
 
     pair = models.builder.build_models({"train": _Loader()}, config)["pair"]
-    return config, pair.receiver.comparer.train()
+    return config, pair.receiver.train()
 
 
 def widths(comparer, config):
@@ -134,7 +138,8 @@ def widths(comparer, config):
 
 def main():
     args = parse_args()
-    config, comparer = build_comparer(args.config)
+    config, receiver = build_receiver(args.config)
+    comparer = receiver.comparer
 
     d_ref, d_msg, msg_len = widths(comparer, config)
     batch = config["data"]["batch_size"]
@@ -142,11 +147,17 @@ def main():
     lr = args.lr if args.lr is not None else config["optimiser"]["lr"]
     has_kurtosis = hasattr(comparer, "decision_kurtosis")
 
+    # +4 for PAD, SOS, EOS and UNK, matching `models.builder`.
+    vocabulary = config["sender_language_model"]["vocabulary"] + 4
+    vocabulary_note = (
+        f" over {vocabulary} symbols" if args.message_form == "tokens" else ""
+    )
+
     print(f"{os.path.basename(args.config)}")
     print(f"  comparer    : {type(comparer).__name__}")
     print(f"  referents   : (batch {batch}, n_obj {n_obj}, d_ref {d_ref})")
     print(f"  message     : (batch {batch}, len {msg_len}, d_msg {d_msg})"
-          f"  [{args.message}]")
+          f"  [{args.message}, {args.message_form}{vocabulary_note}]")
     print(f"  distractors : {args.distractors}")
     print(f"  concepts {args.concepts}, noise {args.noise}, lr {lr}, "
           f"{args.steps} steps\n")
@@ -157,7 +168,26 @@ def main():
     # This is the easiest protocol there is: already converged, noise-free, and
     # the same every time the concept comes up.
     prototypes = torch.randn(args.concepts, d_ref)
-    codes = torch.randn(args.concepts, msg_len, d_msg)
+
+    if args.message_form == "tokens":
+        # What the speaker actually emits: `message_length` one-hot rows over
+        #     the vocabulary, which `Receiver.forward` turns into embeddings
+        #     with `messages @ token_embedding.weight`. Sampled once per
+        #     concept and then fixed, so this is still a converged protocol --
+        #     the only thing taken away from the dense case is the width and
+        #     the entropy of the signal carrying it.
+        #
+        # Distinctness is asserted rather than assumed. With 24 symbols over 10
+        #     positions a collision is vanishingly unlikely, but a collision
+        #     would make the task unsolvable rather than hard, and this script
+        #     exists to distinguish those two.
+        tokens = torch.randint(vocabulary, (args.concepts, msg_len))
+        assert len({tuple(row.tolist()) for row in tokens}) == args.concepts, (
+            "two concepts drew the same message"
+        )
+        codes = torch.nn.functional.one_hot(tokens, vocabulary).float()
+    else:
+        codes = torch.randn(args.concepts, msg_len, d_msg)
 
     def make_batch():
         positive = torch.randint(args.concepts, (batch,))
@@ -188,18 +218,28 @@ def main():
         )
         return referents, codes[said], y
 
-    optimiser = torch.optim.AdamW(comparer.parameters(), lr=lr)
+    # The token embedding learns in the real run and is the first thing the
+    #     message meets, so it learns here too. Excluded in the dense case,
+    #     where nothing routes through it.
+    learners = [comparer]
+    if args.message_form == "tokens":
+        learners.append(receiver.token_embedding)
+
+    parameters = [p for module in learners for p in module.parameters()]
+    optimiser = torch.optim.AdamW(parameters, lr=lr)
     criterion = torch.nn.BCEWithLogitsLoss()
 
     best_acc = 0.0
     for step in range(args.steps + 1):
         referents, message, y = make_batch()
+        if args.message_form == "tokens":
+            message = message @ receiver.token_embedding.weight
         scores = comparer(referents, message)
         loss = criterion(scores, y)
 
         optimiser.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(comparer.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(parameters, 1.0)
         optimiser.step()
 
         with torch.no_grad():

@@ -120,22 +120,24 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # counterpart is rung 9's comparer, at 5,015,553, which the
         # cross-attention comparer meets at 1.05x.
         #
-        # The odd digit is `log_score_scale`, one 0-d parameter, and it is now
-        # `BilinearGRUComparer`'s alone: the cross-attention comparer gave up
-        # both that and `decision.bias` when its readout became a batch norm at
-        # a fixed gain, so its count is two lower than it was. The earlier
-        # movements were 640, when `referent_layer_norm` gave up a `gamma` and a
-        # `beta` at `d_model = 320`, and another 320 when `referent_adapter`
-        # gave up its bias -- without which `LN(W(cx)) = LN(W(x))` does not hold
-        # and the score is not exactly free of the vision model's scale.
+        # The odd digit is `log_score_scale`, one 0-d parameter, and it is
+        # `BilinearGRUComparer`'s alone: the cross-attention comparer gave it up
+        # when the readout was rewritten and did not get it back. It did get
+        # `decision.bias` back, so its count has moved -2 and then +1 across the
+        # two rewrites and now stands one below where it was before either. The
+        # earlier movements were 640, when `referent_layer_norm` gave up a
+        # `gamma` and a `beta` at `d_model = 320`, and another 320 when
+        # `referent_adapter` gave up its bias -- without which
+        # `LN(W(cx)) = LN(W(x))` does not hold and the score is not exactly free
+        # of the vision model's scale.
         #
         # The cross-attention rows below are stale by considerably more than
-        # those two, and were before the readout changed: measured against the
-        # current tree both rung 11 and rung 12 build a comparer of 5,357,348,
-        # where this table claims 5,272,606. That gap is 84,744 and none of it
-        # is the readout. These counts are the capacity-matching argument the
-        # whole ladder rests on, so they want re-deriving deliberately rather
-        # than being edited to match whatever builds today.
+        # any of that, and were before the readout was touched at all: measured
+        # against the current tree both rung 11 and rung 12 build a comparer of
+        # 5,357,349, where this table claims 5,272,606. That gap is 84,743 and
+        # none of it is the readout. These counts are the capacity-matching
+        # argument the whole ladder rests on, so they want re-deriving
+        # deliberately rather than being edited to match whatever builds today.
         ("01_shapeworld_baseline.toml", "receiver.comparer", 5_212_161),
         # ShapeWorld: the Transformer arm it is compared against. The speaker's
         # language model is the autoregressive decoder, four blocks at message
