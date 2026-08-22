@@ -855,9 +855,10 @@ class SenderTransformerLM(nn.Module):
         #     all: the cross-attention below is bit-identical under swapping the
         #     two keys.
         #
-        # Added after the norm, zero-initialised, and not scale-pinned; the name
-        #     must keep "embedding" in it or `gradboard` will start decaying it.
-        #     See docs/architecture.md for all four.
+        # Added after the norm, initialised as an antipodal pair at the
+        #     normed prototype's own scale, and not otherwise scale-pinned; the
+        #     name must keep "embedding" in it or `gradboard` will start decaying
+        #     it. See docs/architecture.md for all four.
         self.polarity_embedding = nn.Parameter(
             torch.zeros(2, self.d_model)
         )
@@ -1335,8 +1336,11 @@ class SenderTransformerLM(nn.Module):
         self.query_layer_norm.reset_parameters()
         self.referent_layer_norm.reset_parameters()
         self.latent_layer_norm.reset_parameters()
-        # Zero, not a draw: this rung opens at the untagged speaker's behaviour.
-        nn.init.zeros_(self.polarity_embedding)
+        positive_tag = torch.randn_like(self.polarity_embedding[0])
+        with torch.no_grad():
+            self.polarity_embedding.copy_(
+                torch.stack([positive_tag, -positive_tag])
+            )
         self.cross_attention.reset_parameters()
 
         if self.bidirectional:
