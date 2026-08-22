@@ -204,20 +204,27 @@ logit_scale_lr = 2e-3
 # opens as an antipodal draw at `referent_layer_norm`'s own scale, so there is
 # no distance to cover and that argument is retired.
 #
-# What is left is the direction the tag has to move *in*. It opens louder than
-# any run has settled at -- separation `2 * sqrt(d_model)`, against the 0.16 to
-# 0.79 the zero-init runs reached -- so the rate now buys the descent rather
-# than the climb, and it still wants to be a key of its own for the reason
-# above: `log_logit_scale` lives on both speakers, and retuning the tag through
-# it would move the GRU baseline's channel and with it the comparison the
-# ablation exists to make.
+# What is left is a rate the tag can still move at, in whichever direction the
+# loss wants. It opens at `2 * sqrt(d_model)`, which on rung 8's 320-wide
+# speaker is 35.8, against the 13.2 that rung 10 -- the one rung on this ladder
+# that learns -- reached from a zero init by epoch 29. So the opening is a
+# factor of 2.7 high rather than the order of magnitude it might look, and
+# whether what follows is a descent or a further climb is an open question this
+# key does not decide.
+#
+# It still wants to be a key of its own for the reason above:
+# `log_logit_scale` lives on both speakers, and retuning the tag through it
+# would move the GRU baseline's channel and with it the comparison the ablation
+# exists to make.
 #
 # There is no arithmetic here, because there is no target to compute one
 # against. How large a tag the cross-attention wants is set by whatever scale
 # `referent_layer_norm` hands it, which is a property of the trained backbone.
-# `polarity_separation` in metrics.csv is the readout, and it now answers a
-# different question than it used to: not whether the tag ever left zero, but
-# where the loss pulls it down to and whether it settles at all.
+# `polarity_separation` in metrics.csv is the readout. Read it against rung 10's
+# trace rather than against zero: 0.098 at epoch 0, crossing 1.0 at epoch 4,
+# 6.1 by epoch 7, 13.2 by 29, with `train_acc` leaving chance in the same epoch
+# the tag crosses 1.0 and plateauing when it does. That lockstep is why the
+# init changed.
 #
 # Applies only to `SenderTransformerLM`; `build_models` skips it for a GRU
 # speaker, which is told its polarities apart by `init_h`.

@@ -259,10 +259,17 @@ averaging *is* pooling with uniform weights.
 alike and cannot separate them, so the distance between the rows is the only part
 of the tag the cross-attention can act on. Opens at `2 * sqrt(d_model)`: the tag
 is an antipodal draw at the scale of the layer-normed prototype it is added to,
-so the column reads as how far the loss pulls the tag *down* from a start louder
-than any run has settled at, rather than — as under the old zero init — whether
-the tag was ever used at all. Zero-init runs reached 0.16 to 0.79 over thirty
-epochs, which is the band to compare a descent against. NaN for `SenderGRULM`, which is
+which on a 320-wide speaker is 35.8, where under the old zero init the column
+opened at 0 and the question was whether the tag was ever used at all.
+
+The trace to read it against is rung 10's, the one rung that both builds this
+speaker and learns: 0.098 at epoch 0, crossing 1.0 at epoch 4, 6.1 by epoch 7
+and 13.19 by epoch 29, with `train_acc` leaving chance in the same epoch the tag
+crosses 1.0 and plateauing when it does. So a learning run wants a tag of order
+10, and the antipodal init opens a factor of 2.7 above that rather than the
+order of magnitude the dead rungs suggest. Do **not** use rungs 11 and 12's 0.16
+to 0.79 as the reference: those runs never learned, so that is where a dead run
+leaves the tag. NaN for `SenderGRULM`, which is
 handed the distinction by `init_h` and has nothing to learn.
 
 It is a *parameter* norm rather than a per-batch quantity, so it does not depend

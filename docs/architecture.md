@@ -229,9 +229,20 @@ Design details, each load-bearing:
   bounded by `lr * steps` before the cross-attention could read it at all, and
   the climb sat in exactly the bootstrapping window where the GRU speaker has
   its polarities free — the same shape of bottleneck the logit scale turned out
-  to have. The zero-init runs left zero rather than sticking at it, reaching
-  0.16 to 0.79 over thirty epochs, so the traverse was a delay rather than a
-  trap.
+  to have.
+
+  Rung 10 is what makes that concrete, being the one rung on this ladder that
+  both builds this speaker and learns. Its tag went 0.098 → 13.19 from a zero
+  init, and `train_acc` moved with it rather than after it: the tag crosses 1.0
+  at epoch 4 and accuracy leaves chance in the same epoch, both plateau together
+  around epoch 15. Seven epochs of a thirty-epoch run were spent climbing.
+
+  Read the opening against that 13.19 and not against zero. At rung 8's 320-wide
+  speaker the antipodal draw opens at `2 * sqrt(320)` = 35.8, so it starts a
+  factor of 2.7 above where a learning run settled — an overshoot, but a mild
+  one. The 0.16 to 0.79 that rungs 11 and 12 reached is not the comparison: those
+  runs never learned, so it is where a dead run leaves the tag rather than where
+  the loss puts it.
 - **Scaled by what it is added to, not pinned to a number.** `randn_like` is at
   per-element unit variance, which is exactly what `referent_layer_norm` emits
   when it is reset, so the tag opens at the scale of the prototype it marks with
