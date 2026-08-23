@@ -614,10 +614,37 @@ A thin wrapper over broccoli's `ViT`. The patch-grid geometry is derived from th
 image size rather than configured:
 
 ```
-pooling_kernel_size   = largest even number ≤ (max_side / 32) × 4
-pooling_kernel_stride = kernel_size / 2
-pooling_padding       = stride
+pooling_kernel_size   = largest even number ≤ (max_side / 32) × 3
+pooling_kernel_stride = kernel_size
+pooling_padding       = enough to cover the image, split symmetrically
 ```
+
+That is 6px patches on an 11×11 grid at ShapeWorld's 64px, and 20px patches on a
+12×12 grid at CUB's 224px.
+
+**The tiling does not overlap, and used to.** The old rule ran stride at half the
+kernel with a matching pad, which put both datasets on a 17×17 grid of 289
+tokens. Because `pooling_type` is `"concat"` the tokenizer is a space-to-depth,
+so at stride = kernel it is an exact tiling and every pixel still reaches the
+transformer exactly once — the overlap was duplicating each pixel four times
+rather than adding information. What it bought was a locality prior and a finer
+positional grid; what it cost was 289 tokens against 121.
+
+On an A100 at 640 images of 64px, fwd+bwd in bf16 and compiled, that is 303ms
+against 118ms, where the `ResNet18SmallInput` these backbones are compared
+against runs in 81ms. The ViT was 3.75× the baseline's wall clock and is now
+1.46×. `scripts/vit_geometry_sweep.py` is the harness and can re-derive it.
+
+Stride appears in no weight shape, so ShapeWorld's parameter count is unmoved at
+10,319,266, or 92% of ResNet18's — which matters, because the fairness claim the
+ablation rests on is stated in parameters. CUB's does move, since a 20px patch is
+1,200 values against a 28px one's 2,352 and above `d_model` that difference is
+carried by `ResizeAndPadPatches`. It moves the right way: 101% of ResNet18 where
+the old geometry was 113%.
+
+The padding is what makes the tiling cover the image. Without it the final
+partial patch is silently cropped, which is a strip of the image the model cannot
+see.
 
 `image_classes` is `d_model`, so what broccoli calls the logits is this
 backbone's output *embedding*. It is left unnormalised — `SequencePool` into a

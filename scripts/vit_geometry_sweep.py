@@ -208,9 +208,10 @@ def main():
         "--geometries",
         type=parse_geometry,
         nargs="+",
-        default=[(8, 4, 4), (4, 4, 0), (6, 6, 1), (8, 8, 0)],
+        default=[(6, 6, 1), (4, 4, 0), (8, 8, 0), (8, 4, 4)],
         help="kernel,stride,padding triples. The default set is for 64px; "
-             "the first is the geometry the rungs currently run.",
+             "the first is the geometry the rungs currently run, and the "
+             "last is the overlapping one they ran before it.",
     )
     parser.add_argument(
         "--include-resnet",

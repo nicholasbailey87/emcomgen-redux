@@ -3,27 +3,33 @@
 name = "DEFAULT" # experiment name - should be the same as file name
 resume = true
 cuda = true
-# `torch.compile` on the agent pair, applied in `train.py` after the checkpoint
-# restore so a resume still key-matches. On because the ablation rungs were
-# leaving throughput on the floor: a ShapeWorld ViT epoch is ~18.2 PFLOPs
-# (20,000 games x 20 examples x 2 agents, 22.7 GFLOPs each fwd+bwd) and was
-# taking 22 minutes, i.e. ~14 TFLOP/s, against the ~35 TFLOP/s per GPU the
-# ImageNet ViT in `vit-representation-learning` sustains on the same hardware --
-# where `torch.compile` is on. A CPU profile of `ViT2` puts `aten::mul` at 22%
-# of self time over 1,373 calls, which is the elementwise traffic compile exists
-# to fuse.
+# `torch.compile` on the sender's and receiver's feature models, applied in
+# `train.py` after the checkpoint restore. On because the ablation rungs were
+# leaving throughput on the floor: measured on an A100 at 640 images of 64px,
+# fwd+bwd, the `ViT2` backbone runs 968ms eager against 303ms compiled -- 18.5
+# TFLOP/s against 59.2 -- and `ResNet18SmallInput` 170ms against 81ms. Both
+# sides gain, so the comparison between them does not quietly shift.
 #
-# Expect graph breaks rather than one graph: the autoregressive decode loop in
-# `SenderTransformerLM`/`SenderGRULM`, the Gumbel sampling, and the per-batch
-# `.cpu()` calls in the training loop all force them. The win is real but is
-# unlikely to be the full 2.5x.
+# This used to compile the `Pair` and that did nothing at all. `Pair` has no
+# `forward`; it is a container so the two agents share an optimiser and a
+# checkpoint. `torch.compile(pair)` therefore wrapped a method nothing calls,
+# and the training loop's `pair.sender(...)` and `pair.receiver(...)` went
+# through `OptimizedModule.__getattr__` to `_orig_mod`, i.e. to the uncompiled
+# submodules. A profile of rung 13 confirms it: no `triton_*` kernel anywhere,
+# no Dynamo output at all, and `aten::mul` at 30% of device time with the
+# GEMMs under 10%. See `train.py --profile-steps`.
 #
-# One consequence, and the reason this is set here rather than per rung. A
-# compiled module prefixes every `state_dict` key with `_orig_mod.`, so the
-# `final_model.pt` a compiled rung writes does not key-match one from an
-# uncompiled rung. `probe_shape.py` fails loudly on the mismatch rather than
-# silently loading nothing, but the files are still incompatible: flipping this
-# means re-running a whole comparison, not half of one.
+# The feature models only. The language models decode autoregressively and would
+# break into graphs at every step; the comparers are small. The backbones are
+# ~90% of a ViT rung and have no data-dependent control flow.
+#
+# One consequence, and the reason this is set here rather than per rung.
+# `Module.compile()` compiles in place and leaves `state_dict` keys alone, where
+# the old `torch.compile(pair)` prefixed every key with `_orig_mod.`. So a
+# checkpoint written from here on key-matches neither an old compiled rung nor
+# an old uncompiled one. `probe_shape.py` fails loudly on a mismatch rather than
+# silently loading nothing, but the files are still incompatible: this is a
+# re-run of a whole comparison, not half of one.
 compile = true
 use_lang = true
 copy_receiver = false

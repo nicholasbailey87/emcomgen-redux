@@ -811,9 +811,40 @@ if __name__ == "__main__":
                 f"run directory aside."
             )
 
+    # Compile the two feature models, which is where the time goes, rather than
+    #     the `Pair`. `Pair` has no `forward` -- it is a container that exists so
+    #     the two agents share an optimiser and a checkpoint -- so
+    #     `torch.compile(pair)` wrapped a method nothing calls. The training loop
+    #     calls `pair.sender(...)` and `pair.receiver(...)`, and
+    #     `OptimizedModule.__getattr__` forwards those to `_orig_mod`, handing
+    #     back the *uncompiled* submodules. Compile was inert from the day it
+    #     went in: a profile of rung 13 shows no `triton_*` kernel anywhere, no
+    #     Dynamo output, and `aten::mul` at 30% of device time.
+    #
+    # It was worth having. On an A100 at 640 images of 64px, fwd+bwd, the ViT
+    #     backbone runs 968ms eager against 303ms compiled -- 18.5 TFLOP/s
+    #     against 59.2 -- and `ResNet18SmallInput` 170ms against 81ms, so the
+    #     baseline rungs gain too and the comparison between them does not
+    #     quietly shift.
+    #
+    # `Module.compile()` rather than rebinding to `torch.compile(module)`,
+    #     because it compiles in place and leaves `state_dict` keys alone. The
+    #     old call did not: it prefixed every key with `_orig_mod.`, which is
+    #     why checkpoints from a compiled rung and an uncompiled one do not
+    #     key-match. Checkpoints written from here on carry plain keys, so they
+    #     match neither -- this is a re-run, not a resume.
+    #
+    # The feature models only. `SenderTransformerLM` and `SenderGRULM` decode
+    #     autoregressively and would break into graphs at every step, and the
+    #     comparers are small; the backbones are ~90% of a ViT rung and have no
+    #     data-dependent control flow at all. Compiling the module rather than
+    #     its `forward` also means `Sender.speak` -- the eval-pass entry point
+    #     -- gets the compiled backbone too, since it goes through the same
+    #     submodule.
     if config['compile']:
-        print("Compiling model...")
-        model_config['pair'] = torch.compile(model_config['pair'])
+        print("Compiling the sender and receiver feature models...")
+        model_config['pair'].sender.feat_model.compile()
+        model_config['pair'].receiver.feature_model.compile()
 
     run_args = (
         model_config['pair'],
