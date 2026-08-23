@@ -302,6 +302,227 @@ def mean_winning_probability(
     return scaled.softmax(-1).max(-1).values.mean()
 
 
+class ExampleContrast(nn.Module):
+    """
+    Let the referents inform each other before they are pooled.
+
+    Both prototypers work *within* a polarity -- `AveragePrototyper` means each
+        half and `AttentionPrototyper` scores each half with its own
+        `SequencePool` -- so nothing in the speaker compares a positive example
+        against a negative one. The only place the two halves meet is the
+        language model's cross-attention, by which point each is already a
+        single vector. This stage runs one self-attention over all `2n`
+        referents at once and adds the result back as a residual, so a positive
+        example can be represented by what distinguishes it from the negatives
+        rather than by what it is in isolation.
+
+    The prototyper downstream is unchanged and still receives
+        `(batch, 2 * n_positive, referent embedding size)`; either of them
+        composes with this.
+
+    **What it costs, and why the diagnostics below exist.** The message becomes
+        a function of the sampled negatives rather than of the concept alone, so
+        the same concept with different distractors gets a different message --
+        which is exactly what `topsim` penalises. This stage can therefore raise
+        accuracy and lower compositionality at the same time, and
+        `contrast_share` and `contrast_within_share` are what make that a
+        reportable result rather than an inference from accuracy.
+
+    **It opens at exactly the identity.** `contrast_gate` starts at zero, so a
+        run with this stage on is bit-identical to one without it at step 0 and
+        the arm is an ablation of one thing. The gate is a plain scalar and
+        deliberately *not* log-parameterised: `exp` cannot reach zero, and zero
+        is the whole point. Its sign is free because the branch's direction is
+        arbitrary -- a negative gate is the same branch pointing the other way.
+
+    **Why a gate rather than a zero-initialised projection.** Both open at the
+        identity, but a zero matrix does not travel. AdamW moves a parameter by
+        about `lr` per step whatever the gradient's size, so `out_projection`
+        would have to climb from 0 to its own init scale `1/sqrt(d_model)` one
+        `lr`-step at a time: 560 steps of perfectly sign-consistent gradient at
+        `lr` 1e-4, which on birds' 62 optimiser steps an epoch is nine epochs of
+        flat, optimistically. That is the arithmetic that made the logit scale's
+        traverse the bottleneck for those runs. A lone scalar at
+        `contrast_gate_lr` (2e-3) reaches 0.1 in fifty steps instead, and
+        `out_projection` starts at a properly scaled random direction, so the
+        branch contributes at a sensible magnitude the moment the gate opens
+        rather than having to build one first.
+
+        A gate at zero is a starting point and not a weld:
+        `dL/dgate = <branch, dL/dout>` is non-zero there. Compare
+        `AttentionDiscriminator.mix_floor`, which is in the parameterisation for
+        the same reason a `clamp` would not do.
+
+    **Its own projection and norm**, as the listener's slots have and for the
+        same reason. `bias=False` on the adapter is load-bearing: the norm can
+        only divide the backbone's scale out exactly if what reaches it is
+        homogeneous in the input, which is what makes the *rate* of departure
+        comparable across backbones. The residual is over the raw referents, so
+        what the prototyper pools is still at the backbone's own scale -- the
+        same "score from normalised selves, weight over raw selves" split
+        `AttentionPrototyper` makes.
+
+    **Polarity reaches this stage through the tag and nowhere else.** With
+        `rotary_embedding=None` the attention is permutation-equivariant, so it
+        cannot read the first-half-positive ordering that the rest of the
+        speaker relies on; `label_embedding` is the only route, and it is
+        indexed from the labels rather than from the halving index.
+        `tests/test_contrast.py` pins both halves of that.
+    """
+
+    def __init__(
+        self,
+        referent_embedding_size,
+        **kwargs
+    ):
+        """
+        Args:
+            referent_embedding_size: width of the backbone's output, which is
+                also the width this returns -- the residual fixes it.
+        """
+        super().__init__()
+        self.referent_embedding_size = referent_embedding_size
+        self.d_model = kwargs["d_model"]
+        self.heads = kwargs["heads"]
+        self.self_attention_dropout = kwargs["self_attention_dropout"]
+
+        self.adapter = nn.Linear(
+            self.referent_embedding_size,
+            self.d_model,
+            bias=False
+        )
+        self.layer_norm = nn.LayerNorm(
+            self.d_model, elementwise_affine=False, eps=LAYER_NORM_EPS
+        )
+
+        # Row 0 positive, row 1 negative, as on `SenderTransformerLM`. The name
+        #     must keep "embedding" in it or `gradboard` will start decaying it,
+        #     and it is deliberately not `polarity_embedding`:
+        #     `SPLIT_LEARNING_RATES` selects by suffix, so any name ending that
+        #     way -- `contrast_polarity_embedding` included -- would silently
+        #     join the speaker tag's parameter group. See docs/architecture.md.
+        self.label_embedding = nn.Parameter(torch.zeros(2, self.d_model))
+
+        # Every broccoli argument is set explicitly, including the inert ones.
+        #     See docs/broccoli.md.
+        self.attention = broccoli.transformer.MHAttention(
+            self.d_model,
+            self.heads,
+            dropout=self.self_attention_dropout,
+            causal=False, # Every referent may inform every other one
+            seq_len=None, # Only read when causal; the set has no fixed size
+            linear_module=nn.Linear,
+            bos_tokens=0,
+            knocking_heads=False,
+            # No positional information, and load-bearing: referent order *is*
+            #     the label vector here, so a stage able to index its own
+            #     sequence axis could read polarity without the tag. `causal` is
+            #     off for the same reason it is off in the listener's stacks.
+            #     `positional_heads` is inert and pinned at the repo-wide 1.0.
+            rotary_embedding=None,
+            positional_heads=1.0,
+            source_size=None,
+            scaling="d",
+        )
+
+        self.out_projection = nn.Linear(self.d_model, self.referent_embedding_size)
+
+        self.contrast_gate = nn.Parameter(torch.zeros(()))
+
+        # Per-batch diagnostics, read by `train.py` for metrics.csv. See
+        #     docs/measurement.md.
+        self.contrast_share = float("nan")
+        self.contrast_within_share = float("nan")
+
+        self.reset_parameters()
+
+    def forward(self, samples, labels):
+        """
+        Args:
+            samples: (batch, n_examples, referent embedding size), the first
+                half positive and the rest negative
+            labels: (batch, n_examples), 1.0 positive and 0.0 negative. Read
+                rather than assumed: `Sender.get_prototypes` has already
+                checked that the two agree, so indexing the tag from the labels
+                costs nothing and stays honest if that layout ever changes.
+
+        Returns:
+            A tensor of `samples`' shape, each referent informed by the rest of
+                the set.
+        """
+        tag = self.label_embedding[(1.0 - labels).long()]
+        adapted = self.layer_norm(self.adapter(samples)) + tag
+
+        branch = self.out_projection(self.attention(adapted, adapted, adapted))
+        contribution = self.contrast_gate * branch
+
+        self._record_diagnostics(samples, branch, contribution)
+
+        return samples + contribution
+
+    @torch.no_grad()
+    def _record_diagnostics(self, samples, branch, contribution):
+        """
+        Volume and shape, kept apart: `contrast_share` measures the gated
+            contribution and `contrast_within_share` the branch before the gate,
+            so a branch that is well-shaped but still quiet reads as exactly
+            that rather than as noise. Undefined shares report 0.0 rather than
+            NaN, since a NaN here would be indistinguishable from the stage
+            being switched off.
+        """
+        referent_scale = samples.pow(2).mean().sqrt()
+        self.contrast_share = (
+            contribution.pow(2).mean().sqrt() / referent_scale
+        ).item() if referent_scale > 0.0 else 0.0
+
+        # The part of the branch that is example-level, i.e. what neither a
+        #     vector common to the whole game nor a per-polarity offset could
+        #     have produced. A common vector shifts both prototypes equally and
+        #     the language model's `LayerNorm` eats most of it; a per-polarity
+        #     offset is a learned "I am positive", which `AttentionPrototyper`'s
+        #     two separate pools already provide. Only the remainder is contrast
+        #     *between examples*, which is the whole point of the stage. The
+        #     polarity means are nested inside the grand mean, so the two sums of
+        #     squares are orthogonal and this is a share of the total.
+        n_positive = branch.size(1) // 2
+        positive, negative = branch[:, :n_positive], branch[:, n_positive:]
+        polarity_means = torch.cat(
+            (
+                positive.mean(1, keepdim=True).expand_as(positive),
+                negative.mean(1, keepdim=True).expand_as(negative),
+            ),
+            dim=1,
+        )
+        total = branch.pow(2).sum()
+        within = (branch - polarity_means).pow(2).sum()
+        self.contrast_within_share = (
+            (within / total).item() if total > 0.0 else 0.0
+        )
+
+    def reset_parameters(self):
+        self.adapter.reset_parameters()
+        # A no-op while the norm is parameter-free, and listed anyway so that
+        #     turning `elementwise_affine` back on cannot leave a reset speaker
+        #     holding trained gains. See docs/anecdotes.md.
+        self.layer_norm.reset_parameters()
+        self.attention.reset_parameters()
+        self.out_projection.reset_parameters()
+
+        with torch.no_grad():
+            # Antipodal at unit per-element variance, which is what the
+            #     parameter-free norm above emits: the tag opens at the scale of
+            #     what it is added to, with no constant to choose and none to
+            #     keep in step with `d_model`. `SenderTransformerLM`'s
+            #     `polarity_embedding` is initialised the same way and
+            #     docs/architecture.md carries the argument.
+            positive_tag = torch.randn(self.d_model)
+            self.label_embedding.copy_(
+                torch.stack([positive_tag, -positive_tag])
+            )
+
+            self.contrast_gate.zero_()
+
+
 class AveragePrototyper(nn.Module):
 
     def __init__(self, *args, **kwargs):
@@ -1283,6 +1504,7 @@ class Sender(nn.Module):
         feat_model: nn.Module,
         prototyper: nn.Module,
         language_model: nn.Module,
+        contrast: Optional[nn.Module] = None,
         vision_dropout: float= 0.5,
         prototype_dropout: float= 0.5
     ):
@@ -1294,6 +1516,9 @@ class Sender(nn.Module):
             feat_model: produces embeddings from referents
             prototyper: builds prototypes from positive and negative examples
             language_model: builds utterances from prototypes
+            contrast: optional `ExampleContrast`, run between the two so the
+                referents inform each other before they are pooled. `None`
+                leaves the speaker exactly as it was.
             vision_dropout: dropout on per-image embeddings, before pooling
             prototype_dropout: dropout on the pooled concept vectors. This is
                 where jayelm's single `--dropout` sits; the pre-pool mask is the
@@ -1303,6 +1528,7 @@ class Sender(nn.Module):
         self.feat_model = feat_model
         self.feat_size = feat_model.final_feat_dim
         self.prototyper = prototyper
+        self.contrast = contrast
         self.language_model = language_model
         self.vision_dropout = nn.Dropout(p=vision_dropout)
         self.prototype_dropout = nn.Dropout(p=prototype_dropout)
@@ -1334,7 +1560,17 @@ class Sender(nn.Module):
                 "the first n / 2 should be positive and the rest negative."
             )
 
-        prototypes = self.prototyper(self.embed_images(samples), targets)
+        embedded = self.embed_images(samples)
+
+        # Between the vision model and the pooling, so the contrast sees the
+        #     same `vision_dropout` mask the prototyper does and what it returns
+        #     is pooled exactly as the backbone's own output would have been.
+        #     Guarded on `None` rather than by `hasattr`, matching
+        #     `reset_parameters` below.
+        if self.contrast is not None:
+            embedded = self.contrast(embedded, targets)
+
+        prototypes = self.prototyper(embedded, targets)
 
         # Applied per prototype rather than to the concatenation, which is the
         #     same thing: dropout masks each element independently.
@@ -1380,4 +1616,9 @@ class Sender(nn.Module):
         #     docs/anecdotes.md.
         self.feat_model.reset_parameters()
         self.prototyper.reset_parameters()
+        # The `None` guard is the architecture, not a `hasattr` fallback: a
+        #     speaker built without the contrast stage has nothing to reset,
+        #     where a speaker built with one that had been renamed must raise.
+        if self.contrast is not None:
+            self.contrast.reset_parameters()
         self.language_model.reset_parameters()

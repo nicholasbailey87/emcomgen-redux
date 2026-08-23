@@ -408,6 +408,18 @@ def run(
             if training and speaking:
                 language_model = pair.sender.language_model
                 prototyper = pair.sender.prototyper
+
+                # The contrast stage is optional, so its three columns are NaN
+                # rather than absent when it is off -- the header has to be the
+                # same shape either way or a run cannot be resumed against a
+                # config that toggles it, and a NaN says "not applicable" where
+                # a zero would read as a stage that never opened. Guarded on
+                # `None` rather than by `hasattr`, matching `Sender`.
+                # `contrast_gate` is a parameter and so does not depend on the
+                # pass; the other two are per-batch.
+                contrast = pair.sender.contrast
+                unmeasured = float("nan")
+
                 stats.update(
                     realised_survival=language_model.realised_survival,
                     logit_spread=language_model.logit_spread,
@@ -416,6 +428,18 @@ def run(
                     pool_effective_examples=prototyper.pool_effective_examples,
                     pool_score_norm=prototyper.pool_score_norm,
                     polarity_separation=language_model.polarity_separation,
+                    contrast_gate=(
+                        contrast.contrast_gate.item()
+                        if contrast is not None else unmeasured
+                    ),
+                    contrast_share=(
+                        contrast.contrast_share
+                        if contrast is not None else unmeasured
+                    ),
+                    contrast_within_share=(
+                        contrast.contrast_within_share
+                        if contrast is not None else unmeasured
+                    ),
                     batch_size=batch_size,
                 )
 

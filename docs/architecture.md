@@ -105,6 +105,97 @@ still initialised the way broccoli intends. The override lives here rather than
 in broccoli because `SequencePoolClassificationHead` uses the same module and
 wants the usual init.
 
+## `ExampleContrast` — the optional contrast stage
+
+Both prototypers pool **within** a polarity: `AveragePrototyper` means each half
+and `AttentionPrototyper` scores each half with its own `SequencePool`. So
+nothing in the speaker compares a positive example against a negative one. The
+two halves first meet in the language model's cross-attention, by which point
+each is already a single vector, and whatever distinguished a positive example
+from the distractors it was shown beside has been averaged away.
+
+`[sender] contrast = true` inserts one self-attention over all `2n` referents
+between the vision model and the prototyper, and adds its output back as a
+residual:
+
+```
+x    = vision(samples)                        (batch, 2n, feat), post vision_dropout
+h    = LayerNorm(adapter(x)) + label_embedding[labels]
+out  = x + contrast_gate * out_projection(MHSA(h, h, h))
+```
+
+The prototyper downstream is unchanged and still receives the backbone's own
+width, which is what lets either of them compose with this.
+
+A boolean rather than a class name, because there is one of these or there is
+nothing: it is a residual on the referents, so "off" is the absence of a module
+rather than a different one. `Sender` holds it as `None` and guards on that,
+never `hasattr` — see `reset_parameters has no hasattr guard` above.
+
+### It opens at the identity, and the gate is what makes that survivable
+
+`contrast_gate` is a scalar opening at exactly zero, so a speaker with the stage
+on is bit-identical to one without it at step 0 and the arm is an ablation of one
+thing. That is the same recipe as `AttentionPrototyper`'s zero-initialised
+scoring weights and `AttentionDiscriminator`'s mix floor: open at the simple
+behaviour, depart only if it pays.
+
+A zero-initialised `out_projection` would open at the identity too, and it would
+not move. AdamW steps a parameter by about `lr` per step whatever the gradient's
+size, so the matrix would have to climb from 0 to its own init scale
+`1/sqrt(d_model)` = 0.056 one `lr`-step at a time: 560 steps of perfectly
+sign-consistent gradient at `lr` 1e-4, which on birds' 62 optimiser steps an
+epoch is nine epochs of flat, optimistically. That is the arithmetic that made
+the logit scale's traverse the bottleneck for those runs, and it is why
+`contrast_gate_lr` exists at 2e-3 — fifty steps to 0.1 instead. A scalar is also
+better shaped than a matrix here: `out_projection` starts at a properly scaled
+random direction, so the branch contributes at a sensible magnitude the moment
+the gate opens rather than having to build one first.
+
+The gate is **not** log-parameterised, unlike `log_logit_scale`,
+`log_score_scale` and `log_mix_scale`. Those are volumes that must stay strictly
+positive and open at 1.0; this one must be able to be exactly zero, which `exp`
+cannot reach. Its sign is free because the branch's own direction is arbitrary —
+a negative gate is the same branch pointing the other way. And zero is a
+starting point rather than a floor: `dL/dgate = <branch, dL/dout>` is non-zero
+there, which is the same distinction that keeps the discriminator's mix floor in
+the parameterisation and out of a `clamp`.
+
+### Polarity arrives through the tag and nowhere else
+
+`rotary_embedding=None`, so this attention is permutation-equivariant and cannot
+read the first-half-positive ordering that the rest of the speaker relies on.
+`label_embedding` — row 0 positive, row 1 negative, indexed from the labels
+rather than from the halving index — is the only route by which polarity reaches
+the stage, and it is initialised antipodally at unit per-element variance for the
+reasons set out under [the polarity embedding](#the-polarity-embedding): it is
+added after a parameter-free norm, so that is the scale of what it marks.
+
+The name is deliberate twice over. It keeps `"embedding"` in it, which is what
+holds it out of `gradboard`'s weight decay; and it is *not* `polarity_embedding`,
+because `SPLIT_LEARNING_RATES` selects by name suffix and anything ending that
+way — `contrast_polarity_embedding` included — would silently join the speaker
+tag's parameter group.
+
+The adapter carries `bias=False` for the same reason
+`ReceiverCrossAttentionLM.referent_adapter` does: the norm can only divide the
+backbone's scale out exactly if what reaches it is homogeneous in the input,
+which is what makes the *rate* of departure comparable across arms. The residual
+is over the raw `x`, so what the prototyper pools is still at the backbone's own
+scale — the same "score from normalised selves, weight over raw selves" split
+`AttentionPrototyper` makes.
+
+### What it costs
+
+The message becomes a function of the sampled negatives rather than of the
+concept alone: the same concept with different distractors gets a different
+message. `topsim` measures exactly that correspondence, so this stage can raise
+accuracy and lower compositionality at once, and that outcome is a finding rather
+than a bug. `contrast_share` and `contrast_within_share` are what make it
+reportable — see [measurement.md](measurement.md). Note also that
+`AveragePrototyper` stops being a parameter-free control in this arm: its pooling
+is still a mean, but what it means is no longer the backbone's output.
+
 ## Speaker language models
 
 ### `SenderGRULM`

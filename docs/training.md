@@ -98,7 +98,13 @@ If the suffix matches nothing, `split_out_parameter` raises rather than silently
 doing nothing — the error names the config key so a rename says which knob went
 quiet.
 
-### The three overrides, and why each is gated the way it is
+### The overrides, and why each is gated the way it is
+
+Note this subsection still names `BilinearGRUComparer` and
+`TransformerCrossAttentionComparer` below, which the listener split replaced with
+`BilinearDiscriminator` and `AttentionDiscriminator`, and it predates
+`mix_logit_lr` and `mix_scale_lr`. The reasoning holds; the names want a pass
+with the rung overhaul.
 
 **`logit_scale_lr`** — ungated. `log_logit_scale` exists on both speakers.
 
@@ -129,6 +135,20 @@ parameter, not an argument against it. The knob is gated rather than deleted
 because `BilinearGRUComparer` keeps its scale and is the ablation's baseline
 listener — and gating on the class that *has* the parameter leaves
 `split_out_parameter`'s error on duty where it can still fire.
+
+**`contrast_gate_lr`** — gated on `pair.sender.contrast is not None`, i.e. on the
+stage existing at all, since `[sender] contrast` is a boolean and "off" is the
+absence of the module rather than a different one.
+
+This is the override the arm depends on rather than merely benefits from.
+`contrast_gate` opens at exactly zero — that is what makes the contrast arm an
+ablation of one thing — and a lone scalar cannot travel further than `lr × steps`.
+At the base 1e-4 and birds' 62 steps an epoch it would take sixteen epochs of
+perfectly sign-consistent gradient to reach 0.1, so a run at the base rate would
+report "contrast does nothing" and be measuring the learning rate. At 2e-3 it is
+fifty steps. See [architecture.md](architecture.md) for why the gate is a scalar
+rather than a zero-initialised projection, which has the same problem and no way
+out of it.
 
 ## Gradient clipping
 

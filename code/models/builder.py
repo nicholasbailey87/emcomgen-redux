@@ -106,6 +106,16 @@ SPLIT_LEARNING_RATES = (
             pair.receiver.discriminator, receiver.AttentionDiscriminator
         ),
     ),
+    (
+        # The one scalar standing between the contrast stage and the identity.
+        #     It opens at exactly zero, and at the base rate a lone scalar
+        #     cannot travel further than `lr * steps` -- 62 steps an epoch on
+        #     birds -- so without this the stage would stay shut for most of a
+        #     run. See `sender.ExampleContrast`.
+        "contrast_gate_lr",
+        "contrast_gate",
+        lambda pair: pair.sender.contrast is not None,
+    ),
 )
 
 
@@ -135,10 +145,25 @@ def build_models(dataloaders, config):
         **config['sender_language_model']
     )
 
+    # A boolean rather than a class name, because there is one of these or there
+    #     is nothing: the stage is a residual on the referents, so "off" is
+    #     `None` and not another module. `False` builds the speaker that existed
+    #     before it, and `True` opens at that speaker exactly -- see
+    #     `sender.ExampleContrast`.
+    sender_contrast = (
+        sender.ExampleContrast(
+            sender_feature_model.final_feat_dim,
+            **config['sender_contrast']
+        )
+        if config['sender']['contrast']
+        else None
+    )
+
     sender_ = sender_class(
         feat_model = sender_feature_model,
         prototyper = sender_prototyper,
         language_model = sender_language_model,
+        contrast = sender_contrast,
         vision_dropout = config['sender']['vision_dropout'],
         prototype_dropout = config['sender']['prototype_dropout']
     )

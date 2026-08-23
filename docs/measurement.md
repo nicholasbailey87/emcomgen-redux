@@ -276,6 +276,58 @@ It is a *parameter* norm rather than a per-batch quantity, so it does not depend
 on the pass at all; it is recorded inside the decode so every column stays on the
 same clock.
 
+**`contrast_gate`, `contrast_share`, `contrast_within_share`** — the speaker's
+optional contrast stage, and all three are NaN when `[sender] contrast` is false.
+NaN rather than absent because the header has to be the same shape either way or
+a run cannot be resumed against a config that toggles the flag; and NaN rather
+than zero because "the stage is not there" and "the stage is there and has not
+opened" are different rows.
+
+They divide the way the speaker's other columns do, into volume and shape:
+
+| | did it open | how loud | is it doing anything new |
+|---|---|---|---|
+| `ExampleContrast` | `contrast_gate` | `contrast_share` | `contrast_within_share` |
+
+**`contrast_gate`** is the scalar standing between the branch and the identity.
+It opens at exactly zero and takes `contrast_gate_lr`, so like `logit_scale` it
+cannot travel further than `lr × steps` — 0.1 an epoch at 2e-3 and birds' 62
+steps, against 0.0062 at the base rate, which is why it has its own key. A
+parameter rather than a per-batch quantity, so it does not depend on the pass.
+
+**`contrast_share`** is `rms(gate × branch) / rms(referents)`: what fraction of
+the referent going into the prototyper is contrast. This is the reportable
+column, and it is what the gate alone cannot give — the gate's meaning depends on
+whatever magnitude `out_projection` happens to emit, and that is neither
+configured nor pinned.
+
+**`contrast_within_share`** is the part of the branch that is example-level.
+Within each game the branch decomposes by nested means into a single vector
+common to all `2n`, a per-polarity offset, and a per-example remainder; the three
+are orthogonal, so their sums of squares add to the total, and this is the
+remainder's share. It is measured on the branch *before* the gate, so a
+well-shaped branch that is still quiet reads as well-shaped — the only time
+anyone needs the column is early, when the gate is small.
+
+It exists because a large `contrast_share` is not evidence of contrast. A vector
+common to the whole game shifts both prototypes equally and the language model's
+`LayerNorm` eats most of it; a per-polarity offset is a learned "I am positive",
+which `AttentionPrototyper`'s two separate pools already provide. Only the
+remainder is contrast *between examples*, which is the entire reason the stage is
+there.
+
+| `contrast_share` | `contrast_within_share` | reading |
+|---|---|---|
+| ~0 | any | the gate never opened; the arm is its parent rung and says nothing about contrast |
+| large | ~0 | a null result dressed up as a departure — the branch is a polarity tag or a global shift |
+| small | large | the stage found something example-level but is not being trusted with the decision |
+| large | large | the referents are genuinely being read against each other, which is the arm working |
+
+Read all three against `topsim` and not against `acc`. The stage makes messages
+distractor-dependent by construction, so a run where the share is large and
+`topsim` has fallen is the cost showing up, not a bug — see
+[architecture.md](architecture.md).
+
 ### Listener, on the train pass only
 
 The listener is two slots — a language model and a discriminator — and it is the

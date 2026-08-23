@@ -324,6 +324,26 @@ mix_logit_lr = 2e-3
 # `train_decision_spread` are what watch it.
 mix_scale_lr = 2e-3
 
+# `ExampleContrast.contrast_gate`, the one scalar between the speaker's contrast
+# stage and the identity. Inert unless `[sender] contrast` is true.
+#
+# It opens at exactly zero, which is what makes the stage an ablation of one
+# thing, and the same arithmetic as `logit_scale_lr` above then decides whether
+# it ever leaves: AdamW moves a parameter by about `lr` per step whatever the
+# gradient's size, so a lone scalar cannot travel further than `lr * steps`. At
+# the base 1e-4 and birds' 62 steps an epoch that is 0.0062 an epoch, so a gate
+# reaching even 0.1 -- a tenth of the branch, at the scale `out_projection`
+# emits -- would take sixteen epochs of perfectly sign-consistent gradient. At
+# 2e-3 it takes fifty steps.
+#
+# This is also why the gate is a scalar rather than a zero-initialised
+# projection matrix. The matrix opens at the identity too, but it would have to
+# climb from zero to its own init scale one `lr`-step at a time before it
+# contributed anything at all, and `out_projection` starting at a properly
+# scaled random direction means the branch is at a sensible magnitude the moment
+# the gate opens. See `ExampleContrast`'s docstring.
+contrast_gate_lr = 2e-3
+
 [scheduler]
 epochs = 100
 warm_up_epochs = 0
@@ -342,6 +362,39 @@ prototype_dropout = 0.1 # On the pooled concept vectors, before the language
                         # `--dropout` sits (at 0.1 in their runs).
 prototyper = "AveragePrototyper"
 language_model = "SenderGRULM"
+# Run one self-attention over all the referents, positive and negative together,
+# and add it back as a residual before they are pooled. Both prototypers work
+# *within* a polarity, so without this nothing in the speaker ever compares a
+# positive example against a negative one -- the two halves first meet as single
+# vectors in the language model's cross-attention.
+#
+# A boolean rather than a class name because there is one of these or there is
+# nothing: it is a residual on the referents, so "off" is the absence of a
+# module and not a different one. It opens at exactly the identity either way;
+# see `contrast_gate_lr` above and `models/sender.py`.
+#
+# Off by default, and note what it costs when it is on: the message becomes a
+# function of the sampled negatives rather than of the concept alone, so the
+# same concept with different distractors gets a different message. That is what
+# `topsim` penalises, so this can raise accuracy and lower compositionality at
+# once -- `train_contrast_share` and `train_contrast_within_share` are what make
+# that readable. See docs/measurement.md.
+contrast = false
+
+[sender_contrast]
+# Inert unless `[sender] contrast` is true.
+#
+# One `MHAttention` and no feedforward: this stage exists to let the referents
+# see each other, and the prototyper and language model downstream are where the
+# depth already is. `d_model` 320 with 5 heads is head_dim 64, the head
+# dimension every attention module in the repo now has -- see
+# `[sender_feature_model]` for where that number comes from. The referents
+# arrive at whatever width the backbone emits (512 for ResNet18, 640 for a
+# concat-pooled ViT2), and this stage owns the projection between the two, as
+# the listener's slots own theirs.
+d_model = 320
+heads = 5 # head_dim 64
+self_attention_dropout = 0.0
 
 [sender_feature_model]
 # The one ViT specification, used by every rung that swaps a CNN for a

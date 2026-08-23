@@ -47,10 +47,13 @@ def _name(config_file):
     return "cub" if int(config_file[:2]) % 2 == 0 else "shapeworld"
 
 
-def _pair(config_file):
+def _build(config_file, contrast=False):
     """A real rung, through `models.builder`, with a stub dataloader."""
     config = parse_config.get_config(os.path.join(CONFIG_DIR, config_file))
     config["cuda"] = False
+    # No rung sets this yet; the tests at the foot of this file build the arm
+    #     the same way a rung that did would.
+    config["sender"]["contrast"] = contrast
 
     class _Dataset:
         n_feats = _feats(config_file)
@@ -59,7 +62,11 @@ def _pair(config_file):
     class _Loader:
         dataset = _Dataset()
 
-    built = models.builder.build_models({"train": _Loader()}, config)
+    return config, models.builder.build_models({"train": _Loader()}, config)
+
+
+def _pair(config_file, contrast=False):
+    config, built = _build(config_file, contrast=contrast)
     return config, built["pair"]
 
 
@@ -258,3 +265,129 @@ def test_every_rope_attention_takes_all_its_heads(config_file):
         checked += 1
 
     assert checked, "no rotary attention in this pair; the test proved nothing"
+
+
+# --------------------------------------------------------------------------
+# The speaker's optional contrast stage. No rung sets `[sender] contrast` yet,
+#     so these build the arm a rung would get: one per dataset for each of the
+#     two sender backbones the ladder uses.
+# --------------------------------------------------------------------------
+
+CONTRAST_RUNGS = (
+    "01_shapeworld_baseline.toml",
+    "02_birds_baseline.toml",
+    "11_shapeworld_receiver_cross_attention.toml",
+    "12_birds_receiver_cross_attention.toml",
+)
+
+
+@pytest.mark.parametrize("config_file", CONTRAST_RUNGS)
+def test_a_rung_with_contrast_still_speaks(config_file):
+    """
+    The stage returns the backbone's own width, so everything downstream should
+    be unable to tell it ran. This is the same end-to-end pass as
+    `test_every_rung_speaks_a_message_of_the_configured_length`, with the flag
+    on.
+    """
+    config, pair = _pair(config_file, contrast=True)
+    pair.eval()
+
+    batch, n_obj = 2, config["data"]["n_examples"]
+    samples = torch.randn(batch, n_obj, *_feats(config_file))
+    targets = torch.zeros(batch, n_obj)
+    targets[:, : n_obj // 2] = 1.0
+
+    with torch.no_grad():
+        messages, _ = pair.sender(samples, targets)
+
+    assert messages.shape == (
+        batch,
+        config["sender_language_model"]["message_length"],
+        config["sender_language_model"]["vocabulary"] + 4,
+    )
+
+
+@pytest.mark.parametrize("config_file", CONTRAST_RUNGS)
+def test_contrast_opens_at_the_parent_rung(config_file):
+    """
+    Bit-identical messages with the flag on and off, from the same seed. This is
+    what makes the contrast arm an ablation of one thing, and it holds only
+    because `contrast_gate` opens at zero *and* because the stage is built after
+    the speaker's other modules, so it does not shift their draws from the RNG.
+
+    Greedy at eval, so there is no channel noise to average over.
+    """
+    batch = 2
+    messages = {}
+
+    for contrast in (False, True):
+        torch.manual_seed(0)
+        config, pair = _pair(config_file, contrast=contrast)
+        pair.eval()
+
+        n_obj = config["data"]["n_examples"]
+        generator = torch.Generator().manual_seed(1)
+        samples = torch.randn(
+            batch, n_obj, *_feats(config_file), generator=generator
+        )
+        targets = torch.zeros(batch, n_obj)
+        targets[:, : n_obj // 2] = 1.0
+
+        with torch.no_grad():
+            messages[contrast], _ = pair.sender(samples, targets)
+
+    assert torch.equal(messages[False], messages[True])
+
+
+@pytest.mark.parametrize(
+    "config_file,expected",
+    [
+        # ResNet18 and Conv4 both hand over 512; the ViT2 rungs hand over their
+        #     own `d_model`, 320. The rest is the stage's own width, so the two
+        #     numbers are `2 * feat * 320 + 4 * 320^2 + 320 + 2 * 320 + feat + 1`
+        #     -- the two projections, the attention's four, its `out_norm` gain,
+        #     the label tag and the gate.
+        ("01_shapeworld_baseline.toml", 738_753),
+        ("02_birds_baseline.toml", 738_753),
+        ("11_shapeworld_receiver_cross_attention.toml", 615_681),
+        ("12_birds_receiver_cross_attention.toml", 615_681),
+    ],
+)
+def test_contrast_costs_what_it_says(config_file, expected):
+    """
+    Exact, for the reason every other count in this file is exact: the stage is
+    one attention and two projections, and a second block or a feedforward
+    creeping in would otherwise show up only as a slower run.
+    """
+    _, plain = _pair(config_file)
+    _, contrasted = _pair(config_file, contrast=True)
+
+    assert plain.sender.contrast is None
+    assert _count(contrasted.sender.contrast) == expected
+    assert (
+        _count(contrasted.sender) - _count(plain.sender) == expected
+    ), "the stage changed something outside itself"
+
+
+@pytest.mark.parametrize("config_file", CONTRAST_RUNGS)
+def test_the_gate_gets_its_own_learning_rate(config_file):
+    """
+    The gate is a lone scalar opening at zero, and at the base rate it cannot
+    travel further than `lr * steps` -- sixteen epochs of sign-consistent
+    gradient to reach 0.1 on birds. `contrast_gate_lr` is what makes the arm
+    answerable inside a run, so a group that quietly stopped being created would
+    look like "the contrast stage does nothing".
+    """
+    config, built = _build(config_file, contrast=True)
+
+    gate = built["pair"].sender.contrast.contrast_gate
+    expected_lr = config["optimiser"]["contrast_gate_lr"]
+
+    group = [
+        g for g in built["optimiser"].param_groups
+        if any(p is gate for p in g["params"])
+    ]
+
+    assert len(group) == 1
+    assert group[0]["lr"] == expected_lr
+    assert group[0]["lr"] != config["optimiser"]["lr"]

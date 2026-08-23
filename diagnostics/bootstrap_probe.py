@@ -198,16 +198,30 @@ def parse_args():
              "space that still has to be found; large is an encoder with a "
              "long way to go",
     )
+    parser.add_argument(
+        "--contrast", action="store_true",
+        help="turn on the speaker's contrast stage, whatever the config says: "
+             "one self-attention over all the referents, added back as a "
+             "residual before they are pooled. Watch `gate` leave zero and "
+             "`within` against `share` -- a large share with a small within is "
+             "a branch emitting one vector per polarity, which the prototyper "
+             "could already do",
+    )
     parser.add_argument("--every", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args()
 
 
 def build(config_path, concepts, noise, lr=None, vision="frozen",
-          input_dim=128, nuisance_dim=32, nuisance=1.0):
+          input_dim=128, nuisance_dim=32, nuisance=1.0, contrast=False):
     """The real pair and the real optimiser, with the vision models swapped."""
     config = parse_config.get_config(config_path)
     config["cuda"] = False
+
+    # An override rather than a second config: the point is the same rung with
+    #     and without the stage, and no rung sets it yet.
+    if contrast:
+        config["sender"]["contrast"] = True
 
     name = "cub" if "cub" in config["data"]["dataset"] else "shapeworld"
 
@@ -300,6 +314,7 @@ def main():
     config, pair, optimiser = build(
         args.config, args.concepts, args.noise, args.lr,
         args.vision, args.input_dim, args.nuisance_dim, args.nuisance,
+        args.contrast,
     )
     pair.train()
 
@@ -335,6 +350,18 @@ def main():
     has_kurtosis = hasattr(discriminator, "decision_kurtosis")
     has_mix = hasattr(discriminator, "mix_alpha")
 
+    # The speaker's contrast stage, when it is on. `gate` is the scalar between
+    #     the branch and the identity, `share` how much of the referent going
+    #     into the prototyper is contrast, and `within` how much of the branch
+    #     is example-level rather than one vector for a game or a polarity. The
+    #     first says whether it opened, the second how loud it is and the third
+    #     whether it is doing anything the prototyper could not already do.
+    contrast = pair.sender.contrast
+    if contrast is not None:
+        print(f"  contrast : on, {contrast.heads} heads at "
+              f"{contrast.d_model} wide over "
+              f"{n_obj} referents; gate opens at 0\n")
+
     if args.cross_beta != 1.0:
         scaled = scale_message_crossing(pair, args.cross_beta)
         print(f"  crossing : referent-stack cross-attention x{args.cross_beta} "
@@ -347,6 +374,8 @@ def main():
         f"{'polarity':>9} {'lgt_scale':>10} {'survival':>9} {'spread':>7}"
         + (f" {'kurtosis':>9}" if has_kurtosis else "")
         + (f" {'mix_a':>7} {'agree':>7}" if has_mix else "")
+        + (f" {'gate':>7} {'share':>7} {'within':>7}"
+           if contrast is not None else "")
     )
     print(header)
     print("-" * len(header))
@@ -408,6 +437,12 @@ def main():
             line += (
                 f" {discriminator.mix_alpha:7.3f}"
                 f" {discriminator.path_agreement:+7.3f}"
+            )
+        if contrast is not None:
+            line += (
+                f" {contrast.contrast_gate.item():+7.3f}"
+                f" {contrast.contrast_share:7.3f}"
+                f" {contrast.contrast_within_share:7.3f}"
             )
         print(line)
 
