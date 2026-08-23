@@ -62,7 +62,7 @@ import parse_config     # noqa: E402
 DEFAULT_CONFIG = os.path.join(
     os.path.dirname(__file__),
     "..", "experiments", "ablation", "configs",
-    "12_birds_receiver_cross_attention.toml",
+    "16_birds_receiver_cross_attention_lm.toml",
 )
 
 # Only used to construct the vision models, which this probe never calls.

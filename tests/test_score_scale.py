@@ -114,7 +114,7 @@ def _comparer(referent_dim=REFERENT_DIM, **overrides):
     )
 
 
-CROSS_RUNG = "11_shapeworld_receiver_cross_attention.toml"
+CROSS_RUNG = "15_shapeworld_receiver_cross_attention_lm.toml"
 
 # The keys that belong to the discriminator's table rather than the language
 #     model's, so `_cross_comparer` can take one flat kwargs like the builder it
@@ -886,14 +886,14 @@ def test_an_attention_rung_asks_for_the_mix_rates_and_not_the_scale_one():
         to nothing, and no *new* group appears that nothing asked for.
 
     The elevated groups cannot be told apart by their rate -- DEFAULT.toml opens
-        all five of these keys at 2e-3 -- so the assertion is on which
-        parameters are in them. This rung's `SenderTransformerLM` earns the
-        speaker's two, and the listener contributes the mixing weight and the
-        mix's volume but no `log_score_scale`: it builds its bilinear path
-        without one, because `standardise` would divide it out.
+        all six of these keys at 2e-3 -- so the assertion is on which parameters
+        are in them. This rung's `SenderTransformerLM` earns the speaker's two
+        and its contrast stage a third; the listener contributes the mixing
+        weight and the mix's volume but no `log_score_scale`, because it builds
+        its bilinear path without one and `standardise` would divide it out.
     """
     config, pair, optimiser = _pair_and_optimiser(
-        "12_birds_receiver_cross_attention.toml"
+        "16_birds_receiver_cross_attention_lm.toml"
     )
     wanted = config["optimiser"]["score_scale_lr"]
     assert wanted != config["optimiser"]["lr"]
@@ -915,6 +915,7 @@ def test_an_attention_rung_asks_for_the_mix_rates_and_not_the_scale_one():
     assert elevated == {
         "sender.language_model.log_logit_scale",
         "sender.language_model.polarity_embedding",
+        "sender.contrast.contrast_gate",
         "receiver.discriminator.mix_logit",
         "receiver.discriminator.log_mix_scale",
     }

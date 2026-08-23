@@ -5,9 +5,12 @@
 # the dataset directory, which brings in the stock-stem ResNet18 for both
 # agents -- ShapeWorld's default is `ResNet18SmallInput`, the same network with
 # SimCLR's 3x3 stride-1 stem, which is right for 64px images and wrong for CUB's
-# 224px ones -- plus batch_size
-# 16, n_examples 10, vocabulary 20, message_length 10, no silhouetting and
-# accumulator_steps 1.
+# 224px ones -- plus batch_size 16, n_examples 10, vocabulary 20, message_length
+# 10, no silhouetting and accumulator_steps 1.
+#
+# Note the `[birds.*]` family is merged *under* this file rather than over it,
+# so a rung that names a vision model here wins. That is what lets rungs 4, 6, 8,
+# 10 and 12 swap in a ViT without the birds defaults putting ResNet18 back.
 #
 # Nothing else is overridden. The optimiser and channel settings this file used
 # to restate -- `weight_decay` 0.0 and the `init_energy` / `uniform_weight` pair

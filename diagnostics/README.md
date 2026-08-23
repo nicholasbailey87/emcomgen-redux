@@ -1,5 +1,9 @@
 # diagnostics
 
+> **Rung numbers below are the old ladder.** It was renumbered when it grew to
+> sixteen rungs; old 10 is new 12 and old 12 is new 16, both now carrying the
+> speaker's contrast stage. See `experiments/README.md` for the full table.
+
 Scripts for taking one suspect at a time out of a stuck run.
 
 A pair that sits at chance offers no evidence about *why*. The speaker may have
@@ -39,7 +43,7 @@ python diagnostics/comparer_probe.py --message scrambled --distractors varied
 ```
 
 `--config` takes any rung. It defaults to
-`experiments/ablation/configs/12_birds_receiver_cross_attention.toml`, and works
+`experiments/ablation/configs/16_birds_receiver_cross_attention_lm.toml`, and works
 on the bilinear baseline too. `--lr` defaults to the config's own
 `optimiser.lr`, so the timings below are the rate the real run learns at, not a
 convenience setting. About a minute on CPU for a thousand steps.
@@ -136,7 +140,7 @@ the loop cheap enough to run on a laptop.
 
 ```
 python diagnostics/bootstrap_probe.py                        # rung 12
-python diagnostics/bootstrap_probe.py --config experiments/ablation/configs/10_birds_receiver_vit.toml
+python diagnostics/bootstrap_probe.py --config experiments/ablation/configs/12_birds_receiver_vit.toml
 ```
 
 It prints `metrics.csv`'s own columns under their own names, because a working

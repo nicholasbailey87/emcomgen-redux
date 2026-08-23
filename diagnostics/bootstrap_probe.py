@@ -1,6 +1,10 @@
 """
 Run the whole pair, with the vision models taken out of the argument.
 
+Rung numbers in this docstring are the *old* ladder, which was renumbered when it
+grew to sixteen rungs -- see `experiments/README.md`. Old 10 is new 12 and old 12
+is new 16, both with the contrast stage added.
+
 `comparer_probe.py` asks whether the listener's comparer can use a message. It
 can -- on rung 12 it reaches 100% in under two hundred steps at the config's own
 learning rate, on dense codes and on discrete symbol sequences alike, and it is
@@ -153,7 +157,7 @@ def parse_args():
     )
     parser.add_argument(
         "--config",
-        default=os.path.join(CONFIG_DIR, "12_birds_receiver_cross_attention.toml"),
+        default=os.path.join(CONFIG_DIR, "16_birds_receiver_cross_attention_lm.toml"),
     )
     parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument(

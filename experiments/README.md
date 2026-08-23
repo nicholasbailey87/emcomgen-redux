@@ -14,6 +14,33 @@ experiments/<experiment>/logs/            # SLURM stdout/stderr, created at laun
 
 The rest of this file is a reference for the columns of that `metrics.csv`.
 
+## The ablation ladder was renumbered
+
+`experiments/ablation/configs/` now holds **sixteen** rungs rather than fourteen,
+and the numbers moved. Anything written before that -- run directories, the
+`docs/` prose, `diagnostics/README.md`, commit messages -- names rungs in the old
+scheme, so read those numbers against this table rather than against the current
+configs:
+
+| old | new | correspondence |
+| --- | --- | --- |
+| 1, 2 baseline | 1, 2 | exact |
+| 3, 4 attention prototyper on a CNN sender | — | gone; the prototyper now sits on top of the ViT |
+| 5, 6 sender ViT + prototyper | 5, 6 | exact |
+| 7, 8 sender Transformer LM | 9, 10 | plus the contrast stage |
+| 9, 10 receiver ViT | 11, 12 | plus the contrast stage |
+| 11, 12 cross-attention listener | 15, 16 | plus the contrast stage, and the listener's two halves now enter separately at 13 and 15 |
+| 13, 14 parallel speaker arm | — | gone; flip `[sender_language_model] bidirectional` on the top rung to get it back |
+
+Two changes are structural rather than a renaming. The sender's vision swap now
+comes **before** the prototyper, so an attention pooler is never measured over
+CNN features; and the listener's message encoder and discriminator, which one
+`comparer` key used to change together, now enter as two rungs so that "attention
+helps" can be attributed to one of them. Rungs 7 and 8 are new entirely.
+
+A consequence worth stating plainly: no rung above 6 is configuration-identical
+to any old rung, so old and new trajectories should not be pooled.
+
 ## Shape of the file
 
 One row per epoch, appended by `code/train.py` as the epoch finishes (the header

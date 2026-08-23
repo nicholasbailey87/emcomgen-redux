@@ -1,8 +1,23 @@
 # Rung 1: ShapeWorld with the GRU/CNN baseline agents.
 #
 # ResNet18SmallInput on both agents, AveragePrototyper, SenderGRULM,
-# BilinearGRUComparer. This is the reference point every other rung is measured
-# against, and it now overrides nothing:
+# ReceiverGRULM, BilinearDiscriminator. This is the reference point every other
+# rung is measured against, and it overrides nothing.
+#
+# The ladder, in order. Each rung is the one below it plus exactly one change:
+#
+#    1,  2  baseline: ResNet18 vision, AveragePrototyper, SenderGRULM,
+#           ReceiverGRULM, BilinearDiscriminator
+#    3,  4  + sender ViT2
+#    5,  6  + AttentionPrototyper
+#    7,  8  + ExampleContrast upstream of the prototyper
+#    9, 10  + SenderTransformerLM
+#   11, 12  + receiver ViT2
+#   13, 14  + AttentionDiscriminator
+#   15, 16  + ReceiverCrossAttentionLM
+#
+# Odd numbers are ShapeWorld, even are CUB. The two datasets never mix: rung 4
+# is rung 2 plus one change, not rung 3 plus a dataset.
 #
 # The backbone was Conv4 (113,088 parameters) until the rebalancing. Conv4 is
 # both tiny and, at 1024, oddly wide -- that width is a flattened 64x4x4 feature
@@ -15,17 +30,17 @@
 # whose known failure mode is the speaker naming colours.
 #
 # This rung is therefore not comparable to any ShapeWorld run recorded before
-# the change -- the whole ladder rebaselines, not just the arms that moved. the settings it used to carry --
-# `weight_decay` 0.0, `silhouette_p_receiver` 0.1, and the `init_energy` /
-# `uniform_weight` pair -- are DEFAULT.toml's own values, so every rung inherits
-# them rather than rung 1 alone.
+# the change -- the whole ladder rebaselines, not just the arms that moved. The
+# settings it used to carry -- `weight_decay` 0.0, `silhouette_p_receiver` 0.1,
+# and the `init_energy` / `uniform_weight` pair -- are DEFAULT.toml's own values,
+# so every rung inherits them rather than rung 1 alone.
 #
 # `epochs` and `repeats` below are not overrides: scripts/job_utils.py reads
 # both straight out of this file rather than out of the merged config, so every
 # config in an experiment must carry them even when they restate the default.
 # `[slurm]` is read from the *first* config in the folder only (sorted by
 # filename), so the block here governs the whole array -- it is sized for the
-# heaviest job in the set, which is rung 12.
+# heaviest job in the set, which is rung 16.
 
 name = "ablation"
 

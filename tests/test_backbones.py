@@ -378,7 +378,7 @@ def test_attention_listener_reset_covers_its_adapters():
         512,
         # Rung 11 rather than DEFAULT, whose `[receiver_language_model] d_model`
         # is the GRU's 1024 and does not divide its `heads = 5`.
-        config_file=rung("11_shapeworld_receiver_cross_attention.toml"),
+        config_file=rung("15_shapeworld_receiver_cross_attention_lm.toml"),
         # So neither stack is a single block, where a depth ramp would be inert.
         language_model_overrides=dict(layers=2),
         discriminator_overrides=dict(layers=2),

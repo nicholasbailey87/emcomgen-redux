@@ -55,7 +55,7 @@ from _bootstrap import build_listener, rung
 REFERENT_DIM = 320
 BATCH, N_OBJ = 32, 20
 
-CROSS_RUNG = "11_shapeworld_receiver_cross_attention.toml"
+CROSS_RUNG = "15_shapeworld_receiver_cross_attention_lm.toml"
 
 
 def _listener(language_model_overrides=None, discriminator_overrides=None):

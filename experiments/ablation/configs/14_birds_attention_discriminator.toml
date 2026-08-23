@@ -1,0 +1,124 @@
+# Rung 14: rung 12 with the attention discriminator.
+#
+# The listener is two slots -- a language model that encodes the message and a
+# discriminator that scores the candidates from it -- and this rung replaces the
+# second one only. The message is still read by `ReceiverGRULM`; what changes is
+# how the encoding is compared against the candidate set.
+#
+# That split is the point of the pair of rungs. One `comparer` key used to
+# choose both halves at once, so a rung swapping the bilinear comparer for the
+# cross-attention one changed the message encoder *and* the comparison, and
+# "attention helps" could not be attributed to either. 13 moves the comparison
+# and 15 moves the encoder.
+#
+# `AttentionDiscriminator` scores the candidates with a decoder stack that reads
+# the encoded message as memory, mixed with a bilinear score over the same
+# message. The mix opens at the bilinear limit and departs only if attention
+# earns it, because the attention path alone does not bootstrap: under a nuisance
+# level where the bilinear comparison reaches 0.938 it sits at 0.469.
+# `train_mix_alpha` and `train_path_agreement` are the columns that say which
+# happened. See docs/architecture.md.
+#
+# **Read the parameter counts here with care.** `ReceiverGRULM` at DEFAULT's
+# 1024 wide and 2 layers bidirectional is 28,262,400 parameters, against this
+# discriminator's 3,580,487 -- itself inflated by a `memory_adapter` bringing the
+# GRU's 2048-wide output down to 256. So the listener on this rung is dominated
+# by an encoder that rung 15 then replaces with a 2,466,139-parameter one, and
+# the step from 13 to 15 is an architecture change *and* a 26M parameter change.
+# That is not the clean contrast the rest of the ladder is built on. Fixing it
+# means setting the GRU's width against the transformer's deliberately, in
+# `[receiver_language_model]`, and that is a decision about the whole ladder
+# rather than about this rung.
+
+name = "ablation"
+
+[data]
+dataset = "../data/cub"
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+contrast = true
+language_model = "SenderTransformerLM"
+
+[sender_language_model]
+# Both must equal `sender_feature_model.d_model`: `SenderTransformerLM`
+# layer-norms the incoming prototypes at its own `d_model` and separately
+# rejects `token_embedding_size != referent_embedding_size`. That pinning is
+# why rung 3 has to come before this one -- a Transformer speaker on top of a
+# CNN backbone would inherit whatever width the CNN emits.
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+
+# 4 blocks, chosen on parameters rather than on taste. A decoder block costs
+# 1,376,137 parameters at 320 wide with `ff_inner_size = 576`, so against the
+# GRU baseline this speaker measures 0.79x at 3 layers, 1.03x at 4 and 1.27x at
+# 5. Four is the closest this arm gets, and it is close: 5,933,047 against
+# 5,764,923 on ShapeWorld and 5,938,813 against 5,774,073 on CUB.
+#
+# The cost of matching on parameters is not matching on depth. Depth or
+# parameters, not both, and the ladder is built on parameters.
+layers = 4
+
+# `false` selects the autoregressive decoder arm: a learned query array
+# cross-attends the two prototypes into a latent memory, and four decoder blocks
+# then generate the content symbols one at a time, each conditioned on the
+# symbols before it. `true` selects the Perceiver IO arm instead, which emits
+# every symbol in one shot.
+#
+# `false` here, because the GRU baseline at rung 1 is autoregressive too: this
+# rung then moves the language model's architecture and nothing else. `true`
+# would move the generation regime at the same time, and whatever the
+# combination measured could not be attributed to either.
+#
+# The parallel arm is no longer a rung of its own. It used to sit beside the top
+# of the ladder as a fork; to measure it again, copy the topmost rung and flip
+# this key -- and note that a difference then covers depth as well as regime,
+# since the two arms take 5 and 4 blocks to reach comparable size.
+bidirectional = false
+
+[receiver]
+feature_model = "ViT2"
+discriminator = "AttentionDiscriminator"
+
+[receiver_discriminator]
+# Neither listener slot's width is tied to any other width in the run -- each
+# adapts the referents into its own space -- so this is sized to buy depth
+# rather than to match the repo's other transformers. Depth is what matters
+# here: every block is another crossing of the message into the stream the
+# scores are read off, where the bilinear discriminator it replaces has exactly
+# one. Width bought nothing at that margin.
+#
+# So 256 wide with a feedforward inner size of 320, against DEFAULT's 320 / 5
+# heads / 576 for this table. That keeps the repo-wide head dimension of 64 --
+# hence 4 heads rather than 5, since 256 % 4 == 0 where 256 % 5 is not -- and
+# gives up the repo-wide feedforward proportion of 1.73 for 1.25, which is what
+# pays for the extra blocks.
+#
+# This stack reads no `bidirectional` key at all: its sequence axis is the
+# candidate set, whose order is the label vector, so it is unconditionally
+# non-causal and takes no positional embedding. `layers` is a block count and
+# its DeepNorm constants are resolved from it -- `decoder=True`, three sublayers
+# to the block, so alpha 1.732 and beta 0.408 at 3.
+#
+# No `token_embedding_size` here. The width the message arrives at is the
+# language model's `output_size`, which `build_models` passes in, and
+# `memory_adapter` brings it to this `d_model` -- so the two tables' widths need
+# not agree and a key restating one in the other could only be wrong.
+d_model = 256
+heads = 4
+ff_inner_size = 320
+layers = 3
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

@@ -1,0 +1,45 @@
+# Rung 4: rung 2 with a Transformer sender vision model.
+#
+# ViT2 at the shared specification comes to 11,332,626 parameters on CUB's 224px
+# images, against ResNet18's 11,176,512 -- 1.01x. The gap to rung 3's 0.92x is
+# entirely the patch tokeniser, which scales with image size; see there.
+#
+# So parity is approximate rather than tuned -- within 8% on ShapeWorld and 1.4%
+# here, rather than tuned on one dataset and unreachable on the other. That is
+# the trade the rebalancing makes, and it is the right way round: a vision model
+# a few per cent off its counterpart is a far smaller confound than a language
+# model 12.8x off its counterpart, which is what the old per-dataset widths
+# bought.
+#
+# The ViT's shape is not set here. `[sender_feature_model]` and
+# `[receiver_feature_model]` in DEFAULT.toml carry the one specification every
+# rung uses -- 320 wide, 10 layers, feedforward inner 576, 5 heads for a head
+# dimension of 64 -- so a rung that swaps in a ViT only has to name it.
+#
+# That is a change of principle, not just of numbers. The widths used to be
+# picked per dataset to match each one's own baseline backbone, which is
+# defensible for a vision rung on its own but not once `SenderTransformerLM`
+# enters at rung 9: it pins its width to the vision model's, so ShapeWorld's
+# language model inherited 128 and came out 12.8x smaller than the GRU it is
+# compared against. One width for both datasets is what makes rungs 9 and 10
+# comparable.
+
+name = "ablation"
+
+[data]
+dataset = "../data/cub"
+
+[sender]
+feature_model = "ViT2"
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

@@ -1,9 +1,9 @@
 """
-The fourteen ablation rungs, built the way `train.py` builds them.
+The sixteen ablation rungs, built the way `train.py` builds them.
 
-Nothing checked this before, and the cost of that was rung 7. Its speaker came
-out at 533,943 parameters against the GRU baseline's 6,813,499 -- twelve times
-smaller -- because `SenderTransformerLM` pins its width to the vision model's
+Nothing checked this before, and the cost of that was the speaker rung -- 7 in
+the old numbering, 9 in this one. Its speaker came out at 533,943 parameters
+against the GRU baseline's 6,813,499 -- twelve times smaller -- because `SenderTransformerLM` pins its width to the vision model's
 and ShapeWorld's ViT had been sized against Conv4's 113,088. The config was
 valid, every unit test was green, and the run produced numbers. They just were
 not measuring architecture.
@@ -51,8 +51,9 @@ def _build(config_file, contrast=False):
     """A real rung, through `models.builder`, with a stub dataloader."""
     config = parse_config.get_config(os.path.join(CONFIG_DIR, config_file))
     config["cuda"] = False
-    # No rung sets this yet; the tests at the foot of this file build the arm
-    #     the same way a rung that did would.
+    # Forced either way rather than inherited, so a test that builds both arms
+    #     of a rung gets both arms whatever the rung itself says. Rungs 7 and
+    #     above set this to true.
     config["sender"]["contrast"] = contrast
 
     class _Dataset:
@@ -74,9 +75,9 @@ def _count(module):
     return sum(p.numel() for p in module.parameters())
 
 
-def test_there_are_fourteen_rungs():
+def test_there_are_sixteen_rungs():
     """A rung added or renamed without the counts below being revisited."""
-    assert len(RUNGS) == 14
+    assert len(RUNGS) == 16
 
 
 @pytest.mark.parametrize("config_file", RUNGS)
@@ -109,83 +110,69 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
     )
 
 
-# The sizes the ladder is built around. Sender vision, speaker language model,
-# and listener comparer for each dataset's baseline and its fully-Transformer
-# counterpart. See the rung headers for where each number comes from.
+# The sizes the ladder is built around: sender vision, speaker language model,
+# and both listener slots, for each dataset's baseline and for the top of the
+# ladder, which carries every change. See the rung headers for where each number
+# comes from.
+#
+# **Every number here was re-measured when the ladder was rebuilt.** The counts
+# this file used to carry for rungs 11 to 14 had gone stale -- they predated the
+# removal of the absolute position tables and the `ff_inner_size` 554 -> 576
+# alignment -- and had been failing rather than catching anything. Do not read
+# the old figures out of git history as a reference; they describe a tree that
+# no longer exists.
 @pytest.mark.parametrize(
     "config_file,module,expected",
     [
         # ShapeWorld: the CNN/GRU baseline.
         ("01_shapeworld_baseline.toml", "sender.feat_model", 11_168_832),
         ("01_shapeworld_baseline.toml", "sender.language_model", 5_764_923),
-        # The listener is two modules now, so it takes two rows. `receiver.
-        # language_model` is the message encoder and `receiver.discriminator`
-        # the comparison; the pair replaces the single `receiver.comparer` row
-        # this table used to carry.
+        # The listener is two modules: `receiver.language_model` encodes the
+        # message and `receiver.discriminator` scores the candidates from it.
         #
-        # **These are measurements, not a capacity-matching argument, and the
-        # matching they used to record is currently broken.** The old rows had
-        # the bilinear comparer at 5,212,161 against the cross-attention one at
-        # a claimed 5,272,606 -- 1.05x, which was the point of the ladder. What
-        # the split changed is `DEFAULT.toml`'s GRU, now 2 layers bidirectional
-        # for parity with the transformer encoder *at a shared width*. Rungs 1
-        # to 10 inherit that at DEFAULT's 1024 and a 500-wide token embedding,
-        # where the transformer arm states 256 for both, so the baseline
-        # listener is 29.3M against the attention arm's 5.0M rather than 1.05x.
-        #
-        # Nick is overhauling the rungs, and that is where the two widths get
-        # set together. Recorded here rather than left failing so that the next
-        # change to the listener still trips a wire -- and stated in full so
-        # nobody reads these numbers as the matching holding.
-        #
-        # The odd digit on the bilinear rows is `log_score_scale`, one 0-d
-        # parameter, and it is `BilinearDiscriminator`'s alone:
-        # `AttentionDiscriminator` builds its bilinear path without one,
-        # because `standardise` divides any positive scale straight back out.
-        #
-        # The sender rows for rungs 11 to 14 were already stale before this
-        # split and are left alone: they are the speaker's own capacity
-        # argument, and they want re-deriving deliberately rather than being
-        # edited to match whatever builds today.
+        # **These are measurements, not a capacity-matching argument.** The
+        # baseline's GRU encoder is 28.3M against the attention arm's 2.5M at
+        # rung 15, because `DEFAULT.toml`'s GRU is 1024 wide with a 500-wide
+        # token embedding where the transformer arm states 256 for both. The two
+        # listeners are therefore not comparable on size, and rung 13's header
+        # says what that costs the 13 -> 15 step. Setting the two widths together
+        # is a decision about the whole ladder and has not been made.
         ("01_shapeworld_baseline.toml", "receiver.language_model", 28_262_400),
         ("01_shapeworld_baseline.toml", "receiver.discriminator", 1_048_577),
-        # ShapeWorld: the Transformer arm it is compared against. The speaker's
-        # language model is the autoregressive decoder, four blocks at message
-        # length -- see rung 7 for why four rather than five.
-        ("11_shapeworld_receiver_cross_attention.toml", "sender.feat_model", 10_084_940),
-        ("11_shapeworld_receiver_cross_attention.toml", "sender.language_model", 5_848_303),
-        ("11_shapeworld_receiver_cross_attention.toml", "receiver.language_model", 2_466_139),
-        ("11_shapeworld_receiver_cross_attention.toml", "receiver.discriminator", 2_548_295),
+        # ShapeWorld: the top of the ladder. The speaker's language model is the
+        # autoregressive decoder at four blocks -- see rung 9's `layers` for why
+        # four.
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 10_317_986),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 5_933_047),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 2_466_139),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_548_295),
         # CUB: the CNN/GRU baseline.
         ("02_birds_baseline.toml", "sender.feat_model", 11_176_512),
         ("02_birds_baseline.toml", "sender.language_model", 5_774_073),
         ("02_birds_baseline.toml", "receiver.language_model", 28_262_400),
         ("02_birds_baseline.toml", "receiver.discriminator", 1_048_577),
-        # CUB: the Transformer arm it is compared against.
-        ("12_birds_receiver_cross_attention.toml", "sender.feat_model", 12_338_428),
-        ("12_birds_receiver_cross_attention.toml", "sender.language_model", 5_854_069),
-        ("12_birds_receiver_cross_attention.toml", "receiver.language_model", 2_466_139),
-        ("12_birds_receiver_cross_attention.toml", "receiver.discriminator", 2_548_295),
-        # The parallel arm, rungs 13 and 14. Five encoder blocks over the latent
-        # array rather than four decoder blocks over the message, which is a
-        # different speaker at a different size against the same baseline --
-        # 0.965x where the decoder is 1.015x. Pinned here because the pair is
-        # what makes a difference between rungs 11 and 13 readable: if either
-        # moves without the other, the two are no longer answering the same
-        # question.
-        ("13_shapeworld_sender_transformer_lm_latent.toml", "sender.language_model", 5_558_454),
-        ("14_birds_sender_transformer_lm_latent.toml", "sender.language_model", 5_563_260),
-        # And the listener, which is the half that has to be *identical* to 11
-        # and 12 for the contrast to be about emission at all. 13 and 14 are
-        # those rungs with the speaker's `bidirectional` flipped and nothing
-        # else, so these assertions are the ones that would catch the pair
-        # drifting apart.
-        ("13_shapeworld_sender_transformer_lm_latent.toml", "receiver.language_model", 2_466_139),
-        ("13_shapeworld_sender_transformer_lm_latent.toml", "receiver.discriminator", 2_548_295),
-        ("14_birds_sender_transformer_lm_latent.toml", "receiver.language_model", 2_466_139),
-        ("14_birds_sender_transformer_lm_latent.toml", "receiver.discriminator", 2_548_295),
-        ("13_shapeworld_sender_transformer_lm_latent.toml", "sender.feat_model", 10_084_940),
-        ("14_birds_sender_transformer_lm_latent.toml", "sender.feat_model", 12_338_428),
+        # CUB: the top of the ladder. Only the two vision-dependent counts differ
+        # from ShapeWorld's -- the ViT's patch tokeniser scales with image size,
+        # and the speaker's language model carries a longer message.
+        ("16_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 11_332_626),
+        ("16_birds_receiver_cross_attention_lm.toml", "sender.language_model", 5_938_813),
+        ("16_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 2_466_139),
+        ("16_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_548_295),
+        # Rung 13's discriminator, pinned because it is the number that makes the
+        # 13 -> 15 step unclean: 3,580,487 against rung 15's 2,548,295, the gap
+        # being a `memory_adapter` bringing the GRU's 2048-wide output down to
+        # 256 rather than reading a 256-wide message directly.
+        ("13_shapeworld_attention_discriminator.toml", "receiver.discriminator", 3_580_487),
+        ("14_birds_attention_discriminator.toml", "receiver.discriminator", 3_580_487),
+        # The two intermediate vision swaps, so a rung that stopped inheriting
+        # the shared ViT specification shows up here rather than in a run.
+        ("03_shapeworld_sender_vit.toml", "sender.feat_model", 10_317_986),
+        ("04_birds_sender_vit.toml", "sender.feat_model", 11_332_626),
+        # And the prototyper, which is 642 parameters -- one scoring direction
+        # and a bias per polarity, at the ViT's 320 -- where rung 3's is nothing
+        # at all.
+        ("05_shapeworld_attention_prototyper.toml", "sender.prototyper", 642),
+        ("06_birds_attention_prototyper.toml", "sender.prototyper", 642),
     ],
 )
 def test_the_arms_are_the_sizes_they_claim(config_file, module, expected):
@@ -201,13 +188,17 @@ def test_the_arms_are_the_sizes_they_claim(config_file, module, expected):
 @pytest.mark.parametrize(
     "baseline,transformer,tolerance",
     [
-        ("01_shapeworld_baseline.toml", "11_shapeworld_receiver_cross_attention.toml", 0.05),
-        ("02_birds_baseline.toml", "12_birds_receiver_cross_attention.toml", 0.05),
-        # Both Transformer arms are matched to the baseline, not to each other:
-        # the decoder lands at 1.015x and the parallel arm at 0.965x, and no
-        # integer depth puts them at the same place. See rung 13's `layers`.
-        ("01_shapeworld_baseline.toml", "13_shapeworld_sender_transformer_lm_latent.toml", 0.05),
-        ("02_birds_baseline.toml", "14_birds_sender_transformer_lm_latent.toml", 0.05),
+        # Measured at 1.029x on both datasets. The tolerance is 0.05 rather than
+        # something tighter because `layers` is an integer: the neighbouring
+        # depths are 0.79x and 1.27x, so nothing between them is reachable and a
+        # tighter band would only be pinning the arithmetic of one depth.
+        ("01_shapeworld_baseline.toml", "09_shapeworld_sender_transformer_lm.toml", 0.05),
+        ("02_birds_baseline.toml", "10_birds_sender_transformer_lm.toml", 0.05),
+        # The same speaker at the top of the ladder, which nothing above rung 9
+        # is supposed to touch. If these two diverge from the pair above, a
+        # listener rung has reached into the speaker.
+        ("01_shapeworld_baseline.toml", "15_shapeworld_receiver_cross_attention_lm.toml", 0.05),
+        ("02_birds_baseline.toml", "16_birds_receiver_cross_attention_lm.toml", 0.05),
     ],
 )
 def test_the_speakers_language_models_are_matched(baseline, transformer, tolerance):
@@ -227,13 +218,14 @@ def test_the_speakers_language_models_are_matched(baseline, transformer, toleran
     assert abs(ratio - 1.0) < tolerance, f"{ratio:.3f}x"
 
 
-# Both arms: the rotary module is the latent self-attention on one and the
-# decoder's causal self-attention on the other, so neither covers the other.
+# Both agents: the rotary modules are the speaker's decoder self-attention at
+# rung 9 and, on top of that, the listener's two stacks at rung 15, so neither
+# rung covers the other.
 @pytest.mark.parametrize(
     "config_file",
     [
-        "11_shapeworld_receiver_cross_attention.toml",
-        "13_shapeworld_sender_transformer_lm_latent.toml",
+        "09_shapeworld_sender_transformer_lm.toml",
+        "15_shapeworld_receiver_cross_attention_lm.toml",
     ],
 )
 def test_every_rope_attention_takes_all_its_heads(config_file):
@@ -268,16 +260,17 @@ def test_every_rope_attention_takes_all_its_heads(config_file):
 
 
 # --------------------------------------------------------------------------
-# The speaker's optional contrast stage. No rung sets `[sender] contrast` yet,
-#     so these build the arm a rung would get: one per dataset for each of the
-#     two sender backbones the ladder uses.
+# The speaker's contrast stage, forced on and off independently of what a rung
+#     says. Rungs 7 and above set `[sender] contrast` themselves; these build
+#     both arms of each rung below, one per dataset for each of the two sender
+#     backbones the ladder uses.
 # --------------------------------------------------------------------------
 
 CONTRAST_RUNGS = (
     "01_shapeworld_baseline.toml",
     "02_birds_baseline.toml",
-    "11_shapeworld_receiver_cross_attention.toml",
-    "12_birds_receiver_cross_attention.toml",
+    "11_shapeworld_receiver_vit.toml",
+    "12_birds_receiver_vit.toml",
 )
 
 
@@ -349,8 +342,8 @@ def test_contrast_opens_at_the_parent_rung(config_file):
         #     the label tag and the gate.
         ("01_shapeworld_baseline.toml", 738_753),
         ("02_birds_baseline.toml", 738_753),
-        ("11_shapeworld_receiver_cross_attention.toml", 615_681),
-        ("12_birds_receiver_cross_attention.toml", 615_681),
+        ("11_shapeworld_receiver_vit.toml", 615_681),
+        ("12_birds_receiver_vit.toml", 615_681),
     ],
 )
 def test_contrast_costs_what_it_says(config_file, expected):

@@ -1,0 +1,44 @@
+# Rung 7: rung 5 with the referent contrast stage.
+#
+# One self-attention over all the referents -- positive and negative together,
+# tagged by label -- whose output is added back as a residual before they are
+# pooled. Both prototypers work *within* a polarity, so without this nothing in
+# the speaker ever compares a positive example against a negative one: the two
+# halves first meet in the language model, by which point each is a single
+# vector.
+#
+# `[sender_contrast]` in DEFAULT.toml carries the shape: 320 wide, 5 heads, one
+# `MHAttention` and no feedforward. At the ViT's 320-d output that is 615,681
+# parameters.
+#
+# Like the prototyper at the rung below, this opens at exactly its parent.
+# `contrast_gate` starts at zero, so the referents reach the prototyper
+# untouched at step 0, and `contrast_gate_lr` at 2e-3 is what lets a lone scalar
+# leave zero inside the first epoch rather than the ninth.
+#
+# Read `train_contrast_share` with `train_contrast_within_share`, never alone: a
+# large share with a small within-share is a branch emitting one vector per
+# polarity, which the prototyper's two separate pools already provide. And read
+# both against `topsim` rather than against `acc` -- this stage makes the message
+# a function of the sampled negatives, which is exactly what topsim penalises, so
+# it can raise accuracy and lower compositionality at once. See
+# docs/measurement.md.
+
+name = "ablation"
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+contrast = true
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

@@ -1,0 +1,36 @@
+# Rung 6: rung 4 with the attention prototyper.
+#
+# The CUB counterpart of rung 5, and identical to it in what it adds: both
+# datasets' senders now emit 320, so the pooler costs the same 642 parameters on
+# each.
+#
+# Replaces the mean over each polarity's examples with broccoli's `SequencePool`
+# attention pooling, one instance per polarity. The prototyper is sized from the
+# sender's feature model, so at the ViT's 320-d output this adds 2 x 321 = 642
+# parameters -- one scoring direction and a bias per polarity.
+#
+# It opens at exactly the mean: the scoring weights are zero-initialised, so the
+# softmax over examples is uniform at step 0 and this rung starts where its
+# parent finished. `train_pool_effective_examples` and `train_pool_score_norm`
+# are what say whether it ever left. See docs/architecture.md.
+
+name = "ablation"
+
+[data]
+dataset = "../data/cub"
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

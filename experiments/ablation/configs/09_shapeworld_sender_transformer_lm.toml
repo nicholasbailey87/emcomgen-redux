@@ -1,0 +1,77 @@
+# Rung 9: rung 7 with a Transformer sender language model.
+#
+# The speaker is an autoregressive Transformer decoder: a learned query array
+# cross-attends the two prototypes into a latent memory, and four decoder blocks
+# then generate the content symbols one at a time, each conditioned on the
+# symbols before it and cross-attending back into that memory.
+#
+# 5,933,047 parameters against the GRU baseline's 5,764,923 on ShapeWorld, and
+# 5,938,813 against 5,774,073 on CUB -- 1.03x on both, which is what the shared
+# 320-wide ViT below it buys. See `[sender_language_model] layers`.
+#
+# This is the rung the rebalancing was for. At the old widths it was 533,943
+# parameters against the GRU's 6,813,499 -- 12.8x smaller -- because
+# `SenderTransformerLM` pins its width to the vision model's and ShapeWorld's
+# ViT had been sized against Conv4's 113,088. Whatever that rung measured, it was
+# not architecture.
+#
+# The GRU baseline is autoregressive too, so this rung moves the language model's
+# architecture and not its generation regime. See `[sender_language_model]`
+# below for the parallel arm, which is no longer a rung of its own.
+
+name = "ablation"
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+contrast = true
+language_model = "SenderTransformerLM"
+
+[sender_language_model]
+# Both must equal `sender_feature_model.d_model`: `SenderTransformerLM`
+# layer-norms the incoming prototypes at its own `d_model` and separately
+# rejects `token_embedding_size != referent_embedding_size`. That pinning is
+# why rung 3 has to come before this one -- a Transformer speaker on top of a
+# CNN backbone would inherit whatever width the CNN emits.
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+
+# 4 blocks, chosen on parameters rather than on taste. A decoder block costs
+# 1,376,137 parameters at 320 wide with `ff_inner_size = 576`, so against the
+# GRU baseline this speaker measures 0.79x at 3 layers, 1.03x at 4 and 1.27x at
+# 5. Four is the closest this arm gets, and it is close: 5,933,047 against
+# 5,764,923 on ShapeWorld and 5,938,813 against 5,774,073 on CUB.
+#
+# The cost of matching on parameters is not matching on depth. Depth or
+# parameters, not both, and the ladder is built on parameters.
+layers = 4
+
+# `false` selects the autoregressive decoder arm: a learned query array
+# cross-attends the two prototypes into a latent memory, and four decoder blocks
+# then generate the content symbols one at a time, each conditioned on the
+# symbols before it. `true` selects the Perceiver IO arm instead, which emits
+# every symbol in one shot.
+#
+# `false` here, because the GRU baseline at rung 1 is autoregressive too: this
+# rung then moves the language model's architecture and nothing else. `true`
+# would move the generation regime at the same time, and whatever the
+# combination measured could not be attributed to either.
+#
+# The parallel arm is no longer a rung of its own. It used to sit beside the top
+# of the ladder as a fork; to measure it again, copy the topmost rung and flip
+# this key -- and note that a difference then covers depth as well as regime,
+# since the two arms take 5 and 4 blocks to reach comparable size.
+bidirectional = false
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

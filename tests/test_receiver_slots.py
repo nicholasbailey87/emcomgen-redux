@@ -50,7 +50,7 @@ BATCH, N_OBJ, SEQ = 6, 10, 7
 #     coincidence.
 TOKEN_DIM = 37
 
-CROSS_RUNG = "11_shapeworld_receiver_cross_attention.toml"
+CROSS_RUNG = "15_shapeworld_receiver_cross_attention_lm.toml"
 
 
 def _inputs(listener, seed=0):
