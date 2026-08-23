@@ -236,12 +236,12 @@ logit_scale_lr = 2e-3
 # speaker, which is told its polarities apart by `init_h`.
 polarity_embedding_lr = 2e-3
 
-# The listener's counterpart, for `BilinearGRUComparer.log_score_scale` -- the
-# one scalar that sets how loudly it states a conclusion. Both comparer operands
-# are layer-normalised without an affine and the dot product is divided by
-# `sqrt(referent_embedding_size)`, so nothing else can reach the score's
-# magnitude: `bilinear` sets the *direction* of the comparison and this sets its
-# volume.
+# The listener's counterpart, for `BilinearDiscriminator.log_score_scale` -- the
+# one scalar that sets how loudly the bilinear comparison states a conclusion.
+# Both of its operands are layer-normalised without an affine and the dot product
+# is divided by `sqrt(referent_embedding_size)`, so nothing else can reach that
+# score's magnitude: `bilinear` sets the *direction* of the comparison and this
+# sets its volume.
 #
 # A third key rather than a reuse, on the same argument as the one above. This
 # one exists on every rung, `logit_scale_lr` moves a speaker and this moves a
@@ -267,24 +267,62 @@ polarity_embedding_lr = 2e-3
 # floor -- that was tried in `e3fcabd` and cost fifteen epochs before `29b18ea`
 # removed it.
 #
-# Applies only to `BilinearGRUComparer`, and `build_models` gates on that class
-# rather than on finding the parameter. `TransformerCrossAttentionComparer` has
-# no learnable scale to point this at: its readout is a plain
-# `nn.Linear(d_model, 1)` whose weight carries the volume, so there is no lone
-# scalar to give a rate of its own. `train_score_scale` is a bilinear-only
-# column, and `decision_spread` and `decision_kurtosis` are what the other arm
-# reports instead. Read the kurtosis column first.
+# `BilinearDiscriminator` only, and `build_models` gates on that class rather
+# than on finding the parameter. `AttentionDiscriminator` owns a bilinear path
+# but builds it with `score_scale=False`: `standardise` runs on that path's
+# output and `standardise(s * u) == standardise(u)` exactly, so a scale there
+# would take identically zero gradient, report a constant 1.0, and sit in this
+# elevated group doing nothing. Its volume is `log_mix_scale`, two keys down.
+# `train_score_scale` is therefore a bilinear-arm column and `train_mix_scale`
+# is the attention arm's counterpart.
 #
-# The scoping is not a verdict either way, and the history is worth knowing
-# before anyone extends this key to the other comparer. That scale falling
-# monotonically to 0.27 while `train_loss` sat at ln 2 is what prompted rewriting
-# the cross-attention readout to standardise itself at a fixed gain — which
-# closed the collapse exactly as designed and stopped four rungs learning at all.
-# The collapse is survivable: rung 10 does it here, `train_score_scale` falling
-# 0.856 -> 0.238 across thirty epochs while `train_acc` climbs 0.4975 -> 0.6351.
-# See `diagnostics/README.md` and the `TransformerCrossAttentionComparer`
-# docstring for the measurements.
+# The history is worth knowing. That scale falling monotonically to 0.27 while
+# `train_loss` sat at ln 2 is what prompted rewriting the old cross-attention
+# readout to standardise itself at a fixed gain — which closed the collapse
+# exactly as designed and stopped four rungs learning at all. The collapse is
+# survivable: rung 10 does it, `train_score_scale` falling 0.856 -> 0.238 across
+# thirty epochs while `train_acc` climbs 0.4975 -> 0.6351. That measurement is
+# also why there is no floor on this parameter and must not be one. See
+# `diagnostics/README.md`.
 score_scale_lr = 2e-3
+
+# `AttentionDiscriminator.mix_logit`, the attention path's share of the score,
+# reported as `train_mix_alpha`. Named `mix_*` and not `alpha_*` because this
+# table already carries an `alpha`, which is DeepNorm's residual scaling on the
+# referent stack and has nothing to do with the mix.
+# The counterpart of the two keys above and elevated for the same reason they
+# are: it is a lone scalar, and Adam moves one about `lr` per step whatever the
+# gradient's size, so its whole travel over a run is bounded by `lr * steps`.
+#
+# What it has to cover is larger than either of theirs. The mixing weight opens
+# at 0.116 -- `mix_floor` 0.1 plus a sigmoid at logit -4.0 -- and a listener
+# that decided attention was worth half its score would need the logit to reach
+# -0.85, a traverse of 3.15 log-units. At the base 1e-4 and 194 steps an epoch
+# that is 0.019 an epoch, so the crossing alone would take 162 epochs of a
+# 100-epoch run and the answer to "did attention get used" would be a fact about
+# the learning rate. At 2e-3 the ceiling is 0.388 an epoch and the traverse is
+# affordable inside eight, which is what makes `train_mix_alpha` readable as
+# evidence rather than as a floor effect.
+#
+# Note the ceiling is not a prediction. Only a sign-consistent gradient spends
+# it, and the probe's free-alpha arms climbed to 0.33-0.44 over 2,000 steps,
+# well inside it.
+mix_logit_lr = 2e-3
+
+# `AttentionDiscriminator.log_mix_scale`, the volume downstream of the mix, and
+# the attention arm's whole counterpart of `score_scale_lr` above. Both mixed
+# paths are standardised per game, so this scalar is the *only* thing that sets
+# the score's magnitude and nothing upstream can absorb it -- the same position
+# `log_score_scale` is in on the bilinear arm, and given the same rate for the
+# same reason. Unbounded, log-parameterised, and with no floor: the measurement
+# that argued against a floor there argues against one here.
+#
+# Note what this leaves closed. Neither path can go quiet on its own, because
+# standardising removes its magnitude, so the attention path cannot escape
+# being learned by turning itself down. The *pair* can still go quiet through
+# this scalar, which is the freedom the readout needs and `train_mix_scale` and
+# `train_decision_spread` are what watch it.
+mix_scale_lr = 2e-3
 
 [scheduler]
 epochs = 100
@@ -316,7 +354,7 @@ language_model = "SenderGRULM"
 # datasets is what makes that comparison mean anything.
 #
 # `heads` is 5 for a head dimension of 64. Every attention module in the repo now
-# has that same head dimension -- see `[receiver_comparer]`, which reaches it at
+# has that same head dimension -- see `[receiver_discriminator]`, which reaches it at
 # 256 wide with 4 heads. The previous rule was head_dim 32, chosen as broccoli's
 # 2D axial-RoPE floor; 64 clears that floor with room, so the constraint no
 # longer decides the number.
@@ -561,7 +599,7 @@ return_bos_tokens = false
 knocking_heads = false
 ff_inner_dropout = 0.0
 ff_outer_dropout = 0.0
-# See [receiver_comparer] for what these two are.
+# See [receiver_language_model] for what these two are.
 #
 # `cross_attention_dropout` covers every cross-attention in the speaker, on both
 # arms: the one that reads the prototypes into the latent array, the parallel
@@ -579,12 +617,56 @@ beta = "deepnorm"
 [receiver]
 class = "Receiver"
 feature_model = "ResNet18SmallInput"
-comparer = "BilinearGRUComparer"
+# Two slots, not one `comparer`. The listener encodes the message and then scores
+# the candidates from that encoding, and until these were split a single key
+# chose both halves at once: swapping `BilinearGRUComparer` for
+# `TransformerCrossAttentionComparer` changed the message encoder (790k of GRU
+# for 2.3M of decoder stack) *and* the comparison (a bilinear form for a second
+# decoder stack) in one move, so "attention helps" could not be attributed to
+# either. Four combinations are reachable now, and the two new ones are what
+# separate "an encoder that reads the candidate set helps" from "a comparison
+# built on attention helps".
+#
+# Exactly one message encoder is built, always. `AttentionDiscriminator` carries
+# an internal bilinear path, and that is a second *comparison* reading whatever
+# this language model produced -- there is no key that turns on a second encoder,
+# and if one ever looks necessary the slot contract is wrong. See
+# code/models/receiver.py.
+language_model = "ReceiverGRULM"         # or ReceiverCrossAttentionLM
+discriminator = "BilinearDiscriminator"  # or AttentionDiscriminator
+# Note this renames every listener key in the checkpoint --
+# `receiver.comparer.*` becomes `receiver.language_model.*` and
+# `receiver.discriminator.*` -- so no checkpoint written before the split loads
+# after it, whatever `resume` says. `probe_shape.py` fails loudly on a mismatch
+# rather than silently loading nothing, but the files are incompatible: this is
+# a re-run of a whole comparison, not half of one. Same situation as the
+# `compile` note at the top of this file, and for the same reason.
+# The listener's only dropout, and it lives here now rather than in either slot:
+# `Receiver` masks the referent embeddings once and hands the same masked tensor
+# to both, so no configuration can regularise twice. Counterpart to the sender's
+# `prototype_dropout`, and set to match it — the literature says listeners want
+# at least as much regularisation as speakers for compositional languages to
+# emerge, and jayelm's single `--dropout` (0.1) gave both agents the same weak
+# setting.
+#
+# It masks *elements* of `(batch, n_objects, features)`, so it removes features
+# within each candidate rather than removing whole candidates, which would leak
+# the label ordering.
+#
+# The message operand is not masked. It arrives through the Gumbel channel, whose
+# noise `sampling_tau` and `uniform_weight` already calibrate, so a mask on top is
+# a second and uncalibrated perturbation of a signal that has one. The referents
+# arrive clean, which is what makes that the side where a mask regularises rather
+# than compounds.
+#
+# Note this now applies *before* each slot's norm, where both of the modules it
+# replaces applied it after. A LayerNorm following dropout renormalises the
+# corrupted vector, so the two are genuinely different operations and the
+# pre-split numbers reproduce only at 0.0.
+dropout = 0.1
 # No `vision_dropout` here, unlike [sender]: it would mask the same tensor as
-#     the referent side of `receiver_comparer.dropout`, with nothing but a
-#     reshape between them, so the two would compose into a single mask at a
-#     rate neither knob names. The listener's regularisation is the one
-#     `receiver_comparer.dropout` below.
+#     `dropout` above, with nothing but a reshape between them, so the two would
+#     compose into a single mask at a rate neither knob names.
 
 [receiver_feature_model]
 d_model = 320 # Only applies to Transformer vision models
@@ -608,94 +690,146 @@ self_attention_dropout = 0.0
 alpha = "deepnorm" # see [sender_feature_model]
 beta = "deepnorm"
 
-[receiver_comparer]
+[receiver_language_model]
+# Both listener language models read the token embedding table, so its width is
+# theirs to state and `build_models` sizes `nn.Embedding` from here.
 token_embedding_size = 500
+# The GRU's hidden size, and the decoder stack's model width. One key per table
+# rather than one shared between them: these are different modules and there is
+# no reason they should agree.
+#
+# This used to have to be read alongside `heads` below, with a warning that 1024
+# does not divide 5. That contradiction was an artefact of one table describing
+# two modules and is now gone: `heads` is read only by
+# `ReceiverCrossAttentionLM`, which sets its own width here, and no broccoli
+# `d_model % n_heads == 0` assertion is reachable from these defaults.
 d_model = 1024
-dropout = 0.1 # The listener's only dropout, and in both comparers it masks
-              # one operand of the comparison: the incoming referent
-              # embeddings, after their norm and immediately before they are
-              # compared. Counterpart to the sender's `prototype_dropout`, and
-              # set to match it — the literature says listeners want at least
-              # as much regularisation as speakers for compositional languages
-              # to emerge, and jayelm's single `--dropout` (0.1) gave both
-              # agents the same weak setting. Also passed to `nn.GRU(dropout=)`,
-              # which is inert while `layers = 1`.
-              #
-              # It used to mask the message operand too. The message arrives
-              # through the Gumbel channel, whose noise `sampling_tau` and
-              # `uniform_weight` already calibrate, so a mask on top is a
-              # second and uncalibrated perturbation of a signal that has one.
-              # The referents arrive clean, which is what makes that the side
-              # where a mask regularises rather than compounds.
-layers = 1
-# The two Transformer comparer depths, in blocks. `layers` above is
-# `BilinearGRUComparer`'s GRU depth and is read by nothing else; these are read
-# only by `TransformerCrossAttentionComparer`, which builds one decoder stack
-# from each and resolves that stack's DeepNorm constants from its own count.
+# GRU depth, and 2 rather than 1 for parameter parity with the transformer
+# language model *at a shared width*: at rung 11's 256 wide with a 256-wide
+# token embedding, 1,972,224 against `ReceiverCrossAttentionLM`'s 2,318,427,
+# where a 1-layer bidirectional GRU is 789,504. Note 2 layers bidirectional is
+# 2.5x 1 layer and not 2x -- the second layer's input is the first's
+# concatenated output, so its `weight_ih` is double.
 #
-# 1 and 1 here because a default should be the smallest thing that runs, not a
-# guess at a good shape: every rung that builds this class states both, and the
-# sizing argument lives with them -- see `[receiver_comparer]` in rung 11.
-message_layers = 1  # Only applies to Transformer comparers
-referent_layers = 1 # Only applies to Transformer comparers
-bidirectional = false
-message_length = 7 # Only applies to Transformer comparers. Should be the same as sender_language_model.message_length
-# 5, which is *not* what the Transformer comparer uses: it takes 256 wide with 4
-# heads from rung 11, for the head dimension of 64 that every attention module in
-# the repo now has. This default is here so the key exists, not because anything
-# reads it at 5.
+# Parity is a property of the pair of widths, not of this key, and at the 1024
+# and 500 above it does not hold: 28,262,400, against 2,466,139 for the
+# transformer arm as rungs 11 and 12 build it. The old default -- 1 layer,
+# unidirectional -- was 4,687,872 at these widths, so a rung inheriting this
+# gains 6x. Nothing in the ladder inherits both halves of that today, because
+# every rung that builds the transformer arm states 256, but a *new* rung that
+# takes this table as given would be comparing a 28M listener against a 2.5M
+# one. Set both widths together, or set neither.
 #
-# Note this does not divide the `d_model = 1024` above, and that is not the
-# contradiction it looks like: the two describe different modules. 1024 is
-# `BilinearGRUComparer`'s hidden size, and that class builds an `nn.GRU`, which
-# has no heads and no broccoli in it. `heads` is read only by
-# `TransformerCrossAttentionComparer`, which sets its own width. No configuration
-# reaches broccoli's `d_model % n_heads == 0` assertion with this pair.
-#
-# What can is code that builds the Transformer comparer straight from the
-# defaults, so anything doing that must override `d_model` -- see
-# `tests/test_backbones.py`.
-heads = 5 # Only applies to Transformer comparers
-utility_tokens = 0 # Only applies to Transformer comparers
-ff_inner_size = 576 # Only applies to Transformer comparers
-stochastic_depth = 0.1 # Only applies to Transformer comparers, where both
-                       # decoder stacks take it. Asked of each stack separately
-                       # and suppressed in either one that is a single block
-                       # deep, where a linear depth ramp would give one rate of
-                       # 0.0 anyway -- see `TransformerCrossAttentionComparer`.
+# This is a deliberate change to what the defaults *mean*. `layers = 1`,
+# `bidirectional = false` used to be the pre-split rung-1 baseline with no rung
+# overriding either, so the default *was* the baseline. It is the parity-matched
+# value now, and reproducing the old baseline means pinning both keys explicitly.
+# The parity is what makes "attention helps" a claim about attention rather than
+# about the 3x parameter gap that used to come with it.
+layers = 2
+# Read by both. `ReceiverGRULM` passes it to `nn.GRU(bidirectional=)`;
+# `ReceiverCrossAttentionLM` reads it as `causal = not bidirectional`, because
+# the message arrives whole and nothing needs to mask it left to right.
+bidirectional = true
+message_length = 7 # Only applies to Transformer language models. Should be the same as sender_language_model.message_length
+# Transformer language model only, whose depth is `layers` above, shared with the
+# GRU. 4 heads at 256 wide is what rung 11 sets, for the head dimension of 64
+# that every attention module in the repo has; 5 is here so the key exists.
+heads = 5 # Only applies to Transformer language models
+utility_tokens = 0 # Only applies to Transformer language models
+ff_inner_size = 576 # Only applies to Transformer language models
+stochastic_depth = 0.1 # Only applies to Transformer language models, and
+                       # suppressed at a single block, where a linear depth ramp
+                       # would give one rate of 0.0 anyway.
 # Attention dropout. Named per attention type, and kept strictly separate from
-# the `dropout` above, which regularises the two operands of the comparison
-# rather than anything inside a module. `self_attention_dropout` reaches every
-# TransformerEncoder block; `cross_attention_dropout` reaches the single
-# MHAttention that compares message against referents. The speaker carries the
-# same two keys with the same meanings, so both agents are regularised on the
-# same terms. Note broccoli's attention-pooling layer (`SequencePool`, used by
-# `AttentionPrototyper` and the ViT head) takes no dropout argument at all, so
-# it is not covered by either key.
-cross_attention_dropout = 0.0 # Only applies to Transformer comparers
+# `[receiver] dropout`, which regularises the referent embeddings rather than
+# anything inside a module. `self_attention_dropout` covers the message reading
+# itself; `cross_attention_dropout` covers the message reading the candidate set,
+# once per block. The speaker carries the same two keys with the same meanings,
+# so both agents are regularised on the same terms. Note broccoli's
+# attention-pooling layer (`SequencePool`, used by `AttentionPrototyper` and the
+# ViT head) takes no dropout argument at all, so it is covered by neither.
+self_attention_dropout = 0.0 # Only applies to Transformer language models
+cross_attention_dropout = 0.0 # Only applies to Transformer language models
 # See [sender_feature_model] for what this is and why it is here. It drives the
-# comparer's message encoder only; the three attention stages around it take
-# `rotary_embedding=None` by construction, two of them because their sequence
-# axis is the referent set and a set has no order to embed.
+# message stream, whose axis is an order. The candidate set this stack
+# cross-attends into is a set and takes no positional embedding at all.
+relative_position_embedding = true # Only applies to Transformer language models
 depthwise_linear_stochastic_depth = true
 activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
-relative_position_embedding = true
 pre_norm = false
 post_norm = true
 return_bos_tokens = false
 knocking_heads = false
 ff_inner_dropout = 0.0
 ff_outer_dropout = 0.0
-self_attention_dropout = 0.0
-# Resolved twice in this comparer rather than once: the message encoder takes
-# `layers`, and the three hand-written residuals around it take depth 1. Those
-# three are bare attention sublayers -- one on the message stream, two on the
-# referent stream -- and DeepNorm's depth argument counts attention-plus-
-# feedforward layers, so a stream of two attention sublayers and no feedforward
-# is one layer's worth of residual path. Pinning a number still passes straight
-# through to both. Otherwise as [sender_feature_model].
+# Resolved for this stack's own depth with `decoder=True`, which counts three
+# sublayers to the block -- self-attention, cross-attention, feedforward -- so
+# what is passed is the block count and not a multiple of it. Pinning a number
+# still passes straight through. Otherwise as [sender_feature_model].
 alpha = "deepnorm"
 beta = "deepnorm"
+
+[receiver_discriminator]
+# `BilinearDiscriminator` reads nothing from this table. It is sized entirely by
+# the referent width and by the language model's `output_size`, which
+# `build_models` passes in rather than restating as a key that could be wrong.
+# Everything here is `AttentionDiscriminator`'s.
+#
+# 320 at 5 heads for the head dimension of 64 that every attention module in the
+# repo has. A default should be the smallest thing that runs, not a guess at a
+# good shape; rung 11 states 256 and 4 alongside its sizing argument.
+d_model = 320
+layers = 1
+heads = 5
+ff_inner_size = 576
+stochastic_depth = 0.1 # Suppressed at a single block, as above.
+self_attention_dropout = 0.0 # The candidates reading each other.
+cross_attention_dropout = 0.0 # The candidates reading the message.
+depthwise_linear_stochastic_depth = true
+activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
+pre_norm = false
+post_norm = true
+knocking_heads = false
+ff_inner_dropout = 0.0
+ff_outer_dropout = 0.0
+alpha = "deepnorm" # As above, resolved for this stack's own depth.
+beta = "deepnorm"
+# The attention path's minimum share of the score:
+#
+#     score = s * [ (1 - a) * bilinear_hat + a * attention_hat ] + bias
+#     a     = mix_floor + (1 - mix_floor) * sigmoid(mix_logit)
+#
+# Both paths are standardised per game before mixing, so `a` means composition
+# and `s` alone means volume -- the same shape/volume split the speaker has in
+# `logit_spread` and `logit_scale`.
+#
+# The floor exists because at `a = 0` the whole attention stack would receive
+# zero gradient and could never earn its way in. At 0.1 it always contributes and
+# so always learns, but not enough to derail a listener the bilinear path is
+# already carrying. It is in the *parameterisation* and must never become a
+# `clamp`: `clamp`'s gradient is zero below its bound, so a weight that drifted
+# under the floor would weld there permanently. That bug cost an afternoon in the
+# prototype.
+#
+# Because the attention path is standardised it also cannot go quiet, so an
+# uninformative one cannot be escaped by turning it down. It has to be made
+# informative or paid for.
+mix_floor = 0.1
+# -4.0 puts `a` at 0.116 for the floor above, so the discriminator opens
+# essentially *as* the bilinear comparison and departs only if attention pays.
+# That matters because the attention path alone does not bootstrap: at a nuisance
+# level where the bilinear comparison reaches 0.938 it sits at 0.469 with its
+# polarity tag barely moving, since at initialisation nothing in the pair yet
+# looks like a pattern and uniformity is the cheapest thing a listener can do.
+# This is the recipe `AttentionPrototyper` already follows -- open at pooling
+# that *is* the mean, and depart if it pays.
+#
+# Read `train_mix_alpha` and `train_path_agreement` together. Attention that is
+# never used and attention that has learned to imitate the bilinear path look
+# identical from accuracy and from `mix_alpha` alone, and they are different
+# findings. See docs/measurement.md.
+mix_logit_init = -4.0
 
 # ====== Defaults for the CUB birds data set below here ======
 
@@ -804,5 +938,5 @@ message_length = 10 # max message length. note this includes sos/eos token, i.e.
 [birds.receiver]
 feature_model = "ResNet18"
 
-[birds.receiver_comparer]
-message_length = 10 # Only applies to Transformer comparers. Should be the same as sender_language_model.message_length
+[birds.receiver_language_model]
+message_length = 10 # Only applies to Transformer language models. Should be the same as sender_language_model.message_length

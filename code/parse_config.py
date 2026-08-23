@@ -69,11 +69,11 @@ def validate_config(config: dict) -> bool:
     if (
         config['sender_language_model']['message_length']
         !=
-        config['receiver_comparer']['message_length']
+        config['receiver_language_model']['message_length']
     ):
         raise InvalidConfig(
             "`sender_language_model` message length must be the same as "
-            "`receiver_comparer` message length."            
+            "`receiver_language_model` message length."
         )
     
     # Checked here rather than in the speaker's constructor: `SafeDict` only

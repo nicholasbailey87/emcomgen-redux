@@ -6,9 +6,15 @@ are recorded.
 
 ## The listener readout: two attempts and a revert
 
-The longest story in the codebase. It concerns
-`TransformerCrossAttentionComparer.decision`, currently a bare
-`nn.Linear(d_model, 1)` — which is exactly where it started.
+The longest story in the codebase. It concerns the attention listener's
+`decision`, a bare `nn.Linear(d_model, 1)` — which is exactly where it started.
+
+Written before the listener was split into `ReceiverCrossAttentionLM` and
+`AttentionDiscriminator`, and left in the names it happened under.
+`TransformerCrossAttentionComparer` below is both of those, and
+`BilinearGRUComparer` is `ReceiverGRULM` plus `BilinearDiscriminator`. **There
+is a fourth act, at the bottom of this section, and it changes what is true
+today.**
 
 ### The problem
 
@@ -107,9 +113,45 @@ module on a synthetic game, an informative message gave −2.0 at 100% accuracy 
 a scrambled one +11..+23 at chance, while `decision_spread` overlapped between
 the two (2.7–5.1 against 1.4–2.1) and could not tell them apart.
 
-Also left behind: `score_scale_lr` is now gated on `BilinearGRUComparer` rather
-than applying to both comparers. That gate is an artefact of the parameter's
-absence, not an argument against the parameter.
+Also left behind: `score_scale_lr` is gated on `BilinearDiscriminator` rather
+than applying to both. That gate is an artefact of the parameter's absence, not
+an argument against the parameter.
+
+### Attempt three, which is not attempt two again
+
+`AttentionDiscriminator` standardises the attention readout. That is, on its
+face, the thing that stopped four rungs learning — so the difference is worth
+stating precisely, because reading this section and stopping above would suggest
+it had been forgotten.
+
+The standardised readout failed because the *listener as a whole* could not go
+quiet. It had to commit through a fixed gain from step zero, before the message
+carried anything, and the speaker never got a gradient worth having.
+
+What is standardised now is each of two mixed operands, and the volume is
+`log_mix_scale`, downstream of both, unbounded, log-parameterised, with no floor.
+So the listener as a whole can still go quiet — the property that mattered —
+while neither path can go quiet *on its own*. That second half is the new thing,
+and it is deliberate: the attention path cannot escape being learned by turning
+itself down, because turning down costs it its whole contribution and buys
+nothing back.
+
+The other half of why this is affordable is that the bilinear path is there. At
+`a = 0.116` the discriminator is essentially the bilinear comparison, which is
+the arm measured reaching 0.938 under a nuisance level where the attention
+stacks alone reach 0.469 — so nothing has to be confident early. The fixed gain
+had no such companion.
+
+And the listener was never broken, which is what made all of this the wrong
+place to look for a while. Handed a message naming the concept, the
+cross-attention listener reaches 0.988 and holds its between-candidate share at
+0.90; handed a scrambled one it collapses to 0.40. Uniformity is *correct
+behaviour* when there is no pattern. Three hypotheses were tested against that
+and failed, and are recorded so they are not revisited: message share at
+initialisation (raised 0.299 → 0.741 by undamping the referent stack's
+cross-attention branch — no effect); readout volume collapse (`|W|` fell 10% in
+1500 steps and the bias never moved); and a bounded listener scale (the working
+bilinear arm's own `score_scale` *falls* 0.856 → 0.238 and still reaches 1.000).
 
 ## Frozen logit spread: NaN through a masked gradient
 

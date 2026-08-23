@@ -278,13 +278,25 @@ same clock.
 
 ### Listener, on the train pass only
 
-The two comparers answer with different columns because they no longer have the
-same mechanism. Dispatch is on the class rather than by `hasattr`, for the same
-reason the pooling columns are: a fallback would turn a rename into a silently-NaN
-column, and a silently-NaN column is how the cross-attention comparer's collapse
-went unnoticed for a whole smoke test.
+The listener is two slots — a language model and a discriminator — and it is the
+**discriminator** these columns belong to. Dispatch is on its class rather than
+by `hasattr`, for the same reason the pooling columns are: a fallback would turn
+a rename into a silently-NaN column, and a silently-NaN column is how the
+cross-attention listener's collapse went unnoticed for a whole smoke test. A
+discriminator with no branch here raises rather than running unmeasured.
 
-**`score_scale`** — `BilinearGRUComparer` only. `logit_scale` says how audibly
+The two answer with different columns because they no longer have the same
+mechanism:
+
+| | volume | shape | mix |
+|---|---|---|---|
+| `BilinearDiscriminator` | `score_scale` | — | — |
+| `AttentionDiscriminator` | `mix_scale`, `decision_spread` | `decision_kurtosis` | `mix_alpha`, `path_agreement` |
+
+**`score_scale`** — `BilinearDiscriminator` only, and only when it is the whole
+discriminator: `AttentionDiscriminator` owns one for its bilinear path but
+builds it with `score_scale=False`, because `standardise` runs on that path's
+output and divides any positive scale straight back out. `logit_scale` says how audibly
 the speaker states a message; this says how confidently the listener acts on one.
 Both dip during bootstrapping for the same reason — neither agent should commit
 while the message is still noise — and `29b18ea` measured the separation that
@@ -293,13 +305,57 @@ returned within a few epochs, where the arm that died fell 0.94 and never did.
 There is deliberately no floor on either; `e3fcabd` tried one and it cost fifteen
 epochs.
 
-**`decision_spread`** — `TransformerCrossAttentionComparer` only, which has no
-learnable scale to report: its readout is a plain `nn.Linear(d_model, 1)` and the
-volume lives in that weight. Simply the standard deviation of the scores. It
-opened around 0.57 under the four-stage structure this module replaced; the two
-decoder stacks have not been measured, and the opening is in any case an
-emergent property of `nn.Linear`'s init against a post-norm input rather than a
-number anything pins.
+**`mix_alpha`** — `AttentionDiscriminator` only, and the column the whole split
+exists to produce. The attention path's share of the score:
+
+```
+score = mix_scale * [ (1 - a) * bilinear_hat + a * attention_hat ] + bias
+a     = mix_floor + (1 - mix_floor) * sigmoid(mix_logit)
+```
+
+Bounded in `[mix_floor, 1)`, so it reads directly as *was attention used* —
+which is the chapter's question, and one no previous column could answer. It
+opens at 0.116 (floor 0.1, logit −4.0), essentially at the bilinear comparison,
+and departs only if attention earns it. `mix_logit_lr` is elevated to 2e-3 so
+the traverse is affordable inside a run; see DEFAULT.toml for that arithmetic.
+
+**`path_agreement`** — same class, and it must be read *with* `mix_alpha`, never
+instead of it. The within-game correlation between the two paths' standardised
+scores. Both operands are already per-game zero-mean and unit-spread, so the
+mean of their product is Pearson's r exactly.
+
+The reason it exists: an attention path that is never used and one that has
+learned to imitate the bilinear path look identical from accuracy and from
+`mix_alpha` alone, and they are different findings. The prototype's pinned arm
+ended at 0.811, so this is not hypothetical. Read the four combinations:
+
+| `mix_alpha` | `path_agreement` | reading |
+|---|---|---|
+| at the floor | high | attention imitates the bilinear path; it is not being used and has nothing else to say |
+| at the floor | low | attention is saying something different and losing the argument |
+| climbing | high | attention is being taken up but has not yet found anything distinct |
+| climbing | low | attention is being taken up *for* something the bilinear path cannot express — the outcome the design is aimed at |
+
+**`mix_scale`** — `AttentionDiscriminator` only, and its counterpart of
+`score_scale`. Both mixed paths are standardised, so this one scalar is the only
+thing that sets the score's magnitude. Read it exactly as `score_scale` is read:
+a dip while the message is still noise is a pair correctly refusing to commit; a
+monotone descent that never returns is the collapse. No floor, for the reason
+given above.
+
+Note what the standardising does and does not close. Neither path can go quiet
+on its own, so the attention stack cannot escape being learned by turning itself
+down. The *pair* can still go quiet, through this scalar — which is the freedom
+the bootstrap needs, and the freedom a fixed gain took away when it stopped four
+rungs learning at all.
+
+**`decision_spread`** — `AttentionDiscriminator` only. Simply the standard
+deviation of the returned scores, which is `mix_scale` times the spread of the
+mixed standardised paths — so it is `mix_scale` read through the mix rather than
+off the parameter, and the two moving apart means the two paths have started to
+cancel. It opened around 0.57 under the four-stage structure this module
+replaced; the current arrangement opens near 1.0 by construction, since both
+mixed operands have unit spread per game and `mix_scale` opens at 1.0.
 
 A **monotone descent towards zero** is the finding: BCE reduces a loss it cannot
 otherwise reduce by becoming less confident, and nothing in this readout stops it.
@@ -312,7 +368,8 @@ Note the decision boundary is `scores = 0` and `train.py` reads `lis_scores > 0`
 so accuracy is invariant to any positive rescale of the readout. That is why the
 accuracy column could not see the original collapse and still cannot.
 
-**`decision_kurtosis`** — same class, and the one to read first. Excess kurtosis
+**`decision_kurtosis`** — same class, and the one to read first among the shape
+columns. Excess kurtosis
 of the scores. Negative means bimodal, which is what discriminating looks like
 (−2 is the two-point floor); sustained positive alongside `train_acc` at 0.5 is a
 listener with nothing to say.
@@ -328,11 +385,15 @@ scrambled     acc ~0.50   loss ~0.9    excess kurtosis  +11..+23
 `decision_spread` read 2.7–5.1 and 1.4–2.1 across those same two runs —
 overlapping, and so unable to tell them apart on its own.
 
-It is NaN when the readout has collapsed to a constant, where the fourth
+It is NaN when the scores have collapsed to a constant, where the fourth
 standardised moment is 0/0. NaN is the honest value there: the shape of a point
 mass is not defined, and a silent 0.0 would read as "Gaussian, nothing to see" at
 exactly the moment there is something to see. `decision_spread` is the column
 that names that state.
+
+Note it now takes *both* paths going flat, or `mix_scale` going to zero, to get
+there: a constant attention readout standardises to zero and the mix falls back
+on the bilinear path, which keeps discriminating.
 
 The column outlived the design it was built for; see [anecdotes.md](anecdotes.md).
 

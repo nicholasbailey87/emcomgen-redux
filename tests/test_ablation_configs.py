@@ -111,45 +111,54 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # ShapeWorld: the CNN/GRU baseline.
         ("01_shapeworld_baseline.toml", "sender.feat_model", 11_168_832),
         ("01_shapeworld_baseline.toml", "sender.language_model", 5_764_923),
-        # Reads 512-d referents from the ResNet, where rung 11's reads 320-d
-        # from the ViT, and `BilinearGRUComparer`'s projection is sized from
-        # that width -- so these two are not the like-for-like pair. Rung 11's
-        # counterpart is rung 9's comparer, at 5,015,553, which the
-        # cross-attention comparer meets at 1.05x.
+        # The listener is two modules now, so it takes two rows. `receiver.
+        # language_model` is the message encoder and `receiver.discriminator`
+        # the comparison; the pair replaces the single `receiver.comparer` row
+        # this table used to carry.
         #
-        # The odd digit is `log_score_scale`, one 0-d parameter, and it is
-        # `BilinearGRUComparer`'s alone: the cross-attention comparer gave it up
-        # when the readout was rewritten and did not get it back. It did get
-        # `decision.bias` back, so its count has moved -2 and then +1 across the
-        # two rewrites and now stands one below where it was before either. The
-        # earlier movements were 640, when `referent_layer_norm` gave up a
-        # `gamma` and a `beta` at `d_model = 320`, and another 320 when
-        # `referent_adapter` gave up its bias -- without which
-        # `LN(W(cx)) = LN(W(x))` does not hold and the score is not exactly free
-        # of the vision model's scale.
+        # **These are measurements, not a capacity-matching argument, and the
+        # matching they used to record is currently broken.** The old rows had
+        # the bilinear comparer at 5,212,161 against the cross-attention one at
+        # a claimed 5,272,606 -- 1.05x, which was the point of the ladder. What
+        # the split changed is `DEFAULT.toml`'s GRU, now 2 layers bidirectional
+        # for parity with the transformer encoder *at a shared width*. Rungs 1
+        # to 10 inherit that at DEFAULT's 1024 and a 500-wide token embedding,
+        # where the transformer arm states 256 for both, so the baseline
+        # listener is 29.3M against the attention arm's 5.0M rather than 1.05x.
         #
-        # The cross-attention rows below are stale by considerably more than
-        # any of that, and were before the readout was touched at all: measured
-        # against the current tree both rung 11 and rung 12 build a comparer of
-        # 5,357,349, where this table claims 5,272,606. That gap is 84,743 and
-        # none of it is the readout. These counts are the capacity-matching
-        # argument the whole ladder rests on, so they want re-deriving
-        # deliberately rather than being edited to match whatever builds today.
-        ("01_shapeworld_baseline.toml", "receiver.comparer", 5_212_161),
+        # Nick is overhauling the rungs, and that is where the two widths get
+        # set together. Recorded here rather than left failing so that the next
+        # change to the listener still trips a wire -- and stated in full so
+        # nobody reads these numbers as the matching holding.
+        #
+        # The odd digit on the bilinear rows is `log_score_scale`, one 0-d
+        # parameter, and it is `BilinearDiscriminator`'s alone:
+        # `AttentionDiscriminator` builds its bilinear path without one,
+        # because `standardise` divides any positive scale straight back out.
+        #
+        # The sender rows for rungs 11 to 14 were already stale before this
+        # split and are left alone: they are the speaker's own capacity
+        # argument, and they want re-deriving deliberately rather than being
+        # edited to match whatever builds today.
+        ("01_shapeworld_baseline.toml", "receiver.language_model", 28_262_400),
+        ("01_shapeworld_baseline.toml", "receiver.discriminator", 1_048_577),
         # ShapeWorld: the Transformer arm it is compared against. The speaker's
         # language model is the autoregressive decoder, four blocks at message
         # length -- see rung 7 for why four rather than five.
         ("11_shapeworld_receiver_cross_attention.toml", "sender.feat_model", 10_084_940),
         ("11_shapeworld_receiver_cross_attention.toml", "sender.language_model", 5_848_303),
-        ("11_shapeworld_receiver_cross_attention.toml", "receiver.comparer", 5_272_606),
+        ("11_shapeworld_receiver_cross_attention.toml", "receiver.language_model", 2_466_139),
+        ("11_shapeworld_receiver_cross_attention.toml", "receiver.discriminator", 2_548_295),
         # CUB: the CNN/GRU baseline.
         ("02_birds_baseline.toml", "sender.feat_model", 11_176_512),
         ("02_birds_baseline.toml", "sender.language_model", 5_774_073),
-        ("02_birds_baseline.toml", "receiver.comparer", 5_212_161),
+        ("02_birds_baseline.toml", "receiver.language_model", 28_262_400),
+        ("02_birds_baseline.toml", "receiver.discriminator", 1_048_577),
         # CUB: the Transformer arm it is compared against.
         ("12_birds_receiver_cross_attention.toml", "sender.feat_model", 12_338_428),
         ("12_birds_receiver_cross_attention.toml", "sender.language_model", 5_854_069),
-        ("12_birds_receiver_cross_attention.toml", "receiver.comparer", 5_272_606),
+        ("12_birds_receiver_cross_attention.toml", "receiver.language_model", 2_466_139),
+        ("12_birds_receiver_cross_attention.toml", "receiver.discriminator", 2_548_295),
         # The parallel arm, rungs 13 and 14. Five encoder blocks over the latent
         # array rather than four decoder blocks over the message, which is a
         # different speaker at a different size against the same baseline --
@@ -162,10 +171,12 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # And the listener, which is the half that has to be *identical* to 11
         # and 12 for the contrast to be about emission at all. 13 and 14 are
         # those rungs with the speaker's `bidirectional` flipped and nothing
-        # else, so these two assertions are the ones that would catch the pair
+        # else, so these assertions are the ones that would catch the pair
         # drifting apart.
-        ("13_shapeworld_sender_transformer_lm_latent.toml", "receiver.comparer", 5_272_606),
-        ("14_birds_sender_transformer_lm_latent.toml", "receiver.comparer", 5_272_606),
+        ("13_shapeworld_sender_transformer_lm_latent.toml", "receiver.language_model", 2_466_139),
+        ("13_shapeworld_sender_transformer_lm_latent.toml", "receiver.discriminator", 2_548_295),
+        ("14_birds_sender_transformer_lm_latent.toml", "receiver.language_model", 2_466_139),
+        ("14_birds_sender_transformer_lm_latent.toml", "receiver.discriminator", 2_548_295),
         ("13_shapeworld_sender_transformer_lm_latent.toml", "sender.feat_model", 10_084_940),
         ("14_birds_sender_transformer_lm_latent.toml", "sender.feat_model", 12_338_428),
     ],

@@ -16,12 +16,13 @@ was actually built with, and these tests pin the resolution rather than the
 numbers in DEFAULT.toml: what has to hold is that a stack's scaling follows its
 own `layers`, whatever a config says those are.
 
-The encoder constants everywhere, including for the two stacks that have a
+The encoder constants everywhere, including for the stacks that have a
 cross-attention near them. DeepNorm's decoder form assumes cross-attention
-inside every block; here it runs once, outside the residual path whose depth is
-being corrected for -- `SenderTransformerLM` uses it to build the sequence its
-encoder reads, and `TransformerCrossAttentionComparer` puts it between two
-encoder stacks.
+inside every block; where it runs once, outside the residual path whose depth is
+being corrected for, the encoder form is the right one -- `SenderTransformerLM`
+uses it to build the sequence its encoder reads. The listener's two stacks are
+built from `DecoderBlock` and do take the decoder form; see
+`test_the_listener_asks_for_the_decoder_form`.
 """
 
 
@@ -29,10 +30,9 @@ import pytest
 import torch
 
 import _bootstrap  # noqa: F401
-from _bootstrap import config_section
+from _bootstrap import build_listener, config_section
 
 import models.model_util as model_util
-import models.receiver as R
 import models.sender as S
 from models.backbone.vision import ViT2
 
@@ -140,50 +140,75 @@ def test_the_two_deepnorm_forms_are_not_the_same():
         )
 
 
-@pytest.mark.parametrize("layers", [1, 2, 4, 7])
-def test_the_comparer_resolves_each_stack_from_its_own_depth(layers):
+def _listener(referent_dim=64, **overrides):
     """
-    Two stacks, two depths, two pairs. The depth key of one must not reach the
-    other's scaling -- there was once a single key that was a total split
-    between two stacks, so asking for one more block moved two.
+    The attention arm, with each slot's `layers` and residual keys settable
+        separately -- which is the whole subject of this section. Keys are
+        routed by name because both tables carry `alpha`, `beta` and `layers`
+        and mean different stacks by them.
     """
-    comparer = R.TransformerCrossAttentionComparer(
-        64,
-        **config_section(
-            "receiver_comparer", d_model=64, heads=4,
-            message_layers=layers, referent_layers=1,
+    return build_listener(
+        "ReceiverCrossAttentionLM",
+        "AttentionDiscriminator",
+        referent_dim,
+        language_model_overrides=dict(
+            d_model=64, heads=4,
+            layers=overrides.get("message_layers", 1),
+            **{
+                key: overrides[key]
+                for key in ("alpha", "beta")
+                if key in overrides
+            },
+        ),
+        discriminator_overrides=dict(
+            d_model=64, heads=4,
+            layers=overrides.get("referent_layers", 1),
+            **{
+                key: overrides[key]
+                for key in ("alpha", "beta")
+                if key in overrides
+            },
         ),
     )
 
-    assert (comparer.message_alpha, comparer.message_beta) == (
+
+@pytest.mark.parametrize("layers", [1, 2, 4, 7])
+def test_the_listener_resolves_each_stack_from_its_own_depth(layers):
+    """
+    Two stacks, two depths, two pairs. The depth key of one must not reach the
+    other's scaling -- there was once a single key that was a total split
+    between two stacks, so asking for one more block moved two. They are now in
+    separate config tables, which makes the mistake unstateable rather than
+    merely untested; the test stays because the tables could be merged again.
+    """
+    listener = _listener(message_layers=layers, referent_layers=1)
+    language_model = listener.language_model
+    discriminator = listener.discriminator
+
+    assert (language_model.alpha, language_model.beta) == (
         model_util.deepnorm_constants(layers, decoder=True)
     )
-    assert (comparer.referent_alpha, comparer.referent_beta) == (
+    assert (discriminator.alpha, discriminator.beta) == (
         model_util.deepnorm_constants(1, decoder=True)
     )
 
 
 @pytest.mark.parametrize("layers", [1, 4, 10])
-def test_the_comparer_asks_for_the_decoder_form(layers):
+def test_the_listener_asks_for_the_decoder_form(layers):
     """
     Both stacks are built from `DecoderBlock`, which has three residual branches
     to a block rather than two, so they take `(3N)^0.25` and `(12N)^-0.25`. The
     encoder form would scale their branches as if a block held two sublayers,
     which is the wrong constant by a factor that grows with depth.
     """
-    comparer = R.TransformerCrossAttentionComparer(
-        64,
-        **config_section(
-            "receiver_comparer", d_model=64, heads=4,
-            message_layers=layers, referent_layers=layers,
-        ),
-    )
+    listener = _listener(message_layers=layers, referent_layers=layers)
+    language_model = listener.language_model
 
-    assert (comparer.message_alpha, comparer.message_beta) != (
+    assert (language_model.alpha, language_model.beta) != (
         model_util.deepnorm_constants(layers, decoder=False)
     )
-    assert comparer.message_alpha == pytest.approx((3 * layers) ** 0.25)
-    assert comparer.message_beta == pytest.approx((12 * layers) ** -0.25)
+    assert language_model.alpha == pytest.approx((3 * layers) ** 0.25)
+    assert language_model.beta == pytest.approx((12 * layers) ** -0.25)
 
 
 def test_a_pinned_number_reaches_both_stacks():
@@ -191,31 +216,29 @@ def test_a_pinned_number_reaches_both_stacks():
     Pinning is documented as passing straight through, and there are two places
     for it to pass through to.
     """
-    comparer = R.TransformerCrossAttentionComparer(
-        64,
-        **config_section(
-            "receiver_comparer", d_model=64, heads=4, message_layers=4,
-            referent_layers=2, alpha=2.0, beta=0.25,
-        ),
+    listener = _listener(
+        message_layers=4, referent_layers=2, alpha=2.0, beta=0.25
     )
 
-    assert (comparer.message_alpha, comparer.message_beta) == (2.0, 0.25)
-    assert (comparer.referent_alpha, comparer.referent_beta) == (2.0, 0.25)
+    assert (listener.language_model.alpha, listener.language_model.beta) == (
+        2.0, 0.25
+    )
+    assert (listener.discriminator.alpha, listener.discriminator.beta) == (
+        2.0, 0.25
+    )
 
 
-def test_the_comparer_still_runs_at_its_resolved_scaling():
+def test_the_listener_still_runs_at_its_resolved_scaling():
     """
     Construction is not the risk on its own -- these multiply tensors inside
     every block, so a resolved value has to survive a forward pass.
     """
-    settings = config_section(
-        "receiver_comparer", d_model=64, heads=4,
-        message_layers=2, referent_layers=2,
-    )
-    comparer = R.TransformerCrossAttentionComparer(32, **settings)
-    scores = comparer(
+    listener = _listener(referent_dim=32, message_layers=2, referent_layers=2)
+    scores = listener(
         torch.randn(2, 6, 32),
-        torch.randn(2, settings["message_length"], settings["token_embedding_size"]),
+        torch.randn(
+            2, listener.message_length, listener.token_embedding_size
+        ),
     )
 
     assert scores.shape == (2, 6)

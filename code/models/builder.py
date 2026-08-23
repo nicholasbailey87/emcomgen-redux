@@ -61,9 +61,9 @@ def split_out_parameter(optimiser, pair, suffix, lr, config_key):
 # `(config key, parameter suffix, applies to)`, in the order the groups are
 #     added. The test gates on the architecture rather than on finding the
 #     parameter: a GRU speaker has no polarity tag, and
-#     `TransformerCrossAttentionComparer` has no learnable score scale, so for
-#     those the key is inapplicable rather than broken. See docs/training.md --
-#     and do not read a gate as a verdict on the parameter.
+#     a `BilinearDiscriminator` has no mixing weight, so for those the key is
+#     inapplicable rather than broken. See docs/training.md -- and do not read a
+#     gate as a verdict on the parameter.
 SPLIT_LEARNING_RATES = (
     (
         "logit_scale_lr",
@@ -80,8 +80,30 @@ SPLIT_LEARNING_RATES = (
     (
         "score_scale_lr",
         "log_score_scale",
+        # `BilinearDiscriminator` only, and `AttentionDiscriminator` is not it
+        #     even though it owns one: it builds its bilinear path with
+        #     `score_scale=False`, because `standardise` runs on that path's
+        #     output and divides any positive scale straight back out. Its
+        #     volume is `log_mix_scale`, which has its own key below.
         lambda pair: isinstance(
-            pair.receiver.comparer, receiver.BilinearGRUComparer
+            pair.receiver.discriminator, receiver.BilinearDiscriminator
+        ),
+    ),
+    (
+        # Moves the parameter reported as `train_mix_alpha`. Named for the
+        #     parameter rather than the column so the suffix beside it is
+        #     obviously the same thing.
+        "mix_logit_lr",
+        "mix_logit",
+        lambda pair: isinstance(
+            pair.receiver.discriminator, receiver.AttentionDiscriminator
+        ),
+    ),
+    (
+        "mix_scale_lr",
+        "log_mix_scale",
+        lambda pair: isinstance(
+            pair.receiver.discriminator, receiver.AttentionDiscriminator
         ),
     ),
 )
@@ -124,39 +146,56 @@ def build_models(dataloaders, config):
     # Set up receiver
     receiver_class = getattr(receiver, config['receiver']['class'])
     receiver_feature_model_class = getattr(vision, config['receiver']['feature_model'])
-    receiver_comparer_class = getattr(receiver, config['receiver']['comparer'])
-    
+    receiver_language_model_class = getattr(
+        receiver, config['receiver']['language_model']
+    )
+    receiver_discriminator_class = getattr(
+        receiver, config['receiver']['discriminator']
+    )
+
     receiver_feature_model = receiver_feature_model_class(
         n_feats=n_feats,
         **config['receiver_feature_model']
     )
     receiver_token_embedding_module = nn.Embedding(
         config['sender_language_model']['vocabulary'] + 4, # +4 for PAD, SOS, EOS, UNK
-        config['receiver_comparer']['token_embedding_size']
+        config['receiver_language_model']['token_embedding_size']
     )
     if (
-        ('message_length' in config['receiver_comparer'])
+        ('message_length' in config['receiver_language_model'])
         and
         (
-            config['receiver_comparer']['message_length']
+            config['receiver_language_model']['message_length']
             !=
             config['sender_language_model']['message_length']
         )
     ):
         raise ValueError(
-            "receiver_comparer.message_length, if it exists, "
+            "receiver_language_model.message_length, if it exists, "
             "must be equal to sender_language_model.message_length"
         )
 
-    receiver_comparer = receiver_comparer_class(
+    receiver_language_model = receiver_language_model_class(
         receiver_feature_model.final_feat_dim,
-        **config['receiver_comparer']
+        **config['receiver_language_model']
+    )
+
+    # The discriminator is sized from the language model rather than from the
+    #     config: which width the message arrives at is the encoder's business
+    #     -- `2 * d_model` for a bidirectional GRU, `d_model` for the decoder
+    #     stack -- and a config key restating it is a key that can be wrong.
+    receiver_discriminator = receiver_discriminator_class(
+        receiver_feature_model.final_feat_dim,
+        receiver_language_model.output_size,
+        **config['receiver_discriminator']
     )
 
     receiver_ = receiver_class(
         feature_model = receiver_feature_model,
         token_embedding_module=receiver_token_embedding_module,
-        comparer = receiver_comparer
+        language_model = receiver_language_model,
+        discriminator = receiver_discriminator,
+        dropout = config['receiver']['dropout'],
     )
 
     pair = base.Pair(sender_, receiver_)

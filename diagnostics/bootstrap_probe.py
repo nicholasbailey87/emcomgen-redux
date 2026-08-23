@@ -91,6 +91,61 @@ class FrozenConceptVision(nn.Module):
         """Nothing to reset; kept so `Pair.reset_parameters` still works."""
 
 
+class LearnableConceptVision(nn.Module):
+    """
+    A vision model that has *not* won yet, on the same game.
+
+    `FrozenConceptVision` hands each agent a feature space in which the concepts
+        are already separated. That is what makes the probe cheap, and it is
+        also the one thing it cannot ask about: both comparers solve the game
+        under it -- the two-stack reaches 1.000 by step 600 and the four-stage
+        one by step 800 -- while only the bilinear one learns in the real run.
+        The difference the probe removes is the difference that is left.
+
+    So here the concepts live in a fixed `input_dim` space with a nuisance
+        subspace on top, and each agent owns a learnable linear map from that
+        space to its own features. Two properties make it the right hard case:
+
+    1. At initialisation the map is a random projection, which by
+       Johnson-Lindenstrauss preserves the input's class separation and adds
+       nothing. The features therefore open at the *input's* signal-to-noise,
+       not at a separation someone arranged.
+    2. The nuisance lives in a `nuisance_dim` subspace, so a linear map can
+       null it. The task is learnable, and learning it is exactly the job the
+       ViT does: amplify between-class over within-class variation.
+
+    Both agents see the same concepts through their own map and their own draw
+        of the nuisance, as the real pair sees different images of one species.
+    """
+
+    def __init__(self, concepts, final_feat_dim, input_dim, nuisance_dim,
+                 nuisance, generator):
+        super().__init__()
+        self.final_feat_dim = final_feat_dim
+        self.nuisance = nuisance
+
+        # Shared across both agents, so the two are looking at one world.
+        self.register_buffer(
+            "concept_prototypes",
+            torch.randn(concepts, input_dim, generator=generator),
+        )
+        basis = torch.randn(nuisance_dim, input_dim, generator=generator)
+        self.register_buffer("nuisance_basis", basis / basis.norm(dim=1, keepdim=True))
+
+        # The agent's own encoder, and the only thing here that learns.
+        self.encoder = nn.Linear(input_dim, final_feat_dim, bias=False)
+
+    def forward(self, ids):
+        clean = self.concept_prototypes[ids.reshape(-1).long()]
+        coefficients = torch.randn(
+            clean.size(0), self.nuisance_basis.size(0), device=clean.device
+        )
+        return self.encoder(clean + self.nuisance * (coefficients @ self.nuisance_basis))
+
+    def reset_parameters(self):
+        self.encoder.reset_parameters()
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description=__doc__.strip().splitlines()[0],
@@ -111,12 +166,45 @@ def parse_args():
     )
     parser.add_argument("--concepts", type=int, default=50)
     parser.add_argument("--noise", type=float, default=0.5)
+    parser.add_argument(
+        "--cross-beta", type=float, default=1.0,
+        help="multiply the LISTENER's referent-stack cross-attention branch by "
+             "this, which is the same as giving that branch its own beta. 2.45 "
+             "undamps it to beta 1.0 at three blocks, leaving the other two "
+             "branches and the message stack at DeepNorm. Cross-attention "
+             "comparer only",
+    )
+    parser.add_argument(
+        "--vision", choices=("frozen", "learnable"), default="frozen",
+        help="`frozen` gives both agents a feature space in which the concepts "
+             "are already separated -- a vision model that has won. "
+             "`learnable` gives each agent a linear encoder over a shared "
+             "input space with a nuisance subspace on top, so the separation "
+             "has to be learned while the pair bootstraps",
+    )
+    parser.add_argument(
+        "--input-dim", type=int, default=128,
+        help="learnable vision only: width of the shared input space",
+    )
+    parser.add_argument(
+        "--nuisance-dim", type=int, default=32,
+        help="learnable vision only: dimension of the within-class subspace, "
+             "which is what a working encoder learns to null",
+    )
+    parser.add_argument(
+        "--nuisance", type=float, default=1.0,
+        help="learnable vision only: scale of the within-class variation "
+             "against the unit-scale concept prototypes. 0 is a separable "
+             "space that still has to be found; large is an encoder with a "
+             "long way to go",
+    )
     parser.add_argument("--every", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args()
 
 
-def build(config_path, concepts, noise, lr=None):
+def build(config_path, concepts, noise, lr=None, vision="frozen",
+          input_dim=128, nuisance_dim=32, nuisance=1.0):
     """The real pair and the real optimiser, with the vision models swapped."""
     config = parse_config.get_config(config_path)
     config["cuda"] = False
@@ -136,12 +224,22 @@ def build(config_path, concepts, noise, lr=None):
 
     # After the build, so that every width the pair derived from
     #     `final_feat_dim` is the width the real rung uses.
-    pair.sender.feat_model = FrozenConceptVision(
-        concepts, pair.sender.feat_model.final_feat_dim, noise
-    )
-    pair.receiver.feature_model = FrozenConceptVision(
-        concepts, pair.receiver.feature_model.final_feat_dim, noise
-    )
+    if vision == "frozen":
+        def make(width):
+            return FrozenConceptVision(concepts, width, noise)
+    else:
+        # One generator for both agents, so the concepts and the nuisance
+        #     subspace are a property of the world rather than of the agent.
+        #     `torch.manual_seed` in `main` still fixes the whole run.
+        world = torch.Generator().manual_seed(torch.initial_seed() % (2 ** 31))
+
+        def make(width):
+            return LearnableConceptVision(
+                concepts, width, input_dim, nuisance_dim, nuisance, world
+            )
+
+    pair.sender.feat_model = make(pair.sender.feat_model.final_feat_dim)
+    pair.receiver.feature_model = make(pair.receiver.feature_model.final_feat_dim)
 
     # The optimiser was built over the real vision parameters, which no longer
     #     exist. Dropping those groups leaves every other group -- and the
@@ -154,14 +252,54 @@ def build(config_path, concepts, noise, lr=None):
         group["lr"] *= scale
     optimiser.param_groups = [g for g in optimiser.param_groups if g["params"]]
 
+    # The encoders are new parameters in no group, so without this they would
+    #     sit at their random projection for the whole run and `learnable`
+    #     would be a harder `frozen` rather than a different question. Base
+    #     rate: they stand in for the vision models, which take the base rate.
+    encoders = [p for n, p in pair.named_parameters() if ".encoder." in n]
+    if encoders:
+        optimiser.add_param_group(
+            {"params": encoders,
+             "lr": config["optimiser"]["lr"] * scale,
+             "weight_decay": 0.0}
+        )
+
     return config, pair, optimiser
+
+
+
+def scale_message_crossing(pair, factor):
+    """
+    Give the referent stack's cross-attention branch its own beta.
+
+    `DecoderBlock._residual` multiplies all three branches by one `self.beta`,
+        so DeepNorm damps the crossing that carries the message by exactly as
+        much as the candidates' self-attention and the feedforward -- and
+        `alpha = beta = 1.0` in the config undamps all three, in both stacks,
+        including the message stack's crossing, which reads the candidates and
+        runs the other way. That is four changes to test one idea.
+
+    Scaling this branch's output by `factor` is identical to running it at
+        `factor * beta` and leaves everything else at DeepNorm's values. The
+        message stack is untouched: the question is how much message reaches
+        the scored stream, not how much the message reads.
+    """
+    if factor == 1.0:
+        return 0
+    blocks = pair.receiver.discriminator.referent_decoder.blocks
+    for block in blocks:
+        block.cross_attention.register_forward_hook(
+            lambda module, args, output, k=factor: output * k
+        )
+    return len(blocks)
 
 
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
     config, pair, optimiser = build(
-        args.config, args.concepts, args.noise, args.lr
+        args.config, args.concepts, args.noise, args.lr,
+        args.vision, args.input_dim, args.nuisance_dim, args.nuisance,
     )
     pair.train()
 
@@ -172,24 +310,43 @@ def main():
     print(f"{os.path.basename(args.config)}")
     print(f"  speaker  : {type(pair.sender.language_model).__name__} / "
           f"{type(pair.sender.prototyper).__name__}")
-    print(f"  listener : {type(pair.receiver.comparer).__name__}")
+    print(f"  listener : {type(pair.receiver.language_model).__name__} / "
+          f"{type(pair.receiver.discriminator).__name__}")
     rates = sorted({group["lr"] for group in optimiser.param_groups})
     print(f"  batch {batch} x {n_obj} slots, {args.concepts} concepts, "
           f"noise {args.noise}, {args.steps} steps")
     print(f"  rates    : {', '.join(f'{rate:.2g}' for rate in rates)}")
-    print(f"  vision   : frozen prototypes, both agents\n")
+    if args.vision == "frozen":
+        print(f"  vision   : frozen prototypes, both agents -- already separated\n")
+    else:
+        print(f"  vision   : learnable linear encoder, both agents; "
+              f"{args.input_dim}-d input, {args.nuisance_dim}-d nuisance "
+              f"subspace at scale {args.nuisance}\n")
 
-    # The listener's own column, where it has one. `decision_kurtosis` reads
+    # The listener's own columns, where it has them. `decision_kurtosis` reads
     #     the shape of its scores: negative means bimodal, which is what
     #     discriminating looks like; sustained positive alongside a flat `acc`
-    #     means a listener with nothing to say.
-    comparer = pair.receiver.comparer
-    has_kurtosis = hasattr(comparer, "decision_kurtosis")
+    #     means a listener with nothing to say. `mix_alpha` is how much of the
+    #     score is the attention path, and it is the column this probe exists
+    #     to watch: the attention arm on its own reaches 0.469 under nuisance 8
+    #     where the bilinear one reaches 0.938, so what has to be seen is
+    #     whether attention gets taken up once the mix carries the bootstrap.
+    discriminator = pair.receiver.discriminator
+    has_kurtosis = hasattr(discriminator, "decision_kurtosis")
+    has_mix = hasattr(discriminator, "mix_alpha")
+
+    if args.cross_beta != 1.0:
+        scaled = scale_message_crossing(pair, args.cross_beta)
+        print(f"  crossing : referent-stack cross-attention x{args.cross_beta} "
+              f"over {scaled} blocks -- effective beta "
+              f"{discriminator.beta * args.cross_beta:.3f} on that branch, "
+              f"{discriminator.beta:.3f} on the other two\n")
 
     header = (
         f"{'step':>6} {'loss':>7} {'acc':>7} {'pool_eff':>9} {'pool_norm':>10} "
         f"{'polarity':>9} {'lgt_scale':>10} {'survival':>9} {'spread':>7}"
         + (f" {'kurtosis':>9}" if has_kurtosis else "")
+        + (f" {'mix_a':>7} {'agree':>7}" if has_mix else "")
     )
     print(header)
     print("-" * len(header))
@@ -246,7 +403,12 @@ def main():
             f"{language_model.logit_spread:7.4f}"
         )
         if has_kurtosis:
-            line += f" {comparer.decision_kurtosis:+9.2f}"
+            line += f" {discriminator.decision_kurtosis:+9.2f}"
+        if has_mix:
+            line += (
+                f" {discriminator.mix_alpha:7.3f}"
+                f" {discriminator.path_agreement:+7.3f}"
+            )
         print(line)
 
 

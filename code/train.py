@@ -174,7 +174,8 @@ CLIP_GROUPS = (
     ("sender_language_model", lambda pair: pair.sender.language_model),
     ("receiver_vision", lambda pair: pair.receiver.feature_model),
     ("receiver_token_embedding", lambda pair: pair.receiver.token_embedding),
-    ("receiver_comparer", lambda pair: pair.receiver.comparer),
+    ("receiver_language_model", lambda pair: pair.receiver.language_model),
+    ("receiver_discriminator", lambda pair: pair.receiver.discriminator),
 )
 
 
@@ -418,23 +419,41 @@ def run(
                     batch_size=batch_size,
                 )
 
-            # The listener's half. Dispatched on the class rather than by
-            # `hasattr`, so a rename raises instead of quietly producing a NaN
-            # column. Each column is genuinely inapplicable to the other class.
-            # See docs/measurement.md.
+            # The listener's half. Dispatched on the discriminator's class
+            # rather than by `hasattr`, so a rename raises instead of quietly
+            # producing a NaN column. See docs/measurement.md.
+            #
+            # `score_scale` is the bilinear arm's volume and `mix_scale` is
+            # the attention arm's. They are not the same parameter and the
+            # attention arm has no `score_scale` at all -- it standardises its
+            # bilinear path, which divides that scale out -- so the two are
+            # reported under different names rather than sharing a column.
             if training:
-                comparer = pair.receiver.comparer
+                discriminator = pair.receiver.discriminator
 
-                if isinstance(comparer, models.receiver.BilinearGRUComparer):
+                if isinstance(
+                    discriminator, models.receiver.BilinearDiscriminator
+                ):
                     stats.update(
-                        score_scale=comparer.score_scale.item(),
+                        score_scale=discriminator.score_scale.item(),
+                        batch_size=batch_size,
+                    )
+                elif isinstance(
+                    discriminator, models.receiver.AttentionDiscriminator
+                ):
+                    stats.update(
+                        mix_alpha=discriminator.mix_alpha,
+                        mix_scale=discriminator.recorded_mix_scale,
+                        path_agreement=discriminator.path_agreement,
+                        decision_spread=discriminator.decision_spread,
+                        decision_kurtosis=discriminator.decision_kurtosis,
                         batch_size=batch_size,
                     )
                 else:
-                    stats.update(
-                        decision_spread=comparer.decision_spread,
-                        decision_kurtosis=comparer.decision_kurtosis,
-                        batch_size=batch_size,
+                    raise TypeError(
+                        "No metrics are defined for discriminator "
+                        f"{type(discriminator).__name__}. Add a branch here "
+                        "rather than letting a new listener run unmeasured."
                     )
 
         if training:

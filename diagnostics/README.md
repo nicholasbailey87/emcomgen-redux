@@ -19,8 +19,10 @@ Nothing here is part of training. They are read when a run is not working.
 
 ## `comparer_probe.py`
 
-Hands the listener's comparer a game it should be able to win, with the speaker,
-the channel and both vision models removed.
+Hands the listener a game it should be able to win, with the speaker, the
+channel and both vision models removed. Both slots are built and run — the
+language model and the discriminator — since which of them is at fault is
+exactly what a probe on one alone could not say.
 
 Each row is `n_examples` slots. Half are one concept and half another, drawn
 from a pool of random prototype vectors with Gaussian noise on top; the message
@@ -66,7 +68,10 @@ deliberately reachable, because it is reachable in the real game too.
 
 ### Readings
 
-`TransformerCrossAttentionComparer`, rung 12, at the config's own lr of 1e-4:
+Rung 12's listener, at the config's own lr of 1e-4. Taken before the split and
+before the mix, so these are the two decoder stacks with a plain readout and no
+bilinear path; they are the numbers the mix was designed against rather than
+readings of what runs today:
 
 | mode | accuracy | loss | excess kurtosis |
 |---|---|---|---|
@@ -74,8 +79,8 @@ deliberately reachable, because it is reachable in the real game too.
 | scrambled, clustered | 0.39–0.69, no trend | 0.88–1.16 | **+5 to +18** |
 | scrambled, varied | 0.93 by step 200 | 0.40 | −0.7 |
 
-`BilinearGRUComparer`, rung 2, informative and clustered: 1.000 by step 200,
-loss 0.079, kurtosis −1.77.
+Rung 2's listener — the GRU and the bilinear form — informative and clustered:
+1.000 by step 200, loss 0.079, kurtosis −1.77.
 
 Read the **kurtosis** column, and read its sign. Accuracy and `score_sd` read
 the *size* of the scores; kurtosis reads their shape, and shape is what
@@ -90,10 +95,13 @@ more general than the arbitrage that first motivated it. That arbitrage —
 outliers being cheap per unit of variance under a pinned variance budget — went
 with the pin.
 
-The bracketed `[module: …]` figures are the comparer's own `decision_spread` and
-`decision_kurtosis`, the ones that reach `metrics.csv`. They are computed
-independently of the probe's, so a disagreement between the two would mean the
-logged column is wrong.
+The bracketed `[module: …]` figures are the discriminator's own
+`decision_spread` and `decision_kurtosis`, the ones that reach `metrics.csv`.
+They are computed independently of the probe's, so a disagreement between the
+two would mean the logged column is wrong. `AttentionDiscriminator` adds a
+second bracket, `[mix a … agree …]`: how much of the score is the attention path
+and how far the two paths agree within a game. Read those two together — see
+docs/measurement.md.
 
 Note what `decision_spread` alone cannot do: it read 2.7–5.1 in the informative
 condition and 1.4–2.1 in the scrambled one — overlapping ranges, no verdict.
@@ -141,9 +149,8 @@ for 2500 steps.
 ### What it settled
 
 This is the script that identified the listener's readout as the cause of rungs
-11–14 sitting at chance, and it is why
-`TransformerCrossAttentionComparer` no longer batch-normalises its scores. At
-2500 steps and the config's own 1e-4:
+11–14 sitting at chance, and it is why the attention arm no longer batch-normalises
+its scores at a fixed gain. At 2500 steps and the config's own 1e-4:
 
 | | acc | loss | polarity_separation |
 |---|---|---|---|
@@ -165,7 +172,7 @@ thirty epochs) and reaches 1.000 anyway.
 
 ### What it is not for
 
-Choosing a learning rate. At 1e-3 *both* comparers saturate their logits inside
+Choosing a learning rate. At 1e-3 *both* listeners saturate their logits inside
 a hundred steps and freeze, rung 10 included — accuracy 0.59 against 1.000 at
 1e-4. Frozen vision and linearly separable concepts make this a poor model of
 where the real run's optimum sits, and two points are not a sweep.

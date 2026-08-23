@@ -3,19 +3,27 @@ Tests for the listener's score scale in code/models/receiver.py.
 
 Runnable without pytest:  python tests/test_score_scale.py
 
-Both comparers used to let the architecture set how loudly the listener stated
-a conclusion, and both have now been stopped from doing it. That is the same
+The listener is `ReceiverGRULM + BilinearDiscriminator` or
+`ReceiverCrossAttentionLM + AttentionDiscriminator`; this file calls those the
+bilinear arm and the attention arm, and follows each end to end because volume
+is a property of the whole path. The two modules they were split out of are
+named below where the history is theirs.
+
+Both used to let the architecture set how loudly the listener stated a
+conclusion, and both have now been stopped from doing it. That is the same
 defect `e3fcabd` fixed in three places on the speaker, arriving one module at a
 time: whatever multiplies the score also multiplies every gradient in the pair,
 so a listener that quietens starves the machinery that would make it worth
 listening to.
 
-`BilinearGRUComparer` scored a referent by a raw dot product on unnormalised
+`BilinearGRUComparer`, now the bilinear arm, scored a referent by a raw dot
+product on unnormalised
 backbone output, so on ViT2 the size was set by an `nn.BatchNorm1d` at the end
 of broccoli's classification head and on ResNet18 by the trunk's own
 normalisation -- per batch, and differently at eval.
 
-`TransformerCrossAttentionComparer` read its score off a bare
+`TransformerCrossAttentionComparer`, now the attention arm, read its score off a
+bare
 `nn.Linear(d_model, 1)`, which made one vector both the *direction* the head
 reads out and the *volume* it reads at. BCE reduces a loss it cannot otherwise
 reduce by becoming less confident, and that pressure is first-order where
@@ -28,7 +36,7 @@ score's magnitude -- both operands of the dot product on one, the readout
 direction and its input on the other -- and leave a single `log_score_scale`
 opening at 1.0.
 
-That held on `BilinearGRUComparer`, which still has it, and failed on the other
+That held on the bilinear arm, which still has it, and failed on the other
 one. `issue.csv` is the second round: rungs 11 and 12 sat at `train_loss` = ln 2
 and `train_acc` = 0.4998 for thirty epochs while `score_scale` slid 0.914 ->
 0.273, monotone, never recovering. Making the collapse legible had not made it
@@ -53,11 +61,20 @@ crossing 6-8 and the speaker's logit scale traversing behind it. A listener that
 cannot go quiet while the message is still noise never lets the speaker learn to
 send one.
 
+One thing has changed since, and it is the fourth answer rather than a return
+to the third. `AttentionDiscriminator` standardises the attention readout again
+-- but only as one operand of a mix whose other operand is a bilinear
+comparison, and with a single `log_mix_scale` downstream of both. So the *pair*
+can still go quiet, which is the freedom the bootstrap needs, while neither
+path can go quiet on its own, which is what stops the attention path escaping
+being learned. `decision` itself is still plain, and the volume it can no
+longer reach has moved to a named scalar rather than being pinned shut.
+
 The tests below split accordingly: shared properties stay parametrised over both
-classes, `log_score_scale`'s mechanism is bilinear-only, and the cross-attention
-readout has a section of its own -- which now pins the *absence* of guards and
-the columns that watch what is unguarded. `29b18ea` still explains why the
-surviving bilinear scale is free rather than floored: a healthy pair dips ~0.2
+arms, `log_score_scale`'s mechanism is bilinear-only -- the attention arm builds
+its bilinear path without one, because standardising divides it out -- and the
+attention readout has a section of its own. `29b18ea` still explains why the
+surviving scales are free rather than floored: a healthy pair dips ~0.2
 log-units below its opening while the message is still noise and comes back, and
 flooring that cost fifteen epochs.
 """
@@ -76,51 +93,92 @@ import models.builder
 import models.receiver as R
 import parse_config
 
-from _bootstrap import CONFIG_DIR, config_section, rung
+from _bootstrap import CONFIG_DIR, build_listener, config_section, rung
 
 REFERENT_DIM = 512
 BATCH, N_OBJ, SEQ = 8, 20, 7
 
 
 def _comparer(referent_dim=REFERENT_DIM, **overrides):
-    config = config_section("receiver_comparer", **overrides)
-    torch.manual_seed(0)
-    return R.BilinearGRUComparer(referent_dim, **config)
-
-
-def _cross_comparer(referent_dim=REFERENT_DIM, **overrides):
     """
-    Built from rung 11 rather than from DEFAULT, which cannot construct this
-        class: DEFAULT's `d_model = 1024` is `BilinearGRUComparer`'s GRU width
-        and does not divide `heads = 5`. See the note beside `heads` in
-        DEFAULT.toml.
+    The bilinear arm: `ReceiverGRULM` feeding `BilinearDiscriminator`, composed
+        the way `Receiver` composes them. Overrides go to the language model,
+        which is where every key this arm reads lives -- `BilinearDiscriminator`
+        takes nothing from its own config table.
     """
-    config = config_section(
-        "receiver_comparer",
-        rung("11_shapeworld_receiver_cross_attention.toml"),
-        **overrides,
+    return build_listener(
+        "ReceiverGRULM",
+        "BilinearDiscriminator",
+        referent_dim,
+        language_model_overrides=overrides or None,
     )
-    torch.manual_seed(0)
-    return R.TransformerCrossAttentionComparer(referent_dim, **config)
 
 
-# Every property below the first section holds of both classes, and is
+CROSS_RUNG = "11_shapeworld_receiver_cross_attention.toml"
+
+# The keys that belong to the discriminator's table rather than the language
+#     model's, so `_cross_comparer` can take one flat kwargs like the builder it
+#     replaced. `layers`, `alpha` and `beta` are deliberately absent: both
+#     tables carry them and mean different stacks, so a test that wants one has
+#     to say which. See test_residual_scaling.py.
+_DISCRIMINATOR_KEYS = frozenset(
+    {
+        "d_model", "heads", "ff_inner_size", "stochastic_depth",
+        "self_attention_dropout", "cross_attention_dropout",
+        "ff_inner_dropout", "ff_outer_dropout", "activation",
+        "pre_norm", "post_norm", "knocking_heads",
+        "depthwise_linear_stochastic_depth",
+        "mix_floor", "mix_logit_init",
+    }
+)
+
+
+def _cross_comparer(referent_dim=REFERENT_DIM, dropout=0.0, **overrides):
+    """
+    The attention arm: `ReceiverCrossAttentionLM` feeding
+        `AttentionDiscriminator`.
+
+    Built from rung 11 rather than from DEFAULT, which cannot construct the
+        encoder: DEFAULT's `[receiver_language_model] d_model = 1024` is the
+        GRU's width and does not divide its `heads = 5`. See the note beside
+        `d_model` in DEFAULT.toml.
+
+    `dropout` is `[receiver] dropout` and defaults to off, because these are
+        tests of a deterministic property and a resampled mask between two
+        calls would be measuring dropout.
+    """
+    discriminator_overrides = {
+        key: value for key, value in overrides.items()
+        if key in _DISCRIMINATOR_KEYS
+    }
+    return build_listener(
+        "ReceiverCrossAttentionLM",
+        "AttentionDiscriminator",
+        referent_dim,
+        config_file=rung(CROSS_RUNG),
+        dropout=dropout,
+        language_model_overrides=overrides or None,
+        discriminator_overrides=discriminator_overrides or None,
+    )
+
+
+# Every property below the first section holds of both arms, and is
 #     parametrised over them rather than written twice. Where a mechanism
-#     differs the test is in the class's own section further down.
+#     differs the test is in the arm's own section further down.
 BOTH = pytest.mark.parametrize(
     "build", [_comparer, _cross_comparer], ids=["bilinear", "cross_attention"]
 )
 
 
-def _inputs(comparer, referent_scale=1.0, seed=0):
+def _inputs(listener, referent_scale=1.0, seed=0):
     generator = torch.Generator().manual_seed(seed)
     referents = referent_scale * torch.randn(
-        BATCH, N_OBJ, comparer.referent_embedding_size, generator=generator
+        BATCH, N_OBJ, listener.referent_embedding_size, generator=generator
     )
     messages = torch.randn(
         BATCH,
-        getattr(comparer, "message_length", SEQ),
-        comparer.token_embedding_size,
+        getattr(listener, "message_length", SEQ),
+        listener.token_embedding_size,
         generator=generator,
     )
     return referents, messages
@@ -137,11 +195,11 @@ def _labels():
 # --------------------------------------------------------------------------
 
 def test_neither_bilinear_operand_norm_has_an_affine():
-    comparer = _comparer()
-    assert comparer.referent_layer_norm.weight is None
-    assert comparer.referent_layer_norm.bias is None
-    assert comparer.message_layer_norm.weight is None
-    assert comparer.message_layer_norm.bias is None
+    discriminator = _comparer().discriminator
+    assert discriminator.referent_layer_norm.weight is None
+    assert discriminator.referent_layer_norm.bias is None
+    assert discriminator.message_layer_norm.weight is None
+    assert discriminator.message_layer_norm.bias is None
 
 
 def test_the_cross_attention_norms_that_must_be_affine_free_are():
@@ -160,10 +218,15 @@ def test_the_cross_attention_norms_that_must_be_affine_free_are():
         the part that has to hold, so its affine is asserted here as present
         rather than absent.
     """
-    comparer = _cross_comparer()
+    listener = _cross_comparer()
 
-    assert comparer.referent_layer_norm.weight is None
-    assert comparer.referent_decoder.blocks[-1].post_mlp_norm.weight is not None
+    assert listener.language_model.referent_layer_norm.weight is None
+    assert listener.discriminator.referent_layer_norm.weight is None
+    assert listener.discriminator.memory_layer_norm.weight is None
+    assert (
+        listener.discriminator.referent_decoder.blocks[-1].post_mlp_norm.weight
+        is not None
+    )
 
 
 def test_the_referent_adapter_has_no_bias():
@@ -173,7 +236,11 @@ def test_the_referent_adapter_has_no_bias():
         homogeneous in the input. `W(cx) = cW(x)` gives `LN(W(cx)) = LN(W(x))`;
         `W(cx) + b` does not.
     """
-    assert _cross_comparer().referent_adapter.bias is None
+    listener = _cross_comparer()
+    # One per slot, because each owns its own projection; see
+    #     test_receiver_slots.py for why they are not shared.
+    assert listener.language_model.referent_adapter.bias is None
+    assert listener.discriminator.referent_adapter.bias is None
 
 
 # --------------------------------------------------------------------------
@@ -262,14 +329,14 @@ def test_an_unnormalised_referent_would_have_been_promoted():
         inflation, scored the way `BilinearGRUComparer` scored it before this
         change.
     """
-    comparer = _comparer().eval()
-    referents, messages = _inputs(comparer)
+    listener = _comparer().eval()
+    referents, messages = _inputs(listener)
     inflated = referents.clone()
     inflated[:, 3, :] *= 50.0
 
     with torch.no_grad():
-        token_embeddings, _ = comparer.gru(messages)
-        projected = comparer.bilinear(token_embeddings[:, -1, ...])
+        message_repr = listener.language_model(messages, referents)
+        projected = listener.discriminator.bilinear(message_repr.mean(1))
         raw = torch.einsum("ijh,ih->ij", (inflated, projected))
 
     assert raw[:, 3].abs().mean() > 10.0 * raw.abs().mean()
@@ -286,26 +353,27 @@ def test_an_unnormalised_referent_would_have_hijacked_the_value_mixture():
         every message token, and no downstream norm can undo an average that
         has already been taken.
     """
-    comparer = _cross_comparer(referent_dim=320).eval()
-    referents, messages = _inputs(comparer)
+    listener = _cross_comparer(referent_dim=320).eval()
+    language_model = listener.language_model
+    referents, messages = _inputs(listener)
     inflated = referents.clone()
     inflated[:, 3, :] *= 50.0
 
     with torch.no_grad():
-        adapted = comparer.referent_adapter(referents)
-        adapted_inflated = comparer.referent_adapter(inflated)
-        encoded = comparer.message_adapter(messages)
+        adapted = language_model.referent_adapter(referents)
+        adapted_inflated = language_model.referent_adapter(inflated)
+        encoded = language_model.message_adapter(messages)
 
         def stage_one(values):
-            return comparer.message_decoder.blocks[0].cross_attention(
+            return language_model.message_decoder.blocks[0].cross_attention(
                 encoded, values, values
             )
 
         raw = stage_one(adapted)
         raw_inflated = stage_one(adapted_inflated)
-        normed = stage_one(comparer.referent_layer_norm(adapted))
+        normed = stage_one(language_model.referent_layer_norm(adapted))
         normed_inflated = stage_one(
-            comparer.referent_layer_norm(adapted_inflated)
+            language_model.referent_layer_norm(adapted_inflated)
         )
 
     moved_raw = ((raw_inflated - raw).norm(dim=-1) / raw.norm(dim=-1)).mean()
@@ -322,7 +390,7 @@ def test_an_unnormalised_referent_would_have_hijacked_the_value_mixture():
 # --------------------------------------------------------------------------
 
 def test_the_bilinear_scale_opens_at_one():
-    assert _comparer().score_scale.item() == pytest.approx(1.0)
+    assert _comparer().discriminator.score_scale.item() == pytest.approx(1.0)
 
 
 @BOTH
@@ -341,9 +409,9 @@ def test_the_untrained_score_opens_at_a_width_independent_magnitude(
         sets the opening and the referent width does not -- see
         `test_the_readout_opens_below_a_confident_wrong_answer`.
     """
-    comparer = build(referent_dim=referent_dim)
+    listener = build(referent_dim=referent_dim).eval()
     with torch.no_grad():
-        scores = comparer(*_inputs(comparer))
+        scores = listener(*_inputs(listener))
 
     assert 0.3 < scores.std().item() < 3.0
 
@@ -364,9 +432,9 @@ def test_untrained_bce_opens_within_reach_of_ln_2(build, referent_dim):
         `test_the_readout_opens_below_a_confident_wrong_answer` records the
         refutation of.
     """
-    comparer = build(referent_dim=referent_dim)
+    listener = build(referent_dim=referent_dim).eval()
     with torch.no_grad():
-        scores = comparer(*_inputs(comparer))
+        scores = listener(*_inputs(listener))
 
     loss = F.binary_cross_entropy_with_logits(scores, _labels()).item()
 
@@ -374,8 +442,11 @@ def test_untrained_bce_opens_within_reach_of_ln_2(build, referent_dim):
 
 
 # --------------------------------------------------------------------------
-# What the bilinear scale can and cannot do. `BilinearGRUComparer` only, since
-#     it is the only class that still has one -- see the module docstring.
+# What the bilinear scale can and cannot do. `BilinearDiscriminator` only, and
+#     only when it is the whole discriminator: inside `AttentionDiscriminator`
+#     the same class is built with `score_scale=False`, because `standardise`
+#     runs on its output and divides any positive scale straight back out. See
+#     test_receiver_slots.py, which pins that and the counterfactual.
 # --------------------------------------------------------------------------
 
 def test_the_scale_cannot_change_the_decision():
@@ -388,12 +459,12 @@ def test_the_scale_cannot_change_the_decision():
     Which is also why the collapse was invisible in `train_acc`: this property
         is what let the loss walk to ln 2 with every prediction unchanged.
     """
-    comparer = _comparer().eval()
-    referents, messages = _inputs(comparer)
+    listener = _comparer().eval()
+    referents, messages = _inputs(listener)
     with torch.no_grad():
-        quiet = comparer(referents, messages)
-        comparer.log_score_scale.fill_(math.log(37.0))
-        loud = comparer(referents, messages)
+        quiet = listener(referents, messages)
+        listener.discriminator.log_score_scale.fill_(math.log(37.0))
+        loud = listener(referents, messages)
 
     assert torch.equal(quiet > 0, loud > 0)
     assert torch.equal(quiet.argmax(1), loud.argmax(1))
@@ -406,32 +477,33 @@ def test_the_scale_does_change_the_loss():
         is the listener's one control over its own confidence. It is also the
         exposure -- the same asymmetry is what makes the descent first-order.
     """
-    comparer = _comparer().eval()
-    referents, messages = _inputs(comparer)
+    listener = _comparer().eval()
+    referents, messages = _inputs(listener)
     labels = _labels()
 
     with torch.no_grad():
         quiet = F.binary_cross_entropy_with_logits(
-            comparer(referents, messages), labels
+            listener(referents, messages), labels
         ).item()
-        comparer.log_score_scale.fill_(math.log(37.0))
+        listener.discriminator.log_score_scale.fill_(math.log(37.0))
         loud = F.binary_cross_entropy_with_logits(
-            comparer(referents, messages), labels
+            listener(referents, messages), labels
         ).item()
 
     assert loud > quiet
 
 
 def test_the_scale_receives_gradient():
-    comparer = _comparer()
-    referents, messages = _inputs(comparer)
+    listener = _comparer()
+    referents, messages = _inputs(listener)
 
     F.binary_cross_entropy_with_logits(
-        comparer(referents, messages), _labels()
+        listener(referents, messages), _labels()
     ).backward()
 
-    assert comparer.log_score_scale.grad is not None
-    assert comparer.log_score_scale.grad.abs().item() > 0.0
+    scale = listener.discriminator.log_score_scale
+    assert scale.grad is not None
+    assert scale.grad.abs().item() > 0.0
 
 
 def test_bilinear_cannot_reach_the_score_magnitude():
@@ -441,34 +513,40 @@ def test_bilinear_cannot_reach_the_score_magnitude():
         `score_scale` as the only route, and it is the difference between the
         ordering we shipped and the one where the norm sat on the GRU state.
     """
-    comparer = _comparer().eval()
-    referents, messages = _inputs(comparer)
+    listener = _comparer().eval()
+    referents, messages = _inputs(listener)
     with torch.no_grad():
-        before = comparer(referents, messages)
-        comparer.bilinear.weight.mul_(100.0)
-        after = comparer(referents, messages)
+        before = listener(referents, messages)
+        listener.discriminator.bilinear.weight.mul_(100.0)
+        after = listener(referents, messages)
 
     assert torch.allclose(before, after, atol=1e-4)
 
 
 def test_reset_parameters_returns_the_scale_to_its_opening():
-    comparer = _comparer()
+    discriminator = _comparer().discriminator
     with torch.no_grad():
-        comparer.log_score_scale.fill_(math.log(37.0))
-    comparer.reset_parameters()
+        discriminator.log_score_scale.fill_(math.log(37.0))
+    discriminator.reset_parameters()
 
-    assert comparer.score_scale.item() == pytest.approx(1.0)
+    assert discriminator.score_scale.item() == pytest.approx(1.0)
 
 
 # --------------------------------------------------------------------------
-# The readout. `TransformerCrossAttentionComparer` only.
+# The readout. `AttentionDiscriminator` only.
 #
-# It is a plain `nn.Linear(d_model, 1)` on a layer-normed input, which is what
-#     it was before two attempts to take the volume out of the listener's hands
-#     -- `log_score_scale`, then a fixed-gain BatchNorm. The second closed the
-#     collapse it was written for and stopped four rungs learning at all. What
-#     these tests pin is therefore mostly the *absence* of guards, and the
-#     columns that watch what is no longer guarded.
+# `decision` is a plain `nn.Linear(d_model, 1)` on a layer-normed input, which
+#     is what it was before two attempts to take the volume out of the
+#     listener's hands -- `log_score_scale`, then a fixed-gain BatchNorm. The
+#     second closed the collapse it was written for and stopped four rungs
+#     learning at all.
+#
+# What follows it is the mix, and the mix standardises this readout. That is
+#     not the fixed gain coming back: the volume moved to `log_mix_scale`
+#     downstream of both paths rather than being pinned, and the bilinear path
+#     carries the decision through the opening so nothing has to be confident
+#     early. What is closed is only the escape of turning the attention path
+#     down instead of learning it.
 #
 # Tests here run in train mode because everything downstream of the readout
 #     (dropout, stochastic depth) is mode-dependent, and because that is the
@@ -477,10 +555,13 @@ def test_reset_parameters_returns_the_scale_to_its_opening():
 
 def _quiet_cross_comparer(**overrides):
     """
-    A cross-attention comparer with every dropout off, so that two calls on the
-        same input differ only through what the test changed. Without this the
+    The attention arm with every dropout off, so that two calls on the same
+        input differ only through what the test changed. Without this the
         train-mode masks are resampled between calls and an exact-invariance
         assertion is measuring dropout.
+
+    Note the keys reach both slots: `_cross_comparer` routes them by name, and
+        the attention dropouts are in both tables under the same names.
     """
     return _cross_comparer(
         referent_dim=320,
@@ -506,16 +587,27 @@ def test_the_readout_is_a_plain_linear_layer():
         `diagnostics/bootstrap_probe.py` where the same module with a plain
         readout reaches 0.863 and the bilinear baseline reaches 1.000.
 
-    The bias is back because it was only ever dropped as a dead parameter: a
-        mean subtraction downstream absorbed any constant it could add, so its
-        gradient was identically zero. Nothing subtracts a mean now.
+    The bias, though, is a dead parameter again, and knowingly so. It was
+        dropped once for exactly this reason -- a mean subtraction downstream
+        absorbed any constant it could add -- restored when nothing subtracted
+        a mean any more, and `standardise` now subtracts one again. It is kept
+        because the module is a `nn.Linear` and giving one class a bias-free
+        readout to save 1 parameter would be a difference between the arms that
+        means nothing; `mix_bias` is the live per-score constant.
     """
-    comparer = _cross_comparer(referent_dim=320)
+    discriminator = _cross_comparer(referent_dim=320).discriminator
 
-    assert not hasattr(comparer, "log_score_scale")
-    assert not hasattr(comparer, "score_norm")
-    assert not hasattr(comparer, "decision_gain")
-    assert comparer.decision.bias is not None
+    assert not hasattr(discriminator, "score_norm")
+    assert not hasattr(discriminator, "decision_gain")
+    assert isinstance(discriminator.decision, torch.nn.Linear)
+    assert discriminator.decision.out_features == 1
+    assert discriminator.decision.bias is not None
+
+    # The volume is one named scalar downstream of the mix, and it is the only
+    #     one: the bilinear path is built without a `log_score_scale` because
+    #     standardising would divide it out.
+    assert not hasattr(discriminator.bilinear, "log_score_scale")
+    assert discriminator.mix_scale.item() == pytest.approx(1.0)
 
 
 def test_the_readout_opens_below_a_confident_wrong_answer():
@@ -537,9 +629,9 @@ def test_the_readout_opens_below_a_confident_wrong_answer():
         `nn.Linear`'s default init and the referent stack's post-norm output
         scale, and pinning it would make this a change-detector for PyTorch.
     """
-    comparer = _quiet_cross_comparer()
+    listener = _quiet_cross_comparer()
     with torch.no_grad():
-        scores = comparer(*_inputs(comparer))
+        scores = listener(*_inputs(listener))
 
     loss = F.binary_cross_entropy_with_logits(scores, _labels()).item()
 
@@ -547,60 +639,112 @@ def test_the_readout_opens_below_a_confident_wrong_answer():
     assert math.log(2.0) < loss < 1.0
 
 
-def test_the_decision_head_can_reach_the_score_magnitude():
+def test_the_decision_head_cannot_reach_the_score_magnitude():
     """
-    The guard that used to be here is gone, deliberately, and this test says so
-        rather than leaving its absence to be inferred.
+    Where the volume lives now, and this is a change from the arrangement the
+        section header describes: `standardise` runs on `decision`'s output, so
+        scaling its weight scales the pre-standardisation logits, their mean and
+        their spread alike and the quotient does not move. The head can turn but
+        neither shout nor fall silent.
 
-    While the readout was standardised, scaling `decision.weight` by `c` scaled
-        the pre-norm logits, their mean and their standard deviation alike, and
-        the quotient did not move -- the head could turn but neither shout nor
-        fall silent. That is the property `diagnostics/bootstrap_probe.py`
-        measured the cost of: it also stopped the listener going quiet while the
-        message was still noise, which is what the speaker needs it to do.
-
-    So the collapse route documented in this module's docstring is open again.
-        `decision_spread` is what watches it, which is why the assertion below
-        is on that column and not only on the scores.
+    That is exactly the property `diagnostics/bootstrap_probe.py` measured the
+        cost of when it was a fixed gain -- and the reason it is affordable now
+        is `log_mix_scale`, tested immediately below. Volume did not get taken
+        away from the listener; it got moved to one named scalar downstream of
+        both paths, which is where `train_mix_scale` can read it.
     """
-    comparer = _quiet_cross_comparer()
-    referents, messages = _inputs(comparer)
+    listener = _quiet_cross_comparer()
+    discriminator = listener.discriminator
+    referents, messages = _inputs(listener)
 
     with torch.no_grad():
-        before = comparer(referents, messages)
-        opening_spread = comparer.decision_spread
+        before = listener(referents, messages)
+        opening_spread = discriminator.decision_spread
 
-        comparer.decision.weight.mul_(10.0)
-        comparer.decision.bias.mul_(10.0)
-        loud = comparer(referents, messages)
+        discriminator.decision.weight.mul_(10.0)
+        discriminator.decision.bias.mul_(10.0)
+        after = listener(referents, messages)
 
-    assert torch.allclose(loud, 10.0 * before, rtol=1e-4, atol=1e-5)
-    assert comparer.decision_spread == pytest.approx(10.0 * opening_spread, rel=1e-4)
+    assert torch.allclose(after, before, rtol=1e-4, atol=1e-4)
+    assert discriminator.decision_spread == pytest.approx(
+        opening_spread, rel=1e-4
+    )
 
 
-def test_a_constant_readout_is_reported_rather_than_hidden():
+def test_the_mix_scale_can_reach_it_instead():
     """
-    The end state of the collapse, and what the columns say when it arrives.
-
-    A standardised readout sent a constant to 0 and sigmoid 0.5, which is why
-        going quiet was not a way down. A plain one passes the constant
-        through, so the listener really can sit at a fixed answer -- and the
-        only defence is that it is visible: zero spread, and a kurtosis of NaN
-        rather than a 0.0 that would read as "Gaussian, nothing to see".
+    The other half. A listener with nothing to say must be able to say it
+        quietly -- a pair forced to commit through a fixed volume from step zero
+        is committing before the message carries anything, which is what took
+        four rungs down. So the collapse route documented in this module's
+        docstring is open, through one scalar rather than through the readout,
+        and `decision_spread` and `train_mix_scale` are what watch it.
     """
-    comparer = _quiet_cross_comparer()
+    listener = _quiet_cross_comparer()
+    discriminator = listener.discriminator
+    referents, messages = _inputs(listener)
+
+    with torch.no_grad():
+        before = listener(referents, messages)
+        opening_spread = discriminator.decision_spread
+
+        discriminator.log_mix_scale.fill_(math.log(10.0))
+        loud = listener(referents, messages)
+
+    assert torch.allclose(loud, 10.0 * before, rtol=1e-4, atol=1e-4)
+    assert discriminator.decision_spread == pytest.approx(
+        10.0 * opening_spread, rel=1e-4
+    )
+    # And, exactly as on the bilinear arm, it cannot change the decision.
+    assert torch.equal(before > 0, loud > 0)
+
+
+def test_a_constant_attention_readout_is_neutralised_rather_than_obeyed():
+    """
+    The attention path going flat is no longer the end state of a collapse: it
+        is one path saying nothing while the other still decides. `standardise`
+        sends a constant to zero, so the mix falls back to the bilinear path at
+        `1 - mix_weight` and the listener keeps discriminating.
+
+    That is the property the floor is for. The attention stack cannot buy its
+        way out of being learned by going quiet, because going quiet costs it
+        the whole loss it was contributing to and buys nothing back.
+    """
+    listener = _quiet_cross_comparer()
+    discriminator = listener.discriminator
 
     class _Constant(torch.nn.Module):
         def forward(self, x):
             return torch.full((*x.shape[:-1], 1), 3.7)
 
-    comparer.decision = _Constant()
+    referents, messages = _inputs(listener)
     with torch.no_grad():
-        scores = comparer(*_inputs(comparer))
+        live = listener(referents, messages)
+        discriminator.decision = _Constant()
+        flattened = listener(referents, messages)
 
-    assert torch.allclose(scores, torch.full_like(scores, 3.7))
-    assert comparer.decision_spread == pytest.approx(0.0, abs=1e-6)
-    assert math.isnan(comparer.decision_kurtosis)
+    assert flattened.std().item() > 0.1 * live.std().item()
+    assert discriminator.path_agreement == pytest.approx(0.0, abs=1e-6)
+
+
+def test_a_listener_with_no_spread_at_all_is_reported_rather_than_hidden():
+    """
+    The end state of a collapse, and what the columns say when it arrives. It
+        now takes *both* paths going flat, or the scale going to zero, rather
+        than one readout -- but when it happens the reporting is unchanged: zero
+        spread, and a kurtosis of NaN rather than a 0.0 that would read as
+        "Gaussian, nothing to see".
+    """
+    listener = _quiet_cross_comparer()
+    discriminator = listener.discriminator
+
+    with torch.no_grad():
+        discriminator.log_mix_scale.fill_(-40.0)
+        scores = listener(*_inputs(listener))
+
+    assert torch.allclose(scores, torch.zeros_like(scores), atol=1e-12)
+    assert discriminator.decision_spread == pytest.approx(0.0, abs=1e-6)
+    assert math.isnan(discriminator.decision_kurtosis)
 
 
 def test_the_kurtosis_column_separates_the_shapes_the_spread_column_cannot():
@@ -621,10 +765,21 @@ def test_the_kurtosis_column_separates_the_shapes_the_spread_column_cannot():
         that is the point of the test. On the real runs the two conditions
         overlapped on it (1.4-2.1 against 2.7-5.1) while kurtosis separated them
         by sign.
+
+    `mix_logit` is pushed to saturation so the mix is the attention path
+        alone, which is what lets a shape injected at `decision` reach the
+        columns unchanged. Standardising does not disturb the measurement: both
+        columns are read off the final scores, kurtosis is invariant to a
+        positive affine, and `decision_spread` is asserted equal across the two
+        conditions rather than at a particular value.
     """
-    comparer = _quiet_cross_comparer()
-    referents, messages = _inputs(comparer)
-    n = referents.shape[0] * referents.shape[1]
+    listener = _quiet_cross_comparer()
+    discriminator = listener.discriminator
+    with torch.no_grad():
+        discriminator.mix_logit.fill_(50.0)
+    assert discriminator.mix_weight.item() == pytest.approx(1.0)
+
+    referents, messages = _inputs(listener)
 
     class _Shape(torch.nn.Module):
         def __init__(self, values):
@@ -632,23 +787,29 @@ def test_the_kurtosis_column_separates_the_shapes_the_spread_column_cannot():
             self.values = values
 
         def forward(self, x):
-            return self.values.reshape(*x.shape[:-1], 1)
+            return self.values.expand(*x.shape[:-1]).reshape(*x.shape[:-1], 1)
 
-    bimodal = torch.where(torch.arange(n) % 2 == 0, 1.0, -1.0)
+    # Built *per game* rather than over the flattened batch, because
+    #     `standardise` works per game: a shape that lived only in the first and
+    #     last games would leave the rest flat and the spread column would then
+    #     be reading how many games had any variation at all.
+    bimodal = torch.where(torch.arange(N_OBJ) % 2 == 0, 1.0, -1.0)
 
-    # 2% of the mass at +-7 and the rest at zero, matched to `bimodal`'s
-    #     standard deviation so only the shape differs.
-    heavy = torch.zeros(n)
-    heavy[: max(2, n // 50)] = 7.0
-    heavy[-max(2, n // 50):] = -7.0
+    # One candidate a game at each of +-7 and the rest at zero, matched to
+    #     `bimodal`'s standard deviation so only the shape differs.
+    heavy = torch.zeros(N_OBJ)
+    heavy[0] = 7.0
+    heavy[-1] = -7.0
     heavy = heavy * (bimodal.std() / heavy.std())
 
     readings = {}
     for name, values in (("bimodal", bimodal), ("heavy", heavy)):
-        comparer.decision = _Shape(values)
+        discriminator.decision = _Shape(values)
         with torch.no_grad():
-            comparer(referents, messages)
-        readings[name] = (comparer.decision_spread, comparer.decision_kurtosis)
+            listener(referents, messages)
+        readings[name] = (
+            discriminator.decision_spread, discriminator.decision_kurtosis
+        )
 
     assert readings["bimodal"][1] == pytest.approx(-2.0, abs=0.05)
     assert readings["heavy"][1] > 5.0
@@ -661,12 +822,12 @@ def test_the_readout_still_carries_gradient_to_the_message():
         passing anything back. Normalising the readout must not be a way of
         doing that quietly.
     """
-    comparer = _quiet_cross_comparer()
-    referents, messages = _inputs(comparer)
+    listener = _quiet_cross_comparer()
+    referents, messages = _inputs(listener)
     messages = messages.clone().requires_grad_(True)
 
     F.binary_cross_entropy_with_logits(
-        comparer(referents, messages), _labels()
+        listener(referents, messages), _labels()
     ).backward()
 
     assert messages.grad is not None
@@ -694,15 +855,15 @@ def _pair_and_optimiser(config_file):
 
 def test_the_scale_lands_in_a_group_at_its_own_rate():
     """
-    `BilinearGRUComparer` only. The key is gated on that class now, because the
-        cross-attention comparer has no scale for a rate to apply to -- see the
+    `BilinearDiscriminator` only. The key is gated on that class, because the
+        attention discriminator has no scale for a rate to apply to -- see the
         companion test below.
     """
     config, pair, optimiser = _pair_and_optimiser("02_birds_baseline.toml")
     wanted = config["optimiser"]["score_scale_lr"]
     assert wanted != config["optimiser"]["lr"]
 
-    scale = pair.receiver.comparer.log_score_scale
+    scale = pair.receiver.discriminator.log_score_scale
     holding = [
         group for group in optimiser.param_groups
         if any(p is scale for p in group["params"])
@@ -713,30 +874,36 @@ def test_the_scale_lands_in_a_group_at_its_own_rate():
     assert holding[0]["weight_decay"] == 0.0
 
 
-def test_a_cross_attention_rung_builds_and_asks_for_no_scale_group():
+def test_an_attention_rung_asks_for_the_mix_rates_and_not_the_scale_one():
     """
     The regression this gate exists for. `split_out_parameter` raises when no
         parameter matches its suffix -- deliberately, so that a rename says so
         -- and `score_scale_lr` is set in DEFAULT.toml, so an ungated call would
-        take every cross-attention rung down at construction rather than at some
-        later point where the cause would be visible.
+        take every attention rung down at construction rather than at some later
+        point where the cause would be visible.
 
     Also checks the quieter half: no group is left holding a rate that applies
-        to nothing.
+        to nothing, and no *new* group appears that nothing asked for.
 
     The elevated groups cannot be told apart by their rate -- DEFAULT.toml opens
-        `logit_scale_lr`, `polarity_embedding_lr` and `score_scale_lr` all at
-        2e-3, and this rung's `SenderTransformerLM` earns the first two -- so
-        the assertion is on which parameters are in them. Both survivors are on
-        the speaker; the listener contributes nothing.
+        all five of these keys at 2e-3 -- so the assertion is on which
+        parameters are in them. This rung's `SenderTransformerLM` earns the
+        speaker's two, and the listener contributes the mixing weight and the
+        mix's volume but no `log_score_scale`: it builds its bilinear path
+        without one, because `standardise` would divide it out.
     """
     config, pair, optimiser = _pair_and_optimiser(
         "12_birds_receiver_cross_attention.toml"
     )
     wanted = config["optimiser"]["score_scale_lr"]
     assert wanted != config["optimiser"]["lr"]
+    assert config["optimiser"]["mix_logit_lr"] == wanted
+    assert config["optimiser"]["mix_scale_lr"] == wanted
 
-    assert not hasattr(pair.receiver.comparer, "log_score_scale")
+    assert not any(
+        name.endswith("log_score_scale")
+        for name, _ in pair.receiver.named_parameters()
+    )
 
     named = {id(p): name for name, p in pair.named_parameters()}
     elevated = {
@@ -745,10 +912,11 @@ def test_a_cross_attention_rung_builds_and_asks_for_no_scale_group():
         for p in group["params"]
     }
 
-    assert not any(name.endswith("log_score_scale") for name in elevated)
     assert elevated == {
         "sender.language_model.log_logit_scale",
         "sender.language_model.polarity_embedding",
+        "receiver.discriminator.mix_logit",
+        "receiver.discriminator.log_mix_scale",
     }
 
 

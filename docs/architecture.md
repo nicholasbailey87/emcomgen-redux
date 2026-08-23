@@ -23,10 +23,11 @@ single `--dropout` is the latter. Dropping features *before* the pool is much
 weaker, because the average over n/2 examples largely restores them — which is
 exactly why the two are not redundant.
 
-The listener has no counterpart to `vision_dropout`. Its regularisation lives
-entirely in the comparer, and a dropout on `Receiver` would land on the same
-tensor the comparer masks with nothing but a reshape between them, so the pair
-would silently compose into one mask at a rate neither knob names.
+The listener has no counterpart to `vision_dropout`. Its one dropout is
+`[receiver] dropout`, applied by `Receiver` itself; a second between the
+backbone and it would land on the same tensor with nothing but a reshape
+between them, so the pair would silently compose into one mask at a rate
+neither knob names.
 
 ### `speak` versus `forward`
 
@@ -312,8 +313,8 @@ identical work `layers × content_length` times per batch.
 broccoli has no decoder. `TransformerEncoder` and its `EncoderBlock` are
 self-attention and feedforward only, and every cross-attention in this repository
 otherwise is a single `MHAttention` sitting *between* stacks — the speaker's
-Perceiver IO encode/decode pair, and `TransformerCrossAttentionComparer`'s bridge
-from the message to the referents.
+Perceiver IO encode/decode pair, and the bridge the listener used to run from
+the message to the referents.
 
 A speaker that generates left to right needs the other arrangement: a causal
 self-attention over the symbols emitted so far and a cross-attention into a fixed
@@ -362,17 +363,91 @@ argument above.
 
 `Receiver` embeds every candidate through the vision backbone, embeds the message
 through a shared token embedding (`messages @ token_embedding.weight`, keeping
-the straight-through gradient), and hands both to a comparer.
+the straight-through gradient), masks the referents once, and hands both to two
+slots:
 
-### `BilinearGRUComparer`
+```
+language_model(messages, referents) -> (batch, slots, output_size)
+discriminator(referents, message_repr) -> (batch, n_objects)
+```
 
-A GRU reads the message; a bias-free `nn.Linear` projects the final state into
-referent space; the score is the dot product with each referent.
+Four combinations are legal and all four are configurable:
 
-**Why no bias in the projection.** With a bias the score expands to
-`obj·W·m + obj·b`. That second term is a message-independent *prior* that would
-make the model prefer certain objects regardless of what the message said. The
-bilinear form is deliberately pure.
+| | `BilinearDiscriminator` | `AttentionDiscriminator` |
+|---|---|---|
+| **`ReceiverGRULM`** | the historical baseline | new |
+| **`ReceiverCrossAttentionLM`** | new | the attention arm |
+
+**Why the split.** One `comparer` key used to choose both halves at once, and the
+two comparers divided almost exactly in half along that line — `BilinearGRUComparer`
+was a 789,504-parameter GRU plus a 196,608-parameter bilinear form, and
+`TransformerCrossAttentionComparer` was two 2.3M decoder stacks. So a rung that
+swapped one for the other changed the message encoder *and* the comparison in one
+move, and "does attention help compositionality" could not be attributed to
+either. The two new cells are what separate *an encoder that reads the candidate
+set helps* from *a comparison built on attention helps*.
+
+**Exactly one message encoder, always.** `AttentionDiscriminator` carries an
+internal bilinear path, and that is a second *comparison*, not a second encoder:
+it reads whatever the language model produced, whichever language model that is.
+No key turns on a second encoder, and if one ever looks necessary the slot
+contract is wrong rather than the configuration.
+
+### The slot contract
+
+**The language model returns a sequence,** `(batch, slots, width)` always, so
+either discriminator can consume either language model. `ReceiverGRULM` returns
+its final state as a length-1 sequence; `ReceiverCrossAttentionLM` returns one
+position per message slot. `BilinearDiscriminator` means over that axis — the
+identity for the GRU, and for a bidirectional stack the honest analogue of "the
+last position", which has no meaning there. `AttentionDiscriminator` takes it as
+cross-attention memory, where a length-1 memory is legal.
+
+**The signature is uniform:** `language_model(messages, referents)`. The GRU
+ignores `referents`, and pays that deliberately — an unused argument is cheaper
+than dispatching on class at the call site.
+
+**The discriminator is sized from the language model,** not from a config key.
+`build_models` passes `language_model.output_size`, which is `2 * d_model` for a
+bidirectional GRU and `d_model` for the decoder stack. No arithmetic makes those
+agree, so a key restating one in the other's table could only ever be wrong.
+
+**`Receiver` drops out; each slot projects and norms for itself.** `Receiver`
+applies `input_dropout` once to the raw referent embeddings and hands the same
+masked tensor to both slots. It owns no projection, because the width a
+projection targets is a property of the consumer: with four legal combinations a
+shared adapter would force `Receiver` to work out which slots want `d_model` and
+whether to build one at all, which is reaching into slot internals and is the
+coupling this split exists to remove. Each slot therefore owns its own
+`nn.Linear(feat, d_model, bias=False)` and its own non-affine `LayerNorm`, in
+that order, because a post-norm stack wants unit RMS in `d_model` space rather
+than in feature space. The duplication costs one matrix, and only in the one
+combination where both slots want it.
+
+The mask is element-wise over `(batch, n_objects, features)`, so it removes
+features within each candidate rather than removing whole candidates — which
+would leak the label ordering.
+
+*One consequence, accepted deliberately.* Both of the modules this replaces
+applied dropout **after** their norm; this applies it before. A LayerNorm
+following dropout renormalises the corrupted vector, so the two are genuinely
+different operations and the pre-split numbers reproduce only at `dropout = 0`.
+`tests/test_receiver_slots.py` pins the bilinear arm bit-for-bit at that setting,
+which is the whole safety net for the refactor.
+
+### `ReceiverGRULM`
+
+A GRU reads the message and its final state is returned as a length-1 sequence.
+`referents` is accepted and ignored: this is an absolute encoding of the message,
+with no view of what it is being compared against.
+
+**Default 2 layers, bidirectional,** for parameter parity with the transformer
+language model *at a shared width* — 1,972,224 against `ReceiverCrossAttentionLM`'s
+2,318,427 at the widths rung 11 uses, where a 1-layer bidirectional GRU is
+789,504. Note 2 layers bidirectional is 2.5× 1 layer and not 2×: the second
+layer's input is the first's concatenated output, so its `weight_ih` is double.
+Parity is a property of the pair of widths and not of the key; see the note beside
+`layers` in DEFAULT.toml for what it costs at the defaults' own 1024.
 
 **The `-1` timestep.** Taking timestep `-1` gives the state after the GRU has
 consumed the last *slot*, not the last real token. That is correct here only
@@ -384,6 +459,16 @@ This diverges from jayelm, whose speaker *does* sample EOS early and tracks a
 per-example `lang_length`, and whose listener therefore has to
 `pack_padded_sequence`. The assumption is dormant, not satisfied by design
 elsewhere — see [dubious-claims.md](dubious-claims.md).
+
+### `BilinearDiscriminator`
+
+A bias-free `nn.Linear` projects the message representation into referent space;
+the score is the dot product with each referent, divided by `sqrt(d)`.
+
+**Why no bias in the projection.** With a bias the score expands to
+`obj·W·m + obj·b`. That second term is a message-independent *prior* that would
+make the model prefer certain objects regardless of what the message said. The
+bilinear form is deliberately pure.
 
 **Both operands are normalised**, per example over the feature axis, so the
 score's magnitude stops being inherited from whichever vision model the rung
@@ -427,33 +512,51 @@ cosmetic now that both operands are normalised. It is what makes
 moves with the embedding size — 512 on ResNet18 against 320 on ViT2, which would
 otherwise open the two arms 1.26× apart and both far too loud.
 
-**Dropout masks the referents only.** It used to mask the message operand too,
-on the argument that a dot product lets the listener lean on whichever side is
-left intact. True, but it assumed the two sides arrive on equal terms and they do
-not: the message comes through the Gumbel channel, whose noise is already
-calibrated by `sampling_tau` and `uniform_weight`, so a mask on top is a second
-perturbation of a signal that has one — and the listener cannot tell which of the
-two it is being asked to be robust to. The referents arrive clean.
+**Dropout masks the referents only,** and lives on `Receiver`. It used to mask
+the message operand too, on the argument that a dot product lets the listener
+lean on whichever side is left intact. True, but it assumed the two sides arrive
+on equal terms and they do not: the message comes through the Gumbel channel,
+whose noise is already calibrated by `sampling_tau` and `uniform_weight`, so a
+mask on top is a second perturbation of a signal that has one — and the listener
+cannot tell which of the two it is being asked to be robust to. The referents
+arrive clean.
 
-### `TransformerCrossAttentionComparer`
+`score_scale=False` is passed only from inside `AttentionDiscriminator`, and the
+scale is then absent rather than frozen. `standardise` runs on that path's
+output and `standardise(s·u) = standardise(u)` exactly for positive `s`, so the
+parameter would take identically zero gradient, report a constant 1.0 in
+`train_score_scale`, and sit in an elevated learning-rate group doing nothing.
 
-Two `TransformerDecoder` stacks, each reading the other's stream as memory:
+### `ReceiverCrossAttentionLM` and `AttentionDiscriminator`
 
-1. **`message_decoder`** — `message_layers` blocks of self-attention,
-   cross-attention into the candidate set, then a feedforward.
-2. **`referent_decoder`** — `referent_layers` blocks of cross-attention into the
-   encoded message, then self-attention across the candidates, then a
-   feedforward. `cross_first`, so the message comes before the candidates
-   compare each other.
+Two `TransformerDecoder` stacks, one in each slot, each reading the other's
+stream as memory:
 
-Then a plain linear readout scores each one.
+1. **`ReceiverCrossAttentionLM.message_decoder`** — `layers` blocks of
+   self-attention, cross-attention into the candidate set, then a feedforward.
+2. **`AttentionDiscriminator.referent_decoder`** — `layers` blocks of
+   cross-attention into the encoded message, then self-attention across the
+   candidates, then a feedforward. `cross_first`, so the message comes before
+   the candidates compare each other.
+
+Then a plain linear readout scores each one, and the mix below combines that
+score with a bilinear one over the same encoding.
+
+`AttentionDiscriminator` owns a `memory_adapter` — an `nn.Linear` from the
+language model's `output_size` to its own `d_model`, followed by a non-affine
+`LayerNorm`. The adapter is what makes the slot swappable at all, since no
+arithmetic makes a bidirectional GRU's `2 * d_model` agree with this stack's
+width. The norm is there for the same reason `referent_layer_norm` is: a
+post-norm stack normalises its own stream and never its memory, and
+`message_decoder`'s last post-norm used to make that safe by accident where a
+GRU state would not.
 
 **Why two stacks rather than four bare stages.** The structure this replaces
 crossed the message into the referent stream exactly once, at a single
 cross-attention. Everything common across candidates cancels at the readout, so
 the only thing that could separate two of them was the difference between their
 attention weights over the message — a small perturbation about a near-flat
-softmax at initialisation, where `BilinearGRUComparer`'s `obj·W·m` is first
+softmax at initialisation, where a bilinear `obj·W·m` is first
 order and differs per candidate from step zero. Rungs 11 to 14 sat at 0.5000 for
 thirty epochs while rung 10, which is rung 12 with the bilinear comparer and
 nothing else changed, learned. `comparer_probe.py` shows the old module solving
@@ -513,12 +616,12 @@ it a candidate reaches the score only through near-uniform attention weights, an
 this stage halved the between-object share of the variance (0.415 going in, 0.221
 coming out) at init.
 
-**`message_layers` and `referent_layers` are block counts, one per stack.** A
-single key was once a total split between two stacks, which meant asking for one
-more block moved two. Each stack also resolves its DeepNorm constants from its
-own count and with `decoder=True`, since a `DecoderBlock` has three residual
-branches rather than two: at three blocks that is `alpha = 1.732`,
-`beta = 0.408`.
+**Each stack's depth is the `layers` key of its own config table.** A single key
+was once a total split between two stacks, which meant asking for one more block
+moved two; separate tables make that unstateable rather than merely untested.
+Each stack also resolves its DeepNorm constants from its own count and with
+`decoder=True`, since a `DecoderBlock` has three residual branches rather than
+two: at three blocks that is `alpha = 1.732`, `beta = 0.408`.
 
 **Stochastic depth is suppressed below two layers,** asked of each stack
 separately. `depthwise_linear_stochastic_depth` spreads the rate linearly across
@@ -535,7 +638,7 @@ this stack passes `causal=False` explicitly and takes no positional embedding of
 any kind; both are asserted in
 `tests/test_cross_attention_comparer.py`. With neither, it is
 permutation-equivariant and cannot read the ordering at all.
-`BilinearGRUComparer` is immune for a different reason: it scores each referent
+`BilinearDiscriminator` is immune for a different reason: it scores each referent
 in isolation and never sees the set.
 
 **`referent_adapter` has `bias=False`, and that is load-bearing rather than
@@ -563,13 +666,18 @@ averaging has already happened. That is an object winning for being large rather
 than for matching. An affine here would also be a route to *global* score
 magnitude.
 
-**`input_dropout` is placed after `referent_layer_norm`,** not before the
-adapter, which is where it used to be. A mask upstream of a learned projection is
-a mask the projection can average away, and a mask upstream of a LayerNorm has
-its `1/(1−p)` rescale thrown away and its survivors renormalised *up*, so the
-perturbation is neither the size nor the shape the knob names. As on
-`BilinearGRUComparer`, only the referents are masked; attention dropout is a
-separate setting (`receiver_comparer.cross_attention_dropout`).
+**The dropout is `Receiver`'s and now precedes both slots' norms,** where it used
+to sit between `referent_layer_norm` and the stacks. The old placement had an
+argument behind it: a mask upstream of a learned projection is a mask the
+projection can average away, and a mask upstream of a LayerNorm has its
+`1/(1−p)` rescale thrown away and its survivors renormalised *up*, so the
+perturbation is neither the size nor the shape the knob names. All of that is
+still true, and it is the price of one mask reaching two slots identically —
+which is the thing that cannot be got any other way, because a mask inside each
+slot would regularise the two-adapter combinations twice at a rate no key names.
+The consequence is stated under the slot contract above. Only the referents are
+masked; attention dropout is a separate setting
+(`receiver_discriminator.cross_attention_dropout`).
 
 **There is no separate norm before the readout, and there used to be.** The
 argument for `decision_layer_norm` was that it equalised the candidates' lengths
@@ -585,13 +693,64 @@ volume-collapse route the readout's free weight magnitude leaves open, watched b
 `decision_spread` rather than closed. See [anecdotes.md](anecdotes.md) for the
 two attempts to close it.
 
-**The readout is a plain `nn.Linear(d_model, 1)` with a bias and a free weight
-magnitude.** That makes one vector both the *direction* the head reads out and
-the *volume* it reads out at, and it deliberately leaves the volume-collapse
-route open. This is the current design after two attempts to close it; the full
-history and the numbers are in [anecdotes.md](anecdotes.md). `decision_spread`
-and `decision_kurtosis` are the columns that watch it — see
+**The readout is a plain `nn.Linear(d_model, 1)` with a bias.** This is the
+design after two attempts to take the volume out of the listener's hands; the
+full history and the numbers are in [anecdotes.md](anecdotes.md).
+`decision_spread` and `decision_kurtosis` are the columns that watch it — see
 [measurement.md](measurement.md).
+
+### The mix, and why the attention arm opens as the bilinear one
+
+`AttentionDiscriminator` does not return that readout. It returns
+
+```
+score = s · [ (1 − a) · bilinear_hat + a · attention_hat ] + bias
+a     = mix_floor + (1 − mix_floor) · sigmoid(mix_logit)
+```
+
+where both operands are standardised per game — centred over the candidates and
+scaled to unit spread — so `a` means *composition* and `s` alone means *volume*.
+That is the same shape/volume split the speaker has in `logit_spread` and
+`logit_scale`.
+
+**Why.** The attention path alone does not bootstrap. Under a nuisance level
+where the bilinear comparison reaches 0.938, the two decoder stacks reach 0.469
+with the speaker's polarity tag barely moving — and the cause is not the
+listener. Handed a message that names the concept, the same module reaches 0.988
+and holds its between-candidate share at 0.90; handed a scrambled one it
+collapses to 0.40. Uniformity is *correct behaviour* when there is no pattern,
+and at initialisation nothing in the pair is a pattern yet. So the pair needs
+something that already works at step zero, and the attention path can take over
+if it earns it. That is the recipe `AttentionPrototyper` already follows: open at
+pooling that *is* the mean, and depart only if it pays.
+
+At `a = mix_floor` the discriminator is essentially the bilinear comparison,
+which is the configuration measured bootstrapping. `mix_logit_init = −4.0`
+against a floor of 0.1 opens it at 0.116.
+
+**The floor is in the parameterisation and must never become a `clamp`.**
+`clamp`'s gradient is zero below its bound, so a weight that drifted under the
+floor would weld there permanently and the attention stack could never come back.
+That bug cost an afternoon in the prototype. What the floor buys is that the
+attention path always contributes and so always receives gradient — at `a = 0`
+the whole stack would get nothing and could never earn its way in.
+
+**Neither path can go quiet; the pair can.** Standardising means an
+uninformative attention path cannot be escaped by turning it down — it has to be
+made informative or paid for. But `s` is downstream of both, unbounded and
+log-parameterised, so a listener with nothing to say can still say it quietly.
+That distinction is the whole of why this is not the fixed-gain readout coming
+back: that one closed the collapse exactly as designed and stopped four rungs
+learning at all, because a pair forced to commit through a fixed volume from step
+zero commits before the message carries anything.
+
+**Two columns come out of it,** and they have to be read together.
+`mix_alpha` is how much of the score is the attention path, which is the
+chapter's question stated as a number. `path_agreement` is the within-game
+correlation between the two standardised paths, and it is necessary because an
+attention path that is never used and one that has learned to imitate the
+bilinear path look identical from accuracy and from `mix_alpha` alone. See
+[measurement.md](measurement.md) for how to read the four combinations.
 
 **Note stage 2 mutates its input.** broccoli's
 `TransformerEncoder.preprocess` adds its position embedding with

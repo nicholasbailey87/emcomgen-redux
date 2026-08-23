@@ -211,7 +211,7 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
 - `[data] percent_novel = 0.0` + `reference_game = true`: reference game. **For
     ShapeWorld, use the 30-concept reference dataset `shapeworld_ref`, not the
     standard 312-concept `shapeworld`!**
-- `[sender_language_model] message_length` / `[receiver_comparer] message_length`:
+- `[sender_language_model] message_length` / `[receiver_language_model] message_length`:
     max message length (**includes sos/eos, so true length is this minus 2**; the
     two must match)
 - `[sender_language_model] vocabulary`: vocab size of the agents
@@ -238,16 +238,44 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
     (the default) resolves them at construction from that stack's own `layers`,
     as `(2N)^(1/4)` and `(8N)^(-1/4)`; a number pins them instead, and `1.0` is
     the no-scaling identity every run before this used. The cross-attention
-    comparer resolves them twice, once per decoder stack, from `message_layers`
-    and `referent_layers` — and in the decoder form, `(3N)^(1/4)` and
-    `(12N)^(-1/4)`, since those blocks carry a cross-attention branch as well.
+    listener's two slots each resolve their own, from their own table's `layers`
+    — and in the decoder form, `(3N)^(1/4)` and `(12N)^(-1/4)`, since those
+    blocks carry a cross-attention branch as well.
     Derived rather than configured because two constants restated
     per config is an invitation to leave them at values belonging to a depth the
     stack no longer has.
-- `[receiver_comparer] dropout`: the listener's **only** dropout, and the
-    counterpart of the sender's `prototype_dropout`. In both comparers it masks
-    the incoming referent embeddings, after their norm and immediately before
-    the comparison, and defaults to `0.1` to match the sender. It used to mask
+- `[receiver] language_model` / `[receiver] discriminator`: the listener's two
+    slots, and they are chosen independently. `ReceiverGRULM` reads the message
+    with a GRU; `ReceiverCrossAttentionLM` reads it with a decoder stack that
+    cross-attends into the candidate set, so what it encodes is discriminative
+    rather than absolute. `BilinearDiscriminator` scores each candidate by
+    `obj·W·m`; `AttentionDiscriminator` scores them with a second decoder stack
+    reading the encoded message, interpolated with a bilinear score over that
+    same encoding.
+    One key used to choose both halves at once, so a rung swapping the GRU
+    comparer for the cross-attention one changed the encoder *and* the
+    comparison and "attention helps" could not be attributed to either.
+    Exactly one message encoder is built whatever the pairing:
+    `AttentionDiscriminator`'s bilinear path is a second *comparison*, reading
+    whatever the language model produced.
+- `[receiver_discriminator] mix_floor` / `mix_logit_init`: the attention
+    path's minimum share of the score, and where that share opens.
+    `AttentionDiscriminator` returns
+    `s · [(1 − a)·bilinear + a·attention] + bias` with both paths standardised
+    per game, and `a = mix_floor + (1 − mix_floor)·sigmoid(mix_logit)`.
+    The defaults, 0.1 and −4.0, open it at 0.116 — essentially *as* the bilinear
+    comparison, which is the configuration measured bootstrapping where the
+    attention stacks alone do not. The floor exists so the attention path always
+    receives gradient, and it is in the parameterisation and never a `clamp`,
+    whose gradient is zero below its bound. Watch `train_mix_alpha` and
+    `train_path_agreement` together.
+- `[receiver] dropout`: the listener's **only** dropout, and the
+    counterpart of the sender's `prototype_dropout`. `Receiver` masks the
+    incoming referent embeddings once and hands the same masked tensor to both
+    slots, so no pairing can regularise twice; it defaults to `0.1` to match the
+    sender. It masks *elements* of `(batch, n_objects, features)`, so it removes
+    features within a candidate and never a whole candidate, which would leak
+    the label ordering. It used to mask
     the message operand as well; the message arrives through the Gumbel channel,
     whose noise `sampling_tau` and `uniform_weight` already calibrate, so a mask
     on top is a second and uncalibrated perturbation of a signal that has one.
@@ -258,10 +286,10 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
     mask at a rate neither names. The sender keeps its `vision_dropout` because
     the prototyper pools between the two masks there. It affects **only** that
     one input: module internals are fixed constants, so raising it never
-    silently rewires the architecture. The listener GRU's inter-layer dropout is
+    silently rewires the architecture. `ReceiverGRULM`'s inter-layer dropout is
     pinned to `0.0` (jayelm's listener GRU takes no dropout argument), and the
-    cross-attention comparer's attention dropout is
-    `[receiver_comparer] cross_attention_dropout`, which is `0.0`. For
+    attention slots' attention dropout is `cross_attention_dropout` in each of
+    `[receiver_language_model]` and `[receiver_discriminator]`, both `0.0`. For
     reference, jayelm regularised both agents with a single `--dropout` at
     `0.1`, on the listener's vision pathway only, with nothing at all on its
     language pathway.

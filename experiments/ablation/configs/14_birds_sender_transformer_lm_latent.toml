@@ -45,64 +45,69 @@ layers = 5
 # against rung 11. See rung 11's `[sender_language_model] bidirectional` for what
 # the two settings select and why the word means what it does on this class.
 #
-# Note the identically-named key in `[receiver_comparer]` below is a different
-# knob on a different module and keeps rung 11's value.
+# Note the identically-named key in `[receiver_language_model]` below is a
+# different knob on a different module and keeps rung 11's value.
 bidirectional = true
 
 [receiver]
 feature_model = "ViT2"
-comparer = "TransformerCrossAttentionComparer"
+language_model = "ReceiverCrossAttentionLM"
+discriminator = "AttentionDiscriminator"
 
-[receiver_comparer]
-# This module's width is free of every other width in the run -- it adapts the
-# referents (`referent_adapter`) and the message (`message_adapter`) into its
-# own space -- so it is sized to buy depth rather than to match the repo's other
-# transformers. The module is now two decoder stacks, and depth is the thing
-# that matters to it: every block is another crossing of the message into the
-# stream the scores are read off, where the structure it replaced had exactly
-# one. Width bought nothing at that margin.
+[receiver_language_model]
+# Neither listener slot's width is tied to any other width in the run -- each
+# adapts the referents into its own space -- so both are sized to buy depth
+# rather than to match the repo's other transformers. Depth is the thing that
+# matters here: every block is another crossing of the message into the stream
+# the scores are read off, where the structure this replaced had exactly one.
+# Width bought nothing at that margin.
 #
-# So 256 wide with a feedforward inner size of 320, against DEFAULT's 320 / 5
-# heads / 576. That keeps the repo-wide head dimension of 64 -- hence 4 heads
-# rather than 5, and 256 % 4 == 0 where 256 % 5 is not -- and gives up the
-# repo-wide feedforward proportion of 1.73, taking 1.25 instead. The proportion
-# is the one thing here that is not shared with the other stacks, and it is what
-# pays for the extra blocks.
+# So 256 wide with a feedforward inner size of 320, against DEFAULT's
+# 1024 / 5 heads / 576 for this table. That keeps the repo-wide head dimension
+# of 64 -- hence 4 heads rather than 5, and 256 % 4 == 0 where 256 % 5 is not --
+# and gives up the repo-wide feedforward proportion of 1.73, taking 1.25
+# instead. The proportion is the one thing here that is not shared with the
+# other stacks, and it is what pays for the extra blocks.
 #
-# 3 and 3 is then the depth: 4,781,727 parameters, against
-# `BilinearGRUComparer`'s 5,015,553 on the ViT referents of rungs 9 and 10, or
-# 0.95x -- tighter than the 1.05x the previous structure managed at 5,272,606.
-# 2 and 2 would be 0.65x and 4 and 4 would be 1.26x, so 3 is the only depth
-# inside the 10% the ladder aims at, and the two stacks are held equal for want
-# of a reason to favour either.
-#
-# `message_layers` and `referent_layers` are block counts, and each stack's
-# DeepNorm constants are resolved from its own -- `decoder=True`, so three
-# sublayers to the block. At 3 that is alpha 1.732, beta 0.408.
+# `layers` is a block count and this stack's DeepNorm constants are resolved
+# from it -- `decoder=True`, so three sublayers to the block. At 3 that is
+# alpha 1.732, beta 0.408. The discriminator resolves its own separately.
 #
 # `token_embedding_size` is restated because the listener's embedding is built
 # from it in `builder.py` and then adapted into `d_model`; matching the two
-# keeps the adapter square. DEFAULT's 1024 `d_model` in that section is
-# `BilinearGRUComparer`'s hidden size, not this class's; `stochastic_depth`,
-# `activation` and the rest are read only by this class and are inherited.
+# keeps the adapter square. `stochastic_depth`, `activation` and the rest are
+# inherited.
 d_model = 256
 heads = 4
 ff_inner_size = 320
 token_embedding_size = 256
-message_layers = 3
-referent_layers = 3
+layers = 3
 
 # `true`, and for the same reason rung 7 sets it on `[sender_language_model]`:
 # no transformer in this ladder runs a causal mask. The key is shared with
-# `BilinearGRUComparer`, which passes it to `nn.GRU(bidirectional=)` and where
-# DEFAULT.toml's `false` still applies; `TransformerCrossAttentionComparer`
-# instead turns it into `causal = not bidirectional` on the stack that encodes
-# the incoming message (`receiver.py`). Masking that stack left to right models
-# a listener that must commit to an interpretation of symbol 1 before seeing
-# symbol 5, which is not the listening task -- the message arrives whole. The
-# referent stack is unconditionally non-causal and does not read this key at
-# all: its sequence axis is the candidate set, whose order is the label vector.
+# `ReceiverGRULM`, which passes it to `nn.GRU(bidirectional=)`;
+# `ReceiverCrossAttentionLM` instead turns it into `causal = not bidirectional`
+# on the stack that encodes the incoming message (`receiver.py`). Masking that
+# stack left to right models a listener that must commit to an interpretation
+# of symbol 1 before seeing symbol 5, which is not the listening task -- the
+# message arrives whole.
 bidirectional = true
+
+[receiver_discriminator]
+# Matched to the language model above, and held equal for want of a reason to
+# favour either -- the same argument the old `message_layers` / `referent_layers`
+# pair was settled on. This stack reads no `bidirectional` key at all: its
+# sequence axis is the candidate set, whose order is the label vector, so it is
+# unconditionally non-causal and takes no positional embedding.
+#
+# `token_embedding_size` is not restated here. The width the message arrives at
+# is the language model's `output_size`, which `build_models` passes in, and
+# `memory_adapter` brings it to this `d_model` -- so the two tables' widths need
+# not agree and a key restating one in the other could only be wrong.
+d_model = 256
+heads = 4
+ff_inner_size = 320
+layers = 3
 
 [scheduler]
 epochs = 30

@@ -362,43 +362,64 @@ def test_reset_parameters_clears_the_speakers_measured_survival():
     assert speaker.logit_scale == scale
 
 
-def test_cross_attention_comparer_reset_covers_its_adapters():
+def test_attention_listener_reset_covers_its_adapters():
     """
-    The baseline rungs use `BilinearGRUComparer`, so the pair-level test above
-    never reaches this class. Its `reset_parameters` used to omit both adapters
-    and the referent norm -- i.e. everything mapping the listener's two inputs
-    into `d_model` -- while re-drawing everything downstream of them.
+    The baseline rungs use `ReceiverGRULM + BilinearDiscriminator`, so the
+    pair-level test above never reaches these two classes. `reset_parameters`
+    used to omit both adapters and the referent norm -- i.e. everything mapping
+    the listener's two inputs into `d_model` -- while re-drawing everything
+    downstream of them.
     """
-    import models.receiver as receiver
+    from _bootstrap import build_listener, rung
 
-    config = parse_config.get_config()
-    kwargs = dict(config["receiver_comparer"])
-    # So neither stack is a single block, where a depth ramp would be inert.
-    kwargs["message_layers"] = 2
-    kwargs["referent_layers"] = 2
-    # `d_model` has to be overridden, as it is everywhere this class is built
-    # outside a rung config. DEFAULT's 1024 is `BilinearGRUComparer`'s hidden
-    # size, and the section's `heads` describes this class instead -- the two
-    # numbers belong to different modules, so the pair does not satisfy
-    # broccoli's `d_model % n_heads == 0`. 256 and 4 heads is what rung 11 uses.
-    kwargs["d_model"] = 256
-    kwargs["heads"] = 4
-    comparer = receiver.TransformerCrossAttentionComparer(512, **kwargs)
+    listener = build_listener(
+        "ReceiverCrossAttentionLM",
+        "AttentionDiscriminator",
+        512,
+        # Rung 11 rather than DEFAULT, whose `[receiver_language_model] d_model`
+        # is the GRU's 1024 and does not divide its `heads = 5`.
+        config_file=rung("11_shapeworld_receiver_cross_attention.toml"),
+        # So neither stack is a single block, where a depth ramp would be inert.
+        language_model_overrides=dict(layers=2),
+        discriminator_overrides=dict(layers=2),
+    )
 
-    _perturb(comparer)
-    comparer.reset_parameters()
+    _perturb(listener)
+    listener.language_model.reset_parameters()
+    listener.discriminator.reset_parameters()
 
-    for name in (
-        "referent_adapter",
-        "message_adapter",
-        "referent_layer_norm",
-        "message_decoder",
-        "referent_decoder",
-        "decision",
-    ):
-        module = getattr(comparer, name)
-        stale = _still_perturbed(module)
-        assert not stale, f"{name} not reset: {stale}"
+    slots = {
+        "language_model": (
+            "referent_adapter",
+            "message_adapter",
+            "referent_layer_norm",
+            "message_decoder",
+        ),
+        "discriminator": (
+            "referent_adapter",
+            "referent_layer_norm",
+            "memory_adapter",
+            "memory_layer_norm",
+            "referent_decoder",
+            "decision",
+            "bilinear",
+        ),
+    }
+    for slot, names in slots.items():
+        for name in names:
+            module = getattr(getattr(listener, slot), name)
+            # broccoli owns these and does not re-draw them, exactly as in
+            # `test_backbone_reset_parameters_redraws_everything` above:
+            # `rotary_embedding` is a deterministic function of position and
+            # `swish_beta` belongs to the activation rather than the block.
+            # Filtered by name so that a *new* untouched tensor still fails.
+            stale = [
+                tensor
+                for tensor in _still_perturbed(module)
+                if "rotary_embedding" not in tensor
+                and not tensor.endswith("swish_beta")
+            ]
+            assert not stale, f"{slot}.{name} not reset: {stale}"
 
 
 def _pair_with_gradients():

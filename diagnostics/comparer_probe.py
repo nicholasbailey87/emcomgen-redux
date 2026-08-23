@@ -121,31 +121,43 @@ def build_receiver(config_path):
     return config, pair.receiver.train()
 
 
-def widths(comparer, config):
-    """What shapes this comparer wants, asked of the module rather than assumed."""
-    if isinstance(comparer, models.receiver.TransformerCrossAttentionComparer):
-        return (
-            comparer.referent_adapter.in_features,
-            comparer.token_embedding_size,
-            comparer.message_length,
-        )
+def widths(language_model, config):
+    """What shapes this listener wants, asked of the module rather than assumed."""
     return (
-        comparer.referent_embedding_size,
-        comparer.token_embedding_size,
-        config["receiver_comparer"]["message_length"],
+        language_model.referent_embedding_size,
+        language_model.token_embedding_size,
+        getattr(
+            language_model,
+            "message_length",
+            config["receiver_language_model"]["message_length"],
+        ),
+    )
+
+
+def score(receiver, referents, message):
+    """
+    `Receiver.forward` from the referent embeddings inwards -- the dropout, then
+        the two slots. Reproduced here rather than called because `Receiver`
+        takes images and this probe has none.
+    """
+    referents = receiver.input_dropout(referents)
+    return receiver.discriminator(
+        referents, receiver.language_model(message, referents)
     )
 
 
 def main():
     args = parse_args()
     config, receiver = build_receiver(args.config)
-    comparer = receiver.comparer
+    language_model = receiver.language_model
+    discriminator = receiver.discriminator
 
-    d_ref, d_msg, msg_len = widths(comparer, config)
+    d_ref, d_msg, msg_len = widths(language_model, config)
     batch = config["data"]["batch_size"]
     n_obj = config["data"]["n_examples"]
     lr = args.lr if args.lr is not None else config["optimiser"]["lr"]
-    has_kurtosis = hasattr(comparer, "decision_kurtosis")
+    has_kurtosis = hasattr(discriminator, "decision_kurtosis")
+    has_mix = hasattr(discriminator, "mix_alpha")
 
     # +4 for PAD, SOS, EOS and UNK, matching `models.builder`.
     vocabulary = config["sender_language_model"]["vocabulary"] + 4
@@ -154,7 +166,8 @@ def main():
     )
 
     print(f"{os.path.basename(args.config)}")
-    print(f"  comparer    : {type(comparer).__name__}")
+    print(f"  listener    : {type(language_model).__name__} / "
+          f"{type(discriminator).__name__}")
     print(f"  referents   : (batch {batch}, n_obj {n_obj}, d_ref {d_ref})")
     print(f"  message     : (batch {batch}, len {msg_len}, d_msg {d_msg})"
           f"  [{args.message}, {args.message_form}{vocabulary_note}]")
@@ -221,7 +234,7 @@ def main():
     # The token embedding learns in the real run and is the first thing the
     #     message meets, so it learns here too. Excluded in the dense case,
     #     where nothing routes through it.
-    learners = [comparer]
+    learners = [language_model, discriminator]
     if args.message_form == "tokens":
         learners.append(receiver.token_embedding)
 
@@ -234,7 +247,7 @@ def main():
         referents, message, y = make_batch()
         if args.message_form == "tokens":
             message = message @ receiver.token_embedding.weight
-        scores = comparer(referents, message)
+        scores = score(receiver, referents, message)
         loss = criterion(scores, y)
 
         optimiser.zero_grad()
@@ -260,8 +273,13 @@ def main():
         )
         if has_kurtosis:
             line += (
-                f"  [module: spread {comparer.decision_spread:.3f} "
-                f"kurt {comparer.decision_kurtosis:+.2f}]"
+                f"  [module: spread {discriminator.decision_spread:.3f} "
+                f"kurt {discriminator.decision_kurtosis:+.2f}]"
+            )
+        if has_mix:
+            line += (
+                f"  [mix a {discriminator.mix_alpha:.3f} "
+                f"agree {discriminator.path_agreement:+.3f}]"
             )
         print(line)
 
