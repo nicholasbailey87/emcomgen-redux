@@ -46,10 +46,15 @@ The meaning distance is held constant across all six within one reading, and
 | `topsim_gt_` | word-level edit distance between the ground-truth logical forms — the concept distance of the original paper, so `topsim_gt_s6` is comparable to its reported rho |
 
 The first asks whether the language tracks what the sender *represents*; the
-second, whether it tracks the *concepts*. They come apart when the sender has
-collapsed onto a subset of the visual features, and only the second notices: a
-sender that has collapsed onto one visual feature scores well on the cosine space
-for faithfully encoding that feature.
+second, whether it tracks the *latent variables the dataset was generated from*.
+They come apart when the sender has collapsed onto a subset of the visual
+features: a sender that has collapsed onto one visual feature scores well on the
+cosine space for faithfully encoding that feature, and only the second reading
+shows how much of the latent structure it left out.
+
+That is a difference in *coverage*, not in compositionality, and `topsim_gt_` is
+not the better of the two readings. See "Interpreting topsim" below before
+drawing a conclusion from either.
 
 `formula_distance_condensed` interns words to integers so the compiled
 `rapidfuzz` path can be used; it is exact on any sequence of hashables. The
@@ -204,6 +209,130 @@ Topsim is computed on the eval passes only. It is a property of the language, so
 there is no point computing it mid-training-pass, and the extra tensor is wasted
 work. When it is computed, the sender is driven through `speak` so that message,
 symbol embeddings and concepts all come from one forward pass.
+
+## Interpreting topsim
+
+The sections above are what the numbers *are*. This one is how to read them, and
+most of it exists because it was got wrong first.
+
+### Topsim is the definition of compositionality here, not an estimator of it
+
+There is no separate ground truth about how compositional a language is that
+topsim approximates well or badly. The measure *is* the claim.
+
+Three things follow, and they are the ones that go wrong:
+
+**It is not normative.** A language can be highly compositional and grounded in
+one latent variable. You do not become more compositional by representing the
+*correct* concepts. A sender that has collapsed onto colour and emits a
+systematic colour language is compositional — over an impoverished semantics.
+
+**`topsim_gt_` is not a gold standard.** Read it as *what topsim would look like
+if the language encompassed all the latent variables*. It is coverage-conditioned,
+not a paragon that `topsim_` is a degraded copy of. A run reporting `s6 = 0.454`
+and `gt_s6 = 0.099` is reporting narrow coverage, not failed compositionality —
+and on ShapeWorld you can show which by rebuilding the gt meaning space over a
+filtered formula (below).
+
+**`topsim_gt_` cannot be built for CUB, in principle.** ShapeWorld is synthetic,
+so its latents *are* the generative variables and are known by construction. CUB
+is natural images; the 312 attributes shipped with it are human annotations, not
+intrinsic latents, and a topsim against them measures agreement with an
+annotator. So `topsim_` on birds is not a second-best proxy for a missing gt
+reading — there is no gt reading to miss. Birds comparisons work rung against
+rung on the same meaning space, and never against an absolute.
+
+The pairing that does work is `topsim_` for compositionality relative to what the
+sender represents, and **accuracy** for how much of the task that representation
+covers. Read jointly.
+
+### `_static` is not a stand-in for `topsim_gt_`
+
+They fix different things, on different sides of the correlation. `_static`
+removes signal-side leakage from one meaning space; `topsim_gt_` changes the
+meaning space. A near-zero `raw − static` gap says the soft reading is clean; it
+says nothing at all about coverage.
+
+The two are independent in practice, not just in principle. Across the ShapeWorld
+rungs of the August 2026 ablation the `gt_s1 − gt_s1_static` gaps were +0.004,
++0.007, −0.003, +0.004, +0.001 and +0.009 while `gt_s1` itself was 0.087, 0.086,
+0.108, 0.096, −0.001 and 0.066. Gap at zero, coverage at zero, no contradiction —
+and the *tightest* gap in that set belongs to a run that never left `ln 2`.
+
+### Read more than one column
+
+There are 6 signal sets × 2 meaning spaces + 3 `_static` per meaning space = 18
+per split, over `test` / `test_same` / `test_avg` — 54 columns on ShapeWorld, 27
+on CUB. Reading `test_topsim_s1` alone is reading one of them.
+
+**`test_avg` is `np.mean` of the `test` and `test_same` values**, not a third
+eval pass, which is why it always sits between them.
+
+**S4–S6 touch no embeddings at all.** Only S1–S3 read the sender's contextual
+symbol embeddings, which is why only they get a `_static` control. "The topsim is
+inflated by the embeddings" is a claim about S1–S3 and is simply false of S4–S6;
+S6 is leak-free by construction.
+
+**`test` is far noisier than `test_same`.** In the August 2026 ablation the
+median epoch-to-epoch |Δ| on birds ran 0.09–0.20 on `test` against 0.037–0.059 on
+`test_same`, over a range about 0.6 wide. A final-epoch topsim is a draw from
+that spread, not a property of the run. Take a median over a window of epochs and
+quote a spread; a difference of 0.05 between two rungs is noise.
+
+### Topsim rises as the message set collapses
+
+Always read topsim beside `unique_message_fraction`. Fewer distinct messages means
+fewer distinct points in the signal space, and the correlation flatters itself.
+Down the birds ladder of the August 2026 ablation, `test_same` unique-message
+fraction fell 0.286 → 0.298 → 0.188 → 0.107 → 0.031 → 0.012 while static topsim
+climbed 0.808 → 0.846. The rung at the top of that table was scoring 1.2% unique
+messages. That is a smaller message set, not a better language.
+
+The same effect runs the other way at the top of the range. Whole-message
+statistics — topsim included, but mutual information especially — inflate when
+nearly every message is unique, because the whole-message variable approaches an
+identity function. One dead rung reported whole-message NMI of 0.371 with colour
+while its per-slot NMI was 0.008.
+
+**A NaN column is a symptom, not missing data.** Near-random messages sit at
+almost the same distance from each other, so the signal distance vector has ~zero
+variance and Spearman is undefined (see "NaN propagation" above). A run whose
+topsim columns are NaN has a channel carrying noise.
+
+### Topsim cannot see slot specialisation
+
+A smooth *holistic* code — each whole message an unanalysable label, but similar
+concepts getting similar labels — scores high topsim and has no positional
+structure whatsoever. Topsim cannot separate the two, and neither can the
+`_static` gap: a holistic code has perfectly context-independent symbols, so its
+gap vanishes too.
+
+The complement is per-slot mutual information: NMI between each message position
+and each attribute. If the language is compositional, different positions carry
+different attributes. If it is holistic, every position carries the same
+information. In the August 2026 ablation every live rung was the latter —
+ShapeWorld rung 1 gave colour NMI 0.332 / 0.294 / 0.273 / 0.251 / 0.229 across
+its five content slots, and shape 0.162 / 0.134 / 0.122 / 0.107 / 0.096. Five
+noisy copies of one message.
+
+### Build a grounded topsim by filtering the formula
+
+`formula_distance_condensed` takes any token sequence, so a gt meaning space
+restricted to *one* latent is a filter on the formula and nothing else. That is
+how "compositional but narrow" gets established rather than asserted.
+
+Rung 1 of the August 2026 ablation, S6 against filtered ShapeWorld formulas:
+full formula 0.068, colour terms only **0.512 ± 0.029**, colour plus `and`/`or`/
+`not` 0.226, shape terms only −0.046. So `gt_s6 = 0.099` was reporting coverage,
+the language was a real colour language, and adding the operators halved the
+reading — it tracked *which* colours were in the concept and not how they were
+combined. Content words, no syntax.
+
+Two practical notes. All-pairs Spearman on 21,000 utterances is 220M pairs, so
+subsample and report a spread over several draws rather than one number. And a
+filtered formula is still the gt meaning space, so everything above about
+coverage applies to it: a high colour-only rho is not a better result than a low
+one, it is a different question.
 
 ## Diagnostic columns
 
