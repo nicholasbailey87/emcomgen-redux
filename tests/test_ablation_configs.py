@@ -149,10 +149,10 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # weight carries it now. See test_score_scale.py.
         ("01_shapeworld_baseline.toml", "receiver.discriminator", 524_288),
         # ShapeWorld: the top of the ladder. The speaker's language model is the
-        # autoregressive decoder at four blocks -- see rung 9's `layers` for why
-        # four.
+        # causal arm at six blocks -- see rung 9's `layers` for why six, and why
+        # it was four until the blocks stopped cross-attending.
         ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 10_317_986),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 5_933_047),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 5_854_089),
         ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_784_566),
         ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_548_294),
         # CUB: the CNN/GRU baseline.
@@ -164,7 +164,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # from ShapeWorld's -- the ViT's patch tokeniser scales with image size,
         # and the speaker's language model carries a longer message.
         ("16_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 11_332_626),
-        ("16_birds_receiver_cross_attention_lm.toml", "sender.language_model", 5_938_813),
+        ("16_birds_receiver_cross_attention_lm.toml", "sender.language_model", 5_859_855),
         ("16_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_784_566),
         ("16_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_548_294),
         # Rung 13's discriminator, still pinned because it is still the number
@@ -203,10 +203,15 @@ def test_the_arms_are_the_sizes_they_claim(config_file, module, expected):
 @pytest.mark.parametrize(
     "baseline,transformer,tolerance",
     [
-        # Measured at 1.029x on both datasets. The tolerance is 0.05 rather than
-        # something tighter because `layers` is an integer: the neighbouring
-        # depths are 0.79x and 1.27x, so nothing between them is reachable and a
-        # tighter band would only be pinning the arithmetic of one depth.
+        # Measured at 1.015x on both datasets, at six blocks and
+        # `ff_inner_size = 512`. The tolerance is 0.05 rather than something
+        # tighter because `layers` is an integer: at 512 the neighbouring depths
+        # are 0.88x and 1.08x, so nothing between them is reachable on depth
+        # alone and a tighter band would only be pinning the arithmetic of one
+        # depth against one feedforward width.
+        #
+        # It was 1.029x at four blocks and 576, before the speaker's blocks lost
+        # their cross-attention sublayer.
         ("01_shapeworld_baseline.toml", "09_shapeworld_sender_transformer_lm.toml", 0.05),
         ("02_birds_baseline.toml", "10_birds_sender_transformer_lm.toml", 0.05),
         # The same speaker at the top of the ladder, which nothing above rung 9

@@ -235,8 +235,7 @@ def test_anything_below_two_dimensions_is_exempt(name):
         "label_embedding",
         "token_embedding.weight",
         "query",
-        "output_query",
-        "decoder.blocks.0.attn.q_proj.weight",  # "q_proj" is not "query"
+        "transformer.blocks.0.attn.q_proj.weight",  # "q_proj" is not "query"
     ],
 )
 def test_the_name_rule_matches_the_tensors_it_is_meant_to(name):

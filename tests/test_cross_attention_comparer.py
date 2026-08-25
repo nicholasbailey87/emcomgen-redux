@@ -416,18 +416,28 @@ def test_stochastic_depth_is_suppressed_only_at_a_single_layer():
         used to be gated on `layers // 2 > 1`, which silenced it at three layers
         -- a live depth for this module. Asked of each stack separately, so a
         one-block stack beside a deep one still gets nothing.
+
+    The rate is passed in rather than inherited from the config, which it used
+        to be. `DEFAULT.toml` set 0.1 everywhere when this was written and now
+        sets 0.0 everywhere (see the comment at `[sender_language_model]
+        stochastic_depth`), which quietly turned the "> 0.0" assertions into
+        assertions about the default rather than about the gating. Stating the
+        rate here tests the thing the test is named for whatever the default
+        becomes.
     """
+    rate = dict(stochastic_depth=0.1)
+
     single = _listener(
-        language_model_overrides=dict(layers=1),
-        discriminator_overrides=dict(layers=4),
+        language_model_overrides=dict(layers=1, **rate),
+        discriminator_overrides=dict(layers=4, **rate),
     )
     assert single.language_model.stochastic_depth == 0.0
     assert single.discriminator.stochastic_depth > 0.0
 
     for layers in (2, 3, 4):
         deep = _listener(
-            language_model_overrides=dict(layers=layers),
-            discriminator_overrides=dict(layers=layers),
+            language_model_overrides=dict(layers=layers, **rate),
+            discriminator_overrides=dict(layers=layers, **rate),
         )
         assert deep.language_model.stochastic_depth > 0.0
         assert deep.discriminator.stochastic_depth > 0.0

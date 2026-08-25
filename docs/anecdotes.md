@@ -325,12 +325,146 @@ does not is shape — precisely the wrong bias for a study whose known failure m
 is the speaker learning to name colours. SimCLR's small-image stem leaves an 8×8
 final map, so the pool has 64 positions rather than 4.
 
+## The Transformer speaker's first symbol was nearly a constant
+
+Rung 9 never ignites, and neither does rung 11. Rung 7 has a different speaker
+and ignites at about epoch 3; rung 13 has the *same* speaker and a different
+listener and ignites at about epoch 20; rung 10 is rung 9 on CUB, architecturally
+identical, and ignites. Every single-factor change from rung 9 rescues it, which
+is the signature of a marginal bootstrap rather than a broken component.
+
+`scripts/ignition_audit.py` measured what was marginal. It records the sign of
+`log_logit_scale`'s gradient per optimiser step, which matters because AdamW moves
+a lone scalar about `lr` per step whatever the gradient's magnitude — so its
+travel over a run is `lr × steps × net sign consistency`, and *only* the sign
+consistency is free to vary. Rung 9 sat at **49–52% negative over 1,100 steps**,
+a coin flip. Rung 7 sat at the same place for 450 steps and then burst to ~97%
+over one 25-step block, settling near 75%, taking its scale from 0.87 to 1.25 and
+its `realised_survival` from 0.26 to 0.53 while the loss was still 0.68. Ignition
+is a crossing, not a ramp.
+
+Two configuration interventions were tried against that and both failed, which is
+worth recording because both had good arguments behind them.
+
+**`silhouette_p_receiver = 0.0`.** ShapeWorld strips colour from the receiver's
+view on half of all training games while the speaker always sees it, and the roll
+is per game, so a batch is a mix and the receiver's `ResNet18SmallInput`
+normalises both distributions against one blended batch statistic. That looked
+like it was scrambling the referent side of the map on the listener's side at
+exactly the point the listener has to learn it. It is not what stops rung 9:
+30 epochs at 0.0 and `pool_score_norm` settled at 0.0324 by epoch 2 and stayed
+there, `logit_scale` slid 0.890 to 0.787, and `test_acc` sat at chance throughout — while `train_acc`
+climbed to 0.565, which is the colour shortcut arriving by a route the silhouette
+was evidently also blocking.
+
+**`accumulator_steps = 1`.** ShapeWorld runs an effective batch of 128 against
+CUB's 16, and in a noise-dominated regime `sign consistency − 0.5` grows as
+`√batch` while the optimiser step count falls as `batch`, so accumulation is a
+straight loss for a lone Adam scalar. The arithmetic held exactly and the
+conclusion did not: at four times the steps per epoch the scale travelled about
+four times as far — 0.868 to 0.592 over 20 epochs against 0.890 to 0.787 over 30
+— in the *same* direction. Net sign consistency came out 1.30% and 1.54% in the
+two runs, indistinguishable. Both interventions changed the rate and neither
+touched the sign.
+
+### Why the sign is negative
+
+BCE's convexity applied to a message that carries nothing. `L(z) = softplus(z) −
+y·z` has `L''(0) = 0.25`, so `E[L(z̄ + ε)] ≈ L(z̄) + 0.125·Var(ε)`. In the
+straight-through backward path the listener's score is a function of
+`Σ_k y_k E_k`: at small scale `y` is near-uniform and the message embedding
+collapses to the mean, `Var(z) → 0`; at large scale `y` sharpens onto a token
+chosen mostly by the Gumbel draw and `Var(z)` grows. While the message is
+uninformative, raising the scale is a pure variance injection and BCE charges for
+it. The gradient is telling the speaker something true: *your message makes the
+listener noisier without making it better, so send less.* That is a property of
+the loss at p ≈ 0.5, not of the dataset or the architecture, which is why it
+survived both interventions. It also unifies two things that had been read
+separately — the listener shrinking `score_scale` and the speaker shrinking
+`logit_scale` are the same hedge from opposite ends.
+
+Ignition is therefore a race: the first-order covariance term overtaking that
+penalty, which requires the listener to have learned the speaker's **accidental
+code** — the random but fixed concept-to-symbol map a freshly initialised speaker
+already has. So the thing to measure is how much there is to learn at step zero.
+
+### The measurement
+
+Five seeds, 256 gaussian prototype pairs, both speakers fresh. Two statistics per
+content position, both closed-form from the post-mixture distribution rather than
+sampled:
+
+- `code_signal` = `1 − P(two different concepts share the intended symbol)`.
+- `channel_signal` = `p_same − p_diff`, where `p_same = E_c[Σ_k p_c(k)²]` is the
+  probability two draws for the same concept agree and `p_diff` the same across
+  different concepts. Zero exactly when every concept emits the same distribution,
+  i.e. when the listener can learn nothing.
+
+The Transformer speaker had a hole, and only at **position 0**:
+
+| speaker | position-0 `code_signal` | summed `channel_signal` |
+|---|---|---|
+| `SenderGRULM` (rung 7) | 0.866 ±0.029 | 0.2261 |
+| `SenderTransformerLM` (rung 9, as it was) | **0.485 ±0.284** | 0.1922 |
+
+Positions 1–4 were fine at about 0.88 on both. Per seed, position 0 came out
+0.740, 0.323, 0.770, **0.098**, 0.493 — one seed in five emitting essentially the
+same first symbol for every concept, and a run-to-run lottery that on its own
+predicts rung 9 should sometimes ignite.
+
+The cause was structural. The causal arm's sequence began at SOS, one learned
+vector shared by every example, so symbol 0's residual stream carried nothing
+about the concept and the referents reached it only through cross-attention
+branches scaled by DeepNorm's `beta / alpha` = 0.20. `SenderGRULM` has no such
+hole because `init_h` builds its hidden state *from* the prototypes.
+
+### What was tried, and what it cost
+
+| design | DeepNorm | `alpha = beta = 1` |
+|---|---|---|
+| cross-attention kept, SOS-seeded (as it was) | 0.1922 | 0.2552 |
+| cross-attention kept, slots seeded from the latents | 0.2388 | 0.2570 |
+| no cross-attention, message = latent tail | **0.2236** | 0.1979 |
+| no cross-attention, no free slots (multiplier 1.0) | 0.2059 | 0.1358 |
+
+Two things fall out of that table. **DeepNorm flips sign** on whether the
+referents arrive through a branch or through the input: with cross-attention
+re-injecting them at every block, `alpha` is a drag; with them in the residual
+stream and nothing to refresh them, `alpha` is what keeps them alive and removing
+it costs 34%. And **the free slots ahead of the message do the memory's job** —
+they are never overwritten, so every message slot reads them at every step, which
+recovers about half of what dropping cross-attention costs. More of them buys
+almost nothing (0.2254 at multiplier 3.0), and making them bidirectional with a
+prefix-LM mask buys +0.1% (0.2239), which does not pay for dropping off SDPA's
+fused kernel.
+
+The shipped design is the third row: the message is the tail of the latent array,
+there is no cross-attention inside the blocks, and DeepNorm works with the grain.
+It scores below the alternatives that keep cross-attention, and was chosen anyway
+— it is the one where the residual scaling is protective rather than something to
+be worked around, and it collapses the two arms into one stack under one mask.
+At six blocks and `ff_inner_size = 512` it holds the parameter match at 1.015x.
+
+### What this does not establish
+
+The whole measured range across nine speaker variants is 0.192 to 0.257 — about
+±15% around the GRU. **Nothing here connects initialisation-time code strength to
+a gradient sign fraction**, and the variance penalty holding the sign down is a
+property of BCE that none of it touches. The seed lottery disappearing is the
+strongest result and the one worth checking against reality: if rung 9 has been
+run at several seeds and all of them stalled, most of this line is falsified. It
+is also all measured at initialisation, on gaussian prototypes, which are
+higher-rank than real ones; it says nothing about trainability or the endpoint.
+
 ## Parameter costs, for the record
 
 - Absolute position embeddings: ~190k parameters a rung, most of it two
   289-position tables in the `ViT2` backbones.
 - A decoder block costs about `4·d_model²` more than an encoder block:
-  1,354,951 against 944,711 at 320 wide with `ff_inner_size = 554`. The ablation
-  runs the decoder arm at 4 layers and the latent arm at 5 to put both within 2%
-  of the GRU baseline.
+  1,354,951 against 944,711 at 320 wide with `ff_inner_size = 554`. This is why
+  the ablation used to run the speaker's two arms at 4 and 5 layers to put both
+  within 2% of the GRU baseline. Neither arm builds decoder blocks any more, so
+  both run at 6 layers and `ff_inner_size = 512` — 5,854,089 against the GRU's
+  5,764,923 on ShapeWorld, 1.015x — and the arms are now the same size as each
+  other to within `token_embedding`'s 5,760.
 - The small ResNet stem: 1,728 parameters against 9,408.

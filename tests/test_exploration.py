@@ -566,30 +566,31 @@ def _greedy_reference(speaker, prototypes):
         return S.mask_reserved_tokens(logits).argmax(-1)
 
     if isinstance(speaker, S.SenderTransformerLM):
-        # The decoder arm, which is autoregressive and so needs the loop. Built
-        #     as a growing prefix rather than as `decode`'s fixed-length buffer,
-        #     deliberately: the two agree only if the causal mask really does
-        #     stop the unwritten tail reaching the positions behind it, so this
-        #     reference checks that claim as a side effect of checking the
-        #     greedy policy.
-        batch_size = prototypes[0].size(0)
-        memory = speaker.latent_layer_norm(speaker.encode(prototypes))
-
-        onehot = torch.zeros(batch_size, 1, speaker.vocabulary + 4)
-        onehot[:, 0, data.language.SOS_IDX] = 1.0
-        emitted = [(onehot @ speaker.token_embedding.weight)[:, 0, :]]
+        # The causal arm, which is autoregressive and so needs the loop. Built as
+        #     a growing prefix over a *blanked* tail rather than as `decode`'s
+        #     in-place overwrite, deliberately: the two agree only if the causal
+        #     mask really does stop the slots after the one being read from
+        #     reaching it, so this reference checks that claim as a side effect
+        #     of checking the greedy policy. `decode` leaves those slots holding
+        #     their latent vectors; this one zeroes them.
+        latents = speaker.latent_layer_norm(speaker.encode(prototypes))
+        rows = list(latents.unbind(1))
 
         tokens = []
         for i in range(speaker.content_length):
-            padding = torch.zeros(batch_size, speaker.d_model)
+            slot = speaker.first_message_slot + i
+
             sequence = torch.stack(
-                emitted + [padding] * (speaker.content_length - len(emitted)), dim=1
+                rows[: slot + 1]
+                + [torch.zeros_like(rows[0])] * (speaker.latent_length - slot - 1),
+                dim=1,
             )
-            logits = speaker.outputs2vocab(speaker.decoder(sequence, memory)[:, i, :])
+
+            logits = speaker.outputs2vocab(speaker.transformer(sequence)[:, slot, :])
             logits = S.layer_norm_logits(logits, speaker.vocabulary)
             chosen = S.mask_reserved_tokens(logits).argmax(-1)
             tokens.append(chosen)
-            emitted.append(
+            rows[slot] = (
                 F.one_hot(chosen, speaker.vocabulary + 4).float()
                 @ speaker.token_embedding.weight
             )

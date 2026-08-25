@@ -374,5 +374,5 @@ should not be on the graph.
 
 Both speakers pool the measurement over positions once per batch rather than per
 position, so it reads the batch's statistics rather than each position's alone.
-The latent arm can take it straight off its logits because it emits every
-position in one shot; the GRU and the decoder arm have to stack theirs.
+The parallel arm can take it straight off its logits because it emits every
+position in one shot; the GRU and the causal arm have to stack theirs.

@@ -138,16 +138,26 @@ its score inherits whatever magnitude the backbone emits.
 **Pooling geometry is derived from the image size, not configured**: these size
 the patch grid, and so the transformer's `source_size`, from the data.
 
-### `causal` on the latent arm's stack
+### `causal` on the speaker's stack
 
-Never causal, and no longer configurable. It used to read `not bidirectional`,
-which masked the *latent* array left to right — and the latent array is not a
-sequence in time. It is read back out in one shot by `output_query`, so latent
-index 0 is no earlier than latent index 9 in any sense the task can see. All that
-mask did was hide most of the image from the low-index latents, which is exactly
-what the encoder cross-attention declares it does not want ("whole image informs
-whole latent array"). Ordering the message is the decoder arm's job, and it does
-it by conditioning rather than by masking this.
+`not bidirectional`, and it is now the *only* difference between the speaker's
+two arms — the message is the tail of the latent array on both, so masking that
+array left to right is exactly how the causal arm orders its message.
+
+This reverses an earlier entry, which said the flag was pinned False and no
+longer configurable because "the latent array is not a sequence in time": it was
+read back out in one shot by `output_query`, so latent index 0 was no earlier
+than latent index 9 in any sense the task could see, and all the mask did was
+hide most of the image from the low-index latents. That was right about the
+architecture it described. With the message living in the array's tail, the
+ordering the mask imposes is the ordering the message has.
+
+The concern it raised has not gone away, it has moved to the free slots. Those
+are the `latent_length - content_length` positions ahead of the message, and the
+mask does still make them triangular among themselves — slot 0 sees only itself.
+Making them bidirectional with a prefix-LM mask was measured and buys +0.1%
+(0.2236 to 0.2239), which does not pay for dropping off SDPA's fused kernel. See
+docs/anecdotes.md.
 
 ### Attention dropout is its own key
 
@@ -156,9 +166,9 @@ never the agent's `dropout`, which regularises the inputs to the comparison. The
 speaker's cross-attention used to read `self.dropout` while the listener's
 matching cross-attention took a separate constant, so raising the speaker's input
 regularisation silently rewired its attention and the two agents were regularised
-on different terms. In the decoder arm, the per-block cross-attention takes the
-speaker's `cross_attention_dropout` too, so every cross-attention in the speaker
-is on one knob.
+on different terms. The speaker now has exactly one cross-attention — the
+encoder query reading the prototypes — so the knob has a single consumer there;
+the listener's stacks still have several, and take it per block.
 
 broccoli gates attention dropout on `self.training` (the `dropout_p` argument in
 `MHAttention.forward`), so it does not leak into eval the way a bare
@@ -203,17 +213,25 @@ block, so a block with three residual branches takes the decoder form and a bloc
 with two takes the encoder form.
 
 **Most stacks here are the encoder case, and not by accident.**
-`SenderTransformerLM`'s latent arm runs one cross-attention over the prototypes
-to build the sequence its encoder then reads, and
+`SenderTransformerLM` runs one cross-attention over the prototypes to build the
+array its blocks then read, on both arms, and
 `TransformerCrossAttentionComparer` runs one between two encoder stacks. In both,
 the cross-attention sits outside the residual path whose depth this is correcting
 for, so it is not a sublayer and the encoder constants are the right ones.
 
-**The exception is `transformer_decoder.DecoderBlock`**, which
-`SenderTransformerLM` builds for its autoregressive arm. That one does
-cross-attend into the latent memory inside every block, which is the
-configuration DeepNorm's decoder form was derived for, so it asks for
-`decoder=True`.
+**The exception is `transformer_decoder.DecoderBlock`**, which does
+cross-attend into a memory inside every block — the configuration DeepNorm's
+decoder form was derived for — so it asks for `decoder=True`. The listener builds
+those, for its message decoder and its referent decoder.
+
+`SenderTransformerLM` used to build them too, for its autoregressive arm, and was
+the reason `resolve_residual_scaling` took `decoder=not bidirectional` there. It
+no longer does: the referents arrive as the stack's input rather than as a
+memory, so both of the speaker's arms are two-branch encoder stacks and both ask
+for `decoder=False`. At the six blocks the ablation now runs, that is numerically
+what the four-block decoder form gave — `2·6 = 3·4` and `8·6 = 12·4`, so `alpha`
+and `beta` are unchanged at 1.861 and 0.380 — which is a coincidence of the
+depths and not something to rely on.
 
 ### Depth is per sub-stack
 

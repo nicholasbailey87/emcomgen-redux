@@ -147,7 +147,7 @@ module added later is covered without anyone having to remember a list.
 - `p.dim() < 2` — biases, norm gains, and every learned scalar. No fan-in to
   scale by.
 - name containing `"embedding"` or `"query"` — `polarity_embedding`,
-  `label_embedding`, `token_embedding`, `query`, `output_query`. muP gives input
+  `label_embedding`, `token_embedding` and `query`. muP gives input
   embeddings a Θ(1) rate because their fan-in is a one-hot index rather than a
   width, and every one of these is Θ(1)-*initialised* as well, so scaling their
   rate by width would be scaling against an init that never shrank. Matched as a

@@ -217,41 +217,71 @@ There is no greedy or epsilon-greedy generation option. The former is only used
 in the parts of the original code relating to ACRe; the latter is off by default
 and is not discussed in the original paper.
 
-### `SenderTransformerLM` — two architectures behind one flag
+### `SenderTransformerLM` — one architecture, and `bidirectional` is a mask
 
-The flag is `bidirectional`, exactly as it is on `SenderGRULM`.
+A learned query cross-attends the two prototypes into a latent array, `layers`
+blocks run over that array, and **the message is its tail** — the last
+`content_length` slots, one per content symbol. That is the whole speaker on
+both arms. `bidirectional` chooses whether the blocks are masked.
 
-**`false` (the default) — an autoregressive Transformer decoder.** A learned
-query cross-attends the two prototypes into a latent memory, and `layers`
-decoder blocks generate the message one symbol at a time, each conditioned on
-the symbols before it and cross-attending back into that memory. Causal in the
-sense the GRU is causal, and comparable to it on generation regime as well as on
-parameters.
+**`false` (the default) — causal.** The blocks are masked left to right, and the
+tail slots are read in order: run the stack, read slot `first_message_slot + i`,
+sample, and overwrite that slot with the symbol's embedding so the next slot is
+conditioned on it. Causal in the sense the GRU is causal, and comparable to it on
+generation regime as well as on parameters.
 
-**`true` — Perceiver IO.** The same cross-attention into the same latent array,
-then `layers` blocks of self-attention over the latents, then a second learned
-query reading them back out as every symbol at once. Nothing is conditioned on
-anything; the message has an order only because its slots are numbered.
+**`true` — parallel.** The same blocks unmasked, and the whole tail read in one
+shot. Nothing is conditioned on anything; the message has an order only because
+its slots are numbered.
 
-Both live in one class because they share everything up to the latent array —
-the polarity tag, the encoder cross-attention, the logit scale and its
-diagnostics — and because the ablation configs select between them by setting
-one key.
+The arms are the same size at the same `layers` to within `token_embedding` —
+5,760 parameters, which only the causal arm needs, because only it reads a symbol
+back. So a difference between them covers the generation regime and nothing else.
 
-The two arms are **not the same size at the same `layers`**: a decoder block
-carries a cross-attention the encoder block does not, so it costs about
-`4·d_model²` more — 1,354,951 against 944,711 at 320 wide with
-`ff_inner_size = 554`. The ablation rungs therefore run the decoder arm at 4
-layers and the latent arm at 5, which puts both within 2% of the GRU baseline.
+#### What this replaced, and why
+
+The arms used to be two genuinely different architectures. `true` was Perceiver
+IO: a latent array, a self-attention stack, and a *second* learned query
+(`output_query`) reading the latents back out at the message's length. `false`
+was an encoder–decoder: the latents became a cross-attention **memory**, and
+`layers` `TransformerDecoder` blocks generated a message-length sequence while
+cross-attending into it. They were not the same size at the same depth — a
+three-branch decoder block cost about `4·d_model²` more than a two-branch encoder
+block — so the ablation ran them at 4 and 5 layers respectively.
+
+That cost the causal arm its first symbol. Its sequence began at SOS, one learned
+vector shared by every example, so symbol 0's residual stream carried nothing
+about the concept and the referents reached it only through cross-attention
+branches scaled by DeepNorm's `beta / alpha` ≈ 0.20. Measured at initialisation
+over five seeds, the probability that two different concepts chose *different*
+first symbols came out 0.740, 0.323, 0.770, 0.098 and 0.493 — one seed in five
+emitting the same first symbol for every concept, against ~0.87 uniformly for
+`SenderGRULM`, whose `init_h` builds its hidden state from the prototypes.
+
+Reading the message off the latent array puts the concept in the residual stream
+on the Transformer speaker too, where `alpha` amplifies it rather than
+attenuating it. See [anecdotes.md](anecdotes.md) for the measurement and what it
+did and did not settle.
 
 #### The latent array and `latent_message_multiplier`
 
 `latent_length = round(content_length × latent_message_multiplier)` is the
-length of the array the self-attention stack runs over, as distinct from the
-message it eventually produces. This is the Perceiver IO shape: a learned query
-array cross-attends into the byte array (here, the two prototypes), a
-self-attention stack processes the result, and a *second* learned query reads
-that latent array back out at whatever length the task wants.
+length of the array the blocks run over. The message is its last
+`content_length` slots, so what the multiplier buys is **free slots ahead of the
+message**: `first_message_slot = latent_length - content_length`. At the
+configured 2.0 that is five free slots and five message slots on ShapeWorld,
+eight and eight on CUB.
+
+1.0 is a hard floor and `SenderTransformerLM` raises below it — an array shorter
+than the message has nowhere to put the message.
+
+The free slots are load-bearing rather than spare capacity. Nothing ever
+overwrites them, so under the causal mask every message slot reads all of them at
+every step. That is what cross-attending into a memory used to do, folded into
+the self-attention branch — and it is why removing them costs something real: at
+1.0 the measured initialisation-time code strength falls from 0.2236 to 0.2059.
+Adding more buys almost nothing (0.2254 at 3.0), so this is a floor effect rather
+than a capacity one.
 
 Perceiver's own reason for the split does not apply — its latent array is
 *smaller* than its input so the quadratic attention stays affordable, whereas a
@@ -267,12 +297,14 @@ without touching `message_length`.
 Rounded rather than floored, so the knob is symmetric about the integers; at the
 configured 2.0 it is exact for every message length anyway.
 
-The output query is built at multiplier 1.0 as well as above it, deliberately.
-The knob's job is to vary the latent width and nothing else; if 1.0 also removed
-a module then a sweep over it would confound two changes at once, and the
-`state_dict` shape would move with the knob, so checkpoints could not be
-compared across sweep points. At 1.0 it is a learned re-read of an array of its
-own length — redundant, but honestly so.
+There used to be an `output_query` here — a second learned query reading the
+latent array back out at the message's length — and it was built at multiplier
+1.0 as well as above it, so that a sweep varied one thing rather than two and
+`state_dict` shapes stayed comparable across sweep points. Taking the tail says
+the same thing with one module fewer, and says it identically on both arms. The
+cost is that `query` is now the one parameter whose shape moves with the knob:
+it is one learned row per latent slot, so a sweep over the multiplier can no
+longer share checkpoints.
 
 #### The polarity embedding
 
@@ -352,7 +384,7 @@ Design details, each load-bearing:
   "embedding" in it reintroduces that silently. `polarity_embedding_lr` in
   `[optimiser]` is the other half of the same concern.
 
-#### The decoder arm's sampling loop
+#### The causal arm's sampling loop
 
 `decode_autoregressively` is a step-for-step mirror of `SenderGRULM.decode` from
 the sampling onwards — same normalisation order, same mask-then-explore order,
@@ -361,43 +393,52 @@ same per-step accumulation of diagnostics pooled once at the end. All the
 reasoning behind those is in [channel.md](channel.md).
 
 What differs is what carries the state. The GRU threads a hidden state through
-the loop; this threads the symbols themselves, re-reading the whole prefix
+the loop; this decodes the latent array in place, re-reading the whole array
 through the stack at every step.
 
 **Why re-read rather than extend:** broccoli's `MHAttention` asserts
 `query_tokens == seq_len` whenever it is causal, so a growing prefix is not
-something the module will accept. The loop therefore runs the stack over a
-full-length sequence every step, with the positions after the cursor held at
-zero. The causal mask makes those positions unable to reach the ones before
-them, so they are inert and the result is exactly what a growing prefix would
-have given. The cost is `content_length` passes over a `content_length`
-sequence — five of them at ShapeWorld's message length, over a stack a few
-million parameters wide, which is not worth a KV cache.
+something the module will accept. The loop therefore runs the stack over the
+full `latent_length` array every step, reading slot `first_message_slot + i` and
+overwriting it with that symbol's embedding before the next pass. The cost is
+`content_length` passes over a `latent_length` sequence — five over ten at
+ShapeWorld's message length, over a stack a few million parameters wide, which is
+not worth a KV cache.
 
-The input sequence is built fresh at each step rather than written into in
-place. In-place would be the obvious way and does not work: the previous step's
-forward pass has already saved that tensor for backward, so mutating it makes
-autograd refuse.
+**The slots after the cursor keep their latent vectors** rather than being
+blanked. The causal mask makes them unreachable from the slot being read, so what
+they hold cannot matter; leaving them alone is simply cheaper than zeroing them.
+`test_latent_phase.py` scribbles noise into them at every step and asserts the
+embedding does not move, which is the test for the mask as much as for the slots.
 
-The last symbol is never fed back — there is nothing left to condition — so the
-sequence stays `content_length` long and position 0 stays the SOS.
+**Why each message slot opens concept-derived.** Slot `first_message_slot + i`
+holds what `encode` put there until the moment it is read, so the residual stream
+that produces symbol `i` *starts* as the referent and DeepNorm's `alpha`
+amplifies it. This is structurally what `SenderGRULM.init_h` does. The sequence
+used to open at SOS instead — see *What this replaced, and why* above.
+
+The sequence is rebuilt with `torch.stack` at each step rather than written into
+in place. In-place would be the obvious way and does not work: the previous
+step's forward pass has already saved that tensor for backward, so mutating it
+makes autograd refuse. Overwriting an entry of a python list of row tensors,
+which is what the loop does, is not the same thing and is fine.
 
 Both speakers feed the *soft* one-hot through the token embedding
 (`onehot @ weight` rather than an index lookup) so that the straight-through
-gradient reaches the step that produced the symbol. The decoder arm's
+gradient reaches the step that produced the symbol. The causal arm's
 `token_embedding` is sized at `d_model`, not `token_embedding_size`: the two are
 required to be equal for this class anyway, and writing the width the stack
 actually consumes keeps the dependency visible.
 
-`embeddings()` is the latent arm's whole forward pass and is deliberately not
-given a decoder-arm branch — the decoder arm's embeddings are not a function of
-the prototypes, so there is no honest signature it could have there.
+`embeddings()` is the parallel arm's whole forward pass and is deliberately not
+given a causal-arm branch — the causal arm's embeddings are not a function of
+the prototypes alone, so there is no honest signature it could have there.
 
-`encode()` returns the latent array **unnormalised**, because the two arms want
-it normalised at different points: the latent arm feeds the raw array to its
-self-attention stack and norms afterwards, the decoder arm norms once and hands
-the result to every block as a fixed memory. Normalising per block would repeat
-identical work `layers × content_length` times per batch.
+`encode()` returns the latent array **unnormalised** and both arms normalise it
+once, immediately, before the stack. The parallel arm used to feed the raw array
+straight in and norm afterwards; it cannot now, because the causal arm shares the
+sequence between latent vectors and token embeddings, which arrive at their own
+scale, and the two arms must stay identical up to the mask.
 
 ## `models/transformer_decoder.py`
 
