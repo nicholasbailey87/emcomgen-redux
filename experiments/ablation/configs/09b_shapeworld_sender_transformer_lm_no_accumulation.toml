@@ -1,0 +1,97 @@
+# Rung 9b: rung 9 with `accumulator_steps = 1`, and nothing else.
+#
+# A diagnostic fork, not a step of the ladder. Rung 9 never ignites: the sign of
+# the gradient on `log_logit_scale` sits at 49-52% negative over 1100 steps of
+# `scripts/ignition_audit.py`, a coin flip, so the scalar has no net travel and
+# the channel stays shut. Rung 10 is rung 9 on CUB, architecturally identical,
+# and it does ignite. So the cause is in what differs between the two datasets,
+# and there are exactly two candidates. Rung 9 now tests the other one
+# (`silhouette_p_receiver`); this rung tests accumulation.
+#
+# The arithmetic. A lone scalar under AdamW moves about `lr` per *optimiser*
+# step whatever its gradient's magnitude, so its travel over a run is
+# `lr * steps * net sign consistency`. ShapeWorld runs `batch_size = 32` at
+# `accumulator_steps = 4`, an effective batch of 128; CUB runs 16 at 1, an
+# effective batch of 16. Eight times the batch buys about sqrt(8) = 2.83x the
+# sign consistency in the noise-dominated regime, and costs 8x the optimiser
+# step count. Net travel per example seen is then about 0.35x. Accumulation is
+# a straight loss for this scalar, and ShapeWorld is the dataset that does it.
+#
+# What this costs, and why it is a fork rather than an edit to rung 9. Dropping
+# to `accumulator_steps = 1` quarters the effective batch, so every other
+# gradient in the model gets noisier too and the run is no longer
+# batch-comparable with the rest of the ladder. `learning_rate` is deliberately
+# left alone: rescaling it with the batch would move two things at once and the
+# point here is to move one.
+#
+# `silhouette_p_receiver` is deliberately NOT overridden here, so it takes the
+# ShapeWorld default of 0.5 and this rung differs from the ladder's rung 9 in
+# exactly one key. Read against rung 9 (which now sets silhouetting to 0.0) the
+# pair separates the two candidates; read against `current_ablation/09` it is
+# the accumulation effect on its own.
+#
+# Read `train_realised_survival`, `train_logit_scale` and `train_pool_score_norm`
+# for ignition, and note that at four times the optimiser steps an epoch, epochs
+# are not comparable to rung 9's -- compare on steps.
+
+name = "ablation"
+
+[optimiser]
+# 1 rather than ShapeWorld's default of 4. This is the whole point of the rung;
+# see the arithmetic in the header.
+accumulator_steps = 1
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+contrast = true
+language_model = "SenderTransformerLM"
+
+[sender_language_model]
+# Both must equal `sender_feature_model.d_model`: `SenderTransformerLM`
+# layer-norms the incoming prototypes at its own `d_model` and separately
+# rejects `token_embedding_size != referent_embedding_size`. That pinning is
+# why rung 3 has to come before this one -- a Transformer speaker on top of a
+# CNN backbone would inherit whatever width the CNN emits.
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+
+# 4 blocks, chosen on parameters rather than on taste. A decoder block costs
+# 1,376,137 parameters at 320 wide with `ff_inner_size = 576`, so against the
+# GRU baseline this speaker measures 0.79x at 3 layers, 1.03x at 4 and 1.27x at
+# 5. Four is the closest this arm gets, and it is close: 5,933,047 against
+# 5,764,923 on ShapeWorld and 5,938,813 against 5,774,073 on CUB.
+#
+# The cost of matching on parameters is not matching on depth. Depth or
+# parameters, not both, and the ladder is built on parameters.
+layers = 4
+
+# `false` selects the autoregressive decoder arm: a learned query array
+# cross-attends the two prototypes into a latent memory, and four decoder blocks
+# then generate the content symbols one at a time, each conditioned on the
+# symbols before it. `true` selects the Perceiver IO arm instead, which emits
+# every symbol in one shot.
+#
+# `false` here, because the GRU baseline at rung 1 is autoregressive too: this
+# rung then moves the language model's architecture and nothing else. `true`
+# would move the generation regime at the same time, and whatever the
+# combination measured could not be attributed to either.
+#
+# The parallel arm is no longer a rung of its own. It used to sit beside the top
+# of the ladder as a fork; to measure it again, copy the topmost rung and flip
+# this key -- and note that a difference then covers depth as well as regime,
+# since the two arms take 5 and 4 blocks to reach comparable size.
+bidirectional = false
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24
