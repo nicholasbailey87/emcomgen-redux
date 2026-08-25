@@ -3,10 +3,12 @@ Speaker models: a GRU language model as in "Emergent Communication of
     Generalizations" (https://arxiv.org/abs/2106.02668), and Transformer
     language models in two arms.
 
-`SenderTransformerLM` is two architectures behind one flag, `bidirectional`:
-    `false` is an autoregressive Transformer decoder, `true` is Perceiver IO.
-    Both are built here because they share everything up to the latent array.
-    See docs/architecture.md.
+`SenderTransformerLM` is one architecture behind one flag, `bidirectional`,
+    which selects a mask. Both arms cross-attend the two prototypes into a
+    latent array and run the same blocks over it; the message is the array's
+    tail. `true` reads that tail in one shot, `false` generates it in order,
+    overwriting each slot with its symbol as it commits. See
+    docs/architecture.md.
 
 The Gumbel channel -- `layer_norm_logits`, `logit_scale`, `uniform_weight`,
     `sampling_tau` and their diagnostics -- is documented in docs/channel.md.
@@ -27,7 +29,6 @@ import data.language
 import broccoli
 
 from . import model_util
-from . import transformer_decoder
 
 
 def trim_messages(token_id_rows):
@@ -1010,7 +1011,11 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
             kwargs["alpha"],
             kwargs["beta"],
             kwargs["layers"],
-            decoder=not self.bidirectional,
+            # The encoder form on both arms. Neither cross-attends from inside a
+            #     block any more -- the referents arrive as the stack's *input*,
+            #     not as a memory -- so both are two-branch stacks. See
+            #     docs/broccoli.md.
+            decoder=False,
         )
 
         self._init_channel(
@@ -1038,23 +1043,32 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
 
         self.content_length = self.message_length - 2
 
-        # The length of the latent array the self-attention stack runs over, as
-        #     distinct from the message it eventually produces. This is the
-        #     Perceiver IO shape, and it is here for bandwidth: the referents
-        #     reach the language model through `heads * latent_length` softmax
-        #     weights and nothing else. Rounded rather than floored so the knob
-        #     is symmetric about the integers. See docs/architecture.md.
+        # The length of the latent array the stack runs over. The message is its
+        #     *tail*, so this is the message's length plus however many free
+        #     slots the multiplier buys above it. Those free slots are what the
+        #     knob is for, and it is bandwidth they buy: the referents reach the
+        #     language model through `heads * latent_length` softmax weights and
+        #     nothing else. Rounded rather than floored so the knob is symmetric
+        #     about the integers. See docs/architecture.md.
         self.latent_length = round(
             self.content_length * self.latent_message_multiplier
         )
 
-        if self.latent_length < 1:
+        if self.latent_length < self.content_length:
             raise ValueError(
                 "`latent_message_multiplier` "
                 f"({self.latent_message_multiplier}) rounds the latent array to "
                 f"{self.latent_length} positions at content length "
-                f"{self.content_length}; it must leave at least one."
+                f"{self.content_length}. The message is the tail of the latent "
+                f"array, so the array cannot be shorter than the message: the "
+                f"multiplier must be at least 1.0."
             )
+
+        # Where the message begins. The slots before it are never overwritten by
+        #     a sampled symbol, so every message slot reads them at every step --
+        #     which is what a cross-attention memory used to do, folded into the
+        #     self-attention branch. See docs/architecture.md.
+        self.first_message_slot = self.latent_length - self.content_length
 
         # The encoder query: what to ask the prototypes, `latent_length` times.
         #     Built in both arms -- it is what turns two prototypes into an array
@@ -1067,18 +1081,8 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
         self.referent_layer_norm = nn.LayerNorm(self.d_model)
         self.latent_layer_norm = nn.LayerNorm(self.d_model)
 
-        if self.bidirectional:
-            # Latent arm only: which symbol slot each output is. Splitting this
-            #     from `query` is what lets the latent array be a different
-            #     length from the message. The decoder arm gets its order from
-            #     its own position embedding and rotary self-attention instead.
-            self.output_query = nn.Parameter(
-                torch.empty(self.content_length, self.d_model)
-            )
-
-            self.output_query_layer_norm = nn.LayerNorm(self.d_model)
-        else:
-            # Decoder arm only: the parallel arm never reads a symbol back.
+        if not self.bidirectional:
+            # Causal arm only: the parallel arm never reads a symbol back.
             #     Sized at `d_model`, which the check above requires to equal
             #     `token_embedding_size` anyway. Both speakers feed the *soft*
             #     one-hot through this so the straight-through gradient reaches
@@ -1124,125 +1128,68 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
             scaling="d",
         )
 
-        # The two arms. On this speaker `bidirectional` selects an architecture
-        #     rather than a mask.
-        if self.bidirectional:
-            self.transformer = broccoli.transformer.TransformerEncoder(
-                self.latent_length,
-                self.d_model,
-                self.layers,
-                self.heads,
-                # Pinned False, and no longer a config option; both arms run
-                #     rotary. See docs/broccoli.md.
-                absolute_position_embedding=False,
-                relative_position_embedding=self.relative_position_embedding,
-                # Pinned at 1.0 and no longer configurable; see docs/broccoli.md.
-                positional_heads=1.0,
-                # Derived, not configured: this block runs over the *latent*
-                #     array. See `latent_length`.
-                source_size=(self.latent_length,),
-                # `ff_ratio` None so that `ff_inner_size` is the live knob; note
-                #     broccoli's `ViT` resolves the two the other way round. See
-                #     docs/broccoli.md.
-                ff_ratio=None,
-                ff_inner_size=self.ff_inner_size,
-                activation=self.activation,
-                activation_kwargs=None,
-                ff_linear_module_up=None,
-                ff_linear_module_down=None,
-                # Pinned rather than promoted: this argument can never take
-                #     effect. Use the inner/outer knobs. See docs/broccoli.md.
-                ff_dropout=0.0,
-                ff_inner_dropout=self.ff_inner_dropout,
-                ff_outer_dropout=self.ff_outer_dropout,
-                msa_dropout=self.self_attention_dropout,
-                stochastic_depth=self.stochastic_depth,
-                depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
-                # Never causal, and no longer configurable: the latent array is
-                #     not a sequence in time. See docs/broccoli.md.
-                causal=False,
-                linear_module=nn.Linear,
-                bos_tokens=self.utility_tokens,
-                knocking_heads=self.knocking_heads,
-                return_bos_tokens=self.return_bos_tokens,
-                pre_norm=self.pre_norm,
-                post_norm=self.post_norm,
-                msa_scaling="d",
-                alpha=self.alpha,
-                beta=self.beta,
-            )
-
-            # Perceiver IO's decoder: `content_length` learned queries read the
-            #     processed latent array and return one vector per symbol slot,
-            #     which is what makes `latent_length` free of `message_length`.
-            #     Built at multiplier 1.0 as well as above it, deliberately, so
-            #     the `state_dict` shape does not move with the knob. See
-            #     docs/architecture.md.
-            self.decode_attention = broccoli.transformer.MHAttention(
-                self.d_model,
-                self.heads,
-                dropout=self.cross_attention_dropout,
-                causal=False, # Whole latent array informs whole message
-                seq_len=self.content_length,
-                linear_module=nn.Linear,
-                bos_tokens=0,
-                knocking_heads=False,
-                # No positional information on the key side: the latent array's
-                #     order is already baked in and the output query carries its
-                #     own. `positional_heads` is inert here and pinned at 1.0.
-                rotary_embedding=None,
-                positional_heads=1.0,
-                source_size=None,
-                scaling="d",
-            )
-        else:
-            # The decoder arm. Same `layers` blocks, spent at message length
-            #     rather than at latent length, and cross-attending into the
-            #     latent memory from inside every one of them. There is no
-            #     self-attention stack over the latents here, so the latent array
-            #     is a memory rather than a representation. Note the two arms are
-            #     not the same size at the same `layers`. See
-            #     docs/architecture.md.
-            self.decoder = transformer_decoder.TransformerDecoder(
-                self.content_length,
-                self.latent_length,
-                self.d_model,
-                self.layers,
-                self.heads,
-                # Pinned False, and no longer a config option; both arms run
-                #     rotary. See docs/broccoli.md.
-                absolute_position_embedding=False,
-                relative_position_embedding=self.relative_position_embedding,
-                # Pinned at 1.0, as on the latent arm's stack.
-                positional_heads=1.0,
-                # The message, not the latent array: these blocks run over the
-                #     symbols emitted so far, which is the whole difference
-                #     between the arms.
-                source_size=(self.content_length,),
-                # `ff_ratio` None so that `ff_inner_size` is the live knob.
-                ff_ratio=None,
-                ff_inner_size=self.ff_inner_size,
-                activation=self.activation,
-                activation_kwargs=None,
-                ff_dropout=0.0,
-                ff_inner_dropout=self.ff_inner_dropout,
-                ff_outer_dropout=self.ff_outer_dropout,
-                msa_dropout=self.self_attention_dropout,
-                # Every cross-attention in this speaker is regularised on one
-                #     knob rather than two.
-                cross_attention_dropout=self.cross_attention_dropout,
-                stochastic_depth=self.stochastic_depth,
-                depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
-                linear_module=nn.Linear,
-                bos_tokens=self.utility_tokens,
-                knocking_heads=self.knocking_heads,
-                return_bos_tokens=self.return_bos_tokens,
-                pre_norm=self.pre_norm,
-                post_norm=self.post_norm,
-                msa_scaling="d",
-                alpha=self.alpha,
-                beta=self.beta,
-            )
+        # One stack, both arms. `bidirectional` selects a mask and nothing else:
+        #     the two arms build the same latent array from the same query, run
+        #     the same blocks over it, and take the message from the same tail
+        #     slots. The parallel arm reads all of them at once; the causal arm
+        #     reads them one at a time, overwriting each with its symbol as it
+        #     commits. See docs/architecture.md.
+        #
+        # This used to be a genuine fork -- a Perceiver IO encoder plus an output
+        #     query on one side, a cross-attending `TransformerDecoder` on the
+        #     other -- and `bidirectional` selected an architecture rather than a
+        #     mask. That cost the causal arm its first symbol: its sequence began
+        #     at SOS, a constant, so the concept reached symbol 0 only through
+        #     cross-attention branches scaled by DeepNorm's `beta / alpha`. At
+        #     init one seed in five then emitted the *same* first symbol for
+        #     every concept. See docs/anecdotes.md.
+        self.transformer = broccoli.transformer.TransformerEncoder(
+            self.latent_length,
+            self.d_model,
+            self.layers,
+            self.heads,
+            # Pinned False, and no longer a config option; both arms run
+            #     rotary. See docs/broccoli.md.
+            absolute_position_embedding=False,
+            relative_position_embedding=self.relative_position_embedding,
+            # Pinned at 1.0 and no longer configurable; see docs/broccoli.md.
+            positional_heads=1.0,
+            # Derived, not configured: this block runs over the *latent*
+            #     array. See `latent_length`.
+            source_size=(self.latent_length,),
+            # `ff_ratio` None so that `ff_inner_size` is the live knob; note
+            #     broccoli's `ViT` resolves the two the other way round. See
+            #     docs/broccoli.md.
+            ff_ratio=None,
+            ff_inner_size=self.ff_inner_size,
+            activation=self.activation,
+            activation_kwargs=None,
+            ff_linear_module_up=None,
+            ff_linear_module_down=None,
+            # Pinned rather than promoted: this argument can never take
+            #     effect. Use the inner/outer knobs. See docs/broccoli.md.
+            ff_dropout=0.0,
+            ff_inner_dropout=self.ff_inner_dropout,
+            ff_outer_dropout=self.ff_outer_dropout,
+            msa_dropout=self.self_attention_dropout,
+            stochastic_depth=self.stochastic_depth,
+            depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
+            # The whole of what `bidirectional` now selects. False here means
+            #     the array is a set and every slot reads every other; True
+            #     means the message slots in its tail are generated in order,
+            #     each reading only what came before it. Either way the free
+            #     slots ahead of the message are visible from all of them.
+            causal=not self.bidirectional,
+            linear_module=nn.Linear,
+            bos_tokens=self.utility_tokens,
+            knocking_heads=self.knocking_heads,
+            return_bos_tokens=self.return_bos_tokens,
+            pre_norm=self.pre_norm,
+            post_norm=self.post_norm,
+            msa_scaling="d",
+            alpha=self.alpha,
+            beta=self.beta,
+        )
 
         # Pre-norm token prior, as in `SenderGRULM`; see docs/channel.md.
         self.outputs2vocab = nn.Linear(
@@ -1291,34 +1238,28 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
         prototypes
     ):
         """
-        The latent arm's whole forward pass: one vector per symbol slot, a
+        The parallel arm's whole forward pass: one vector per symbol slot, a
             function of the prototypes alone.
 
-        Latent arm only, and deliberately not given a decoder-arm branch --
+        Parallel arm only, and deliberately not given a causal-arm branch --
             there the embeddings depend on the symbols sampled before them, so
             no honest signature exists and the loop lives in `decode`.
+
+        The message is the latent array's tail rather than a separate readout.
+            There used to be an `output_query` here, `content_length` learned
+            rows cross-attending the processed latents; taking the tail says the
+            same thing with one parameter fewer and, more to the point, says it
+            identically on both arms. What `latent_message_multiplier` buys is
+            now free slots *ahead* of the message rather than a separately-sized
+            array behind it.
         """
-        batch_size = prototypes[0].size(0)
-
-        latents = self.encode(prototypes)
-
-        # Self-attention over the latents, and only the latents: a single pass,
-        #     as in Perceiver IO, rather than Perceiver's iterated re-reads.
-        latents = self.transformer(latents)
-
-        output_query = self.output_query.unsqueeze(0).expand(
-            batch_size,
-            self.content_length,
-            self.d_model
+        latents = self.transformer(
+            self.latent_layer_norm(self.encode(prototypes))
         )
 
-        # `content_length` queries read the latent array back out, which is what
-        #     fixes the message length regardless of `latent_length`.
-        return self.decode_attention(
-            self.output_query_layer_norm(output_query),
-            self.latent_layer_norm(latents),
-            self.latent_layer_norm(latents),
-        ) # (batch, self.content_length, self.d_model)
+        return latents[
+            :, self.first_message_slot :, :
+        ] # (batch, self.content_length, self.d_model)
 
     def record_polarity_separation(self):
         """
@@ -1336,54 +1277,60 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
         prototypes
     ):
         """
-        The decoder arm's sampling loop: one symbol at a time, each conditioned
-            on the symbols already emitted and on the latent memory.
+        The causal arm's sampling loop: the latent array decoded in place, one
+            tail slot at a time, each conditioned on the free slots ahead of the
+            message and on the symbols already committed behind it.
 
         A step-for-step mirror of `SenderGRULM.decode` from the sampling
             onwards, and deliberately does not restate the reasoning behind the
             ordering there. What differs is that this threads the symbols
-            themselves rather than a hidden state, re-reading the whole prefix
+            themselves rather than a hidden state, re-reading the whole array
             through the stack at every step -- see docs/architecture.md for why
-            re-reading is exact, and why the input is rebuilt rather than
-            written into in place.
+            re-reading is exact.
+
+        The point of the overwrite. Slot `first_message_slot + i` holds a
+            *concept-derived* vector when it is read, because `encode` put one
+            there, so the residual stream that produces symbol `i` starts as the
+            referent and DeepNorm's `alpha` amplifies it. That is what
+            `SenderGRULM.init_h` does for the GRU. The sequence used to open at
+            SOS -- a constant -- and the concept had to arrive through a
+            cross-attention branch scaled by `beta / alpha`; docs/anecdotes.md
+            has what that cost the first symbol.
+
+        Under the causal mask nothing after slot `i` is visible from it, so the
+            slots that have not been sampled yet may keep their latent vectors.
+            Nothing reads them until they are overwritten.
 
         Returns: as `decode`.
         """
         batch_size = prototypes[0].size(0)
         device = prototypes[0].device
 
-        # Normalised once, here, rather than inside each block.
-        memory = self.latent_layer_norm(self.encode(prototypes))
+        # Normalised once, here, rather than inside each block. The array is the
+        #     stack's input on this arm, and it shares the sequence with token
+        #     embeddings, which arrive at their own scale.
+        rows = list(
+            self.latent_layer_norm(self.encode(prototypes)).unbind(1)
+        ) # `latent_length` tensors of (B, D)
 
         lang = []
         symbol_embeddings = []
         survival_logits = []
         spread_steps = []
 
-        sos_onehot = self.reserved_onehot(
-            data.language.SOS_IDX, batch_size, device
-        )
-        lang.append(sos_onehot)
-
-        # Through the embedding matrix rather than an index lookup: the sampled
-        #     one-hots that follow are soft in the backward pass, and a matmul is
-        #     what lets the straight-through gradient reach them.
-        emitted = [(sos_onehot @ self.token_embedding.weight)[:, 0, :]] # (B, D)
-
-        padding = torch.zeros(
-            batch_size, self.d_model, device=device, dtype=emitted[0].dtype
+        lang.append(
+            self.reserved_onehot(data.language.SOS_IDX, batch_size, device)
         )
 
         if self.training:
             self.record_polarity_separation()
 
         for i in range(self.content_length):
-            decoder_input = torch.stack(
-                emitted + [padding] * (self.content_length - len(emitted)),
-                dim=1
-            ) # (B, content_length, D)
+            slot = self.first_message_slot + i
 
-            step_embedding = self.decoder(decoder_input, memory)[:, i, :] # (B, D)
+            step_embedding = self.transformer(
+                torch.stack(rows, dim=1)
+            )[:, slot, :] # (B, D)
             symbol_embeddings.append(step_embedding)
 
             logits = self.outputs2vocab(step_embedding) # (B, V + 4)
@@ -1398,10 +1345,11 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
 
             lang.append(predicted_onehot.unsqueeze(1))
 
-            # The last symbol is never fed back -- there is nothing left to
-            #     condition -- so position 0 stays the SOS.
-            if i + 1 < self.content_length:
-                emitted.append(predicted_onehot @ self.token_embedding.weight)
+            # Through the embedding matrix rather than an index lookup: the
+            #     sampled one-hot is soft in the backward pass, and a matmul is
+            #     what lets the straight-through gradient reach the step that
+            #     produced it.
+            rows[slot] = predicted_onehot @ self.token_embedding.weight
 
         if self.training:
             # Pooled over positions after the loop, as in `SenderGRULM.decode`.
@@ -1422,8 +1370,8 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
         Produce a message and the symbol embeddings that produced it, and
             dispatch on the arm.
 
-        The latent arm's embeddings are a function of the prototypes alone; the
-            decoder arm's depend on the symbols sampled before them, so there
+        The parallel arm's embeddings are a function of the prototypes alone;
+            the causal arm's depend on the symbols sampled before them, so there
             they correspond only within one call. Either way both come back
             together, so callers can treat all three speakers identically.
 
@@ -1483,15 +1431,12 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
                 torch.stack([positive_tag, -positive_tag])
             )
         self.cross_attention.reset_parameters()
+        self.transformer.reset_parameters()
 
-        if self.bidirectional:
-            nn.init.normal_(self.output_query, mean=0.0, std=1.0)
-            self.output_query_layer_norm.reset_parameters()
-            self.transformer.reset_parameters()
-            self.decode_attention.reset_parameters()
-        else:
+        # The only module either arm has that the other does not: the causal arm
+        #     reads its own symbols back, and the parallel arm never does.
+        if not self.bidirectional:
             self.token_embedding.reset_parameters()
-            self.decoder.reset_parameters()
 
         self.outputs2vocab.reset_parameters()
         self.reset_logit_scale()

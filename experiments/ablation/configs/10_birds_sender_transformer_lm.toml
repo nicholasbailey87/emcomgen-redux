@@ -1,12 +1,14 @@
 # Rung 10: rung 8 with a Transformer sender language model.
 #
-# The speaker is an autoregressive Transformer decoder: a learned query array
-# cross-attends the two prototypes into a latent memory, and four decoder blocks
-# then generate the content symbols one at a time, each conditioned on the
-# symbols before it and cross-attending back into that memory.
+# The speaker is an autoregressive Transformer: a learned query array
+# cross-attends the two prototypes into a latent array, six blocks run over that
+# array under a causal mask, and the message is its tail -- one slot per content
+# symbol, each read and then overwritten by the symbol it produced, so the next
+# slot is conditioned on it. The slots ahead of the message are never
+# overwritten, so every symbol reads the referents through them.
 #
-# 5,933,047 parameters against the GRU baseline's 5,764,923 on ShapeWorld, and
-# 5,938,813 against 5,774,073 on CUB -- 1.03x on both, which is what the shared
+# 5,854,089 parameters against the GRU baseline's 5,764,923 on ShapeWorld, and
+# 5,859,855 against 5,774,073 on CUB -- 1.015x on both, which is what the shared
 # 320-wide ViT below it buys. See `[sender_language_model] layers`.
 #
 # This is the rung the rebalancing was for. At the old widths it was 533,943
@@ -18,6 +20,15 @@
 # The GRU baseline is autoregressive too, so this rung moves the language model's
 # architecture and not its generation regime. See `[sender_language_model]`
 # below for the parallel arm, which is no longer a rung of its own.
+#
+# It also no longer moves *how the concept arrives*, which it silently used to.
+# `SenderGRULM` builds its initial hidden state from the prototypes through
+# `init_h`, so the concept is the state the first symbol is generated from. The
+# Transformer speaker used to begin its sequence at SOS -- a constant -- and let
+# the concept in only through cross-attention branches scaled by DeepNorm's
+# `beta / alpha`, which at init left one seed in five emitting the same first
+# symbol for every concept. Reading the message off the latent array puts the
+# concept back in the residual stream on both speakers. See docs/anecdotes.md.
 
 name = "ablation"
 
@@ -40,21 +51,19 @@ token_embedding_size = 320
 d_model = 320
 heads = 5    # head_dim 64, as everywhere
 
-# 4 blocks, chosen on parameters rather than on taste. A decoder block costs
-# 1,376,137 parameters at 320 wide with `ff_inner_size = 576`, so against the
-# GRU baseline this speaker measures 0.79x at 3 layers, 1.03x at 4 and 1.27x at
-# 5. Four is the closest this arm gets, and it is close: 5,933,047 against
-# 5,764,923 on ShapeWorld and 5,938,813 against 5,774,073 on CUB.
-#
-# The cost of matching on parameters is not matching on depth. Depth or
-# parameters, not both, and the ladder is built on parameters.
-layers = 4
+# 6 blocks and `ff_inner_size = 512`, which together hold the speaker's language
+# model at 1.015x the GRU baseline's -- 5,859,855 against 5,774,073 here. The
+# blocks lost their cross-attention sublayer when the referents moved into the
+# stack's input, so they are cheaper and there are more of them. Rung 9 carries
+# the argument; this rung is its twin on CUB and takes the same depth, which is
+# the point of the pair.
+layers = 6
 
-# `false` selects the autoregressive decoder arm: a learned query array
-# cross-attends the two prototypes into a latent memory, and four decoder blocks
-# then generate the content symbols one at a time, each conditioned on the
-# symbols before it. `true` selects the Perceiver IO arm instead, which emits
-# every symbol in one shot.
+# `false` selects the causal arm: the blocks run over the latent array under a
+# causal mask and the message slots in its tail are generated in order, each
+# read and then overwritten by its symbol so the next one is conditioned on it.
+# `true` selects the parallel arm, which runs the same blocks unmasked and reads
+# the whole tail in one shot.
 #
 # `false` here, because the GRU baseline at rung 1 is autoregressive too: this
 # rung then moves the language model's architecture and nothing else. `true`
@@ -63,8 +72,11 @@ layers = 4
 #
 # The parallel arm is no longer a rung of its own. It used to sit beside the top
 # of the ladder as a fork; to measure it again, copy the topmost rung and flip
-# this key -- and note that a difference then covers depth as well as regime,
-# since the two arms take 5 and 4 blocks to reach comparable size.
+# this key. A difference then covers the generation regime and nothing else,
+# which is new: the two arms used to be different architectures at different
+# sizes, and are now the same blocks at the same size under different masks.
+# They differ by `token_embedding` alone -- 5,760 parameters, which only the
+# causal arm needs because only it reads a symbol back.
 bidirectional = false
 
 [scheduler]

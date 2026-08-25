@@ -84,7 +84,10 @@ def split_out_parameter(optimiser, pair, suffix, lr, config_key):
 #     `EXCLUDE_FROM_WEIGHT_DECAY` does, rather than enumerated: the same rule
 #     then covers a module added later without anyone having to remember this
 #     list. Covers `polarity_embedding`, `label_embedding`, `token_embedding`,
-#     `query` and `output_query`.
+#     `query` and `token_embedding`. It used to cover `output_query` too; the
+#     speaker's two arms now read the message off the tail of the latent array
+#     rather than through a learned readout, so that parameter is gone. The rule
+#     is unchanged -- "query" still matches `query`.
 MUP_EMBEDDING_LIKE = ("embedding", "query")
 
 
