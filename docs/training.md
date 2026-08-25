@@ -370,6 +370,17 @@ the axis most likely to reproduce a marginal bootstrap and cited stochastic dept
 as adding noise on top of a noisy channel. The ramp above is normalised by the
 block count, so that reasoning was wrong.
 
+**As of 2026-08-25 `stochastic_depth` is 0.0 in all five stacks**, so the rates
+quoted above are the historical ones. It was turned off while diagnosing rung
+09's failure to ignite; the argument is written out at `[sender_language_model]`
+in DEFAULT.toml. That argument is *not* the one retracted in the paragraph above
+— it is not about the rate growing with depth, but about `_residual` redrawing
+its mask on every `forward` while `decode_autoregressively` calls the decoder
+once per symbol, so the speaker's concept-to-symbol map jitters within a single
+message. At a ramped mean rate of ~0.05 it is a small effect and may well be
+irrelevant; it is off so that it is not a variable, not because it has been
+shown to matter.
+
 `torch.compile` is applied to the pair when `config['compile']` is set. Note that
 the `.item()` calls in the diagnostic paths cost a sync and a graph break under
 it; that cost is paid deliberately (see [measurement.md](measurement.md)).
