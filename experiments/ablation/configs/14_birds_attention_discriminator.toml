@@ -19,16 +19,22 @@
 # `train_mix_alpha` and `train_path_agreement` are the columns that say which
 # happened. See docs/architecture.md.
 #
-# **Read the parameter counts here with care.** `ReceiverGRULM` at DEFAULT's
-# 1024 wide and 2 layers bidirectional is 28,262,400 parameters, against this
-# discriminator's 3,580,487 -- itself inflated by a `memory_adapter` bringing the
-# GRU's 2048-wide output down to 256. So the listener on this rung is dominated
-# by an encoder that rung 15 then replaces with a 2,466,139-parameter one, and
-# the step from 13 to 15 is an architecture change *and* a 26M parameter change.
-# That is not the clean contrast the rest of the ladder is built on. Fixing it
-# means setting the GRU's width against the transformer's deliberately, in
-# `[receiver_language_model]`, and that is a decision about the whole ladder
-# rather than about this rung.
+# **Read the parameter counts here with care.** They have just been fixed, and
+# the fix is worth knowing about. `ReceiverGRULM` used to inherit 2 layers
+# bidirectional at DEFAULT's 1024 wide, which is 28,262,400 parameters, against
+# this discriminator's 3,580,487 -- itself inflated by a `memory_adapter`
+# bringing the GRU's then-2048-wide output down to 256. The listener on this
+# rung was therefore dominated by an encoder that rung 15 replaced with a
+# 2,466,139-parameter one, so the step from 13 to 15 was an architecture change
+# *and* a 26M parameter change, which is not the clean contrast the rest of the
+# ladder is built on.
+#
+# `[receiver_language_model]` now restores jayelm's 1 layer unidirectional:
+# 4,687,872 here at an `output_size` of 1024, and rung 15 deepens its
+# transformer to 6 blocks for 4,784,566. Parity is bought at jayelm's width by
+# moving the arm under test, rather than at a shared 256 by moving the baseline.
+# This discriminator is 2,990,663 at the halved `memory_adapter`, against rung
+# 15's 2,548,295.
 
 name = "ablation"
 

@@ -97,16 +97,31 @@ n_workers = 0
 # only (1 - p) of the time. Setting both rates to p makes that (1 - p)^2 --
 # strictly worse ceiling for the same shape pressure.
 #
-# The rate: 0.5 was never titrated -- it arrived in 536c59e and stayed -- and by
-# the time the last ShapeWorld run reached epoch 37 it had colour at 0.788 and
-# shape at exactly chance, which is the paper's failure mode rather than the one
-# silhouetting was added to prevent. 0.1 keeps some pressure against colour
-# while costing far less of the colour concepts, which are 62% of eval games.
+# The rate: back at 0.5 as of 2026-08-25, on the recollection that it worked
+# well. Note this reverses an earlier reading, which is left here because it has
+# not been reconciled: 0.5 arrived untitrated in 536c59e, and the last ShapeWorld
+# run at that rate had colour at 0.788 and shape at exactly chance by epoch 37 --
+# the paper's failure mode rather than the one silhouetting was added to prevent
+# -- which is what 0.1 was chosen against. The two readings may be of different
+# runs, or that run may have failed for an unrelated reason.
+#
+# The argument for a rate this high is the gradient ratio. Shape is visible in
+# both views, so it earns gradient on every turn; colour earns it only on the
+# (1 - p) of turns where the receiver can see colour to match a colour message
+# against. At 0.1 that ratio is 1 : 0.9, which is nowhere near enough against how
+# much cheaper colour is to learn -- six luma values one conv filter can
+# threshold. At 0.5 it is 1 : 0.5.
+#
+# What to watch at this rate: eval is never silhouetted, so the receiver's
+# BatchNorm running statistics are now averaging two very different pixel
+# distributions and are matched to neither. `test_same_acc_md_shape` leaving
+# chance is the result this is for; a fall in `test_same_acc_md_color` on its own
+# is the failure mode the 0.1 reading describes.
 #
 # Birds overrides both rates to 0.0 in `[birds.data]`: CUB species genuinely
 # depend on plumage colour, and `cub.py` does not thread these through anyway.
 silhouette_p_sender = 0.0
-silhouette_p_receiver = 0.1
+silhouette_p_receiver = 0.5
 
 [optimiser]
 class = "AdamW"
@@ -120,6 +135,80 @@ lr = 1e-4
 weight_decay = 0.0
 clip_grad_norm = 1.0
 log_interval = 100
+
+# The width `lr` above was tuned at, and the numerator of the muP rule:
+#
+#     lr(module) = lr * mup_reference_width / d_model(module)
+#
+# One rule stated once rather than six literal rates, because the rates are a
+# consequence of the widths and would go stale the moment a width moved.
+# `build_models` applies it, `split_out_module` does the regrouping, and the
+# resolved rates are written back into the saved config as
+# `[optimiser] resolved_mup_lrs` so args.json records what was actually built.
+#
+# 1024 is jayelm's `--speaker_hidden_size` and `--listener_hidden_size`. Their
+# runs are where `lr = 1e-4` comes from, so 1024 is the width at which this rule
+# is the identity and every other width is a departure from a tuned setting
+# rather than from a guess.
+#
+# Why any of this. Under muP, Adam's stable learning rate for a matrix that maps
+# one width to another goes as 1/fan_in: the update is a matrix-vector product
+# whose output variance grows with the fan-in, so a rate that is right at 1024 is
+# too small at 320 by the ratio. This repo has inherited 1e-4 unchanged across
+# modules three times narrower than jayelm's. The August 2026 ablation's rungs 9,
+# 11, 13 and 15 never left `ln 2`: every learned quantity on the speaker side was
+# stationary to four decimal places for thirty epochs, with a loss falling slowly
+# and monotonically and no spikes anywhere -- the signature of too little rate,
+# not too much. Rung 9 is exactly where `sender_language_model.d_model` drops
+# 1024 -> 320, which under this rule wants 3.2x.
+#
+# At the current widths that gives 3.2e-4 for `ViT2`, `AttentionPrototyper`,
+# `ExampleContrast` and `SenderTransformerLM` (320 wide), 4.0e-4 for
+# `ReceiverCrossAttentionLM` and `AttentionDiscriminator` (256), and an unchanged
+# 1e-4 for `SenderGRULM` and `ReceiverGRULM`, which are at the reference width.
+#
+# Two exemptions, both by rule rather than by list, so a module added later is
+# covered without anyone having to remember to add it. See `is_mup_exempt`.
+#
+# Tensors with fewer than two dimensions -- biases, norm gains, and every learned
+# scalar -- have no fan-in to scale by. This is also what keeps muP's groups
+# disjoint from the five scalar overrides below without either loop having to
+# know about the other.
+#
+# Tensors whose name contains "embedding" or "query" -- `polarity_embedding`,
+# `label_embedding`, `token_embedding`, `query`, `output_query`. muP gives input
+# embeddings a Theta(1) rate, because their fan-in is a one-hot index and not a
+# width; every one of these is Theta(1)-initialised as well, so scaling their
+# rate by width would be scaling against an init that never shrank. Matched as a
+# substring exactly as `gradboard`'s `EXCLUDE_FROM_WEIGHT_DECAY` matches
+# "embedding", and the same caveat applies -- a rename would move a tensor
+# silently.
+#
+# Whole modules out of scope, all of them by the same test: no `d_model`
+# attribute.
+#
+# The convolutional backbones. `ResNet18.final_feat_dim` is a hardcoded 512 with
+# no width to vary, muP's rules are stated for transformers, and a ResNet at 1e-4
+# is precisely what jayelm tuned.
+#
+# `BilinearDiscriminator`, which reads nothing from its own table: its single
+# tensor is `nn.Linear(message_width, referent_embedding_size, bias=False)` whose
+# fan-in is the language model's `output_size`. With `[receiver_language_model]`
+# restored to jayelm's 1024 that fan-in *is* the reference width, so the factor
+# would be 1.0 and the group would be a group at base rate.
+#
+# What this rule does *not* claim. muP transfers a tuned rate across a change of
+# width in one architecture. Two of the changes here are not that: the speaker's
+# language model goes GRU -> Transformer as well as 1024 -> 320, and `ViT2`
+# replaces a ResNet with no 1024 anywhere in it. Principled heuristic, not
+# transfer guarantee, and the paper should say so.
+#
+# Only the learning-rate half of muP is being adopted. Broccoli's `nn.Linear`
+# init is already 1/sqrt(fan_in), `msa_scaling = "d"` is already muP's attention
+# scaling, and `layer_norm_logits` already makes the speaker's readout scale
+# width-invariant. The `mup` package in requirements.txt stays unimported; the
+# rule is one line of arithmetic.
+mup_reference_width = 1024
 
 # Learning rate for the speaker's `log_logit_scale` alone. Set to `lr` to
 # disable the override.
@@ -757,33 +846,49 @@ token_embedding_size = 500
 # `ReceiverCrossAttentionLM`, which sets its own width here, and no broccoli
 # `d_model % n_heads == 0` assertion is reachable from these defaults.
 d_model = 1024
-# GRU depth, and 2 rather than 1 for parameter parity with the transformer
-# language model *at a shared width*: at rung 11's 256 wide with a 256-wide
-# token embedding, 1,972,224 against `ReceiverCrossAttentionLM`'s 2,318,427,
-# where a 1-layer bidirectional GRU is 789,504. Note 2 layers bidirectional is
-# 2.5x 1 layer and not 2x -- the second layer's input is the first's
-# concatenated output, so its `weight_ih` is double.
+# GRU depth. 1 layer, unidirectional -- jayelm's listener exactly, and the
+# baseline this ladder's rung 1 is meant to be.
 #
-# Parity is a property of the pair of widths, not of this key, and at the 1024
-# and 500 above it does not hold: 28,262,400, against 2,466,139 for the
-# transformer arm as rungs 11 and 12 build it. The old default -- 1 layer,
-# unidirectional -- was 4,687,872 at these widths, so a rung inheriting this
-# gains 6x. Nothing in the ladder inherits both halves of that today, because
-# every rung that builds the transformer arm states 256, but a *new* rung that
-# takes this table as given would be comparing a 28M listener against a 2.5M
-# one. Set both widths together, or set neither.
+# Parity with the transformer arm has moved. It used to be sought at a *shared
+# width* of 256, with this key at 2 and `bidirectional = true`: 1,972,224
+# against `ReceiverCrossAttentionLM`'s 2,318,427 at rung 11's widths, where a
+# 1-layer bidirectional GRU is 789,504. Note 2 layers bidirectional is 2.5x 1
+# layer and not 2x -- the second layer's input is the first's concatenated
+# output, so its `weight_ih` is double.
 #
-# This is a deliberate change to what the defaults *mean*. `layers = 1`,
-# `bidirectional = false` used to be the pre-split rung-1 baseline with no rung
-# overriding either, so the default *was* the baseline. It is the parity-matched
-# value now, and reproducing the old baseline means pinning both keys explicitly.
-# The parity is what makes "attention helps" a claim about attention rather than
-# about the 3x parameter gap that used to come with it.
-layers = 2
-# Read by both. `ReceiverGRULM` passes it to `nn.GRU(bidirectional=)`;
-# `ReceiverCrossAttentionLM` reads it as `causal = not bidirectional`, because
-# the message arrives whole and nothing needs to mask it left to right.
-bidirectional = true
+# The trouble is that nothing in the ladder sets both widths, so at the 1024 and
+# 500 stated above -- which every rung up to 14 inherits -- those keys did not
+# buy parity, they bought a listener of 28,262,400 parameters against 2,466,139
+# for the transformer arm. That is 49% of the baseline pair, spent reading a
+# 7-symbol message from a 14-word vocabulary: at most 26.6 bits. The rung 14 ->
+# 15 comparison spanned an 11.5x listener.
+#
+# So parity is now sought at jayelm's width instead, and the transformer arm is
+# the one that moves. This GRU is 4,687,872 here; rungs 15 and 16 take
+# `ReceiverCrossAttentionLM` to 6 layers for 4,784,566, which is +2.1%. Deepening
+# the arm that is being tested is the cheaper distortion: it leaves the baseline
+# listener the published one, and the claim "attention helps" stays a claim about
+# attention rather than about a parameter gap.
+#
+# Parity is still a property of the pair of widths rather than of this key. Set
+# both widths together, or set neither: a rung that overrides `d_model` here and
+# nothing in the transformer table has broken the match again, in whichever
+# direction.
+#
+# And parameter parity is not interface parity. `output_size` is 1024 on this
+# GRU against 256 on the transformer, so the discriminator downstream is a
+# different size on the two arms even at matched language-model parameters.
+layers = 1
+# Read by both, and meaning something different to each. `ReceiverGRULM` passes
+# it to `nn.GRU(bidirectional=)`; `ReceiverCrossAttentionLM` reads it as
+# `causal = not bidirectional`, on the stack that encodes the incoming message.
+#
+# `false` here is jayelm's GRU, per `layers` above. Every rung that builds
+# `ReceiverCrossAttentionLM` states `true` in its own file, which is the right
+# value for that class and not the same decision: masking that stack left to
+# right would model a listener committing to symbol 1 before it has seen symbol
+# 5, and the message arrives whole.
+bidirectional = false
 message_length = 7 # Only applies to Transformer language models. Should be the same as sender_language_model.message_length
 # Transformer language model only, whose depth is `layers` above, shared with the
 # GRU. 4 heads at 256 wide is what rung 11 sets, for the head dimension of 64

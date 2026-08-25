@@ -774,10 +774,17 @@ if __name__ == "__main__":
     print(f"LR: {config['optimiser']['lr']}")
 
     os.makedirs(exp_dir, exist_ok=True)
-    util.save_args(config, exp_dir)
 
     dataloaders = data.loader.load_dataloaders(config)
     model_config = models.builder.build_models(dataloaders, config)
+
+    # After `build_models`, not before: it resolves the per-module muP learning
+    #     rates from widths that are derived rather than declared, and writes
+    #     them back into `config`, so running this first would record a config
+    #     that does not say what was built. Nothing is lost on the failure path
+    #     -- `load_dataloaders` above could already fail after args.json was
+    #     written. See docs/training.md.
+    util.save_args(config, exp_dir)
     scaler = GradScaler()
 
     training_examples = len(dataloaders['train'].dataset)

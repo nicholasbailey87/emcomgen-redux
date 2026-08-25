@@ -167,34 +167,65 @@ def test_the_reproduction_is_not_an_artefact_of_one_width(d_model):
         )
 
 
-def test_the_pre_split_default_is_still_reachable_by_pinning_two_keys():
+def test_the_default_gru_is_jayelms():
     """
-    `DEFAULT.toml` now carries the parity-matched 2 layers bidirectional, so the
-        default is no longer the old rung-1 baseline. What this plan owes anyone
-        reproducing that baseline is that pinning the two keys gets it back.
-    """
-    pinned = build_listener(
-        "ReceiverGRULM",
-        "BilinearDiscriminator",
-        REFERENT_DIM,
-        language_model_overrides=dict(layers=1, bidirectional=False),
-    )
+    `DEFAULT.toml`'s listener GRU is 1 layer unidirectional at 1024 wide --
+        jayelm's, and the baseline rung 1 is meant to reproduce.
 
-    assert pinned.language_model.gru.num_layers == 1
-    assert pinned.language_model.gru.bidirectional is False
-    assert pinned.language_model.output_size == pinned.language_model.d_model
-
-
-def test_the_default_gru_is_the_parity_matched_one():
-    """
-    The change of meaning, stated so it cannot drift back silently. 2 layers
-        bidirectional is 2.5x one layer's parameters, not 2x: the second
-        layer's input is the first's concatenated output, so its `weight_ih`
-        is double.
+    This has been both things. It carried 2 layers bidirectional for a while,
+        for parameter parity with the transformer arm *at a shared width of
+        256*; because nothing in the ladder set both widths, every rung up to 14
+        inherited those keys at 1024 and got a 28.3M listener encoder instead of
+        a 4.7M one. Parity is now bought at jayelm's width by deepening the
+        transformer arm -- see `test_the_two_listener_arms_are_parameter_matched`
+        -- and this test is here so the default cannot drift back silently.
     """
     settings = config_section("receiver_language_model")
-    assert settings["layers"] == 2
-    assert settings["bidirectional"] is True
+    assert settings["layers"] == 1
+    assert settings["bidirectional"] is False
+
+    built = build_listener("ReceiverGRULM", "BilinearDiscriminator", REFERENT_DIM)
+
+    assert built.language_model.gru.num_layers == 1
+    assert built.language_model.gru.bidirectional is False
+    assert built.language_model.output_size == built.language_model.d_model
+
+
+@pytest.mark.parametrize(
+    "config_file",
+    [CROSS_RUNG, "16_birds_receiver_cross_attention_lm.toml"],
+)
+def test_the_two_listener_arms_are_parameter_matched(config_file):
+    """
+    Parity is a property of the pair of configs, so assert it as one: build the
+        default GRU and the rung's transformer and compare the counts.
+
+    4,687,872 against 4,784,566, which is +2.1%. Note 2 layers bidirectional
+        would be 2.5x one layer's parameters and not 2x -- the second layer's
+        input is the first's concatenated output, so its `weight_ih` is double
+        -- which is the arithmetic that made the shared-256 scheme look cheaper
+        than it was at 1024.
+
+    Parameter parity is not interface parity: `output_size` is 1024 on the GRU
+        against 256 on the transformer, so the discriminators downstream differ.
+    """
+    gru = build_listener(
+        "ReceiverGRULM", "BilinearDiscriminator", REFERENT_DIM
+    ).language_model
+    cross = build_listener(
+        "ReceiverCrossAttentionLM", "BilinearDiscriminator", REFERENT_DIM,
+        config_file=rung(config_file),
+    ).language_model
+
+    n_gru = sum(p.numel() for p in gru.parameters())
+    n_cross = sum(p.numel() for p in cross.parameters())
+
+    assert n_gru == 4_687_872
+    assert n_cross == 4_784_566
+    assert abs(n_cross / n_gru - 1.0) < 0.05
+
+    assert gru.output_size == 1024
+    assert cross.output_size == 256
 
 
 # --------------------------------------------------------------------------

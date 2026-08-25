@@ -8,8 +8,12 @@
 # The listener is still `ReceiverGRULM` + `BilinearDiscriminator`. The
 # discriminator reads the referent embeddings through a bias-free bilinear
 # projection, so changing the referent width from 512 to 320 rescales that
-# projection and nothing else -- 1,048,577 parameters down to 655,361 -- and the
+# projection and nothing else -- 524,289 parameters down to 327,681 -- and the
 # message encoder is untouched. Rungs 13 and 15 replace the two halves in turn.
+#
+# (Both of those halved when `[receiver_language_model]` was restored to
+# jayelm's 1 layer unidirectional: the projection's fan-in is the GRU's
+# `output_size`, which went 2048 -> 1024.)
 
 name = "ablation"
 

@@ -7,11 +7,18 @@
 # construction, which is the point of the ordering.
 #
 # Against rung 13 this moves the message encoder only, the discriminator having
-# moved there. Note the caveat in rung 13's header: the GRU encoder it replaces
-# is 28,262,400 parameters and this one is 2,466,139, so the two rungs differ in
-# size as well as in architecture until the GRU's width is set against this one
-# deliberately. The discriminator also shrinks, 3,580,487 to 2,548,295, because
-# its `memory_adapter` now reads a 256-wide message rather than a 2048-wide one.
+# moved there. The two encoders are now parameter-matched, which they were not
+# when this rung was written: the GRU it replaces is 4,687,872 and this stack is
+# 4,784,566 at the 6 blocks stated below, +2.1%. That match is why `layers` is 6
+# here and 3 on `[receiver_discriminator]`, and it is bought at jayelm's width
+# rather than at a shared 256 -- see `layers` in `DEFAULT.toml`. It used to be
+# 28,262,400 against 2,466,139, so the 13 -> 15 step was a 26M parameter change
+# as well as an architecture one.
+#
+# The discriminator still shrinks across the step, 2,990,663 to 2,548,295,
+# because its `memory_adapter` now reads a 256-wide message rather than the
+# GRU's 1024-wide one. Parameter parity between the encoders does not make the
+# listeners identical in size, and is not meant to.
 
 name = "ablation"
 
@@ -93,8 +100,9 @@ ff_inner_size = 320
 layers = 3
 
 [receiver_language_model]
-# Matched to `[receiver_discriminator]` above, and held equal for want of a
-# reason to favour either. See there for where 256 / 4 / 320 comes from.
+# Widths matched to `[receiver_discriminator]` above and held equal for want of
+# a reason to favour either -- see there for where 256 / 4 / 320 comes from.
+# `layers` is the exception and is argued for below.
 #
 # `token_embedding_size` *is* restated here, unlike in the discriminator's
 # table: the listener's embedding table is built from this key in `builder.py`
@@ -103,7 +111,22 @@ d_model = 256
 heads = 4
 ff_inner_size = 320
 token_embedding_size = 256
-layers = 3
+# 6 blocks, against 3 on `[receiver_discriminator]` above, and the one place the
+# two tables deliberately disagree. This is where listener parameter parity with
+# the GRU arm is paid for: `DEFAULT.toml` restores `[receiver_language_model]` to
+# jayelm's 1 layer unidirectional at 1024 wide, which is 4,687,872 parameters,
+# and a block of this stack is 772,809, so 6 of them is 4,784,566 -- +2.1%.
+# Parity is bought by deepening the arm under test rather than by inflating the
+# published baseline; see `layers` in `DEFAULT.toml`.
+#
+# DeepNorm's constants follow the `"deepnorm"` sentinel from this key, so the
+# depth change rescales `alpha` and `beta` on its own with nothing further to
+# set.
+#
+# Note this buys parameter parity and not interface parity: `output_size` is 256
+# here against the restored GRU's 1024, so the discriminator downstream is a
+# different size on the two arms.
+layers = 6
 
 # `true`, i.e. no causal mask, for the same reason the speaker's key is `false`:
 # neither is about masking for its own sake. The key is shared with

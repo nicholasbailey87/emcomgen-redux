@@ -59,6 +59,43 @@ quoted in `1510a55` suggest ... a margin of roughly 24×, not the three orders o
 magnitude previously claimed here."* Both numbers appeared in the same comment at
 different times.
 
+### "156 steps an epoch" and "62 steps an epoch" are stale, not misattributed
+
+`measurement.md` derives `logit_scale`'s per-epoch ceiling as *"at 2e-3 over 156
+steps an epoch"* for birds, and `builder.py`'s `contrast_gate_lr` comment gives
+"62 steps an epoch on birds" for the same quantity. Neither matches the current
+config, which has `games_per_epoch = 3100` at `batch_size = 16` and
+`accumulator_steps = 1` — ~194 optimiser steps an epoch.
+
+This entry previously guessed that 156 might be ShapeWorld's number attached to
+the wrong dataset. It is not, and the reason the guess was tempting is the
+interesting part. `DEFAULT.toml`'s `logit_scale_lr` comment shows its working:
+156 is **birds at `games_per_epoch = 2500`** (2500 / 16 = 156.25), and the
+comment then supersedes it with 194 at the current 3100. It coincides with
+ShapeWorld's 156 *by construction* — the note beside `games_per_epoch` says 2,500
+was picked partly to equalise the two datasets' step counts. So the figure is
+right for birds and identical to ShapeWorld's for a reason, which is exactly the
+shape of coincidence that invites a misattribution reading. `builder.py`'s 62 is
+the same quantity at an older `games_per_epoch` again — 62 × 16 ≈ jayelm's 1,000.
+
+Both figures are therefore the right dataset at a superseded config: a duller
+failure than misattribution, and a likelier one to recur, since the arithmetic in
+these comments is pinned to a key that has now moved twice. The *form* of the
+argument — a scalar cannot travel further than `lr × steps` — is unaffected. The
+entry stays because the stale numbers are still in the source.
+
+Note also that the 20,000 figure is itself read from a profiling log for a
+different run (`13_shapeworld_sender_transformer_lm_latent`), not from the loader.
+
+### `record_polarity_separation`'s docstring says the tag opens at zero
+
+The docstring reads *"the only part of `polarity_embedding` the cross-attention
+can act on, opening at exactly zero"*. `reset_parameters` initialises the tag as
+an antipodal pair of `randn(d_model)` draws, so the separation opens at
+`2·sqrt(d_model)` ≈ 35.8 on a 320-wide speaker, which is what the runs show and
+what `measurement.md` documents. The docstring predates the antipodal init and
+describes the zero init it replaced.
+
 ## Claims that depend on an external version
 
 These were true of some version of a dependency and have no guard in the code.

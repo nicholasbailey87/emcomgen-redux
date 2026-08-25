@@ -104,11 +104,12 @@ class ReceiverGRULM(nn.Module):
             num_layers=self.layers,
             bias=True,
             batch_first=True,
-            # Pinned at 0.0 to match jayelm. It used to be inert as well,
-            #     because `layers` was 1; the parity-matched default is 2, so
-            #     this is now a live decision rather than a dead one. The
-            #     listener's regularisation is `[receiver] dropout`, which masks
-            #     the referents once in `Receiver` -- see docs/architecture.md.
+            # Pinned at 0.0 to match jayelm, and inert at the default anyway:
+            #     `nn.GRU` applies this *between* layers and `layers` is back to
+            #     1, so it would only become a live decision under a config that
+            #     deepened the stack. The listener's regularisation is
+            #     `[receiver] dropout`, which masks the referents once in
+            #     `Receiver` -- see docs/architecture.md.
             dropout=0.0,
             bidirectional=self.bidirectional
         )

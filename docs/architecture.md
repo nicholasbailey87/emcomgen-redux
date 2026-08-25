@@ -532,13 +532,29 @@ A GRU reads the message and its final state is returned as a length-1 sequence.
 `referents` is accepted and ignored: this is an absolute encoding of the message,
 with no view of what it is being compared against.
 
-**Default 2 layers, bidirectional,** for parameter parity with the transformer
-language model *at a shared width* — 1,972,224 against `ReceiverCrossAttentionLM`'s
-2,318,427 at the widths rung 11 uses, where a 1-layer bidirectional GRU is
-789,504. Note 2 layers bidirectional is 2.5× 1 layer and not 2×: the second
-layer's input is the first's concatenated output, so its `weight_ih` is double.
-Parity is a property of the pair of widths and not of the key; see the note beside
-`layers` in DEFAULT.toml for what it costs at the defaults' own 1024.
+**Default 1 layer, unidirectional, 1024 wide** — jayelm's listener exactly, and
+4,687,872 parameters. Parameter parity with the transformer arm is bought at
+*that* width, by taking `ReceiverCrossAttentionLM` to 6 blocks on rungs 15 and 16
+for 4,784,566, which is +2.1%.
+
+Parity used to be sought the other way round, at a shared width of 256, with this
+key at 2 and `bidirectional = true`: 1,972,224 against
+`ReceiverCrossAttentionLM`'s 2,318,427 at rung 11's widths, where a 1-layer
+bidirectional GRU is 789,504. (2 layers bidirectional is 2.5× 1 layer and not 2×
+— the second layer's input is the first's concatenated output, so its `weight_ih`
+is double.) But nothing in the ladder set both widths, so every rung up to 14
+inherited those keys at the defaults' own 1024 and 500 and got a 28,262,400-
+parameter listener encoder — 49% of the pair, reading a 7-symbol message from a
+14-word vocabulary, at most 26.6 bits — against 2,466,139 on the transformer arm.
+The rung 14 → 15 comparison spanned an 11.5× listener. Deepening the arm under
+test is the cheaper distortion, because it leaves the baseline listener the
+published one.
+
+Parity remains a property of the pair of widths and not of the key: set both
+widths together, or set neither. And parameter parity is not interface parity —
+`output_size` is 1024 here against 256 on the transformer, so the discriminator
+downstream differs in size between the arms even at matched encoder parameters.
+See the note beside `layers` in DEFAULT.toml.
 
 **The `-1` timestep.** Taking timestep `-1` gives the state after the GRU has
 consumed the last *slot*, not the last real token. That is correct here only

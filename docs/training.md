@@ -66,8 +66,23 @@ Results land at `<output_root>/<experiment>/<config_stem>_seed<seed>/`, where
 ## Optimiser groups (`models/builder.py`)
 
 `gradboard.get_optimiser` builds the parameter groups, keyed on
-`(lr, weight_decay)`. `split_out_parameter` then moves every parameter whose name
-ends in a given suffix into a group of its own at a given learning rate.
+`(lr, weight_decay)`. Two functions then move parameters out of them.
+
+`split_out_parameter` takes a **name suffix** and moves every parameter of the
+pair whose name ends in it. That is the right selector for the lone scalars of
+`SPLIT_LEARNING_RATES`, each of which is one distinctively named tensor.
+
+`split_out_module` takes a **module object** and moves every non-exempt
+parameter in it. "Every tensor in `sender.language_model`" is not a suffix, and
+a prefix would be no better — the widths that decide these rates live on the
+constructed module, not in its name. Selecting on the object means there is no
+name-matching ambiguity at all, and nothing a rename can quietly break. It is a
+sibling rather than an argument to the suffix version because the two differ in
+how they *fail*: an unmatched suffix is a rename and raises, whereas a module
+whose parameters are all exempt is a legitimate answer and returns unchanged.
+
+Both share `_regroup`, which is the part that actually moves anything: filter the
+selected ids out of every existing group, then `add_param_group`.
 
 **Why after the fact rather than asking `get_optimiser` for it:** that function
 keys its groups on `(lr, weight_decay)` and takes a single `lr`. The parameters
@@ -96,7 +111,81 @@ answers to neither the loss nor that scale.
 
 If the suffix matches nothing, `split_out_parameter` raises rather than silently
 doing nothing — the error names the config key so a rename says which knob went
-quiet.
+quiet. `split_out_module` has no equivalent, because it cannot fail that way.
+
+### The muP rule
+
+Every module with a width takes
+
+```
+lr(module) = [optimiser] lr × [optimiser] mup_reference_width / d_model(module)
+```
+
+with the reference width at **1024**: jayelm's `--speaker_hidden_size` and
+`--listener_hidden_size`, and therefore the width at which `lr = 1e-4` was tuned.
+Under muP, Adam's stable rate for a matrix mapping one width to another goes as
+1/fan_in, so a module three times narrower than the one the rate was tuned on is
+being trained three times too slowly. `resolve_mup_learning_rates` applies it and
+`split_out_module` does the regrouping.
+
+The rule is stated once rather than as six literal rates, because the rates are a
+consequence of widths that move. `mup_width` reads `d_model` off the
+**constructed module** rather than out of the config: several of these widths are
+derived — `SenderTransformerLM` and `AttentionPrototyper` take theirs from the
+vision model's `final_feat_dim` — so a config key would be a second statement of
+the same number, able to disagree with it.
+
+**One rate per module, keyed on `d_model`.** Exact for the attention projections,
+which are square in it and are most of the parameters; approximate for the
+feedforward inner layers and for adapters that read a foreign width. This is a
+heuristic applied at module granularity, and saying so is cheaper than a
+per-tensor scheme nobody can check by eye.
+
+**Two exemptions, both by rule rather than by list** (`is_mup_exempt`), so a
+module added later is covered without anyone having to remember a list.
+
+- `p.dim() < 2` — biases, norm gains, and every learned scalar. No fan-in to
+  scale by.
+- name containing `"embedding"` or `"query"` — `polarity_embedding`,
+  `label_embedding`, `token_embedding`, `query`, `output_query`. muP gives input
+  embeddings a Θ(1) rate because their fan-in is a one-hot index rather than a
+  width, and every one of these is Θ(1)-*initialised* as well, so scaling their
+  rate by width would be scaling against an init that never shrank. Matched as a
+  substring exactly as `gradboard`'s `EXCLUDE_FROM_WEIGHT_DECAY` matches
+  `"embedding"`, and with the same caveat: a rename would move a tensor silently.
+
+The dimension exemption is load-bearing twice over. It is also what makes the muP
+groups **disjoint from `SPLIT_LEARNING_RATES` by construction** — every scalar in
+that table is 0-d, and `polarity_embedding` is 2-d but matches `"embedding"`. No
+ordering trick is needed. muP runs first anyway, so that if the exemption is ever
+loosened the elevated scalar rates are the ones that survive.
+
+**Whole modules out of scope**, all by the same test — no `d_model` attribute.
+The convolutional backbones (`ResNet18.final_feat_dim` is a hardcoded 512, muP's
+rules are stated for transformers, and a ResNet at 1e-4 is what jayelm tuned);
+`AveragePrototyper` and `nn.Embedding`, which have no matrices between widths;
+and `BilinearDiscriminator`, whose single tensor's fan-in is the language model's
+`output_size` — 1024 on the restored listener GRU, i.e. the reference width, so
+its factor would be 1.0.
+
+**What the rule does not claim.** muP transfers a tuned learning rate across a
+change of *width* in one architecture. Two of the changes here are not that: the
+speaker's language model goes GRU → Transformer as well as 1024 → 320, and `ViT2`
+replaces a ResNet with no 1024 anywhere in it. Principled heuristic, not transfer
+guarantee.
+
+Only the learning-rate half of muP is adopted. Broccoli's `nn.Linear` init is
+already 1/√fan_in, `msa_scaling = "d"` is already muP's attention scaling, and
+`layer_norm_logits` already makes the speaker's readout scale width-invariant.
+The `mup` package in `requirements.txt` stays unimported.
+
+**Do not read the `CLIP_GROUPS` norms as evidence about these rates.** Under Adam
+a uniform rescale of a module's gradients cancels in `m̂/√v̂`, so gradient
+magnitude says nothing about whether a learning rate suits the module.
+
+**Do not reach for the LR range test either.** `PASS._apply_range_test_result`
+calls `set_all_lr` and then overwrites `original_param_groups`, which would
+flatten every split rate — muP's and the scalars' alike — permanently.
 
 ### The overrides, and why each is gated the way it is
 
@@ -184,6 +273,103 @@ The scheduler is `gradboard.scheduler.PASS`, driven by
 `gradboard.cycles.CycleSequence` over up to two stages: an `ascent` warm-up of
 `warm_up_epochs`, then `lr_schedule_shape` for the remainder.
 
+**`cool_point_multiplier = 1.0` makes `lr_schedule_shape` a complete no-op**, and
+the configs in the August 2026 ablation all set it there. `PASS.update_learning_
+rates` computes
+
+```python
+min_lr = base_lr * self.cool_point_multiplier
+current_lr = min_lr + (base_lr - min_lr) * self._schedule_multiplier
+```
+
+so at a multiplier of 1 the floor equals the ceiling and every group sits at its
+own `base_lr` for the whole run, whatever shape is named in the config. The knob
+reads as live and is not. Check it before attributing anything — a flat opening,
+a late takeoff — to the schedule.
+
+**One optimiser step per `accumulator_steps` batches, and the scheduler steps
+with it.** `scheduler.step` is called from inside `optimiser_step`, so the
+schedule length and the traverse budgets below are both counted in optimiser
+steps, not batches.
+
+### Effective batch size is a cost when takeoff is gated on a scalar
+
+Adam's update is bounded at roughly ±lr per step regardless of gradient
+magnitude, so a lone scalar cannot travel further than `lr × steps` (the ceiling
+quoted for `logit_scale` in [measurement.md](measurement.md), and the reason
+`contrast_gate_lr` exists at all). Averaging `accumulator_steps` microbatches
+into one update buys a better gradient *estimate*, which a single scalar does not
+need, and costs it the moves it would otherwise have made.
+
+So when a run's takeoff waits on one of these scalars — `log_logit_scale`,
+`contrast_gate`, `log_mix_scale` — raising the effective batch delays it in
+direct proportion, at identical compute. That is a real trade against whatever
+the larger batch was for, and on ShapeWorld the reference setup's batch of 128
+(32 × `accumulator_steps` 4) is four times the traverse cost of the same compute
+at an accumulator of 1.
+
+## Reading a run: deadlock, or undertrained?
+
+Both look like a flat loss near `ln 2`. They want opposite responses, and the
+diagnostic columns separate them cheaply.
+
+**The deadlock signature is joint and it is exact.** Every learned quantity on the
+speaker side stationary to four decimal places across tens of epochs:
+`realised_survival` flat near chance (`1 / vocabulary`), `logit_scale` at its
+`init_energy` solve, `contrast_gate` unmoved, `pool_effective_examples` pinned at
+the positive-example count, `polarity_separation` at its `2·sqrt(d_model)` init.
+The channel is carrying noise, the listener has nothing to learn from, and the
+speaker has no gradient telling it to sharpen.
+
+`score_scale` sliding downwards through this is a *symptom*, not the fault — it is
+the listener correctly declining to be confident about noise, and it is not by
+itself fatal (see [anecdotes.md](anecdotes.md), where a run does the collapse and
+learns anyway).
+
+**Then read the direction of `logit_scale` to tell the two apart.** Rising slowly
+means undertrained and more epochs help. Falling monotonically means the run is
+drifting *away* from escape and more epochs will not reach it. In the August 2026
+ablation the dead ShapeWorld rungs fell from 0.8700 to 0.8668 and from 0.8812 to
+0.8805 over thirty epochs apiece, while the rungs that escaped did so as a sharp
+transition — `realised_survival` 0.203 → 0.260 at epoch 5 → 0.697 at epoch 10.
+Escape is visible as an event, so its absence is informative.
+
+**Depth is the safe axis, including on a marginal bootstrap.** The instinct that
+a deeper stack is riskier does not survive contact with what these stacks
+actually do at init, and three mechanisms are behind that. See
+[broccoli.md](broccoli.md) for the DeepNorm constants themselves.
+
+1. **DeepNorm's `beta` shrinks with depth**, so a deeper stack opens *closer* to
+   the identity, not further from it. On the decoder form `beta = (12N)^(-1/4)`,
+   so going from 3 blocks to 6 takes the branch multiplier down by a further
+   factor of `2^(1/4)`. Each block contributes less of itself at step zero, and
+   the stack as a whole opens nearer a pass-through than the shallower one did.
+   `alpha = (3N)^(1/4)` grows over the same range, which is what bounds the
+   update rather than the signal.
+
+2. **The opening is a floor, not a ceiling.** broccoli applies `beta` as a
+   forward multiplier rather than an initialisation scaling, and the post-norm
+   `RMSNorm` after it carries a learnable gain, so a branch that earns its way
+   out of the opening ratio can take it. Nothing is lost to the scaling; it is
+   only deferred.
+
+3. **Stochastic depth does not accumulate with depth.** The rate is a linear
+   ramp across the blocks — `step_size = stochastic_depth / (n_layers - 1)` —
+   so the *mean* drop rate is about half the configured value whatever the block
+   count. At `stochastic_depth = 0.1` that is ~0.05 at three blocks and ~0.05 at
+   six. And a dropped block reverts to a clean identity rather than a rescaled
+   one, since the mask is applied as `alphas = (alpha - 1) * mask + 1`.
+
+So adding blocks costs compute and parameters, and very little else. When a
+bootstrap is marginal, the thing not to spend budget on is anything that changes
+the *channel* — the vocabulary, the message length, the opening `logit_scale`, or
+the effective batch that the scalar traverses on. Depth is not in that set.
+
+Note this reverses an earlier version of this section, which claimed depth was
+the axis most likely to reproduce a marginal bootstrap and cited stochastic depth
+as adding noise on top of a noisy channel. The ramp above is normalised by the
+block count, so that reasoning was wrong.
+
 `torch.compile` is applied to the pair when `config['compile']` is set. Note that
 the `.item()` calls in the diagnostic paths cost a sync and a graph break under
 it; that cost is paid deliberately (see [measurement.md](measurement.md)).
@@ -241,6 +427,43 @@ is already done.
 `save_args` writes both `args.json` and `config.toml` (the former for the
 original tooling, the latter for the new), stamped with the git hash and with
 `dependency_versions`.
+
+**It runs after `build_models`, not before.** `build_models` resolves the muP
+learning rates from widths that are derived rather than declared and writes them
+back as `[optimiser] resolved_mup_lrs`, so saving first would record a config
+that does not say what was built. Nothing is lost on the failure path — the
+dataloaders are constructed before either, so a run could already fail after
+`args.json` was written.
+
+**Diff the flattened `args.json` when comparing runs, never the `config.toml`
+text.** The two agree, but the toml carries per-dataset blocks of differing
+length, so a line-by-line `diff` between a ShapeWorld run and a birds run pairs
+the wrong sections and invents differences that are not there. This produced a
+phantom "rungs 13 and 14 are differently sized" reading in August 2026 that the
+checkpoints then disproved.
+
+**Read parameter counts off `final_model.pt`, not off either file.** Several
+config blocks are inert for a given class combination — `[sender_feature_model]`
+under a ResNet backbone, `[sender_contrast]` when `contrast = false` — and
+several widths are derived rather than declared: `SenderTransformerLM` takes its
+`d_model` from the vision model, and the discriminator is sized from
+`receiver_language_model.output_size` (see
+[architecture.md](architecture.md)). A config key is not evidence that the
+module was built that way.
+
+`[optimiser] resolved_mup_lrs` is the one derived quantity that *is* recorded, and
+deliberately: it is a per-module `name → lr` mapping computed from those same
+derived widths, so it is a statement about the pair that was constructed rather
+than about the pair the config asked for. Read it as the answer to "which module
+was trained at what rate", and note that it describes each module's matrices —
+its biases, norms, scalars and embedding tables stayed at the base rate, and the
+scalars named in `SPLIT_LEARNING_RATES` then moved again.
+
+**Measure against the pinned dependency, not the installed one.** The version
+string in site-packages can match `dependency_versions` while the commit does
+not. `git archive <sha> | tar -x` into a scratch directory and put it first on
+`PYTHONPATH`; a reading taken against a broccoli that has moved underneath the
+run is not a reading of that run.
 
 `current_git_hash` warns if the working tree has unstaged changes, and covers
 *this repository only* — which is not enough. The model is mostly broccoli's, and
