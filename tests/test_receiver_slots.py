@@ -140,31 +140,90 @@ def _legacy_pair(d_model=128, referent_dim=REFERENT_DIM, token_dim=TOKEN_DIM):
     return legacy, listener
 
 
-def test_the_gru_and_bilinear_slots_reproduce_the_module_they_replaced():
+def test_the_gru_slot_still_reproduces_the_module_it_replaced():
     """
-    Bit-identical, not close. Both paths run the same GRU over the same
-        message, take timestep -1, project, norm, scale, and contract against a
-        normed referent divided by `sqrt(d)` -- so any difference at all is a
-        difference in the plumbing rather than in floating point.
+    The half of the parity that is still exact, and the half this test was
+        really protecting: the message readout. Both paths run the same GRU
+        over the same message and take timestep -1, so any difference here is
+        a difference in the plumbing rather than in floating point.
+
+    `ReceiverGRULM` returns `(batch, 1, d_model)` and `BilinearDiscriminator`
+        now indexes the last slot rather than meaning over them, which for one
+        slot is the same tensor -- so the change of readout does not reach this
+        arm at all. It reaches `ReceiverCrossAttentionLM`, which returns one
+        slot per symbol; see `test_the_bilinear_readout_takes_the_eos_slot`.
     """
     legacy, listener = _legacy_pair()
     referents, messages = _inputs(listener)
 
     with torch.no_grad():
-        assert torch.equal(
-            legacy(referents, messages), listener(referents, messages)
-        )
+        legacy_readout = legacy.gru(messages)[0][:, -1, ...]
+        slot_readout = listener.language_model(messages, referents)
+
+    assert slot_readout.shape[1] == 1
+    assert torch.equal(legacy_readout, slot_readout[:, -1, :])
 
 
 @pytest.mark.parametrize("d_model", [64, 128, 256])
-def test_the_reproduction_is_not_an_artefact_of_one_width(d_model):
+def test_the_gru_reproduction_is_not_an_artefact_of_one_width(d_model):
     legacy, listener = _legacy_pair(d_model=d_model)
     referents, messages = _inputs(listener, seed=d_model)
 
     with torch.no_grad():
-        assert torch.equal(
-            legacy(referents, messages), listener(referents, messages)
+        legacy_readout = legacy.gru(messages)[0][:, -1, ...]
+        slot_readout = listener.language_model(messages, referents)
+
+    assert torch.equal(legacy_readout, slot_readout[:, -1, :])
+
+
+def test_the_score_deliberately_no_longer_matches_the_legacy_module():
+    """
+    The recorded divergence. `LegacyBilinearGRUComparer` is a frozen snapshot
+        and its docstring says a deliberate change to the bilinear path should
+        be written down here rather than patched into the copy, so: **the
+        scores no longer match, in exactly one place, on purpose.**
+
+    The legacy ordering is `message_layer_norm(bilinear(m))`, which pins the
+        projected message to unit variance and leaves `log_score_scale` as the
+        only route to the score's magnitude. `BilinearDiscriminator` now runs
+        `bilinear(message_layer_norm(m))`, so `bilinear.weight` sets volume as
+        well as direction and the scalar is gone.
+
+    Why: the scalar was on an elevated learning rate and the listener spent it
+        turning its own logits down -- 0.9021 -> 0.3731 on rung 09, monotone
+        across thirty epochs -- which multiplies down every gradient going back
+        through the message to the speaker. See test_score_scale.py.
+
+    Everything else about the pairing is unchanged, which is what the two tests
+        above still pin. This one exists so the divergence cannot widen
+        silently: it asserts the scores differ, and that they differ *only*
+        through the reordering, by rebuilding the legacy arithmetic out of the
+        new module's own parts.
+    """
+    legacy, listener = _legacy_pair()
+    referents, messages = _inputs(listener)
+    discriminator = listener.discriminator
+
+    with torch.no_grad():
+        assert not torch.allclose(
+            legacy(referents, messages),
+            listener(referents, messages),
+            atol=1e-6,
         )
+
+        # The new ordering, by hand, from the module's own tensors.
+        readout = listener.language_model(messages, referents)[:, -1, :]
+        projected = discriminator.bilinear(
+            discriminator.message_layer_norm(readout)
+        )
+        normed = discriminator.referent_layer_norm(referents)
+        rebuilt = torch.einsum(
+            "ijh,ih->ij", (normed, projected)
+        ) / math.sqrt(REFERENT_DIM)
+
+    assert torch.allclose(
+        rebuilt, listener(referents, messages), atol=1e-6
+    )
 
 
 def test_the_default_gru_is_jayelms():
@@ -477,7 +536,6 @@ def test_the_mix_opens_essentially_at_the_bilinear_comparison():
     """
     discriminator = _attention_discriminator()
     assert discriminator.mix_weight.item() == pytest.approx(0.116, abs=5e-3)
-    assert discriminator.mix_scale.item() == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize("logit", [-50.0, -8.0, 0.0, 8.0, 50.0])
@@ -541,16 +599,38 @@ def test_the_attention_path_gets_gradient_at_the_opening_mix():
     assert decoder_gradients
     assert any(gradient.abs().max() > 0.0 for gradient in decoder_gradients)
     assert listener.discriminator.mix_logit.grad.abs().item() > 0.0
-    assert listener.discriminator.log_mix_scale.grad is not None
+    # The branch weights are the volume now, so they are what must be receiving
+    #     gradient where `log_mix_scale` used to be checked.
+    assert listener.discriminator.decision.weight.grad.abs().max() > 0.0
+    assert (
+        listener.discriminator.bilinear.bilinear.weight.grad.abs().max() > 0.0
+    )
 
 
-def test_both_paths_are_standardised_before_they_are_mixed():
+def test_standardise_is_a_telemetry_function_now():
     """
-    What makes the weight mean composition and the scale alone mean volume. If
-        one path could grow instead, the weight would be reporting a relative
-        magnitude and `train_mix_alpha` would not answer the question it is
-        there for.
+    `standardise` used to run on both paths in `forward`, which made
+        `mix_logit` mean composition and left the volume to one scalar
+        downstream. It runs only in the `no_grad` telemetry block now, where it
+        gives `path_agreement` its Pearson-r reading and `mix_share` its
+        like-for-like comparison -- and where it cannot cancel the branch
+        weights that carry the volume.
+
+    Its arithmetic is unchanged and still worth pinning, because both of those
+        readings depend on it.
     """
+    listener = build_listener(
+        "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
+        config_file=rung(CROSS_RUNG),
+    ).eval()
+    referents, messages = _inputs(listener)
+
+    # Not standardised in the forward path: a per-game unit-spread score would
+    #     make this exactly 1.0 for every game.
+    with torch.no_grad():
+        spreads = listener(referents, messages).std(1, unbiased=False)
+    assert not torch.allclose(spreads, torch.ones_like(spreads), atol=1e-3)
+
     scores = torch.randn(BATCH, N_OBJ) * 17.0 + 4.0
     standardised = R.standardise(scores)
 
@@ -613,37 +693,102 @@ def test_the_mix_columns_are_set_on_every_forward():
     assert math.isfinite(discriminator.decision_spread)
 
 
-def test_the_attention_arm_builds_no_bilinear_score_scale():
+def test_the_bilinear_readout_takes_the_eos_slot():
     """
-    Because it could not use one. `standardise` runs on the bilinear path's
-        output, so a positive scale there is divided straight back out and the
-        parameter would take identically zero gradient -- while still matching
-        `score_scale_lr`'s suffix and still reporting a constant 1.0 in
-        `train_score_scale`. Absent rather than frozen, so nothing has to know
-        to skip it.
+    The message readout, and the one place the change of readout bites.
+
+    `BilinearDiscriminator` used to mean over slots. `ReceiverGRULM` returns
+        one, so that was the identity there; `ReceiverCrossAttentionLM` returns
+        one per message position, so meaning diluted the readout across every
+        symbol. It now takes the last slot, which is the speaker's reserved EOS
+        position -- fixed-length messages make that positionally determined and
+        so a constant learned vector, which is a CLS query in all but name, and
+        a causal stack reaches it having read the whole message.
+    """
+    listener = build_listener(
+        "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
+        config_file=rung(CROSS_RUNG),
+    ).eval()
+    referents, messages = _inputs(listener)
+
+    with torch.no_grad():
+        slots = listener.language_model(messages, referents)
+
+    # One slot per message position, so the readout is a real choice here.
+    assert slots.shape[1] == listener.message_length
+    assert not torch.allclose(slots[:, -1, :], slots.mean(1), atol=1e-5)
+
+    bilinear = listener.discriminator.bilinear
+    with torch.no_grad():
+        taken = bilinear(referents, slots)
+        from_eos = bilinear(referents, slots[:, -1:, :])
+        from_mean = bilinear(referents, slots.mean(1, keepdim=True))
+
+    assert torch.allclose(taken, from_eos, atol=1e-6)
+    assert not torch.allclose(taken, from_mean, atol=1e-5)
+
+
+def test_the_two_arms_build_the_same_bilinear_path():
+    """
+    There is no special-casing left. `BilinearDiscriminator` used to take a
+        `score_scale` argument so that `AttentionDiscriminator` could build it
+        without one -- a scale on a standardised path takes identically zero
+        gradient while still matching `score_scale_lr`'s suffix and still
+        reporting a constant 1.0. Neither the scalar nor the argument exists
+        now, and neither does the standardising that made it inert.
+
+    So the composed path is the same module the bilinear rung mounts, which is
+        the invariant `AttentionDiscriminator`'s docstring claims when it says
+        the mix's `a -> mix_floor` limit is the module that was measured
+        bootstrapping and not a lookalike.
     """
     attention = _attention_discriminator()
     bilinear = build_listener(
         "ReceiverGRULM", "BilinearDiscriminator", REFERENT_DIM
     ).discriminator
 
-    assert bilinear.learns_score_scale is True
-    assert hasattr(bilinear, "log_score_scale")
+    assert not hasattr(bilinear, "learns_score_scale")
+    assert not hasattr(attention.bilinear, "learns_score_scale")
 
-    assert attention.bilinear.learns_score_scale is False
-    assert not hasattr(attention.bilinear, "log_score_scale")
-    assert not any(
-        name.endswith("log_score_scale")
-        for name, _ in attention.named_parameters()
+    for module in (bilinear, attention.bilinear):
+        assert not any(
+            name.endswith("log_score_scale")
+            for name, _ in module.named_parameters()
+        )
+
+    assert type(attention.bilinear) is type(bilinear)
+    assert sorted(dict(attention.bilinear.named_parameters())) == sorted(
+        dict(bilinear.named_parameters())
     )
-    assert attention.bilinear.score_scale.item() == pytest.approx(1.0)
+
+
+def test_the_composed_bilinear_weight_reaches_the_mixed_score():
+    """
+    What removing the standardising bought, and the reason it had to go if the
+        volume was to live in the weights: scaling the composed path's weight
+        now moves the mixed score, where before it was divided straight out.
+    """
+    listener = build_listener(
+        "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
+        config_file=rung(CROSS_RUNG),
+    ).eval()
+    referents, messages = _inputs(listener)
+
+    with torch.no_grad():
+        before = listener(referents, messages)
+        listener.discriminator.bilinear.bilinear.weight.mul_(37.0)
+        after = listener(referents, messages)
+
+    assert not torch.allclose(before, after, atol=1e-5)
 
 
 def test_a_scale_on_a_standardised_path_would_have_been_inert():
     """
-    The counterfactual the test above is worth checking against. `standardise`
-        subtracts a mean and divides by a spread, and both are homogeneous of
-        degree one in a positive multiplier, so a scale in front of it cancels.
+    Why `standardise` could not stay in the forward path once the volume moved
+        into `bilinear.weight`. It subtracts a mean and divides by a spread,
+        both homogeneous of degree one in a positive multiplier, so anything in
+        front of it that only sets magnitude cancels -- a scalar exactly, and a
+        weight matrix in its radial component.
 
     Exactly, in arithmetic; to float32 rounding, in fact -- which is why the
         comparison below is `allclose` and the gradient one is against a
@@ -666,41 +811,51 @@ def test_a_scale_on_a_standardised_path_would_have_been_inert():
     gradients = {}
     for name, wrap in (("standardised", R.standardise), ("raw", lambda x: x)):
         torch.manual_seed(7)
-        discriminator = R.BilinearDiscriminator(
-            REFERENT_DIM, 64, score_scale=True
-        )
+        discriminator = R.BilinearDiscriminator(REFERENT_DIM, 64)
         wrap(discriminator(referents, message_repr)).pow(2).sum().backward()
-        gradients[name] = discriminator.log_score_scale.grad.abs().item()
+        # The weight's *radial* component -- how much of its gradient wants it
+        #     longer rather than turned. That is the part a volume lives in,
+        #     and the part `standardise` removes.
+        weight = discriminator.bilinear.weight
+        direction = weight.detach() / weight.detach().norm()
+        gradients[name] = abs((weight.grad * direction).sum().item())
 
     assert gradients["raw"] > 0.0
-    assert gradients["standardised"] < 1e-4 * gradients["raw"]
+    assert gradients["standardised"] < 1e-3 * gradients["raw"]
 
 
-def test_the_pair_can_still_go_quiet_even_though_neither_path_can():
+def test_the_pair_can_still_go_quiet():
     """
-    The freedom that is deliberately left open, against the one that is closed.
-        Standardising means the attention path cannot avoid being learned by
-        turning itself down -- but a listener that has nothing to say must
-        still be able to say it quietly, or it is committing before the message
-        carries anything, which is what took out the fixed-gain readout.
-        `log_mix_scale` is where that freedom lives, and `train_mix_scale`
-        watches it.
+    The freedom that is deliberately left open. A listener that has nothing to
+        say must be able to say it quietly, or it is committing before the
+        message carries anything, which is what took out the fixed-gain
+        readout.
+
+    It used to live in `log_mix_scale`, one scalar downstream of two
+        standardised paths. It now lives in the two branch weights, which is
+        strictly more freedom -- and the reason the scalar went is that being
+        one cheap knob on an elevated learning rate is what made going quiet
+        the listener's first move rather than its last.
+
+    What this no longer pins, deliberately, is that neither path can go quiet
+        *alone*. Standardising guaranteed that; nothing does now, and
+        `mix_share` against `mix_alpha` is what watches it instead.
     """
     listener = build_listener(
         "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
         config_file=rung(CROSS_RUNG),
     ).eval()
+    discriminator = listener.discriminator
     referents, messages = _inputs(listener)
 
     with torch.no_grad():
         loud = listener(referents, messages)
-        listener.discriminator.log_mix_scale.fill_(math.log(0.01))
+        discriminator.decision.weight.mul_(0.01)
+        discriminator.decision.bias.mul_(0.01)
+        discriminator.bilinear.bilinear.weight.mul_(0.01)
         quiet = listener(referents, messages)
 
     assert quiet.std().item() < 0.05 * loud.std().item()
-    # And going quiet must not change the decision, exactly as on the bilinear
-    #     arm: the scale multiplies a term shared across a game's candidates.
-    assert torch.equal(loud.argmax(1), quiet.argmax(1))
 
 
 def test_mix_floor_is_validated():
@@ -760,13 +915,11 @@ def test_resetting_returns_the_mix_to_its_opening():
 
     with torch.no_grad():
         discriminator.mix_logit.fill_(3.0)
-        discriminator.log_mix_scale.fill_(2.0)
         discriminator.mix_bias.fill_(1.0)
 
     discriminator.reset_parameters()
 
     assert discriminator.mix_weight.item() == pytest.approx(opening)
-    assert discriminator.mix_scale.item() == pytest.approx(1.0)
     assert discriminator.mix_bias.item() == 0.0
 
 

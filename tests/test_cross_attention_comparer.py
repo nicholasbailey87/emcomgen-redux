@@ -171,11 +171,14 @@ def test_the_staged_walkthrough_matches_the_forward_pass():
         the second.
 
     What follows it now is the interpolation with the bilinear path, and this is
-        the test that pins its arithmetic: standardise each path per game, mix at
-        `mix_weight`, scale once, add a bias. Nothing else. There was briefly a
+        the test that pins its arithmetic: mix the two readouts at
+        `mix_weight`, add a bias. Nothing else. There was briefly a
         `BatchNorm1d(1)` and a fixed gain in this position, which had to be
         rebuilt on the same flattening `forward` used and left this test
-        sensitive to call order through the running estimates. Both are gone.
+        sensitive to call order through the running estimates. Both are gone,
+        and so is the `standardise` on each path that stood here after them --
+        it survives only in the telemetry block, so the branches now reach the
+        mix at their own magnitudes and there is no volume scalar to apply.
     """
     listener = _listener()
     discriminator = listener.discriminator
@@ -184,9 +187,9 @@ def test_the_staged_walkthrough_matches_the_forward_pass():
     with torch.no_grad():
         stages = _stages(listener, referents, messages)
         weight = discriminator.mix_weight
-        rebuilt = discriminator.mix_scale * (
-            (1.0 - weight) * R.standardise(stages["bilinear readout"])
-            + weight * R.standardise(stages["attention readout"])
+        rebuilt = (
+            (1.0 - weight) * stages["bilinear readout"]
+            + weight * stages["attention readout"]
         ) + discriminator.mix_bias
         actual = listener(referents, messages)
 

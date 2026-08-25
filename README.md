@@ -501,33 +501,27 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     use the message), then a climb, then a plateau once the `uniform_weight`
     cap saturates fidelity and the gradient dies with it. A scale climbing
     while accuracy stays at chance is co-adaptation to a premature code.
-- `train_score_scale` — the listener's counterpart, `exp(log_score_scale)`, and
-    live on every rung. Both comparers reach it by the same route with different
-    parts: on `BilinearGRUComparer` both operands of the dot product are
+- `train_bilinear_weight_norm` — the listener's volume, and the counterpart of
+    `train_logit_scale`. `bilinear`'s weight now sets both the *direction* of
+    the comparison and its magnitude: both operands of the dot product are
     layer-normalised without an affine and the product is divided by
-    `sqrt(referent_embedding_size)`; on `TransformerCrossAttentionComparer` the
-    readout direction is normalised to unit length and its input is
-    layer-normalised without an affine. Either way the architecture is left
-    setting the *direction* of the comparison and this scalar setting its
-    volume, and it is the only thing that can. It cannot move the decision:
-    `scores > 0` and the reference-game argmax are both invariant to it. What it
-    moves is BCE, and through BCE every gradient in the pair.
-    It was NaN on the cross-attention rungs until the readout was separated
-    that way, which is how rung 12 ran a whole 30-epoch smoke test with its
-    scores collapsed 25x — from sd 0.42 to sd 0.016 inside the first epoch —
-    while every column that would have said so was either blank or, in
-    `train_loss`, parked at `ln 2` to four decimal places.
-    It opens at exactly 1.0, which the `sqrt(d)` division makes the calibrated
-    value rather than an arbitrary one, so unlike `train_logit_scale` it has no
-    traverse to cover and a flat start is not expected. Read it the same way
-    otherwise, and against the same separation: a dip while the message is still
-    noise is the listener correctly refusing to commit, and `29b18ea`'s numbers
-    are the yardstick for when a dip has become a collapse. Its travel is bounded
-    by `score_scale_lr * steps` for the same AdamW reason as the speaker's — at
-    `2e-3` and 194 steps that is 0.388 log-units an epoch, against an observed
-    healthy dip of about 0.2 over five. There is no floor, deliberately;
-    `e3fcabd` fitted one to the speaker's scale and `29b18ea` removed it after it
-    cost fifteen epochs.
+    `sqrt(referent_embedding_size)`, but the message operand is normalised
+    *before* the projection, so nothing downstream pins what comes out of it.
+    Live on every rung — the attention arm composes the same module, and reports
+    this alongside `train_decision_weight_norm` for its other branch.
+    It cannot move the decision: `scores > 0` and the reference-game argmax are
+    both invariant to a positive rescale. What it moves is BCE, and through BCE
+    every gradient in the pair — which is exactly why it needs a column, since
+    `train_acc` cannot see it.
+    This replaces `train_score_scale`, which read `exp(log_score_scale)` on a
+    lone scalar at an elevated `score_scale_lr` of 2e-3. That arrangement made
+    the volume legible and left it far too cheap to move: rungs 09 and 11 slid
+    0.9021 → 0.3731 and 0.9377 → 0.4072 across thirty epochs, monotone and never
+    returning, spending under 8% of the budget the elevated rate gave them.
+    Read the new column the same way — a dip while the message is still noise is
+    the listener correctly refusing to commit, and a monotone slide is a
+    collapse — but expect it to move more slowly, because a matrix has to turn
+    as well as shrink.
 - `train_sampling_tau` — the temperature actually handed to `gumbel_softmax`,
     as against the configured `tau`. A function of `train_logit_scale` and the
     epoch counter alone, so it carries no independent information, but it is

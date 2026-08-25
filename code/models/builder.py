@@ -107,10 +107,9 @@ def is_mup_exempt(name, parameter):
 
     The exemption is load-bearing for a second reason: it makes the muP groups
         disjoint from every entry in `SPLIT_LEARNING_RATES` by construction.
-        `log_logit_scale`, `log_score_scale`, `mix_logit`, `log_mix_scale` and
-        `contrast_gate` are all 0-d; `polarity_embedding` is 2-d but matches
-        "embedding". So no parameter can be claimed twice however the two loops
-        are ordered.
+        `log_logit_scale`, `mix_logit` and `contrast_gate` are all 0-d;
+        `polarity_embedding` is 2-d but matches "embedding". So no parameter can
+        be claimed twice however the two loops are ordered.
 
     Args:
         name: the parameter's name, relative to the module being split out
@@ -226,30 +225,17 @@ SPLIT_LEARNING_RATES = (
         ),
     ),
     (
-        "score_scale_lr",
-        "log_score_scale",
-        # `BilinearDiscriminator` only, and `AttentionDiscriminator` is not it
-        #     even though it owns one: it builds its bilinear path with
-        #     `score_scale=False`, because `standardise` runs on that path's
-        #     output and divides any positive scale straight back out. Its
-        #     volume is `log_mix_scale`, which has its own key below.
-        lambda pair: isinstance(
-            pair.receiver.discriminator, receiver.BilinearDiscriminator
-        ),
-    ),
-    (
         # Moves the parameter reported as `train_mix_alpha`. Named for the
         #     parameter rather than the column so the suffix beside it is
         #     obviously the same thing.
+        #
+        # The last of the listener's elevated scalars. `score_scale_lr` and
+        #     `mix_scale_lr` sat here too, for `log_score_scale` and
+        #     `log_mix_scale`, until both volumes moved onto the weight
+        #     matrices that carry them -- see `receiver.BilinearDiscriminator`.
+        #     This one is a mixing weight and not a volume, so it stays.
         "mix_logit_lr",
         "mix_logit",
-        lambda pair: isinstance(
-            pair.receiver.discriminator, receiver.AttentionDiscriminator
-        ),
-    ),
-    (
-        "mix_scale_lr",
-        "log_mix_scale",
         lambda pair: isinstance(
             pair.receiver.discriminator, receiver.AttentionDiscriminator
         ),

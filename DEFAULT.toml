@@ -325,63 +325,22 @@ logit_scale_lr = 2e-3
 # speaker, which is told its polarities apart by `init_h`.
 polarity_embedding_lr = 2e-3
 
-# The listener's counterpart, for `BilinearDiscriminator.log_score_scale` -- the
-# one scalar that sets how loudly the bilinear comparison states a conclusion.
-# Both of its operands are layer-normalised without an affine and the dot product
-# is divided by `sqrt(referent_embedding_size)`, so nothing else can reach that
-# score's magnitude: `bilinear` sets the *direction* of the comparison and this
-# sets its volume.
-#
-# A third key rather than a reuse, on the same argument as the one above. This
-# one exists on every rung, `logit_scale_lr` moves a speaker and this moves a
-# listener, and an ablation that varies one agent wants to be able to hold the
-# other's rate still.
-#
-# 2e-3 is not inherited by analogy, despite matching. Unlike the speaker's scale
-# this one opens *at* its target -- 1.0 is the calibrated value by construction
-# -- so it has no traverse to cover and the arithmetic that set 2e-3 there does
-# not apply. What sets it here is the dip. `29b18ea` measured a healthy speaker
-# falling ~0.2 log-units below its opening and returning within a few epochs,
-# which is the pair correctly refusing to commit while the message is still
-# noise; at the base 1e-4 and 194 steps an epoch that is 0.019 log-units an
-# epoch, so a 0.2 dip would take ten epochs and the listener would be
-# recalibrating an order of magnitude slower than the speaker it is aimed at.
-# At 2e-3 the ceiling is 0.388 an epoch and the speaker's observed dip used
-# about 11% of the same budget, so the headroom goes unspent when the gradient
-# is not sign-consistent.
-#
-# Read `train_score_scale` against `29b18ea`'s separation, which is the whole
-# reason the column exists: a healthy arm dips to ~0.8x and comes back, and the
-# arm that died fell 0.94 log-units and never did. There is deliberately no
-# floor -- that was tried in `e3fcabd` and cost fifteen epochs before `29b18ea`
-# removed it.
-#
-# `BilinearDiscriminator` only, and `build_models` gates on that class rather
-# than on finding the parameter. `AttentionDiscriminator` owns a bilinear path
-# but builds it with `score_scale=False`: `standardise` runs on that path's
-# output and `standardise(s * u) == standardise(u)` exactly, so a scale there
-# would take identically zero gradient, report a constant 1.0, and sit in this
-# elevated group doing nothing. Its volume is `log_mix_scale`, two keys down.
-# `train_score_scale` is therefore a bilinear-arm column and `train_mix_scale`
-# is the attention arm's counterpart.
-#
-# The history is worth knowing. That scale falling monotonically to 0.27 while
-# `train_loss` sat at ln 2 is what prompted rewriting the old cross-attention
-# readout to standardise itself at a fixed gain — which closed the collapse
-# exactly as designed and stopped four rungs learning at all. The collapse is
-# survivable: rung 10 does it, `train_score_scale` falling 0.856 -> 0.238 across
-# thirty epochs while `train_acc` climbs 0.4975 -> 0.6351. That measurement is
-# also why there is no floor on this parameter and must not be one. See
-# `diagnostics/README.md`.
-score_scale_lr = 2e-3
-
-# `AttentionDiscriminator.mix_logit`, the attention path's share of the score,
+# `AttentionDiscriminator.mix_logit`, the weight on the attention path,
 # reported as `train_mix_alpha`. Named `mix_*` and not `alpha_*` because this
 # table already carries an `alpha`, which is DeepNorm's residual scaling on the
 # referent stack and has nothing to do with the mix.
-# The counterpart of the two keys above and elevated for the same reason they
-# are: it is a lone scalar, and Adam moves one about `lr` per step whatever the
-# gradient's size, so its whole travel over a run is bounded by `lr * steps`.
+# Elevated for the same reason the two keys above are: it is a lone scalar, and
+# Adam moves one about `lr` per step whatever the gradient's size, so its whole
+# travel over a run is bounded by `lr * steps`.
+#
+# The only listener key left here, and the only one that should be. There were
+# two others, `score_scale_lr` and `mix_scale_lr`, moving the scalars that held
+# each discriminator's *volume* -- and the listener spent that mobility turning
+# its own logits down, monotone across a whole run, which multiplies down the
+# gradient reaching the speaker. Both volumes now sit in the weight matrices
+# that produce the scores, where there is no equivalently cheap move; see
+# `receiver.BilinearDiscriminator`. A mixing weight is not a volume, so this
+# one is unaffected by that argument.
 #
 # What it has to cover is larger than either of theirs. The mixing weight opens
 # at 0.116 -- `mix_floor` 0.1 plus a sigmoid at logit -4.0 -- and a listener
@@ -397,21 +356,6 @@ score_scale_lr = 2e-3
 # it, and the probe's free-alpha arms climbed to 0.33-0.44 over 2,000 steps,
 # well inside it.
 mix_logit_lr = 2e-3
-
-# `AttentionDiscriminator.log_mix_scale`, the volume downstream of the mix, and
-# the attention arm's whole counterpart of `score_scale_lr` above. Both mixed
-# paths are standardised per game, so this scalar is the *only* thing that sets
-# the score's magnitude and nothing upstream can absorb it -- the same position
-# `log_score_scale` is in on the bilinear arm, and given the same rate for the
-# same reason. Unbounded, log-parameterised, and with no floor: the measurement
-# that argued against a floor there argues against one here.
-#
-# Note what this leaves closed. Neither path can go quiet on its own, because
-# standardising removes its magnitude, so the attention path cannot escape
-# being learned by turning itself down. The *pair* can still go quiet through
-# this scalar, which is the freedom the readout needs and `train_mix_scale` and
-# `train_decision_spread` are what watch it.
-mix_scale_lr = 2e-3
 
 # `ExampleContrast.contrast_gate`, the one scalar between the speaker's contrast
 # stage and the identity. Inert unless `[sender] contrast` is true.

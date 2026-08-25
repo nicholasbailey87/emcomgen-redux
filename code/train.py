@@ -447,11 +447,18 @@ def run(
             # rather than by `hasattr`, so a rename raises instead of quietly
             # producing a NaN column. See docs/measurement.md.
             #
-            # `score_scale` is the bilinear arm's volume and `mix_scale` is
-            # the attention arm's. They are not the same parameter and the
-            # attention arm has no `score_scale` at all -- it standardises its
-            # bilinear path, which divides that scale out -- so the two are
-            # reported under different names rather than sharing a column.
+            # Both arms carry their volume in a weight matrix rather than in a
+            # scalar, so the volume column is that matrix's norm.
+            # `bilinear_weight_norm` replaces `score_scale`, which was the
+            # bilinear arm's scalar, and reads the same way: a healthy arm dips
+            # and returns, and the arm that dies slides monotonically. The
+            # attention arm has two such matrices and reports `decision_spread`
+            # for the readout they end up producing.
+            #
+            # `mix_alpha` is the mixing *weight* and `mix_share` is the share
+            # of the score each path actually contributes. They agreed while
+            # `forward` standardised the branches and no longer do, so both are
+            # reported -- a gap between them is a loud or quiet branch.
             if training:
                 discriminator = pair.receiver.discriminator
 
@@ -459,7 +466,9 @@ def run(
                     discriminator, models.receiver.BilinearDiscriminator
                 ):
                     stats.update(
-                        score_scale=discriminator.score_scale.item(),
+                        bilinear_weight_norm=(
+                            discriminator.bilinear.weight.norm().item()
+                        ),
                         batch_size=batch_size,
                     )
                 elif isinstance(
@@ -467,7 +476,13 @@ def run(
                 ):
                     stats.update(
                         mix_alpha=discriminator.mix_alpha,
-                        mix_scale=discriminator.recorded_mix_scale,
+                        mix_share=discriminator.mix_share,
+                        bilinear_weight_norm=(
+                            discriminator.bilinear.bilinear.weight.norm().item()
+                        ),
+                        decision_weight_norm=(
+                            discriminator.decision.weight.norm().item()
+                        ),
                         path_agreement=discriminator.path_agreement,
                         decision_spread=discriminator.decision_spread,
                         decision_kurtosis=discriminator.decision_kurtosis,
