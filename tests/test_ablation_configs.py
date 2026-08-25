@@ -143,35 +143,42 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # 1024 wide with a 500-wide token embedding. Parity is now sought at
         # jayelm's width by deepening the transformer arm instead.
         ("01_shapeworld_baseline.toml", "receiver.language_model", 4_687_872),
-        # Halved with the GRU's `output_size`, 2048 -> 1024.
-        ("01_shapeworld_baseline.toml", "receiver.discriminator", 524_289),
+        # Halved with the GRU's `output_size`, 2048 -> 1024. Exactly 512 * 1024,
+        # the `bilinear` weight and nothing else: it was 524,289 while
+        # `log_score_scale` carried the volume, and that scalar is gone -- the
+        # weight carries it now. See test_score_scale.py.
+        ("01_shapeworld_baseline.toml", "receiver.discriminator", 524_288),
         # ShapeWorld: the top of the ladder. The speaker's language model is the
         # autoregressive decoder at four blocks -- see rung 9's `layers` for why
         # four.
         ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 10_317_986),
         ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 5_933_047),
         ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_784_566),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_548_295),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_548_294),
         # CUB: the CNN/GRU baseline.
         ("02_birds_baseline.toml", "sender.feat_model", 11_176_512),
         ("02_birds_baseline.toml", "sender.language_model", 5_774_073),
         ("02_birds_baseline.toml", "receiver.language_model", 4_687_872),
-        ("02_birds_baseline.toml", "receiver.discriminator", 524_289),
+        ("02_birds_baseline.toml", "receiver.discriminator", 524_288),
         # CUB: the top of the ladder. Only the two vision-dependent counts differ
         # from ShapeWorld's -- the ViT's patch tokeniser scales with image size,
         # and the speaker's language model carries a longer message.
         ("16_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 11_332_626),
         ("16_birds_receiver_cross_attention_lm.toml", "sender.language_model", 5_938_813),
         ("16_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_784_566),
-        ("16_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_548_295),
+        ("16_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_548_294),
         # Rung 13's discriminator, still pinned because it is still the number
         # that makes the 13 -> 15 step unclean, though far less so than it was:
-        # 2,990,663 against rung 15's 2,548,295. The gap is a `memory_adapter`
+        # 2,990,662 against rung 15's 2,548,294. The gap is a `memory_adapter`
         # bringing the GRU's output down to 256 rather than reading a 256-wide
         # message directly, and it shrank from 3,580,487 when that output went
         # 2048 -> 1024 with the listener GRU's restoration.
-        ("13_shapeworld_attention_discriminator.toml", "receiver.discriminator", 2_990_663),
-        ("14_birds_attention_discriminator.toml", "receiver.discriminator", 2_990_663),
+        #
+        # Both attention counts dropped by exactly one when `log_mix_scale`
+        # went: its composed bilinear path never had a `log_score_scale` to
+        # lose, having been built with `score_scale=False`.
+        ("13_shapeworld_attention_discriminator.toml", "receiver.discriminator", 2_990_662),
+        ("14_birds_attention_discriminator.toml", "receiver.discriminator", 2_990_662),
         # The two intermediate vision swaps, so a rung that stopped inheriting
         # the shared ViT specification shows up here rather than in a run.
         ("03_shapeworld_sender_vit.toml", "sender.feat_model", 10_317_986),

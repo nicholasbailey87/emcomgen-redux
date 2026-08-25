@@ -289,10 +289,15 @@ def test_the_scalar_overrides_survive_the_muP_groups(config_file):
         seen += 1
         assert {lr_of[id(p)] for p in hits} == {config["optimiser"][key]}
 
-    # Every rung has a speaker scale and some listener volume, so a rung that
-    #     matched nothing would mean the suffixes had gone stale rather than
-    #     that the rung was austere.
-    assert seen >= 2
+    # Every rung has `log_logit_scale`, so a rung that matched nothing would
+    #     mean the suffixes had gone stale rather than that the rung was
+    #     austere. It used to be `>= 2` on the grounds that every rung also
+    #     carried a listener volume -- `log_score_scale` or `log_mix_scale`.
+    #     Neither exists now: the listener's volume is in `bilinear.weight` and
+    #     `decision.weight`, which take the base rate and are muP's business,
+    #     not this table's. The baseline rungs are genuinely austere, with the
+    #     speaker's scale their only entry here.
+    assert seen >= 1
 
 
 @pytest.mark.parametrize("config_file", RUNGS)
