@@ -483,21 +483,21 @@ def build_models(dataloaders, config):
     #     0-d and `polarity_embedding` matches "embedding". Running muP first
     #     anyway, so that if the exemption rule is ever loosened the elevated
     #     scalar rates are the ones that survive.
-    mup_in_scope, resolved_mup_lrs = resolve_mup_learning_rates(
-        pair, base_lr, config['optimiser']['mup_reference_width']
-    )
-
-    for name, module, lr in mup_in_scope:
-        if lr != base_lr:
-            optimiser = split_out_module(optimiser, module, lr, name)
-
+    # mup_in_scope, resolved_mup_lrs = resolve_mup_learning_rates(
+    #     pair, base_lr, config['optimiser']['mup_reference_width']
+    # )
+    #
+    # for name, module, lr in mup_in_scope:
+    #     if lr != base_lr:
+    #         optimiser = split_out_module(optimiser, module, lr, name)
+    #
     # Written back so `save_args` records what was *built*. Several of these
     #     widths are derived rather than declared, so a config key is not
     #     evidence the module was built that way -- see docs/training.md. Note
     #     the rate here is the one the module's matrices got: its biases, norms,
     #     scalars and embedding tables stayed at the base rate, and any scalar
     #     named below moved again.
-    config['optimiser']['resolved_mup_lrs'] = resolved_mup_lrs
+    # config['optimiser']['resolved_mup_lrs'] = resolved_mup_lrs
 
     for config_key, suffix, applies_to in SPLIT_LEARNING_RATES:
         lr = config['optimiser'].get(config_key, base_lr)
