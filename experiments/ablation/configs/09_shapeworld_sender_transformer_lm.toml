@@ -58,7 +58,7 @@ name = "ablation"
 # This rung is a diagnostic, not a replacement for the ladder's rung 9: if the
 # sign fraction crosses here and not at 0.5, the finding is about silhouetting
 # and the fix belongs somewhere that does not cost the shortcut.
-silhouette_p_receiver = 0.0
+silhouette_p_receiver = 0.5
 
 [sender]
 feature_model = "ViT2"
