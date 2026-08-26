@@ -80,20 +80,38 @@ reaching `outputs2vocab`, the stack and the vision model — the machinery that
 would have made raising it worthwhile. It slides in every run that fails,
 0.9094 → 0.6547 on rung 10 and 0.8648 → 0.7784 on rung 9, monotone.
 
-Measured, gradient norm into the raw logits on the decoder arm at a fixed seed:
+**The helper wraps the scalar and nothing else.** It sits between
+`layer_norm_logits` and `mask_reserved_tokens`, upstream of the sampler;
+`gumbel_softmax(hard=True)` keeps its own straight-through untouched. The
+gradient into the raw logits is a product of three factors:
 
-| `logit_scale` | 0.05 | 0.25 | 1.0 |
-|---|---|---|---|
-| plain product | 3.3e-8 | 1.5e-7 | 4.9e-7 |
-| through the helper | 6.6e-7 | 6.0e-7 | 4.9e-7 |
+```
+dL/draw  =  J_gumbel(scaled)  ×  d(scaled)/d(normalised)  ×  d(normalised)/d(raw)
+```
 
-Not an identity downstream of `gumbel_softmax`, because its soft surrogate is
-`softmax((scaled + g) / tau)` and that Jacobian is itself a function of `scaled`
-— which is the saturation, deliberately kept. What the helper removes is the
-uniform factor in front of it. Note the two swap over *above* ~1.0, where the
-plain product's extra factor partly offsets the softmax saturating: there the
-helper attenuates more. That is the regime no run on this ladder has reached, and
-the one they all travel through is the one in the table.
+and the helper changes the middle one from `logit_scale` to 1, at every scale.
+That is the whole of what it does, and it is exact.
+
+The end-to-end number is not flat, because `J_gumbel` is itself a function of
+`scaled` — the soft surrogate is `softmax((scaled + g) / tau)`, which saturates
+as the scale grows. That is the saturation, it belongs to the sampler, and it is
+deliberately kept. Measured on the decoder arm at a fixed seed, gradient norm
+into the raw logits:
+
+| `logit_scale` | 0.05 | 0.25 | 1.0 | 4.0 | 20.0 |
+|---|---|---|---|---|---|
+| plain product | 3.3e-8 | 1.5e-7 | 4.9e-7 | 1.7e-7 | 5.7e-8 |
+| through the helper | 6.6e-7 | 6.0e-7 | 4.9e-7 | 4.4e-8 | 2.8e-9 |
+
+Downwards — the direction every failing run travels — the plain product loses an
+order of magnitude as the scale falls 20× and the helper does not.
+
+Upwards the plain product looks better, and the tempting reading of that is
+wrong. The helper does not attenuate more at high scale; it does the same thing
+it does everywhere. What the plain product has above ~1.0 is a factor
+`logit_scale` that happens to *offset* the sampler saturating, so removing it
+exposes an attenuation that was always the sampler's. No run on this ladder has
+been there.
 
 ### `eps = 1e-12`, and why that is load-bearing
 

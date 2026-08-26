@@ -459,26 +459,41 @@ def test_the_gain_no_longer_starves_the_stack_as_it_falls():
     """
     The same property end to end, in the direction a run actually travels.
 
-    Not exact here, because `gumbel_softmax`'s soft surrogate is
-    `softmax((scaled + g) / tau)`, whose Jacobian is itself a function of
-    `scaled` -- that is the saturation, and it is deliberately kept. What the
-    helper removes is the *uniform* factor in front of it.
+    The helper wraps the scalar and nothing else -- `normalised * logit_scale`,
+    upstream of the sampler. `gumbel_softmax(hard=True)` keeps its own
+    straight-through untouched, and the gradient into the raw logits is the
+    product of three factors:
+
+        dL/draw  =  J_gumbel(scaled)  x  d(scaled)/d(normalised)  x  d(normalised)/d(raw)
+
+    The helper changes the middle one from `logit_scale` to 1, at every scale.
+    That is the whole of what it does, and it is exact -- see
+    `test_the_gain_is_absent_from_the_gradient_behind_it`.
+
+    The end-to-end number is not flat, because `J_gumbel` is itself a function
+    of `scaled = logit_scale * normalised`: the soft surrogate is
+    `softmax((scaled + g) / tau)`, which saturates as the scale grows. That is
+    the saturation, it belongs to the sampler, and it is deliberately kept.
 
     Measured on the decoder arm, gradient norm into the raw logits, same seed:
 
-        scale   0.05    0.25    1.0
-        plain   3.3e-8  1.5e-7  4.9e-7
-        trick   6.6e-7  6.0e-7  4.9e-7
+        scale   0.05    0.25    1.0     4.0     20.0
+        plain   3.3e-8  1.5e-7  4.9e-7  1.7e-7  5.7e-8
+        helper  6.6e-7  6.0e-7  4.9e-7  4.4e-8  2.8e-9
 
-    So the plain product loses an order of magnitude of gradient as the scale
-    falls by 20x, and the helper does not. That is the regime rung 9 and rung 10
-    sit in: `logit_scale` 0.9094 -> 0.6547 on rung 10 across thirty epochs and
-    0.8648 -> 0.7784 on rung 9, monotone, never returning.
+    Downwards, which is the direction every failing run travels -- `logit_scale`
+    0.9094 -> 0.6547 on rung 10 across thirty epochs and 0.8648 -> 0.7784 on
+    rung 9, monotone, never returning -- the plain product loses an order of
+    magnitude as the scale falls 20x and the helper does not. That is what this
+    asserts.
 
-    Upwards the two swap over -- the plain product's extra factor partly offsets
-    the softmax saturating, so above ~1.0 the helper attenuates *more*. Left
-    unasserted rather than pinned: it is the saturation doing what saturation
-    does, and no run on this ladder has reached it.
+    Upwards the plain product looks better, and it is worth being precise about
+    why, because the tempting reading is wrong. The helper does not attenuate
+    more at high scale: it does the same thing it does everywhere. What the
+    plain product has above ~1.0 is a factor `logit_scale` that happens to
+    *offset* the sampler saturating, so removing it exposes an attenuation that
+    was always the sampler's. Left unasserted, since no run on this ladder has
+    been there.
     """
     speaker = _transformer_speaker()
     vocabulary = speaker.vocabulary
