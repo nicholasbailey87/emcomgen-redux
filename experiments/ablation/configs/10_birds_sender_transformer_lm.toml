@@ -79,6 +79,9 @@ layers = 6
 # causal arm needs because only it reads a symbol back.
 bidirectional = false
 
+[birds.optimiser]
+accumulator_steps = 2
+
 [scheduler]
 epochs = 30
 
