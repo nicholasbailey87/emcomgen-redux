@@ -192,8 +192,8 @@ flatten every split rate — muP's and the scalars' alike — permanently.
 Note this subsection still names `BilinearGRUComparer` and
 `TransformerCrossAttentionComparer` below, which the listener split replaced with
 `BilinearDiscriminator` and `AttentionDiscriminator`, and it predates
-`mix_logit_lr` and `mix_scale_lr`. The reasoning holds; the names want a pass
-with the rung overhaul.
+`mix_logit_lr`. The reasoning holds; the names want a pass with the rung
+overhaul.
 
 **`logit_scale_lr`** — ungated. `log_logit_scale` exists on both speakers.
 
@@ -211,10 +211,19 @@ so the key is simply inapplicable, exactly as `heads` and `ff_ratio` are, and
 skipping is right. A Transformer speaker *missing* the parameter is a rename, and
 `split_out_parameter` raises.
 
-**`score_scale_lr`** — gated on `isinstance(comparer, BilinearGRUComparer)`, for
-the same reason. `TransformerCrossAttentionComparer` has no learnable scale: its
-readout is a plain `nn.Linear(d_model, 1)` whose weight carries the volume, so
-there is no lone scalar for a rate to apply to.
+**`score_scale_lr`** — ungated, since `7b10d47`. `ScoreVolume` puts one
+`log_score_scale` on every discriminator, so one key and one suffix reach both,
+and the `mix_scale_lr` that once moved `AttentionDiscriminator`'s own scalar has
+no successor. It was briefly gated on the bilinear class, when the other arm's
+readout was a plain `nn.Linear(d_model, 1)` whose weight carried the volume and
+there was no lone scalar for a rate to apply to.
+
+Elevated, and that was once the accusation: at 2e-3 the listener could squash its
+own logits fast, which multiplied down the gradient reaching the speaker. What
+made the rate harmful has been removed instead of the rate — the scale is absent
+from the backward pass, see `ScoreVolume` in
+[architecture.md](architecture.md) — so a fast calibration is now just a fast
+calibration.
 
 Do not read that gate as a verdict on the scale. That comparer lost its scale to
 a rewrite that standardised the readout at a fixed gain, which closed the
@@ -302,7 +311,7 @@ into one update buys a better gradient *estimate*, which a single scalar does no
 need, and costs it the moves it would otherwise have made.
 
 So when a run's takeoff waits on one of these scalars — `log_logit_scale`,
-`contrast_gate`, `log_mix_scale` — raising the effective batch delays it in
+`log_score_scale`, `contrast_gate` — raising the effective batch delays it in
 direct proportion, at identical compute. That is a real trade against whatever
 the larger batch was for, and on ShapeWorld the reference setup's batch of 128
 (32 × `accumulator_steps` 4) is four times the traverse cost of the same compute
@@ -324,7 +333,9 @@ speaker has no gradient telling it to sharpen.
 `score_scale` sliding downwards through this is a *symptom*, not the fault — it is
 the listener correctly declining to be confident about noise, and it is not by
 itself fatal (see [anecdotes.md](anecdotes.md), where a run does the collapse and
-learns anyway).
+learns anyway). Since `7b10d47` it is also not a mechanism: the scale is absent
+from the backward pass into the message, so a sliding `score_scale` no longer
+attenuates anything on the speaker's side of the channel.
 
 **Then read the direction of `logit_scale` to tell the two apart.** Rising slowly
 means undertrained and more epochs help. Falling monotonically means the run is

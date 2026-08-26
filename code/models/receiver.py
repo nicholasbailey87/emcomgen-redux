@@ -146,18 +146,19 @@ class ScoreVolume:
         Standardise per game, then apply the volume without attenuating the
             gradient reaching the message.
 
-        A discriminator built with `learns_score_scale=False` returns the
-            standardised scores unscaled, which is what its caller wants: the
-            caller's own readout is downstream and would have divided any scale
-            back out.
+        A discriminator built with `learns_score_scale=False` returns the raw
+            comparison untouched -- not standardised either. Its caller owns the
+            readout and will standardise downstream, and standardising here as
+            well would pin this branch to unit spread before the mix, which is
+            the arrangement `AttentionDiscriminator` is deliberately not in: it
+            would make `mix_logit` mean composition exactly and close the escape
+            of turning one branch down that `mix_share` exists to watch.
         """
-        standardised = standardise(scores)
-
         if not self.learns_score_scale:
-            return standardised
+            return scores
 
         return model_util.scale_without_attenuating(
-            standardised, self.score_scale
+            standardise(scores), self.score_scale
         )
 
     def reset_score_scale(self):

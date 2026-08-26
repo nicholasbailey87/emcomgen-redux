@@ -152,8 +152,8 @@ better shaped than a matrix here: `out_projection` starts at a properly scaled
 random direction, so the branch contributes at a sensible magnitude the moment
 the gate opens rather than having to build one first.
 
-The gate is **not** log-parameterised, unlike `log_logit_scale`,
-`log_score_scale` and `log_mix_scale`. Those are volumes that must stay strictly
+The gate is **not** log-parameterised, unlike `log_logit_scale` and
+`log_score_scale`. Those are volumes that must stay strictly
 positive and open at 1.0; this one must be able to be exactly zero, which `exp`
 cannot reach. Its sign is free because the branch's own direction is arbitrary —
 a negative gate is the same branch pointing the other way. And zero is a
@@ -630,35 +630,75 @@ magnitude — the one these exist to close. It also keeps `sum(LN(r)) = 0`, whic
 is what annihilates the message operand's mean-subtraction; with a `beta` that
 term would start shifting scores between objects.
 
-**`log_score_scale`** is the listener's one degree of freedom over its own
-confidence, and the counterpart of the speaker's `log_logit_scale`. Normalising
-both operands closes every other route to score magnitude, and BCE is not
-scale-invariant, so without this the listener could only ever sharpen by aligning
-the two — never by committing harder to an alignment it already has.
+**`ScoreVolume`** is the listener's one degree of freedom over its own
+confidence, and the counterpart of the speaker's `GumbelChannel`. Both are
+mixins for the same reason: the scalar stays registered on the module itself, so
+`split_out_parameter`'s suffix match and every checkpoint key see it. Both are
+one scalar in front of a parameter-free normalisation. The readout is
+
+```
+score = score_scale · standardise(raw)
+```
+
+where `standardise` centres and unit-scales over the *candidate* axis, per game.
+BCE is not scale-invariant, so without a volume the listener could only ever
+sharpen by aligning its operands — never by committing harder to an alignment it
+already has.
 
 One scalar, not one per operand: `c·LN(p)·LN(r)` and `LN(p)·c·LN(r)` are the same
-function. It multiplies the message operand, which is shared across the objects
-of a game, so it cannot change which object wins — only how loudly the listener
-says so.
+function. And downstream rather than upstream of the normalisation, because
+`standardise(c·u) = standardise(u)` exactly — anything in front of it that only
+sets magnitude is annihilated. That identity is also why
+`AttentionDiscriminator` builds its composed bilinear path with
+`score_scale=False`: absent rather than frozen, so a parameter that could not
+move never matches an elevated learning-rate group.
 
-It opens at 1.0, which `forward`'s `1/sqrt(d)` makes the calibrated value: both
-operands leave LayerNorm at norm `sqrt(d)` and start mutually random, so the
-division puts the untrained score at unit standard deviation and BCE within a
-hair of `ln 2` on both arms. Nothing here has a traverse to cover — unlike
-`log_logit_scale`, which opens at 0.839 against a usable channel of 4 to 6.
+It opens at 1.0, and after `standardise` that is a real unit-spread opening
+rather than a calibrated one — at any width, under any backbone, with nothing to
+compute. The `1/sqrt(referent_embedding_size)` that used to buy that property is
+gone with it. Nothing here has a traverse to cover, unlike `log_logit_scale`,
+which opens at 0.839 against a usable channel of 4 to 6.
 
-It is stored as a log anyway, for different reasons: zero is where every gradient
-in the pair is gated, since `s` multiplies the only path from the message to the
-loss, and `exp` puts it out of reach; halving and doubling a gain should cost the
-same step; and it gives `train_score_scale` a known ceiling of
+Stored as a log for the usual reasons: `exp` keeps it strictly positive so
+gradient descent cannot walk a volume through zero; halving and doubling a gain
+should cost the same step; and it gives `train_score_scale` a known ceiling of
 `score_scale_lr × steps` log-units per epoch, which is what makes the column
 readable rather than merely present.
 
-The `1/sqrt(referent_embedding_size)` division is load-bearing rather than
-cosmetic now that both operands are normalised. It is what makes
-`score_scale = 1.0` the calibrated opening instead of a number whose meaning
-moves with the embedding size — 512 on ResNet18 against 320 on ViT2, which would
-otherwise open the two arms 1.26× apart and both far too loud.
+**The scale is absent from the backward pass**, through
+`model_util.scale_without_attenuating`: the forward is `s · standardise(u)`,
+`∂/∂u` does not carry `s`, and `∂/∂s` is unchanged. That is the whole reason
+this arrangement exists rather than the plain product. BCE's minimiser is
+`p = 0.5` everywhere, so on a message carrying nothing the scale is *correct* to
+fall — but a scalar at the front of the score multiplies down every gradient
+going back through the message, the token embedding and the Gumbel channel into
+the speaker, so falling keeps the message carrying nothing. A listener that
+quietens starves the speaker that would have made it worth listening to.
+
+Both halves are wanted and they are separable. What is deliberately *not* given
+up is the saturation: the gradient reaching the message is `σ(s·z) − y` where the
+plain product gives `s·(σ(s·z) − y)`, so both go quiet on candidates already
+scored correctly once `s` is large, and only the uniform factor differs. At
+initialisation, where `z ≈ 0`, both are `≈ 0.5 − y` — this does not invent a
+bootstrap regime, it stops `s` taking away the one you start in.
+
+**What the centring costs.** `train.py` decides on `lis_scores > 0`, and
+`standardise` puts each game's mean at exactly zero, so the threshold is the
+game's own mean score. That is an opening rather than a constraint: location and
+scale are pinned, the *shape* is not, so a listener wanting one target out of
+twenty scores it at `√19 = 4.359` and the rest at `−1/√19 = −0.229` and is still
+mean-zero and unit-spread. `mix_bias` is what moves the threshold back off — and
+it is also why `AttentionDiscriminator.decision` carries no bias, since a
+constant common to every candidate is exactly what the centring removes.
+
+**And what it costs the weights.** With the readout normalising, a standalone
+`BilinearDiscriminator` is exactly scale-invariant in `bilinear.weight`, which
+therefore learns direction alone. Its gradient is orthogonal to it, so under
+`weight_decay = 0.0` its norm can only grow and its effective learning rate,
+`≈ lr·√d / ‖W‖` under Adam, decays with it. See `bilinear_weight_norm` in
+[measurement.md](measurement.md). Inside `AttentionDiscriminator` the branches
+mix at their own magnitudes before the readout, so there both weights still set
+what the score is made of.
 
 **Dropout masks the referents only,** and lives on `Receiver`. It used to mask
 the message operand too, on the argument that a dot product lets the listener
@@ -669,11 +709,6 @@ mask on top is a second perturbation of a signal that has one — and the listen
 cannot tell which of the two it is being asked to be robust to. The referents
 arrive clean.
 
-`score_scale=False` is passed only from inside `AttentionDiscriminator`, and the
-scale is then absent rather than frozen. `standardise` runs on that path's
-output and `standardise(s·u) = standardise(u)` exactly for positive `s`, so the
-parameter would take identically zero gradient, report a constant 1.0 in
-`train_score_scale`, and sit in an elevated learning-rate group doing nothing.
 
 ### `ReceiverCrossAttentionLM` and `AttentionDiscriminator`
 
@@ -836,30 +871,39 @@ is `nn.RMSNorm(d_model)` and normalises per position, so the candidates already
 reach the readout at equal length and that argument is answered structurally.
 
 What the extra norm also did was sit between the post-norm's learnable gain and
-global score volume. That route is now open, which is deliberate: it is the same
-volume-collapse route the readout's free weight magnitude leaves open, watched by
-`decision_spread` rather than closed. See [anecdotes.md](anecdotes.md) for the
-two attempts to close it.
+global score volume. That route is now closed further downstream instead, by the
+readout's own `standardise` — which normalises the mixed score whatever either
+branch's magnitude is doing. See [anecdotes.md](anecdotes.md) for the attempts
+to close it here.
 
-**The readout is a plain `nn.Linear(d_model, 1)` with a bias.** This is the
-design after two attempts to take the volume out of the listener's hands; the
-full history and the numbers are in [anecdotes.md](anecdotes.md).
-`decision_spread` and `decision_kurtosis` are the columns that watch it — see
-[measurement.md](measurement.md).
+**The readout is a plain `nn.Linear(d_model, 1)` with no bias.** The bias has
+tracked whether anything downstream subtracts a mean, and it is off because
+`ScoreVolume` does: a constant added to every candidate in a game is exactly
+what the centring removes, so it would take identically zero gradient. `mix_bias`
+is the score's one offset, and it sits after the readout where it survives.
+`decision_kurtosis` is the column that watches the shape the centring leaves free
+— see [measurement.md](measurement.md).
 
 ### The mix, and why the attention arm opens as the bilinear one
 
 `AttentionDiscriminator` does not return that readout. It returns
 
 ```
-score = s · [ (1 − a) · bilinear_hat + a · attention_hat ] + bias
+score = score_scale · standardise( (1 − a) · bilinear + a · attention ) + bias
 a     = mix_floor + (1 − mix_floor) · sigmoid(mix_logit)
 ```
 
-where both operands are standardised per game — centred over the candidates and
-scaled to unit spread — so `a` means *composition* and `s` alone means *volume*.
-That is the same shape/volume split the speaker has in `logit_spread` and
-`logit_scale`.
+so the volume is the same `ScoreVolume` the bilinear arm carries — the same
+shape/volume split the speaker has in `logit_spread` and `logit_scale`.
+
+**`standardise` runs on the mix, not on each branch,** and that is a choice with
+a cost on each side. Standardising per branch makes `a` mean *composition*
+exactly, and closes the escape of turning an uninformative branch down rather
+than making it informative. Standardising the mix gets the single volume knob
+without pinning the branches to equal spread, which reopens that escape — so
+`mix_share` is reported beside `mix_alpha` to watch for it: the first is the
+share the score is actually made of, the second the share `mix_logit` asked for,
+and they come apart exactly when a branch is loud or quiet rather than useful.
 
 **Why.** The attention path alone does not bootstrap. Under a nuisance level
 where the bilinear comparison reaches 0.938, the two decoder stacks reach 0.469
@@ -883,22 +927,24 @@ That bug cost an afternoon in the prototype. What the floor buys is that the
 attention path always contributes and so always receives gradient — at `a = 0`
 the whole stack would get nothing and could never earn its way in.
 
-**Neither path can go quiet; the pair can.** Standardising means an
-uninformative attention path cannot be escaped by turning it down — it has to be
-made informative or paid for. But `s` is downstream of both, unbounded and
-log-parameterised, so a listener with nothing to say can still say it quietly.
-That distinction is the whole of why this is not the fixed-gain readout coming
-back: that one closed the collapse exactly as designed and stopped four rungs
-learning at all, because a pair forced to commit through a fixed volume from step
-zero commits before the message carries anything.
+**The pair can go quiet, and that is deliberate.** `score_scale` is downstream
+of the mix, unbounded and log-parameterised, so a listener with nothing to say
+can say it quietly. That is the whole of why this is not the fixed-gain readout
+coming back: that one closed the collapse exactly as designed and stopped four
+rungs learning at all, because a pair forced to commit through a fixed volume
+from step zero commits before the message carries anything.
 
-**Two columns come out of it,** and they have to be read together.
-`mix_alpha` is how much of the score is the attention path, which is the
-chapter's question stated as a number. `path_agreement` is the within-game
+What made going quiet dangerous — that it turned the speaker down at the same
+time — is gone rather than prevented; see `ScoreVolume` above.
+
+**Three columns come out of it,** and they have to be read together.
+`mix_alpha` is how much of the score `mix_logit` asks the attention path for,
+which is the chapter's question stated as a number. `mix_share` is how much of
+it the attention path actually supplies. `path_agreement` is the within-game
 correlation between the two standardised paths, and it is necessary because an
 attention path that is never used and one that has learned to imitate the
 bilinear path look identical from accuracy and from `mix_alpha` alone. See
-[measurement.md](measurement.md) for how to read the four combinations.
+[measurement.md](measurement.md) for how to read the combinations.
 
 **Note stage 2 mutates its input.** broccoli's
 `TransformerEncoder.preprocess` adds its position embedding with

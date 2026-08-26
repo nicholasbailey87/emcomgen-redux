@@ -183,22 +183,30 @@ def test_the_score_deliberately_no_longer_matches_the_legacy_module():
         be written down here rather than patched into the copy, so: **the
         scores no longer match, in exactly one place, on purpose.**
 
-    The legacy ordering is `message_layer_norm(bilinear(m))`, which pins the
-        projected message to unit variance and leaves `log_score_scale` as the
-        only route to the score's magnitude. `BilinearDiscriminator` now runs
-        `bilinear(message_layer_norm(m))`, so `bilinear.weight` sets volume as
-        well as direction and the scalar is gone.
+    The divergence is now in three places, all in the readout, and the legacy
+        module still has the GRU half bit-identical.
 
-    Why: the scalar was on an elevated learning rate and the listener spent it
-        turning its own logits down -- 0.9021 -> 0.3731 on rung 09, monotone
-        across thirty epochs -- which multiplies down every gradient going back
-        through the message to the speaker. See test_score_scale.py.
+    One: the ordering. The legacy path is `message_layer_norm(bilinear(m))`,
+        which pins the projected message to unit variance;
+        `BilinearDiscriminator` runs `bilinear(message_layer_norm(m))`, so the
+        norm sets where `bilinear` starts rather than where it ends.
+
+    Two: `/sqrt(referent_embedding_size)` is gone, because `standardise`
+        divides out any constant factor exactly, so the calibration it bought
+        has nothing left to do.
+
+    Three: the score is standardised per game and then multiplied by
+        `score_scale`. That is the difference that matters -- the legacy module
+        holds its volume in the product of the backbone's magnitude and its
+        weight, the way jayelm's unnormalised `compare` does, and this one holds
+        it in one scalar that is absent from the backward pass. See
+        test_score_scale.py for why.
 
     Everything else about the pairing is unchanged, which is what the two tests
         above still pin. This one exists so the divergence cannot widen
         silently: it asserts the scores differ, and that they differ *only*
-        through the reordering, by rebuilding the legacy arithmetic out of the
-        new module's own parts.
+        through those three, by rebuilding the new arithmetic out of the
+        module's own parts.
     """
     legacy, listener = _legacy_pair()
     referents, messages = _inputs(listener)
@@ -211,15 +219,14 @@ def test_the_score_deliberately_no_longer_matches_the_legacy_module():
             atol=1e-6,
         )
 
-        # The new ordering, by hand, from the module's own tensors.
+        # The new ordering and readout, by hand, from the module's own tensors.
         readout = listener.language_model(messages, referents)[:, -1, :]
         projected = discriminator.bilinear(
             discriminator.message_layer_norm(readout)
         )
         normed = discriminator.referent_layer_norm(referents)
-        rebuilt = torch.einsum(
-            "ijh,ih->ij", (normed, projected)
-        ) / math.sqrt(REFERENT_DIM)
+        raw = torch.einsum("ijh,ih->ij", (normed, projected))
+        rebuilt = discriminator.score_scale * R.standardise(raw)
 
     assert torch.allclose(
         rebuilt, listener(referents, messages), atol=1e-6
@@ -607,17 +614,22 @@ def test_the_attention_path_gets_gradient_at_the_opening_mix():
     )
 
 
-def test_standardise_is_a_telemetry_function_now():
+def test_standardise_runs_on_the_mix_and_on_each_branch():
     """
-    `standardise` used to run on both paths in `forward`, which made
-        `mix_logit` mean composition and left the volume to one scalar
-        downstream. It runs only in the `no_grad` telemetry block now, where it
-        gives `path_agreement` its Pearson-r reading and `mix_share` its
-        like-for-like comparison -- and where it cannot cancel the branch
-        weights that carry the volume.
+    Both jobs, which are different jobs.
 
-    Its arithmetic is unchanged and still worth pinning, because both of those
-        readings depend on it.
+    In the forward path it is `ScoreVolume.readout`'s normaliser, on the *mixed*
+        score, so the volume is one scalar and the branches keep their own
+        magnitudes. Standardising each branch instead would make `mix_logit`
+        mean composition exactly and close the escape of turning one path down,
+        which is precisely what `mix_share` exists to watch; see
+        `AttentionDiscriminator.forward`.
+
+    In the telemetry block it runs per branch, where it gives `path_agreement`
+        its Pearson-r reading and `mix_share` its like-for-like comparison.
+
+    Its arithmetic is unchanged and worth pinning, because every one of those
+        readings depends on it.
     """
     listener = build_listener(
         "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
@@ -625,11 +637,12 @@ def test_standardise_is_a_telemetry_function_now():
     ).eval()
     referents, messages = _inputs(listener)
 
-    # Not standardised in the forward path: a per-game unit-spread score would
-    #     make this exactly 1.0 for every game.
+    # Standardised in the forward path, at `score_scale` -- which opens at 1.0,
+    #     so the per-game spread is exactly 1 before `mix_bias`.
     with torch.no_grad():
-        spreads = listener(referents, messages).std(1, unbiased=False)
-    assert not torch.allclose(spreads, torch.ones_like(spreads), atol=1e-3)
+        scores = listener(referents, messages)
+    spreads = scores.std(1, unbiased=False)
+    assert torch.allclose(spreads, torch.ones_like(spreads), atol=1e-4)
 
     scores = torch.randn(BATCH, N_OBJ) * 17.0 + 4.0
     standardised = R.standardise(scores)
@@ -728,67 +741,81 @@ def test_the_bilinear_readout_takes_the_eos_slot():
     assert not torch.allclose(taken, from_mean, atol=1e-5)
 
 
-def test_the_two_arms_build_the_same_bilinear_path():
+def test_the_two_arms_build_the_same_bilinear_comparison():
     """
-    There is no special-casing left. `BilinearDiscriminator` used to take a
-        `score_scale` argument so that `AttentionDiscriminator` could build it
-        without one -- a scale on a standardised path takes identically zero
-        gradient while still matching `score_scale_lr`'s suffix and still
-        reporting a constant 1.0. Neither the scalar nor the argument exists
-        now, and neither does the standardising that made it inert.
-
-    So the composed path is the same module the bilinear rung mounts, which is
-        the invariant `AttentionDiscriminator`'s docstring claims when it says
-        the mix's `a -> mix_floor` limit is the module that was measured
+    The comparison is the same module either way -- same class, same weights --
+        which is the invariant `AttentionDiscriminator`'s docstring claims when
+        it says the mix's `a -> mix_floor` limit is the module that was measured
         bootstrapping and not a lookalike.
+
+    They differ by their readout, and only there. `score_scale=False` on the
+        composed path is what makes them differ, and it is correct rather than
+        special-casing: `AttentionDiscriminator`'s own readout standardises
+        downstream, and a scale upstream of a standardise is annihilated
+        exactly -- see
+        `test_a_scale_on_a_standardised_path_would_have_been_inert` below.
     """
     attention = _attention_discriminator()
     bilinear = build_listener(
         "ReceiverGRULM", "BilinearDiscriminator", REFERENT_DIM
     ).discriminator
 
-    assert not hasattr(bilinear, "learns_score_scale")
-    assert not hasattr(attention.bilinear, "learns_score_scale")
+    assert type(attention.bilinear) is type(bilinear)
+    assert bilinear.learns_score_scale
+    assert not attention.bilinear.learns_score_scale
 
-    for module in (bilinear, attention.bilinear):
-        assert not any(
-            name.endswith("log_score_scale")
-            for name, _ in module.named_parameters()
+    def _weights(module):
+        return sorted(
+            name for name, _ in module.named_parameters()
+            if not name.endswith("log_score_scale")
         )
 
-    assert type(attention.bilinear) is type(bilinear)
-    assert sorted(dict(attention.bilinear.named_parameters())) == sorted(
-        dict(bilinear.named_parameters())
+    assert _weights(attention.bilinear) == _weights(bilinear)
+    assert not any(
+        name.endswith("log_score_scale")
+        for name, _ in attention.bilinear.named_parameters()
     )
 
 
 def test_the_composed_bilinear_weight_reaches_the_mixed_score():
     """
-    What removing the standardising bought, and the reason it had to go if the
-        volume was to live in the weights: scaling the composed path's weight
-        now moves the mixed score, where before it was divided straight out.
+    The composed path is unstandardised where the *mix* is standardised, so its
+        weight still sets its branch's share of the score. That is what keeps
+        `mix_share` different from `mix_alpha`, and it is why the branch norms
+        stay load-bearing on this arm where they are inert on the other.
+
+    The score's spread does not move with it -- the readout fixes that. What
+        moves is which branch the score is made of.
     """
     listener = build_listener(
         "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
         config_file=rung(CROSS_RUNG),
     ).eval()
     referents, messages = _inputs(listener)
+    discriminator = listener.discriminator
 
     with torch.no_grad():
         before = listener(referents, messages)
-        listener.discriminator.bilinear.bilinear.weight.mul_(37.0)
+        opening_share = discriminator.mix_share
+        discriminator.bilinear.bilinear.weight.mul_(37.0)
         after = listener(referents, messages)
 
     assert not torch.allclose(before, after, atol=1e-5)
+    assert discriminator.mix_share < opening_share
+    assert after.std(1, unbiased=False).mean().item() == pytest.approx(
+        before.std(1, unbiased=False).mean().item(), rel=0.02
+    )
 
 
 def test_a_scale_on_a_standardised_path_would_have_been_inert():
     """
-    Why `standardise` could not stay in the forward path once the volume moved
-        into `bilinear.weight`. It subtracts a mean and divides by a spread,
-        both homogeneous of degree one in a positive multiplier, so anything in
-        front of it that only sets magnitude cancels -- a scalar exactly, and a
-        weight matrix in its radial component.
+    Why `AttentionDiscriminator` builds its composed bilinear path with
+        `score_scale=False`, and why `bilinear.weight` learns direction alone on
+        the arm that stands by itself. `standardise` subtracts a mean and
+        divides by a spread, both homogeneous of degree one in a positive
+        multiplier, so anything in front of it that only sets magnitude
+        cancels -- a scalar exactly, and a weight matrix in its radial
+        component.
 
     Exactly, in arithmetic; to float32 rounding, in fact -- which is why the
         comparison below is `allclose` and the gradient one is against a
@@ -831,15 +858,16 @@ def test_the_pair_can_still_go_quiet():
         message carries anything, which is what took out the fixed-gain
         readout.
 
-    It used to live in `log_mix_scale`, one scalar downstream of two
-        standardised paths. It now lives in the two branch weights, which is
-        strictly more freedom -- and the reason the scalar went is that being
-        one cheap knob on an elevated learning rate is what made going quiet
-        the listener's first move rather than its last.
+    It has lived in `log_mix_scale`, then in the two branch weights, and is now
+        `ScoreVolume.log_score_scale` -- one cheap knob on an elevated learning
+        rate again. Being cheap was the objection, and what made it dangerous
+        was that the same scalar multiplied the gradient going back to the
+        speaker; that coupling is what has gone instead. See
+        `model_util.scale_without_attenuating` and test_score_scale.py.
 
     What this no longer pins, deliberately, is that neither path can go quiet
-        *alone*. Standardising guaranteed that; nothing does now, and
-        `mix_share` against `mix_alpha` is what watches it instead.
+        *alone*. Standardising each branch guaranteed that; standardising the
+        mix does not, and `mix_share` against `mix_alpha` is what watches it.
     """
     listener = build_listener(
         "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
@@ -850,9 +878,7 @@ def test_the_pair_can_still_go_quiet():
 
     with torch.no_grad():
         loud = listener(referents, messages)
-        discriminator.decision.weight.mul_(0.01)
-        discriminator.decision.bias.mul_(0.01)
-        discriminator.bilinear.bilinear.weight.mul_(0.01)
+        discriminator.log_score_scale.fill_(math.log(0.01))
         quiet = listener(referents, messages)
 
     assert quiet.std().item() < 0.05 * loud.std().item()

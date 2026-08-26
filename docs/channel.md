@@ -67,6 +67,34 @@ also have to serve as a token prior, and the shape that suits the listener is no
 the shape that maximises sharpness. One parameter per job. It also keeps
 argmax-preservation, which a per-token gain would cost.
 
+**And it is absent from the backward pass into the stack behind it.** The gain
+goes on through `model_util.scale_without_attenuating`, so the forward is exactly
+`normalised × logit_scale` — the fidelity against the fixed 1.283 noise floor,
+which is the scale's real job and is untouched — while `∂/∂normalised` does not
+carry the scale. `∂L/∂log_logit_scale` is unchanged, so
+`scripts/ignition_audit.py`'s covariance reading is unaffected.
+
+The reason is the same one that put `ScoreVolume` on the listener, and it is a
+loop rather than a cost: a scale sliding down multiplies down every gradient
+reaching `outputs2vocab`, the stack and the vision model — the machinery that
+would have made raising it worthwhile. It slides in every run that fails,
+0.9094 → 0.6547 on rung 10 and 0.8648 → 0.7784 on rung 9, monotone.
+
+Measured, gradient norm into the raw logits on the decoder arm at a fixed seed:
+
+| `logit_scale` | 0.05 | 0.25 | 1.0 |
+|---|---|---|---|
+| plain product | 3.3e-8 | 1.5e-7 | 4.9e-7 |
+| through the helper | 6.6e-7 | 6.0e-7 | 4.9e-7 |
+
+Not an identity downstream of `gumbel_softmax`, because its soft surrogate is
+`softmax((scaled + g) / tau)` and that Jacobian is itself a function of `scaled`
+— which is the saturation, deliberately kept. What the helper removes is the
+uniform factor in front of it. Note the two swap over *above* ~1.0, where the
+plain product's extra factor partly offsets the softmax saturating: there the
+helper attenuates more. That is the regime no run on this ladder has reached, and
+the one they all travel through is the one in the table.
+
 ### `eps = 1e-12`, and why that is load-bearing
 
 `F.layer_norm` divides by `sqrt(var + eps)`, so scale invariance holds only while
@@ -91,9 +119,14 @@ decimal places, and the normaliser holds down to a standard deviation of ~1e-6.
 rather than something inferred after the fact.
 
 `receiver.LAYER_NORM_EPS` mirrors this constant for the same reason: at the 1e-5
-default a referent at RMS 0.01 comes out 4.5% off, taking the score's magnitude
-back out of `score_scale`'s hands and putting it back in the backbone's. Not
-currently binding — ViT2 emits RMS 0.23 — but closing it costs nothing.
+default a referent at RMS 0.01 comes out 4.5% off, taking the *relative* scores
+between candidates back out of the listener's hands and putting them in the
+backbone's. Not currently binding — ViT2 emits RMS 0.23 — but closing it costs
+nothing. The score's overall magnitude is no longer at stake there: the
+listener's readout standardises per game, so `score_scale` sets it whatever the
+operands do. What `referent_layer_norm` still buys is that a large candidate is
+not read *loudly for being large*, which a per-game normalisation downstream
+cannot undo. See `ScoreVolume` in [architecture.md](architecture.md).
 
 ## `mask_reserved_tokens`
 
@@ -330,10 +363,12 @@ samples at the configured `tau`.
 Both decode loops do this:
 
 ```python
-logits = mask_reserved_tokens(normalised * self.logit_scale)
+logits = mask_reserved_tokens(
+    model_util.scale_without_attenuating(normalised, self.logit_scale)
+)
 ```
 
-rather than multiplying the already-masked tensor. `d(logits · scale)/d(scale)`
+rather than scaling the already-masked tensor. `d(logits · scale)/d(scale)`
 is the logits themselves, so scaling *after* the mask sends `-inf` into the
 gradient w.r.t. the scale; the upstream gradient at those slots is zero, and
 `-inf × 0` is NaN. The AMP `GradScaler` reads that as an overflow and skips the

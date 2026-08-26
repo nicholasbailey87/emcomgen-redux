@@ -170,15 +170,23 @@ def test_the_staged_walkthrough_matches_the_forward_pass():
         test_score_scale.py for the first change and docs/architecture.md for
         the second.
 
-    What follows it now is the interpolation with the bilinear path, and this is
-        the test that pins its arithmetic: mix the two readouts at
-        `mix_weight`, add a bias. Nothing else. There was briefly a
-        `BatchNorm1d(1)` and a fixed gain in this position, which had to be
-        rebuilt on the same flattening `forward` used and left this test
-        sensitive to call order through the running estimates. Both are gone,
-        and so is the `standardise` on each path that stood here after them --
-        it survives only in the telemetry block, so the branches now reach the
-        mix at their own magnitudes and there is no volume scalar to apply.
+    What follows it now is the interpolation with the bilinear path and then the
+        readout, and this is the test that pins that arithmetic: mix the two at
+        `mix_weight`, standardise the mix per game, multiply by `score_scale`,
+        add a bias. Nothing else.
+
+    Note the order, because each step is somewhere it has to be. The branches
+        are *not* standardised individually -- that would make `mix_weight` mean
+        composition exactly and close the escape `mix_share` watches -- so the
+        `standardise` is on the mix. `score_scale` is after it, because a scale
+        before a standardise is annihilated. `mix_bias` is after that, for the
+        same reason: the centring removes any constant common to a game's
+        candidates, which is also why `decision` carries no bias.
+
+    There was briefly a `BatchNorm1d(1)` and a fixed gain in this position,
+        which had to be rebuilt on the same flattening `forward` used and left
+        this test sensitive to call order through the running estimates. Both
+        are gone. See test_score_scale.py for the whole sequence.
     """
     listener = _listener()
     discriminator = listener.discriminator
@@ -187,10 +195,14 @@ def test_the_staged_walkthrough_matches_the_forward_pass():
     with torch.no_grad():
         stages = _stages(listener, referents, messages)
         weight = discriminator.mix_weight
-        rebuilt = (
+        mixed = (
             (1.0 - weight) * stages["bilinear readout"]
             + weight * stages["attention readout"]
-        ) + discriminator.mix_bias
+        )
+        rebuilt = (
+            discriminator.score_scale * R.standardise(mixed)
+            + discriminator.mix_bias
+        )
         actual = listener(referents, messages)
 
     assert torch.allclose(rebuilt, actual, atol=1e-6)

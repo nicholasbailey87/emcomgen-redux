@@ -469,31 +469,65 @@ a rename into a silently-NaN column, and a silently-NaN column is how the
 cross-attention listener's collapse went unnoticed for a whole smoke test. A
 discriminator with no branch here raises rather than running unmeasured.
 
-The two answer with different columns because they no longer have the same
-mechanism:
+Both hold their volume the same way — one `ScoreVolume.log_score_scale` in front
+of a per-game `standardise` — and differ only in what else they have to report:
 
-| | volume | shape | mix |
-|---|---|---|---|
-| `BilinearDiscriminator` | `score_scale` | — | — |
-| `AttentionDiscriminator` | `mix_scale`, `decision_spread` | `decision_kurtosis` | `mix_alpha`, `path_agreement` |
+| | volume | shape | mix | drift |
+|---|---|---|---|---|
+| `BilinearDiscriminator` | `score_scale` | — | — | `bilinear_weight_norm` |
+| `AttentionDiscriminator` | `score_scale`, `decision_spread` | `decision_kurtosis` | `mix_alpha`, `mix_share`, `path_agreement` | `bilinear_weight_norm`, `decision_weight_norm` |
 
-**`score_scale`** — `BilinearDiscriminator` only, and only when it is the whole
-discriminator: `AttentionDiscriminator` owns one for its bilinear path but
-builds it with `score_scale=False`, because `standardise` runs on that path's
-output and divides any positive scale straight back out. `logit_scale` says how audibly
-the speaker states a message; this says how confidently the listener acts on one.
-Both dip during bootstrapping for the same reason — neither agent should commit
-while the message is still noise — and `29b18ea` measured the separation that
-tells a productive dip from a collapse: a healthy speaker fell ~0.2 log-units and
-returned within a few epochs, where the arm that died fell 0.94 and never did.
-There is deliberately no floor on either; `e3fcabd` tried one and it cost fifteen
-epochs.
+**`score_scale`** — both classes, one per discriminator.
+`AttentionDiscriminator` composes a `BilinearDiscriminator` built with
+`score_scale=False`, because its own readout standardises downstream of that
+path and `standardise(s · u) = standardise(u)` exactly, so a second scale there
+would take identically zero gradient.
+
+`logit_scale` says how audibly the speaker states a message; this says how
+confidently the listener acts on one. Both dip during bootstrapping for the same
+reason — neither agent should commit while the message is still noise — and
+`29b18ea` measured the separation that tells a productive dip from a collapse: a
+healthy speaker fell ~0.2 log-units and returned within a few epochs, where the
+arm that died fell 0.94 and never did. There is deliberately no floor on either;
+`e3fcabd` tried one and it cost fifteen epochs.
+
+**Read a slide differently than you used to.** The reason a monotone descent was
+alarming is that the scalar sat at the front of the score, so shrinking it
+multiplied down every gradient going back through the message and the channel
+into the speaker: a listener going quiet starved the speaker that would have
+made it worth listening to. `7b10d47` removed that coupling —
+`model_util.scale_without_attenuating` keeps the forward at `s · standardise(u)`
+while hiding `s` from the backward pass — so a low `score_scale` beside a
+*rising* `logit_scale` is now a coherent state rather than a contradiction. The
+column still says how confident the listener is; it no longer says what that
+confidence is costing the speaker.
+
+**`bilinear_weight_norm`, `decision_weight_norm`** — the branch weights' norms,
+and they mean different things on the two arms.
+
+On `BilinearDiscriminator` the readout standardises the module's whole output,
+so it is exactly scale-invariant in `bilinear.weight` and that weight learns
+direction alone. Its norm is therefore *drift*, not volume: with
+`weight_decay = 0.0` a scale-invariant weight's norm can only grow — its
+gradient is orthogonal to it, so `‖W + Δ‖² = ‖W‖² + ‖Δ‖²` — and its effective
+learning rate, `≈ lr · √d / ‖W‖` under Adam, decays with it. Slow growth is
+expected. Read it for the rate, not the direction.
+
+On `AttentionDiscriminator` the branches mix at their own magnitudes *before*
+the readout, so both norms still set what the score is made of. There they are
+load-bearing, and `mix_share` against `mix_alpha` is where the effect shows.
+
+These two were briefly the volume columns themselves, between `a9a6a9c` and
+`7b10d47`. That is the round in which `bilinear_weight_norm` travelled 1.3% of
+its norm in thirty epochs on rung 09 and 0.6% on rung 10, against the 59% the
+scalar it replaced managed — which is how a volume that cannot move looks in
+this column, and why the scalar came back.
 
 **`mix_alpha`** — `AttentionDiscriminator` only, and the column the whole split
 exists to produce. The attention path's share of the score:
 
 ```
-score = mix_scale * [ (1 - a) * bilinear_hat + a * attention_hat ] + bias
+score = score_scale * standardise( (1 - a) * bilinear + a * attention ) + bias
 a     = mix_floor + (1 - mix_floor) * sigmoid(mix_logit)
 ```
 
@@ -520,33 +554,30 @@ ended at 0.811, so this is not hypothetical. Read the four combinations:
 | climbing | high | attention is being taken up but has not yet found anything distinct |
 | climbing | low | attention is being taken up *for* something the bilinear path cannot express — the outcome the design is aimed at |
 
-**`mix_scale`** — `AttentionDiscriminator` only, and its counterpart of
-`score_scale`. Both mixed paths are standardised, so this one scalar is the only
-thing that sets the score's magnitude. Read it exactly as `score_scale` is read:
-a dip while the message is still noise is a pair correctly refusing to commit; a
-monotone descent that never returns is the collapse. No floor, for the reason
-given above.
-
-Note what the standardising does and does not close. Neither path can go quiet
-on its own, so the attention stack cannot escape being learned by turning itself
-down. The *pair* can still go quiet, through this scalar — which is the freedom
-the bootstrap needs, and the freedom a fixed gain took away when it stopped four
-rungs learning at all.
+**`mix_share`** — `AttentionDiscriminator` only, and the column to read *beside*
+`mix_alpha` rather than instead of it. `mix_alpha` is the weight `mix_logit`
+asked for; this is the share the score is actually made of, measured from the
+two branches standardised per game. They agreed while `forward` standardised
+each branch and no longer do, because the readout standardises the mix instead —
+which is deliberate: standardising per branch would make `mix_alpha` mean
+composition exactly, at the cost of closing the escape of turning one branch
+down rather than learning it. A gap between the two is a loud or quiet branch.
 
 **`decision_spread`** — `AttentionDiscriminator` only. Simply the standard
-deviation of the returned scores, which is `mix_scale` times the spread of the
-mixed standardised paths — so it is `mix_scale` read through the mix rather than
-off the parameter, and the two moving apart means the two paths have started to
-cancel. It opened around 0.57 under the four-stage structure this module
-replaced; the current arrangement opens near 1.0 by construction, since both
-mixed operands have unit spread per game and `mix_scale` opens at 1.0.
+deviation of the returned scores, which is now `score_scale` by construction:
+the readout standardises and then multiplies, so this is the same quantity the
+`score_scale` column reports, up to `mix_bias` and the pooling over the batch.
+Kept because it is defined on any discriminator with a `forward`, where the
+scale is a parameter this one happens to have. **Read `score_scale`.**
 
 A **monotone descent towards zero** is the finding: BCE reduces a loss it cannot
 otherwise reduce by becoming less confident, and nothing in this readout stops it.
 Wandering is not that. Nothing in the loss rewards the magnitude in either
 direction on a run that is learning; rung 10 carries the identical exposure and
 its `score_scale` falls 0.856 → 0.238 across thirty epochs while `train_acc`
-climbs. Sign-consistent descent alongside a flat `train_acc` is what to act on.
+climbs. Sign-consistent descent alongside a flat `train_acc` is what to act on —
+and since `7b10d47` even that is a statement about the listener alone, since the
+descent no longer reaches the speaker.
 
 Note the decision boundary is `scores = 0` and `train.py` reads `lis_scores > 0`,
 so accuracy is invariant to any positive rescale of the readout. That is why the
@@ -575,9 +606,12 @@ mass is not defined, and a silent 0.0 would read as "Gaussian, nothing to see" a
 exactly the moment there is something to see. `decision_spread` is the column
 that names that state.
 
-Note it now takes *both* paths going flat, or `mix_scale` going to zero, to get
-there: a constant attention readout standardises to zero and the mix falls back
-on the bilinear path, which keeps discriminating.
+Note the route there is `score_scale`, not the branches. Both branch weights at
+zero make every candidate in a game score identically, which is the 0/0
+`standardise`'s `clamp(min=1e-6)` exists for; short of that the readout
+normalises whatever shape survives and hands it back at `score_scale`. A
+constant attention readout, in particular, standardises to zero and the mix
+falls back on the bilinear path, which keeps discriminating.
 
 The column outlived the design it was built for; see [anecdotes.md](anecdotes.md).
 

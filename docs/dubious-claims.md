@@ -47,10 +47,13 @@ the signature and in `get_true_lang` and have been removed.
 
 ### `builder.py` on `score_scale_lr`
 
-The comment gating `score_scale_lr` notes, of itself: *"This comment previously
-argued the opposite, on the grounds that both comparers carried
-`log_score_scale`."* The current text is believed right, but the passage is a
-record of having been wrong about this once.
+The comment on `score_scale_lr` has now argued three positions in turn: that both
+comparers carried `log_score_scale` and so the key was ungated; that only the
+bilinear one did and so it was gated; and — since `a9a6a9c` deleted both scalars
+and `7b10d47` restored one shared `ScoreVolume` — that the key is ungated again,
+for a different reason than the first time. Each text was right about the code it
+described. The passage is a record of how often this particular parameter has
+moved.
 
 ### `layer_norm_logits` on its own headroom
 

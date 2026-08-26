@@ -53,6 +53,7 @@ WIDTH_256 = "15_shapeworld_receiver_cross_attention_lm.toml"
 #     must leave all of these alone.
 SCALAR_OVERRIDES = (
     ("log_logit_scale", "logit_scale_lr"),
+    ("log_score_scale", "score_scale_lr"),
     ("polarity_embedding", "polarity_embedding_lr"),
     ("mix_logit", "mix_logit_lr"),
     ("contrast_gate", "contrast_gate_lr"),
@@ -185,10 +186,11 @@ def test_the_modules_without_a_width_stay_at_base(config_file, module_name):
     base_lr = config["optimiser"]["lr"]
     lr_of = _lr_by_id(built["optimiser"])
 
-    # `SPLIT_LEARNING_RATES` still reaches inside these -- an
-    #     `AttentionDiscriminator` carries `mix_logit` at 2e-3 -- and muP being
-    #     out of scope is not a claim that nothing else moves. What is asserted
-    #     is that muP itself created no group here.
+    # `SPLIT_LEARNING_RATES` still reaches inside these -- every discriminator
+    #     carries `log_score_scale` at 2e-3, and an `AttentionDiscriminator`
+    #     carries `mix_logit` too -- and muP being out of scope is not a claim
+    #     that nothing else moves. What is asserted is that muP itself created
+    #     no group here.
     overridden = tuple(suffix for suffix, _ in SCALAR_OVERRIDES)
     unclaimed = [
         (n, p) for n, p in module.named_parameters()
@@ -288,15 +290,13 @@ def test_the_scalar_overrides_survive_the_muP_groups(config_file):
         seen += 1
         assert {lr_of[id(p)] for p in hits} == {config["optimiser"][key]}
 
-    # Every rung has `log_logit_scale`, so a rung that matched nothing would
-    #     mean the suffixes had gone stale rather than that the rung was
-    #     austere. It used to be `>= 2` on the grounds that every rung also
-    #     carried a listener volume -- `log_score_scale` or `log_mix_scale`.
-    #     Neither exists now: the listener's volume is in `bilinear.weight` and
-    #     `decision.weight`, which take the base rate and are muP's business,
-    #     not this table's. The baseline rungs are genuinely austere, with the
-    #     speaker's scale their only entry here.
-    assert seen >= 1
+    # Every rung has both volumes -- `log_logit_scale` on the speaker and
+    #     `log_score_scale` on the listener -- so a rung matching fewer than two
+    #     suffixes would mean the table had gone stale rather than that the rung
+    #     was austere. It was briefly `>= 1`, while the listener's volume lived
+    #     in `bilinear.weight` and `decision.weight` at the base rate; that is
+    #     the round `7b10d47` reversed.
+    assert seen >= 2
 
 
 @pytest.mark.parametrize("config_file", RUNGS)

@@ -501,27 +501,34 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     use the message), then a climb, then a plateau once the `uniform_weight`
     cap saturates fidelity and the gradient dies with it. A scale climbing
     while accuracy stays at chance is co-adaptation to a premature code.
-- `train_bilinear_weight_norm` — the listener's volume, and the counterpart of
-    `train_logit_scale`. `bilinear`'s weight now sets both the *direction* of
-    the comparison and its magnitude: both operands of the dot product are
-    layer-normalised without an affine and the product is divided by
-    `sqrt(referent_embedding_size)`, but the message operand is normalised
-    *before* the projection, so nothing downstream pins what comes out of it.
-    Live on every rung — the attention arm composes the same module, and reports
-    this alongside `train_decision_weight_norm` for its other branch.
+- `train_score_scale` — the listener's volume, and the counterpart of
+    `train_logit_scale`. `exp(log_score_scale)` on one lone scalar per
+    discriminator, in front of the candidate scores standardised per game, at an
+    elevated `score_scale_lr` of 2e-3. Live on every rung: the attention arm
+    composes a bilinear path built with `score_scale=False` and carries the one
+    scale downstream of its mix.
     It cannot move the decision: `scores > 0` and the reference-game argmax are
-    both invariant to a positive rescale. What it moves is BCE, and through BCE
-    every gradient in the pair — which is exactly why it needs a column, since
-    `train_acc` cannot see it.
-    This replaces `train_score_scale`, which read `exp(log_score_scale)` on a
-    lone scalar at an elevated `score_scale_lr` of 2e-3. That arrangement made
-    the volume legible and left it far too cheap to move: rungs 09 and 11 slid
-    0.9021 → 0.3731 and 0.9377 → 0.4072 across thirty epochs, monotone and never
-    returning, spending under 8% of the budget the elevated rate gave them.
-    Read the new column the same way — a dip while the message is still noise is
-    the listener correctly refusing to commit, and a monotone slide is a
-    collapse — but expect it to move more slowly, because a matrix has to turn
-    as well as shrink.
+    both invariant to a positive rescale. What it moves is BCE — which is
+    exactly why it needs a column, since `train_acc` cannot see it.
+    Read it as a dip and a return against a monotone slide, with one change from
+    how that used to be read. The slide is no longer a mechanism: the scale is
+    absent from the backward pass into the message, the token embedding and the
+    channel, so a quiet listener no longer starves the speaker. A low
+    `score_scale` beside a rising `train_logit_scale` is a coherent state.
+    It briefly did not exist. Between `a9a6a9c` and `7b10d47` the volume lived
+    in the weight matrices, on the argument that a matrix has no cheap move
+    downwards — true, and the problem: `train_bilinear_weight_norm` travelled
+    1.3% of its norm in thirty epochs on rung 09 and 0.6% on rung 10, against
+    the 0.9021 → 0.3731 the scalar it replaced managed.
+- `train_bilinear_weight_norm`, `train_decision_weight_norm` — the branch
+    weights' norms, and they mean different things on the two arms. On the
+    bilinear arm the readout standardises the module's whole output, so
+    `bilinear.weight` is exactly scale-invariant and learns direction alone:
+    read the norm as *drift*, and expect slow monotone growth, since with
+    `weight_decay = 0.0` a scale-invariant weight's gradient is orthogonal to it
+    and its effective learning rate decays as it grows. On the attention arm the
+    branches mix at their own magnitudes before the readout, so both norms still
+    set what the score is made of and `train_mix_share` is where that shows.
 - `train_sampling_tau` — the temperature actually handed to `gumbel_softmax`,
     as against the configured `tau`. A function of `train_logit_scale` and the
     epoch counter alone, so it carries no independent information, but it is

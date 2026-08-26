@@ -51,6 +51,7 @@ import _bootstrap  # noqa: F401
 from _bootstrap import config_section
 
 import data.language
+import models.model_util as model_util
 import models.sender as S
 from parse_config import get_config
 
@@ -414,6 +415,151 @@ def test_shape_still_moves_the_channel():
     peaked = S.mean_winning_probability(_masked(shapes["peaked"]), scale, 0.02)
 
     assert peaked.item() > typical.item() + 0.1
+
+
+def test_the_gain_is_absent_from_the_gradient_behind_it():
+    """
+    The speaker's half of the same change the listener got in `ScoreVolume`.
+
+    `sample_symbols` scales the layer-normed logits by `logit_scale`, which is
+    the ratio against the Gumbel noise floor of 1.283 and so *is* the channel's
+    fidelity -- the scale's real job, and this does not touch it. What it
+    touches is the backward pass: a scalar at the front of the logits otherwise
+    multiplies every gradient reaching `outputs2vocab`, the stack and the vision
+    model behind it, so a scale sliding down turns down the machinery that would
+    make raising it worthwhile.
+
+    Asserted at the helper, where the claim is exact. Downstream of
+    `gumbel_softmax` it is not, and
+    `test_the_gain_no_longer_starves_the_stack_as_it_falls` is where that is
+    measured.
+    """
+    normalised = _logit_shapes(14)["typical"]
+
+    for scale in (0.05, 1.0, 20.0):
+        gain = torch.tensor(float(scale), requires_grad=True)
+
+        plain_input = normalised.clone().requires_grad_(True)
+        (plain_input * gain).sum().backward()
+
+        trick_input = normalised.clone().requires_grad_(True)
+        model_util.scale_without_attenuating(trick_input, gain).sum().backward()
+
+        # The forward is the same and the gradient on the gain is the same;
+        #     only the gradient behind it differs, by exactly the factor.
+        assert torch.allclose(
+            model_util.scale_without_attenuating(normalised, gain.detach()),
+            scale * normalised,
+        )
+        assert torch.allclose(plain_input.grad, torch.full_like(normalised, scale))
+        assert torch.allclose(trick_input.grad, torch.ones_like(normalised))
+
+
+def test_the_gain_no_longer_starves_the_stack_as_it_falls():
+    """
+    The same property end to end, in the direction a run actually travels.
+
+    Not exact here, because `gumbel_softmax`'s soft surrogate is
+    `softmax((scaled + g) / tau)`, whose Jacobian is itself a function of
+    `scaled` -- that is the saturation, and it is deliberately kept. What the
+    helper removes is the *uniform* factor in front of it.
+
+    Measured on the decoder arm, gradient norm into the raw logits, same seed:
+
+        scale   0.05    0.25    1.0
+        plain   3.3e-8  1.5e-7  4.9e-7
+        trick   6.6e-7  6.0e-7  4.9e-7
+
+    So the plain product loses an order of magnitude of gradient as the scale
+    falls by 20x, and the helper does not. That is the regime rung 9 and rung 10
+    sit in: `logit_scale` 0.9094 -> 0.6547 on rung 10 across thirty epochs and
+    0.8648 -> 0.7784 on rung 9, monotone, never returning.
+
+    Upwards the two swap over -- the plain product's extra factor partly offsets
+    the softmax saturating, so above ~1.0 the helper attenuates *more*. Left
+    unasserted rather than pinned: it is the saturation doing what saturation
+    does, and no run on this ladder has reached it.
+    """
+    speaker = _transformer_speaker()
+    vocabulary = speaker.vocabulary
+    raw = _logit_shapes(vocabulary)["typical"]
+
+    def gradient_into_logits(scale):
+        logits = raw.clone().requires_grad_(True)
+        _set_knob(speaker, "logit_scale", scale)
+
+        torch.manual_seed(0)
+        onehot, _ = speaker.sample_symbols(logits)
+        onehot.sum().backward()
+
+        return logits.grad.norm().item()
+
+    at_one = gradient_into_logits(1.0)
+
+    for scale in (0.25, 0.05):
+        assert gradient_into_logits(scale) > at_one
+
+
+def test_the_gain_still_learns_exactly_as_it_did():
+    """
+    The other half, and the one the diagnosis rests on. `dz/dscale` is untouched
+    by the helper, so `dL/dlog_logit_scale` is bit-identical to what the plain
+    product gave -- which is what keeps the covariance
+    `scripts/ignition_audit.py` measures reading what it always read.
+
+    Both forms are built here rather than trusting the arithmetic, because
+    "unchanged" is the whole claim.
+    """
+    speaker = _transformer_speaker()
+    vocabulary = speaker.vocabulary
+    raw = _logit_shapes(vocabulary)["typical"]
+
+    def gradient_on_scale(plain):
+        logits = raw.clone().requires_grad_(True)
+        speaker.log_logit_scale.grad = None
+
+        normalised = S.layer_norm_logits(logits, vocabulary)
+        if plain:
+            scaled = S.mask_reserved_tokens(normalised * speaker.logit_scale)
+        else:
+            scaled = S.mask_reserved_tokens(
+                model_util.scale_without_attenuating(
+                    normalised, speaker.logit_scale
+                )
+            )
+        if speaker.uniform_weight > 0.0:
+            scaled = S.flatten_logit_distribution(scaled, speaker.uniform_weight)
+
+        torch.manual_seed(0)
+        F.gumbel_softmax(
+            scaled, tau=speaker.sampling_tau, hard=True, dim=-1
+        ).sum().backward()
+
+        return speaker.log_logit_scale.grad.item()
+
+    for scale in (0.05, 0.25, 1.0, 4.0, 20.0):
+        _set_knob(speaker, "logit_scale", scale)
+        assert gradient_on_scale(plain=False) == gradient_on_scale(plain=True)
+
+
+def test_the_gain_still_multiplies_the_forward_logits():
+    """
+    Nothing about the channel itself moves. The scaled logits are exactly
+    `logit_scale * normalised`, so `realised_survival`, `sampling_tau`'s
+    coupling and the mixture with `uniform_weight` all see what they always did.
+    """
+    speaker = _transformer_speaker()
+    vocabulary = speaker.vocabulary
+    raw = _logit_shapes(vocabulary)["typical"]
+
+    normalised = S.layer_norm_logits(raw, vocabulary)
+
+    for scale in (0.05, 1.0, 20.0):
+        _set_knob(speaker, "logit_scale", scale)
+        scaled = model_util.scale_without_attenuating(
+            normalised, speaker.logit_scale
+        )
+        assert torch.allclose(scaled, scale * normalised, atol=1e-5)
 
 
 # ---------------------------------------------------------- 3. Gumbel-max id

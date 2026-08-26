@@ -4,7 +4,7 @@ Findings and failures, with the numbers. Several current design choices only mak
 sense as the survivors of something that did not work, and this is where those
 are recorded.
 
-## The listener readout: two attempts and a revert
+## The listener readout: six attempts, and what each one was actually about
 
 The longest story in the codebase. It concerns the attention listener's
 `decision`, a bare `nn.Linear(d_model, 1)` — which is exactly where it started.
@@ -152,6 +152,87 @@ initialisation (raised 0.299 → 0.741 by undamping the referent stack's
 cross-attention branch — no effect); readout volume collapse (`|W|` fell 10% in
 1500 steps and the bias never moved); and a bounded listener scale (the working
 bilinear arm's own `score_scale` *falls* 0.856 → 0.238 and still reaches 1.000).
+
+### Attempts four and five, and why the fifth was the wrong lesson
+
+The two above are attempts one to three. What followed is the reason this section
+is now a sequence rather than a story with an ending.
+
+**Attempt four** put the volume in a named scalar on each arm —
+`log_score_scale` on the bilinear one, `log_mix_scale` downstream of the
+attention arm's standardised mix — both at an elevated 2e-3 so a lone scalar
+could move fast enough to matter.
+
+**Attempt five (`a9a6a9c`) took both scalars away and gave the volume to the
+weight matrices.** The complaint was legitimate and it is the one this whole
+section keeps circling: the listener spent that mobility squashing its own
+logits, 0.9021 → 0.3731 on rung 09 and 0.9377 → 0.4072 on rung 11, monotone and
+never returning. That is *correct behaviour* on a message carrying nothing, since
+BCE's minimiser is `p = 0.5` everywhere. But the scalar factors to the front of
+the score, so shrinking it multiplies down every gradient going back through the
+message and the channel into the speaker. Going quiet starved the speaker that
+would have made it worth listening to.
+
+The conclusion drawn was that the scalar was too cheap to move, and that a matrix
+— which has to turn as well as shrink — would not collapse the same way. It did
+not collapse. It did not move at all:
+
+| | epoch 0 | epoch 29 |
+|---|---|---|
+| `bilinear_weight_norm`, rung 09 | 13.055 | 12.889 |
+| `bilinear_weight_norm`, rung 10 | 13.049 | 12.968 |
+| `log_score_scale`, rung 09, attempt four | 0.9021 | 0.3731 |
+
+1.3% and 0.6% against 59%. A 320×320 matrix under Adam spends its step turning;
+the radial component is a small fraction of `lr` per step where a lone scalar
+moves about `lr` per step whatever its gradient. And `score_scale_lr` went with
+the scalar, so the matrix also dropped from the elevated group to the 1e-4 base.
+
+Rung 10 — the one rung on this ladder that has ever ignited — then sat at
+`train_loss` 0.7298 → 0.7006 for a whole run. Above `ln 2` throughout, which is
+worse than a constant predictor, with `realised_survival` collapsing 0.545 →
+0.190 and `pool_score_norm` climbing 0.0299 → 0.1876: a listener scoring hard on
+something that does not discriminate.
+
+**That is attempt two wearing a different hat.** Freedom that cannot be exercised
+at the available learning rate is a fixed gain, and it produces the same failure.
+The lesson of attempt five is not that the volume should live in a matrix; it is
+that "make the cheap move expensive" and "close the collapse" are the same
+intervention, and this readout has now been punished twice for it.
+
+### Attempt six: keep the scalar, remove the coupling
+
+`7b10d47`. The objection to the scalar was never that it shrank — it was that
+shrinking it also turned the speaker down. Those are two effects of one
+multiplication, and they are separable.
+
+`ScoreVolume` standardises the score per game and applies one `log_score_scale`
+through `model_util.scale_without_attenuating`: the forward is
+`s · standardise(u)`, `∂/∂u` does not carry `s`, and `∂/∂s` is unchanged. The
+listener can go as quiet as BCE asks — the freedom attempt two proved is
+required — and going quiet costs the speaker nothing. The same treatment went on
+the speaker's `logit_scale` in the same commit.
+
+What is deliberately *not* removed is the saturation. The gradient reaching the
+message is `σ(s·z) − y` where the plain product gives `s·(σ(s·z) − y)`: both go
+quiet on candidates already scored correctly once `s` is large, and only the
+uniform factor differs. At initialisation, where `z ≈ 0`, both are `≈ 0.5 − y`,
+which is to say this does not invent a bootstrap regime — it stops `s` taking
+away the one you start in.
+
+Two things in the record above are now wrong and are left in place rather than
+edited, because the sequence is the point. `score_scale_lr` is no longer gated on
+`BilinearDiscriminator`: `ScoreVolume` puts the same scalar on both, so one key
+reaches both and `mix_scale_lr` has no successor. And `standardise` is back in
+the forward path — on the *mixed* score rather than on each branch, which keeps
+the single volume knob without pinning the branches to equal spread. That
+reopens the escape attempt three closed: a branch can go quiet alone again, and
+`mix_share` against `mix_alpha` is what watches it rather than the structure
+forbidding it.
+
+Whether any of this makes a rung ignite is unknown at the time of writing. It
+removes a coupling that could hold the bootstrap shut; it does not supply what
+opens it.
 
 ## Frozen logit spread: NaN through a masked gradient
 
@@ -381,7 +462,10 @@ listener noisier without making it better, so send less.* That is a property of
 the loss at p ≈ 0.5, not of the dataset or the architecture, which is why it
 survived both interventions. It also unifies two things that had been read
 separately — the listener shrinking `score_scale` and the speaker shrinking
-`logit_scale` are the same hedge from opposite ends.
+`logit_scale` are the same hedge from opposite ends. `7b10d47` acts on that
+reading directly: both scalars now apply their gain without carrying it into the
+backward pass, so the hedge is still available to each agent and no longer
+charged to the other.
 
 Ignition is therefore a race: the first-order covariance term overtaking that
 penalty, which requires the listener to have learned the speaker's **accidental
