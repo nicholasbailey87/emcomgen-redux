@@ -447,13 +447,22 @@ def run(
             # rather than by `hasattr`, so a rename raises instead of quietly
             # producing a NaN column. See docs/measurement.md.
             #
-            # Both arms carry their volume in a weight matrix rather than in a
-            # scalar, so the volume column is that matrix's norm.
-            # `bilinear_weight_norm` replaces `score_scale`, which was the
-            # bilinear arm's scalar, and reads the same way: a healthy arm dips
-            # and returns, and the arm that dies slides monotonically. The
-            # attention arm has two such matrices and reports `decision_spread`
-            # for the readout they end up producing.
+            # `score_scale` is the volume column on both arms: one scalar per
+            # discriminator, downstream of the readout's per-game standardise.
+            # Read it the way it always was -- a dip and a return is a healthy
+            # listener declining to commit while the message is noise, a
+            # monotone slide is a collapse -- with one change: a slide no longer
+            # starves the speaker, because the scale is absent from the backward
+            # pass into the message. So a low `score_scale` beside a rising
+            # `logit_scale` is now a coherent state rather than a contradiction.
+            #
+            # The weight norms stay, and mean different things on the two arms.
+            # On the bilinear arm the readout standardises, so `bilinear.weight`
+            # is exactly scale-invariant and its norm is *drift*: with
+            # `weight_decay = 0.0` a scale-invariant weight's norm can only
+            # grow, and its effective learning rate decays with it. On the
+            # attention arm the branches mix at their own magnitudes before the
+            # readout, so both norms still set the mix and remain load-bearing.
             #
             # `mix_alpha` is the mixing *weight* and `mix_share` is the share
             # of the score each path actually contributes. They agreed while
@@ -466,6 +475,7 @@ def run(
                     discriminator, models.receiver.BilinearDiscriminator
                 ):
                     stats.update(
+                        score_scale=discriminator.score_scale.item(),
                         bilinear_weight_norm=(
                             discriminator.bilinear.weight.norm().item()
                         ),
@@ -475,6 +485,7 @@ def run(
                     discriminator, models.receiver.AttentionDiscriminator
                 ):
                     stats.update(
+                        score_scale=discriminator.score_scale.item(),
                         mix_alpha=discriminator.mix_alpha,
                         mix_share=discriminator.mix_share,
                         bilinear_weight_norm=(

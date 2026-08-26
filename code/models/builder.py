@@ -228,15 +228,33 @@ SPLIT_LEARNING_RATES = (
         ),
     ),
     (
+        # The listener's volume, and the counterpart of `logit_scale_lr` above:
+        #     both are a lone scalar in front of a normalised quantity, both
+        #     travel at most `lr * steps`, and both need to be able to move
+        #     within a run.
+        #
+        # Elevated on purpose, and that was once the objection: at 2e-3 the
+        #     listener could squash its own logits fast, which multiplied down
+        #     the gradient reaching the speaker. `a9a6a9c` answered that by
+        #     deleting the scalar, which left the volume in a 320x320 matrix
+        #     that moved 1.3% in thirty epochs. What made the rate harmful has
+        #     since been removed instead -- the scale is absent from the
+        #     backward pass into the message, see
+        #     `model_util.scale_without_attenuating` -- so a fast calibration is
+        #     now just a fast calibration.
+        #
+        # One key covers both discriminators: `ScoreVolume` puts the same
+        #     `log_score_scale` on each, so the `mix_scale_lr` that used to
+        #     move `AttentionDiscriminator`'s own scalar has no successor.
+        "score_scale_lr",
+        "log_score_scale",
+        lambda pair: True,
+    ),
+    (
         # Moves the parameter reported as `train_mix_alpha`. Named for the
         #     parameter rather than the column so the suffix beside it is
-        #     obviously the same thing.
-        #
-        # The last of the listener's elevated scalars. `score_scale_lr` and
-        #     `mix_scale_lr` sat here too, for `log_score_scale` and
-        #     `log_mix_scale`, until both volumes moved onto the weight
-        #     matrices that carry them -- see `receiver.BilinearDiscriminator`.
-        #     This one is a mixing weight and not a volume, so it stays.
+        #     obviously the same thing. A mixing weight and not a volume, which
+        #     is why it survived the round that took the volumes out.
         "mix_logit_lr",
         "mix_logit",
         lambda pair: isinstance(

@@ -758,6 +758,18 @@ class GumbelChannel:
             w.r.t. the scale, which becomes NaN and makes `GradScaler` skip
             every step -- silently, except for a frozen `logit_spread`. See
             docs/channel.md.
+
+        The gain goes on through `model_util.scale_without_attenuating`, so the
+            forward is exactly `normalised * logit_scale` -- the fidelity of the
+            channel against the fixed 1.283 Gumbel noise floor is the scale's
+            real job and is untouched -- while the backward into `normalised`,
+            and so into this speaker's whole stack and vision model, does not
+            carry the scale as a factor. `dL/dlogit_scale` is unchanged, so the
+            covariance `scripts/ignition_audit.py` measures still reads what it
+            always did; what changes is that a scale sliding down no longer
+            turns down the machinery that would have made raising it worthwhile.
+            The listener's `ScoreVolume` is the same treatment on the same
+            shape. See the helper's docstring.
         """
         normalised = layer_norm_logits(logits, self.vocabulary)
         masked = mask_reserved_tokens(normalised)
@@ -770,7 +782,9 @@ class GumbelChannel:
                 None,
             )
 
-        scaled = mask_reserved_tokens(normalised * self.logit_scale)
+        scaled = mask_reserved_tokens(
+            model_util.scale_without_attenuating(normalised, self.logit_scale)
+        )
 
         if self.uniform_weight > 0.0:
             scaled = flatten_logit_distribution(scaled, self.uniform_weight)
