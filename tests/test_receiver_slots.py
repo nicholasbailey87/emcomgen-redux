@@ -615,22 +615,22 @@ def test_the_attention_path_gets_gradient_at_the_opening_mix():
     )
 
 
-def test_standardise_runs_on_the_mix_and_on_each_branch():
+def test_standardise_runs_in_the_telemetry_and_not_in_the_forward_path():
     """
-    Both jobs, which are different jobs.
+    One job now, where it used to have two.
 
-    In the forward path it is `ScoreVolume.readout`'s normaliser, on the *mixed*
-        score, so the volume is one scalar and the branches keep their own
-        magnitudes. Standardising each branch instead would make `mix_logit`
-        mean composition exactly and close the escape of turning one path down,
-        which is precisely what `mix_share` exists to watch; see
-        `AttentionDiscriminator.forward`.
+    `485b38e` took it out of `ScoreVolume.readout`. It had been dividing each
+        game by the spread of its own candidate scores, which put the game's own
+        margin in the denominator; both of `BilinearDiscriminator`'s operands
+        arrive layer-normed, so the score is already backbone-independent and
+        already opens at `1/sqrt(3)` without it. What remains is the telemetry
+        block, where it runs per branch and gives `path_agreement` its Pearson-r
+        reading and `mix_share` its like-for-like comparison.
 
-    In the telemetry block it runs per branch, where it gives `path_agreement`
-        its Pearson-r reading and `mix_share` its like-for-like comparison.
-
-    Its arithmetic is unchanged and worth pinning, because every one of those
-        readings depends on it.
+    So the forward path must *not* leave a per-game spread of 1 -- that was the
+        signature of the centring, and the test asserted it until this commit --
+        while `standardise`'s own arithmetic stays pinned, because both
+        telemetry readings depend on it.
     """
     listener = build_listener(
         "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
@@ -638,12 +638,12 @@ def test_standardise_runs_on_the_mix_and_on_each_branch():
     ).eval()
     referents, messages = _inputs(listener)
 
-    # Standardised in the forward path, at `score_scale` -- which opens at 1.0,
-    #     so the per-game spread is exactly 1 before `mix_bias`.
+    # Not standardised: the readout is a volume, so the spread the score comes
+    #     out at is the one the branches and `score_scale` made, not 1.
     with torch.no_grad():
         scores = listener(referents, messages)
     spreads = scores.std(1, unbiased=False)
-    assert torch.allclose(spreads, torch.ones_like(spreads), atol=1e-4)
+    assert not torch.allclose(spreads, torch.ones_like(spreads), atol=1e-2)
 
     scores = torch.randn(BATCH, N_OBJ) * 17.0 + 4.0
     standardised = R.standardise(scores)
@@ -780,13 +780,16 @@ def test_the_two_arms_build_the_same_bilinear_comparison():
 
 def test_the_composed_bilinear_weight_reaches_the_mixed_score():
     """
-    The composed path is unstandardised where the *mix* is standardised, so its
-        weight still sets its branch's share of the score. That is what keeps
-        `mix_share` different from `mix_alpha`, and it is why the branch norms
-        stay load-bearing on this arm where they are inert on the other.
+    The composed path's weight sets its branch's share of the score. That is
+        what keeps `mix_share` different from `mix_alpha`, and it is why the
+        branch norms stay load-bearing on this arm.
 
-    The score's spread does not move with it -- the readout fixes that. What
-        moves is which branch the score is made of.
+    Since `485b38e` the score's *spread* moves with it too. It used not to --
+        the readout standardised, so a rescale of one branch changed the mix and
+        nothing else, and this test asserted the spread held to within 2%. With
+        the centring gone the volume is shared with the weights again on both
+        arms: `bilinear_weight_norm` means magnitude as well as direction, and
+        that is exactly what makes it readable as a metric.
     """
     listener = build_listener(
         "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
@@ -803,8 +806,9 @@ def test_the_composed_bilinear_weight_reaches_the_mixed_score():
 
     assert not torch.allclose(before, after, atol=1e-5)
     assert discriminator.mix_share < opening_share
-    assert after.std(1, unbiased=False).mean().item() == pytest.approx(
-        before.std(1, unbiased=False).mean().item(), rel=0.02
+    assert (
+        after.std(1, unbiased=False).mean().item()
+        > 10.0 * before.std(1, unbiased=False).mean().item()
     )
 
 

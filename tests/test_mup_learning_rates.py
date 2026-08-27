@@ -37,12 +37,12 @@ from gradboard.scheduler import PASS
 import models.builder as builder
 import parse_config
 
-from _bootstrap import CONFIG_DIR
+from _bootstrap import all_rungs, rung
 
 SHAPEWORLD_FEATS = (3, 64, 64)
 BIRDS_FEATS = (3, 224, 224)
 
-RUNGS = sorted(f for f in os.listdir(CONFIG_DIR) if f.endswith(".toml"))
+RUNGS = all_rungs()
 
 # The rungs each width first appears on, so a failure names the change that
 #     introduced it rather than the whole ladder.
@@ -62,7 +62,7 @@ SCALAR_OVERRIDES = (
 
 def _build(config_file):
     """A real rung through `models.builder`, with a stub dataloader."""
-    config = parse_config.get_config(os.path.join(CONFIG_DIR, config_file))
+    config = parse_config.get_config(rung(config_file))
     config["cuda"] = False
 
     class _Dataset:

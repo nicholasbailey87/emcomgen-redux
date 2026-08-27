@@ -13,17 +13,54 @@ sys.path.insert(
 from parse_config import get_config  # noqa: E402
 
 
-CONFIG_DIR = os.path.join(
+# Two directories, searched in order, because `experiments/ablation/configs/`
+#     is the live SLURM queue rather than the canonical home of the ladder:
+#     `scripts/run_experiment.sh` and `scripts/job_utils.py` build the job array
+#     from `configs/*.toml`, so `973a68b` moved fourteen rungs up a level to run
+#     two of them on their own. That is a legitimate workflow and the tests must
+#     survive it, so they resolve a rung wherever it is currently parked.
+#
+#     It went unnoticed for a day because the failure is a `FileNotFoundError`
+#     inside `get_config` at collection time, which reads as 159 failing tests
+#     rather than as a missing path. `test_there_are_sixteen_rungs` is the
+#     backstop: it fails if a rung goes missing from both directories.
+ABLATION_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..",
     "experiments",
     "ablation",
-    "configs",
 )
+
+CONFIG_DIRS = (os.path.join(ABLATION_DIR, "configs"), ABLATION_DIR)
 
 
 def rung(config_file):
-    return os.path.join(CONFIG_DIR, config_file)
+    """The path to one rung, wherever it is parked. Raises if it is nowhere."""
+    for directory in CONFIG_DIRS:
+        candidate = os.path.join(directory, config_file)
+        if os.path.exists(candidate):
+            return candidate
+
+    raise FileNotFoundError(
+        f"{config_file} is in none of {', '.join(CONFIG_DIRS)}"
+    )
+
+
+def all_rungs():
+    """
+    Every rung's file name, sorted, deduplicated across `CONFIG_DIRS`.
+
+    Names rather than paths, so a parametrised test's id stays readable and
+        stable wherever the file happens to live; pass each through `rung`.
+    """
+    found = set()
+    for directory in CONFIG_DIRS:
+        if os.path.isdir(directory):
+            found.update(
+                f for f in os.listdir(directory) if f.endswith(".toml")
+            )
+
+    return sorted(found)
 
 
 def config_section(section, config_file=None, **overrides):

@@ -172,16 +172,16 @@ def test_the_staged_walkthrough_matches_the_forward_pass():
 
     What follows it now is the interpolation with the bilinear path and then the
         readout, and this is the test that pins that arithmetic: mix the two at
-        `mix_weight`, standardise the mix per game, multiply by `score_scale`,
-        add a bias. Nothing else.
+        `mix_weight`, multiply by `score_scale`, add a bias. Nothing else.
 
     Note the order, because each step is somewhere it has to be. The branches
         are *not* standardised individually -- that would make `mix_weight` mean
-        composition exactly and close the escape `mix_share` watches -- so the
-        `standardise` is on the mix. `score_scale` is after it, because a scale
-        before a standardise is annihilated. `mix_bias` is after that, for the
-        same reason: the centring removes any constant common to a game's
-        candidates, which is also why `decision` carries no bias.
+        composition exactly and close the escape `mix_share` watches. `485b38e`
+        removed the `standardise` that used to sit on the mix, so what is left
+        is a volume and an offset. The offset is after the volume, so that it is
+        an offset on the score rather than one the volume rescales, and it is
+        also why `decision` carries no bias -- one constant across candidates
+        per module.
 
     There was briefly a `BatchNorm1d(1)` and a fixed gain in this position,
         which had to be rebuilt on the same flattening `forward` used and left
@@ -200,8 +200,7 @@ def test_the_staged_walkthrough_matches_the_forward_pass():
             + weight * stages["attention readout"]
         )
         rebuilt = (
-            discriminator.score_scale * R.standardise(mixed)
-            + discriminator.mix_bias
+            discriminator.score_scale * mixed + discriminator.mix_bias
         )
         actual = listener(referents, messages)
 

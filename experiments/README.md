@@ -12,12 +12,25 @@ experiments/<experiment>/logs/            # SLURM stdout/stderr, created at laun
 `<output_root>/<experiment>/<config>_seed<N>/` (see `results/README.md` and
 `config.json`), and the per-epoch trajectory lands in `metrics.csv` there.
 
+**`configs/` is the queue, not the ladder.** The array is built from
+`configs/*.toml`, so the way to run a subset is to move the rest one level up
+into `experiments/<experiment>/` and leave only what should be submitted --
+which is what `973a68b` did to run rungs 9 and 10 on their own. A rung parked
+up there is still a rung; it is just not queued.
+
+Anything that reads a rung must therefore look in both places.
+`tests/_bootstrap.rung` and `all_rungs` do, and so do the two probes in
+`diagnostics/`. The failure mode when something does not is quiet: a
+`FileNotFoundError` inside `parse_config.get_config` at collection time reads
+as a wall of failing tests rather than as a missing path, and it hid 159 tests
+for a day in August 2026. `test_there_are_sixteen_rungs` is the backstop.
+
 The rest of this file is a reference for the columns of that `metrics.csv`.
 
 ## The ablation ladder was renumbered
 
-`experiments/ablation/configs/` now holds **sixteen** rungs rather than fourteen,
-and the numbers moved. Anything written before that -- run directories, the
+The ablation now has **sixteen** rungs rather than fourteen, and the numbers
+moved. Anything written before that -- run directories, the
 `docs/` prose, `diagnostics/README.md`, commit messages -- names rungs in the old
 scheme, so read those numbers against this table rather than against the current
 configs:

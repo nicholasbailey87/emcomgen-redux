@@ -30,13 +30,13 @@ import broccoli.transformer
 import models.builder
 import parse_config
 
-from _bootstrap import CONFIG_DIR
+from _bootstrap import all_rungs, rung
 
 SHAPEWORLD_FEATS = (3, 64, 64)
 BIRDS_FEATS = (3, 224, 224)
 
 # Even rungs are CUB, odd rungs ShapeWorld.
-RUNGS = sorted(f for f in os.listdir(CONFIG_DIR) if f.endswith(".toml"))
+RUNGS = all_rungs()
 
 
 def _feats(config_file):
@@ -49,7 +49,7 @@ def _name(config_file):
 
 def _build(config_file, contrast=False):
     """A real rung, through `models.builder`, with a stub dataloader."""
-    config = parse_config.get_config(os.path.join(CONFIG_DIR, config_file))
+    config = parse_config.get_config(rung(config_file))
     config["cuda"] = False
     # Forced either way rather than inherited, so a test that builds both arms
     #     of a rung gets both arms whatever the rung itself says. Rungs 7 and
@@ -76,8 +76,24 @@ def _count(module):
 
 
 def test_there_are_sixteen_rungs():
-    """A rung added or renamed without the counts below being revisited."""
-    assert len(RUNGS) == 16
+    """
+    A rung added or renamed without the counts below being revisited -- and the
+        backstop for the other way this breaks.
+
+    `all_rungs` looks in `experiments/ablation/configs/` and in
+        `experiments/ablation/` above it, because the first is the live SLURM
+        queue rather than the ladder's home: `scripts/run_experiment.sh` builds
+        its job array from `configs/*.toml`, so running a subset means moving
+        the rest up a level. `973a68b` did exactly that and left `CONFIG_DIR`
+        pointing at the queue, which raised `FileNotFoundError` inside
+        `get_config` for the fourteen rungs that had moved and hid 159 tests for
+        a day.
+
+    That failure is quiet -- it reads as a wall of unrelated failures rather
+        than as a missing path -- so this is the test that names it. If a rung
+        is in neither directory, the count is wrong here first.
+    """
+    assert len(RUNGS) == 16, f"found {len(RUNGS)}: {RUNGS}"
 
 
 @pytest.mark.parametrize("config_file", RUNGS)

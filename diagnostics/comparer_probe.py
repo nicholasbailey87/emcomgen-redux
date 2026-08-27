@@ -59,10 +59,19 @@ import models.builder   # noqa: E402
 import models.receiver  # noqa: E402
 import parse_config     # noqa: E402
 
-DEFAULT_CONFIG = os.path.join(
-    os.path.dirname(__file__),
-    "..", "experiments", "ablation", "configs",
-    "16_birds_receiver_cross_attention_lm.toml",
+# `experiments/ablation/configs/` is the live SLURM queue, not the ladder's
+#     canonical home -- `scripts/run_experiment.sh` builds the job array from
+#     it, so rungs get moved a level up to take them out of the queue. Look in
+#     both, as `tests/_bootstrap.rung` does.
+DEFAULT_CONFIG = next(
+    path for path in (
+        os.path.join(
+            os.path.dirname(__file__), "..", "experiments", "ablation",
+            directory, "16_birds_receiver_cross_attention_lm.toml",
+        )
+        for directory in ("configs", "")
+    )
+    if os.path.exists(path)
 )
 
 # Only used to construct the vision models, which this probe never calls.

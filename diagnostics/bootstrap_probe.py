@@ -63,9 +63,25 @@ import models.builder   # noqa: E402
 import parse_config     # noqa: E402
 import train            # noqa: E402  -- for `clip_gradients`, the real one
 
-CONFIG_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "experiments", "ablation", "configs"
+# Both, in order: `experiments/ablation/configs/` is the live SLURM queue that
+#     `scripts/run_experiment.sh` builds its job array from, so rungs get moved
+#     a level up to take them out of it. Matches `tests/_bootstrap.rung`.
+CONFIG_DIRS = tuple(
+    os.path.join(os.path.dirname(__file__), "..", "experiments", "ablation", d)
+    for d in ("configs", "")
 )
+
+
+def rung(config_file):
+    """The path to one rung, wherever it is parked. Raises if it is nowhere."""
+    for directory in CONFIG_DIRS:
+        candidate = os.path.join(directory, config_file)
+        if os.path.exists(candidate):
+            return candidate
+
+    raise FileNotFoundError(
+        f"{config_file} is in none of {', '.join(CONFIG_DIRS)}"
+    )
 FEATS = {"cub": (3, 224, 224), "shapeworld": (3, 64, 64)}
 
 
@@ -157,7 +173,7 @@ def parse_args():
     )
     parser.add_argument(
         "--config",
-        default=os.path.join(CONFIG_DIR, "16_birds_receiver_cross_attention_lm.toml"),
+        default=rung("16_birds_receiver_cross_attention_lm.toml"),
     )
     parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument(

@@ -140,7 +140,7 @@ import models.builder
 import models.receiver as R
 import parse_config
 
-from _bootstrap import CONFIG_DIR, build_listener, config_section, rung
+from _bootstrap import build_listener, config_section, rung
 
 REFERENT_DIM = 512
 BATCH, N_OBJ, SEQ = 8, 20, 7
@@ -744,12 +744,13 @@ def test_the_readout_is_a_plain_linear_layer():
         `diagnostics/bootstrap_probe.py` where the same module with a plain
         readout reaches 0.863 and the bilinear baseline reaches 1.000.
 
-    The bias tracks whether anything downstream subtracts a mean, and it is off
-        now because `ScoreVolume.readout` does. It adds the same constant to
-        every candidate in a game and the readout's centring removes exactly
-        that, so it would take identically zero gradient -- dead rather than
-        harmless. `mix_bias`, downstream of the readout, is the score's one
-        offset and survives.
+    The bias stays off, and since `485b38e` for a different reason than it was
+        turned off for. It used to be *dead*: the readout centred each game, and
+        a constant added to every candidate is exactly what a centring removes,
+        so it would have taken identically zero gradient. The centring is gone,
+        so it is now merely redundant -- it adds the same constant across
+        candidates that `mix_bias` adds, one degree of freedom expressed by two
+        parameters free to drift against each other. One offset per module.
     """
     discriminator = _cross_comparer(referent_dim=320).discriminator
 
@@ -766,16 +767,24 @@ def test_the_readout_is_a_plain_linear_layer():
     assert not hasattr(discriminator, "mix_scale")
 
 
-def test_a_bias_on_the_readout_would_have_been_dead():
+def test_a_bias_on_the_decision_head_is_redundant_with_the_offset():
     """
-    Why `decision` has none. The measurement behind the docstring above: a
-        constant added to every candidate is exactly what the readout's centring
-        removes, so a bias there is not merely redundant with `mix_bias` -- it
-        cannot move the score at all.
+    Why `decision` has none. The measurement behind the docstring above, and it
+        changed with `485b38e`.
+
+    It used to be that a bias there could not move the score at all -- the
+        readout centred each game and a constant across candidates is exactly
+        what a centring removes. Now it moves the score by precisely the amount
+        `mix_bias` would have to be moved to match it: the attention branch is
+        multiplied by `mix_weight` and read out through `score_scale`, so a bias
+        of `b` on the head is worth `score_scale * mix_weight * b` on the score,
+        the same constant for every candidate in the game. Two parameters, one
+        degree of freedom.
     """
     listener = _quiet_cross_comparer()
     referents, messages = _inputs(listener)
-    decision = listener.discriminator.decision
+    discriminator = listener.discriminator
+    decision = discriminator.decision
 
     with torch.no_grad():
         before = listener(referents, messages)
@@ -786,12 +795,18 @@ def test_a_bias_on_the_readout_would_have_been_dead():
     with torch.no_grad():
         revived.weight.copy_(decision.weight)
         revived.bias.fill_(11.0)
-    listener.discriminator.decision = revived
+    discriminator.decision = revived
 
     with torch.no_grad():
         after = listener(referents, messages)
+        expected = (
+            discriminator.score_scale * discriminator.mix_weight * 11.0
+        ).item()
 
-    assert torch.allclose(after, before, atol=1e-4)
+    shift = after - before
+    # A constant across the game, and the one `mix_bias` also expresses.
+    assert shift.std(1, unbiased=False).max().item() < 1e-4
+    assert shift.mean().item() == pytest.approx(expected, rel=1e-3)
 
 
 def test_the_readout_opens_below_a_confident_wrong_answer():
@@ -823,20 +838,22 @@ def test_the_readout_opens_below_a_confident_wrong_answer():
     assert math.log(2.0) < loss < 1.0
 
 
-def test_the_decision_head_reaches_its_branch_share_and_not_the_volume():
+def test_the_decision_head_reaches_both_its_branch_share_and_the_volume():
     """
-    What the branch weights still do, and what they no longer do.
+    What the branch weights do, which since `485b38e` is both things.
 
-    They still set their branch's magnitude, and the branches are mixed
+    They set their branch's magnitude, and the branches are mixed
         unstandardised, so making one ten times louder changes what the score is
         *made of* without `mix_logit` moving at all. That gap is the whole
         reason `mix_share` is reported next to `mix_alpha`.
 
-    They no longer set the volume. The readout standardises the mix, so the
-        score's spread is `score_scale` whatever either weight is doing --
-        `decision_spread` does not move. Between those two facts sits the reason
-        this arrangement exists: composition is learned by matrices that have to
-        turn, volume by a scalar that only has to slide.
+    They now also set the volume, which they did not while the readout
+        standardised the mix -- this test asserted `decision_spread` held to
+        within 2% of its opening until that centring was removed. It moves now,
+        and that is the intended arrangement: nothing downstream divides a
+        rescale of a branch weight back out, so `decision_weight_norm` and
+        `bilinear_weight_norm` mean magnitude as well as direction and
+        `score_scale` is one voice among several rather than the only one.
     """
     listener = _quiet_cross_comparer()
     discriminator = listener.discriminator
@@ -852,9 +869,12 @@ def test_the_decision_head_reaches_its_branch_share_and_not_the_volume():
 
     assert not torch.allclose(after, before, rtol=1e-3, atol=1e-3)
     assert discriminator.mix_share > opening_share
-    assert discriminator.decision_spread == pytest.approx(
-        opening_spread, rel=0.02
-    )
+    # Well short of 10x, and it should be: `mix_logit_init` opens `mix_weight`
+    #     at ~0.116, so a 10x on the attention branch alone reaches the mix
+    #     diluted. Measured at 1.63x. What matters is that it moves at all.
+    assert discriminator.decision_spread > 1.5 * opening_spread
+    # `mix_alpha` is the parameter's own reading, so it is the one thing here
+    #     that must *not* move: it is what `mix_share` is compared against.
     assert discriminator.mix_alpha == pytest.approx(
         discriminator.mix_weight.item()
     )
@@ -888,18 +908,17 @@ def test_the_listener_can_still_go_quiet():
     assert discriminator.decision_spread < 0.01 * opening_spread
 
 
-def test_silencing_both_branches_no_longer_silences_the_score():
+def test_silencing_both_branches_silences_the_score():
     """
-    The other half of the inversion, and why `bilinear_weight_norm` and
-        `decision_weight_norm` are not volume columns on this arm either. Both
-        branch weights to zero used to be the only route to a silent listener;
-        the readout now standardises whatever shape survives, so the score comes
-        back out at `score_scale`.
+    The other half of the above, and why `bilinear_weight_norm` and
+        `decision_weight_norm` *are* volume columns on this arm.
 
-    Not vacuous -- `standardise` clamps its divisor at 1e-6, so a genuinely
-        collapsed mix would still read as collapsed. What this shows is that
-        1e-3 is nowhere near that clamp, which is the regime a training run
-        would actually reach.
+    This asserted the opposite between `7b10d47` and `485b38e`: with the readout
+        standardising the mix, turning both branches down to a thousandth left
+        the score coming back out at `score_scale` regardless, because
+        `standardise` divides by whatever spread survives and 1e-3 is nowhere
+        near its 1e-6 clamp. That is what made the branch norms unreadable as
+        volume, and it is gone.
     """
     listener = _quiet_cross_comparer()
     discriminator = listener.discriminator
@@ -912,7 +931,7 @@ def test_silencing_both_branches_no_longer_silences_the_score():
         still_loud = listener(referents, messages)
 
     assert still_loud.std(1, unbiased=False).mean().item() == pytest.approx(
-        before.std(1, unbiased=False).mean().item(), rel=0.02
+        1e-3 * before.std(1, unbiased=False).mean().item(), rel=0.05
     )
 
 
@@ -1231,7 +1250,7 @@ def test_the_volume_still_learns_and_still_wants_to_be_quiet_on_noise():
 # --------------------------------------------------------------------------
 
 def _pair_and_optimiser(config_file):
-    config = parse_config.get_config(os.path.join(CONFIG_DIR, config_file))
+    config = parse_config.get_config(rung(config_file))
     config["cuda"] = False
 
     class _Dataset:
