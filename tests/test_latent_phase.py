@@ -191,22 +191,28 @@ def test_the_gru_speaker_ignores_the_multiplier():
 
 # --------------------------------------------------------- the polarity tag --
 
-def test_the_tag_opens_antipodal_at_the_prototype_scale():
+def test_the_tag_opens_as_two_independent_draws_at_the_prototype_scale():
     """
-    One draw, negated for the negative row. Only `e_pos - e_neg` reaches the
-    cross-attention, so an antipodal pair buys twice the readable separation per
-    unit of tag magnitude that two independent draws would, and there is no
-    traverse out of zero before the tag can be read at all.
+    A draw per row rather than one draw negated. The rows are near-orthogonal
+    and that is not the point: only `e_pos - e_neg` reaches the cross-attention,
+    since the two prototypes are its whole key/value sequence, so an independent
+    pair is exactly an antipodal one along `(e_pos - e_neg) / 2` plus a common
+    mode the softmax annihilates and the value path returns as a constant. What
+    changes is magnitude, and only magnitude.
 
     The scale is the draw's own: the tag is summed with `referent_layer_norm`'s
-    output, which is at per-element unit variance when that norm is reset, so
-    `randn_like` already lands at the scale of the thing it is tagging. That
-    fixes the opening separation at `2 * sqrt(d_model)` up to sampling noise,
-    which is why the tolerances below are loose rather than exact.
+    output, which is at per-element unit variance when that norm is reset, so a
+    unit-variance draw already lands at the scale of the thing it is tagging.
+    Independent rows put the opening separation at `sqrt(2 * d_model)` = 25.3
+    rather than the antipodal `2 * sqrt(d_model)` = 35.8, up to sampling noise
+    -- which is why the tolerances below are loose rather than exact. Read that
+    against the 13.19 the one rung 10 that learned settled at from a zero init:
+    docs/architecture.md called the antipodal opening a 2.7x overshoot, and this
+    halves it.
     """
     speaker = _speaker()
 
-    assert torch.equal(
+    assert not torch.equal(
         speaker.polarity_embedding[0], -speaker.polarity_embedding[1]
     )
     assert (speaker.polarity_embedding != 0).any()
@@ -215,7 +221,7 @@ def test_the_tag_opens_antipodal_at_the_prototype_scale():
     separation = (
         speaker.polarity_embedding[0] - speaker.polarity_embedding[1]
     ).norm().item()
-    assert separation == pytest.approx(2 * D_MODEL ** 0.5, rel=0.15)
+    assert separation == pytest.approx((2 * D_MODEL) ** 0.5, rel=0.15)
 
     assert speaker.polarity_separation != speaker.polarity_separation  # NaN
 
@@ -259,11 +265,11 @@ def test_a_learned_tag_tells_the_prototypes_apart():
 
 def test_the_two_tag_rows_receive_different_gradients():
     """
-    The rows open antipodal and have to stay free to move apart from there. They
-    do because the gradient at each row is the gradient of the sequence position
-    it was added to, and the two prototypes differ in content -- nothing ties
-    `e_neg` to `-e_pos` after the init, so the pair is a starting point rather
-    than a constraint.
+    The rows open as independent draws and have to stay free to move relative to
+    each other. They do because the gradient at each row is the gradient of the
+    sequence position it was added to, and the two prototypes differ in content
+    -- nothing ties the rows together after the init, so the draw is a starting
+    point rather than a constraint.
     """
     speaker = _speaker()
 
@@ -305,8 +311,8 @@ def test_reset_parameters_restores_the_tag_and_the_diagnostic():
 
     speaker.reset_parameters()
 
-    assert torch.equal(
-        speaker.polarity_embedding[0], -speaker.polarity_embedding[1]
+    assert not torch.equal(
+        speaker.polarity_embedding[0], speaker.polarity_embedding[1]
     )
     assert (speaker.polarity_embedding != 0).any()
     assert speaker.polarity_separation != speaker.polarity_separation  # NaN

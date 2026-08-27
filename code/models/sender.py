@@ -369,6 +369,11 @@ class ExampleContrast(nn.Module):
         speaker relies on; `label_embedding` is the only route, and it is
         indexed from the labels rather than from the halving index.
         `tests/test_contrast.py` pins both halves of that.
+
+        The tag rides the queries and keys only; the values are the untagged
+        referents. Polarity chooses what a query reads and is absent from what
+        comes back, which is what stops the stage collapsing into a learned
+        per-polarity offset. See `forward`.
     """
 
     def __init__(
@@ -452,9 +457,26 @@ class ExampleContrast(nn.Module):
                 the set.
         """
         tag = self.label_embedding[(1.0 - labels).long()]
-        adapted = self.layer_norm(self.adapter(samples)) + tag
+        adapted = self.layer_norm(self.adapter(samples))
 
-        branch = self.out_projection(self.attention(adapted, adapted, adapted))
+        # Tagged as queries and keys, untagged as values. Polarity decides which
+        #     referents a query reads and is deliberately absent from what comes
+        #     back. With the tag in the values too, every output carries
+        #     `(sum_pos a - sum_neg a) * V(tag)` -- a free learned per-polarity
+        #     vector, which is the cheapest thing this stage can produce and is
+        #     not contrast between examples at all. `contrast_within_share` is
+        #     the column that reads it: 0.50-0.67 on the rung 10 run that
+        #     learned, against 0.0034 on the 2026-08-26 one that did not, where
+        #     99.7% of the branch was a common vector plus that offset.
+        #
+        # The addressing survives, which is the case the stage exists for: a
+        #     positive query finds the negatives through their keys and gets
+        #     their *content* back to compare itself against, rather than a flag
+        #     saying "negative". A polarity-shaped output can still emerge --
+        #     a query attending only to positives returns the positive mean --
+        #     but it is then built from content rather than from a parameter.
+        tagged = adapted + tag
+        branch = self.out_projection(self.attention(tagged, tagged, adapted))
         contribution = self.contrast_gate * branch
 
         self._record_diagnostics(samples, branch, contribution)
@@ -1439,11 +1461,21 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
         self.query_layer_norm.reset_parameters()
         self.referent_layer_norm.reset_parameters()
         self.latent_layer_norm.reset_parameters()
-        positive_tag = torch.randn_like(self.polarity_embedding[0])
+        # Two independent draws rather than an antipodal pair. Only
+        #     `e_pos - e_neg` reaches the cross-attention -- the two prototypes
+        #     are its whole key/value sequence, so softmax annihilates whatever
+        #     the rows share and the value path returns it as a constant -- and
+        #     an independent pair is exactly an antipodal one along
+        #     `(t_pos - t_neg) / 2` plus that constant. So this is a magnitude
+        #     change and not a geometry one: the opening separation goes from
+        #     `2 * sqrt(d_model)` = 35.8 to `sqrt(2 * d_model)` = 25.3, against
+        #     the 13.19 the one learning rung 10 settled at from a zero init.
+        #     docs/architecture.md called the antipodal opening a 2.7x
+        #     overshoot; this halves the overshoot. `polarity_separation` still
+        #     reads the difference correctly, but the common mode it now has is
+        #     not logged anywhere.
         with torch.no_grad():
-            self.polarity_embedding.copy_(
-                torch.stack([positive_tag, -positive_tag])
-            )
+            self.polarity_embedding.normal_(mean=0.0, std=1.0)
         self.cross_attention.reset_parameters()
         self.transformer.reset_parameters()
 
