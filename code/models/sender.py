@@ -738,11 +738,12 @@ class GumbelChannel:
             gradient w.r.t. the scale. All of that, and what the coupling buys,
             is in docs/channel.md.
         """
-        ratio = torch.clamp(
-            self.logit_scale.detach() / self.initial_logit_scale, min=1.0
-        )
-        weight = 0.5 * (1.0 + math.cos(math.pi * min(self.training_progress, 1.0)))
-        return self.tau * (1.0 + weight * (ratio - 1.0))
+        return self.tau
+        # ratio = torch.clamp(
+        #     self.logit_scale.detach() / self.initial_logit_scale, min=1.0
+        # )
+        # weight = 0.5 * (1.0 + math.cos(math.pi * min(self.training_progress, 1.0)))
+        # return self.tau * (1.0 + weight * (ratio - 1.0))
 
     @property
     def logit_scale(self):
