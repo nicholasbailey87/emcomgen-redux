@@ -738,7 +738,8 @@ class GumbelChannel:
             gradient w.r.t. the scale. All of that, and what the coupling buys,
             is in docs/channel.md.
         """
-        return self.tau
+        # `torch.as_tensor` only so `train.py`'s `.item()` still works.
+        return torch.as_tensor(self.tau)
         # ratio = torch.clamp(
         #     self.logit_scale.detach() / self.initial_logit_scale, min=1.0
         # )
