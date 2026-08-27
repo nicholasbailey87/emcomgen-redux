@@ -82,14 +82,50 @@ class ScoreVolume:
         `state_dict` key is the one `split_out_parameter` matches by suffix and
         the one earlier checkpoints were written against.
 
-    The readout is a plain `score_scale * scores`. The scalar still sits in
-        front of a normalised quantity -- that pairing is what stops the volume
-        meaning something different under every backbone -- but the normalising
-        happens on the discriminator's *inputs* rather than on its output.
+    The readout is `score_scale * scores + score_bias`: a volume and an offset,
+        in that order. The scalar still sits in front of a normalised quantity
+        -- that pairing is what stops the volume meaning something different
+        under every backbone -- but the normalising happens on the
+        discriminator's *inputs* rather than on its output.
         `BilinearDiscriminator` layer-norms both operands of its bilinear form,
         so its score opens at `1 / sqrt(3)` at any width and any backbone by
         construction, and there is nothing left for a normaliser downstream to
         fix.
+
+    **Why there is an offset at all.** `train.py` decides on `lis_scores > 0`,
+        so the threshold is a fixed origin and the listener has to place its
+        scores against it. Before this pair of parameters lived together only
+        `AttentionDiscriminator` could: it had a `mix_bias`, and rungs 1-12 --
+        every rung on the bilinear arm -- had no bias anywhere, `bilinear`
+        being built `bias=False` and the readout a bare multiply. The bilinear
+        score for candidate `j` is `LN(r_j) . proj`, so the only way to move
+        all candidates together was for `proj` to align with whatever direction
+        the candidates have in common, which is data-dependent and spends
+        discriminative capacity in that direction. `mix_bias` is retired into
+        this one: two constants across candidates are one degree of freedom
+        split across two parameters.
+
+    **Why downstream of the volume**, which is the whole reason `mix_bias` sat
+        where it did. An offset applied before the scale is multiplied by it, so
+        the threshold would slide every time the listener changed how loudly it
+        spoke -- and `score_scale` moves fast, at `score_scale_lr`. Downstream,
+        it is an offset on the score itself and the two parameters say
+        independent things.
+
+    **What the offset cannot do.** Games are balanced 10 positive / 10
+        negative, so the loss-optimal *global* offset is near zero and
+        `score_bias` should be expected to sit there. It corrects a systematic
+        offset in where the scores sit; it cannot correct a per-game one, and
+        the bilinear score's per-game mean is `mean_j(LN(r_j)) . proj`, which
+        varies by game. If it moves and accuracy does not, the offset was
+        per-game, no scalar reaches that, and the answer is a different readout
+        rather than a bigger bias.
+
+        It is also not what makes a run start. Rung 9's 2026-08-27 run sat at
+        chance for ten epochs with `train_loss` at 0.6935 against `ln 2` =
+        0.6931 -- the trivial optimum of scoring everything near zero, which is
+        the point an offset gets you *to*. There was no headroom in it. That
+        flat start was `sampling_tau` pinning `log_logit_scale`.
 
     **Why not standardise the score.** `7b10d47` read out
         `score_scale * standardise(scores)`, dividing each game by the spread of
@@ -140,6 +176,10 @@ class ScoreVolume:
             thing and the pair would drift against each other. One volume per
             discriminator. Absent rather than frozen, so
             `split_out_parameter`'s suffix match sees the truth.
+
+        It gates the offset too, for the matching reason: the outer readout is
+            what reaches the decision, and an inner constant is annihilated by
+            nothing -- it would simply be degenerate with the outer one.
         """
         self.learns_score_scale = learns_score_scale
 
@@ -150,6 +190,10 @@ class ScoreVolume:
             #     at its own calibrated opening of `1 / sqrt(3)` -- see
             #     `BilinearDiscriminator.forward`.
             self.log_score_scale = nn.Parameter(torch.zeros(()))
+
+            # Not a log, unlike the volume: an offset is signed, and zero is
+            #     both where it opens and a value it must be able to return to.
+            self.score_bias = nn.Parameter(torch.zeros(()))
 
     @property
     def score_scale(self):
@@ -162,28 +206,30 @@ class ScoreVolume:
 
     def readout(self, scores):
         """
-        Apply the volume. Nothing else -- the normalising this used to do is on
-            the discriminator's inputs instead, where it cannot put the game's
-            own margin in the denominator. See the class docstring.
+        Apply the volume, then the offset. Nothing else -- the normalising this
+            used to do is on the discriminator's inputs instead, where it cannot
+            put the game's own margin in the denominator. See the class
+            docstring, including why the offset is second.
 
         A discriminator built with `learns_score_scale=False` returns the
-            comparison untouched. Its caller owns the volume for the whole
-            module and a second one here would be degenerate with the mix
-            weight.
+            comparison untouched. Its caller owns both scalars for the whole
+            module and a second pair here would be degenerate with them.
         """
         if not self.learns_score_scale:
             return scores
 
-        return self.score_scale * scores
+        return self.score_scale * scores + self.score_bias
 
-    def reset_score_scale(self):
+    def reset_score_volume(self):
         """
-        Put the volume back to its 1.0 opening, so a reset does not leave a
-            trained confidence behind a fresh listener.
+        Put the volume back to its 1.0 opening and the offset back to zero, so
+            a reset does not leave a trained confidence or a trained threshold
+            behind a fresh listener.
         """
         if self.learns_score_scale:
             with torch.no_grad():
                 self.log_score_scale.zero_()
+                self.score_bias.zero_()
 
 
 # --------------------------------------------------------------------------
@@ -546,7 +592,7 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
 
     def reset_parameters(self):
         self.bilinear.reset_parameters()
-        self.reset_score_scale()
+        self.reset_score_volume()
         # No-ops while the two norms are parameter-free, and listed anyway so
         #     that turning `elementwise_affine` back on cannot leave a reset
         #     listener holding trained gains.
@@ -735,9 +781,11 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         #     once, restored, and removed again when the readout's centring
         #     would have annihilated it. The centring has since gone and the
         #     bias stays off, for a third reason: it adds the same constant to
-        #     every candidate, and so does `mix_bias` below, so the two would be
-        #     degenerate and free to drift against each other. One offset per
-        #     module, and it is `mix_bias`. See docs/anecdotes.md.
+        #     every candidate, and so does `ScoreVolume.score_bias`, so the two
+        #     would be degenerate and free to drift against each other. One
+        #     offset per module, and it is the one on the readout, where every
+        #     discriminator has it and `train.py` logs it. This is where
+        #     `mix_bias` used to be named. See docs/anecdotes.md.
         #
         # It reads straight off the referent stack's last post-norm, which is an
         #     `RMSNorm` and so already equalises the candidates' lengths -- no
@@ -766,19 +814,22 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
             torch.tensor(float(self.mix_logit_init))
         )
 
-        # The score's offset, and the only thing downstream of the readout.
-        #     Downstream so that it is an offset on the score itself rather than
-        #     one the volume rescales -- `score_scale` moves fast at
-        #     `score_scale_lr`, and a threshold that slid every time the listener
-        #     changed how loudly it spoke would be a second thing to learn. It
-        #     is also the module's one constant across candidates, which is why
-        #     `decision` above has no bias.
+        # No offset here. It was `mix_bias`, a scalar added after the readout,
+        #     and it is now `ScoreVolume.score_bias` -- the same scalar, the
+        #     same position, applied by the same `readout`, but on both
+        #     discriminators rather than only this one. `BilinearDiscriminator`
+        #     had no bias anywhere, so rungs 1-12 could not place their scores
+        #     against `train.py`'s fixed `lis_scores > 0` threshold at all. The
+        #     argument for the position -- downstream of the volume, so the
+        #     threshold does not slide every time the listener changes how
+        #     loudly it speaks -- is in `ScoreVolume`'s docstring, where it now
+        #     belongs. `mix_bias` also had no config key and no metrics column;
+        #     `score_bias` has both.
         #
-        # This is where a `log_mix_scale` used to sit, carrying the volume for
-        #     the whole module. There is again exactly one volume scalar here,
-        #     but it is `ScoreVolume.log_score_scale` -- the same one the
+        # This is also where a `log_mix_scale` used to sit, carrying the volume
+        #     for the whole module. There is again exactly one volume scalar
+        #     here, but it is `ScoreVolume.log_score_scale` -- the same one the
         #     bilinear arm has, under the same config key, applied the same way.
-        self.mix_bias = nn.Parameter(torch.zeros(()))
 
         # Metrics only: set on every `forward`, read by `train.py`. See
         #     docs/measurement.md.
@@ -865,7 +916,7 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
 
         weight = self.mix_weight
         mixed = (1.0 - weight) * bilinear + weight * attention
-        scores = self.readout(mixed) + self.mix_bias
+        scores = self.readout(mixed)
 
         # `.item()` in a forward pass costs a sync and a graph break under
         #     `torch.compile`, which is on. Paid deliberately -- a metric nobody
@@ -911,7 +962,7 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         #     column cannot see a volume collapse. `score_scale` can.
         #
         # The threshold is a fixed zero again, not each game's own mean score:
-        #     the readout no longer centres, so `mix_bias` moves the threshold
+        #     the readout no longer centres, so `score_bias` moves the threshold
         #     against a fixed origin rather than against a moving one. `train_acc`
         #     is not comparable across this change in either direction.
         return scores
@@ -924,9 +975,8 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         self.referent_decoder.reset_parameters()
         self.decision.reset_parameters()
         self.bilinear.reset_parameters()
-        self.reset_score_scale()
+        self.reset_score_volume()
         nn.init.constant_(self.mix_logit, float(self.mix_logit_init))
-        nn.init.zeros_(self.mix_bias)
 
 
 class Receiver(nn.Module):

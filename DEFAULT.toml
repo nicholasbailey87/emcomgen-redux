@@ -319,6 +319,35 @@ logit_scale_lr = 2e-3
 # listener declining to commit, a monotone slide is a collapse.
 score_scale_lr = 2e-3
 
+# The offset half of the same readout: `ScoreVolume.score_bias`, added after
+# the volume, on both discriminators.
+#
+# `train.py` decides on `lis_scores > 0`, so this is the parameter that places
+# the scores against that fixed origin. Before it existed only
+# `AttentionDiscriminator` could -- it had a `mix_bias`, and the twelve rungs on
+# the bilinear arm had no bias anywhere, `bilinear` being built `bias=False` and
+# the readout a bare multiply. `mix_bias` is retired into this: same position,
+# same arithmetic, both arms, and now with a key and a column.
+#
+# Elevated for the reason every lone scalar here is. A 0-d parameter moves about
+# `lr` per step whatever its gradient, so its whole travel is bounded by
+# `lr * steps`. At birds' 194 steps an epoch, 2e-3 gives 0.39 an epoch against a
+# score whose opening spread is 0.577 -- a threshold it can actually place
+# within a run. `mix_bias` had no key and so sat at the base 1e-4, which bounded
+# its entire thirty-epoch travel at 0.58; that looks like an oversight rather
+# than a decision.
+#
+# What to expect in `train_score_bias`, and this is not the usual "bigger is
+# better". Games are balanced 10 positive / 10 negative, so the loss-optimal
+# global offset is about zero and staying there is the healthy reading -- it
+# means the scores already sit where the threshold assumes. A large sustained
+# value is a *finding*: the scores are systematically off, and worth
+# understanding rather than celebrating. A scalar also cannot correct a
+# per-game offset, and the bilinear score's per-game mean is
+# `mean_j(LN(r_j)) . proj`, which varies by game. If this moves and accuracy
+# does not, the offset was per-game and the answer is a different readout.
+score_bias_lr = 2e-3
+
 # The same elevated rate, for `SenderTransformerLM.polarity_embedding` -- the
 # learned tag that tells that speaker which of its two prototypes is the
 # positive concept. Deliberately a second key rather than a reuse of the one

@@ -163,7 +163,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # the `bilinear` weight and nothing else: it was 524,289 while
         # `log_score_scale` carried the volume, and that scalar is gone -- the
         # weight carries it now. See test_score_scale.py.
-        ("01_shapeworld_baseline.toml", "receiver.discriminator", 524_289),
+        ("01_shapeworld_baseline.toml", "receiver.discriminator", 524_290),
         # ShapeWorld: the top of the ladder. The speaker's language model is the
         # causal arm at six blocks -- see rung 9's `layers` for why six, and why
         # it was four until the blocks stopped cross-attending.
@@ -175,7 +175,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         ("02_birds_baseline.toml", "sender.feat_model", 11_176_512),
         ("02_birds_baseline.toml", "sender.language_model", 5_774_073),
         ("02_birds_baseline.toml", "receiver.language_model", 4_687_872),
-        ("02_birds_baseline.toml", "receiver.discriminator", 524_289),
+        ("02_birds_baseline.toml", "receiver.discriminator", 524_290),
         # CUB: the top of the ladder. Only the two vision-dependent counts differ
         # from ShapeWorld's -- the ViT's patch tokeniser scales with image size,
         # and the speaker's language model carries a longer message.
@@ -193,12 +193,22 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # These two are unchanged across `7b10d47`, and the arithmetic is worth
         # stating because it is a coincidence: the module gained one parameter
         # in `log_score_scale` and lost one in `decision.bias`, which the
-        # readout's per-game centring annihilates. Its composed bilinear path
-        # again has no `log_score_scale`, being built with `score_scale=False`.
+        # readout's per-game centring annihilated. Its composed bilinear path
+        # has neither of `ScoreVolume`'s scalars, being built with
+        # `score_scale=False`.
         #
-        # The bilinear discriminator's 524,288 became 524,289 in the same
-        # commit: it gained the scalar with no bias to lose. That is the whole
-        # cost of the listener's volume.
+        # Unchanged again by the commit that added `score_bias`, and again by
+        # coincidence: this module already had an offset in `mix_bias`, which
+        # `score_bias` replaces one for one. What changed is where it lives and
+        # that it now has a config key and a metrics column.
+        #
+        # The bilinear discriminator's 524,288 became 524,289 across `7b10d47`
+        # -- it gained the volume with no bias to lose -- and 524,290 with
+        # `score_bias`, which is the parameter it never had. Before that it had
+        # no bias anywhere, `bilinear` being built `bias=False`, so nothing in
+        # rungs 1-12 could place the score against `train.py`'s fixed
+        # `lis_scores > 0`. Two scalars is the whole cost of the listener's
+        # readout.
         ("13_shapeworld_attention_discriminator.toml", "receiver.discriminator", 2_990_662),
         ("14_birds_attention_discriminator.toml", "receiver.discriminator", 2_990_662),
         # The two intermediate vision swaps, so a rung that stopped inheriting

@@ -110,9 +110,10 @@ def is_mup_exempt(name, parameter):
 
     The exemption is load-bearing for a second reason: it makes the muP groups
         disjoint from every entry in `SPLIT_LEARNING_RATES` by construction.
-        `log_logit_scale`, `mix_logit` and `contrast_gate` are all 0-d;
-        `polarity_embedding` is 2-d but matches "embedding". So no parameter can
-        be claimed twice however the two loops are ordered.
+        `log_logit_scale`, `log_score_scale`, `score_bias`, `mix_logit` and
+        `contrast_gate` are all 0-d; `polarity_embedding` is 2-d but matches
+        "embedding". So no parameter can be claimed twice however the two loops
+        are ordered.
 
     Args:
         name: the parameter's name, relative to the module being split out
@@ -251,6 +252,22 @@ SPLIT_LEARNING_RATES = (
         #     move `AttentionDiscriminator`'s own scalar has no successor.
         "score_scale_lr",
         "log_score_scale",
+        lambda pair: True,
+    ),
+    (
+        # The listener's threshold, and the offset half of the same readout.
+        #     `train.py` decides on `lis_scores > 0`, so this is the parameter
+        #     that places the scores against that origin, and like the volume it
+        #     is a lone scalar whose whole travel is bounded by `lr * steps`.
+        #
+        # One key covers both discriminators, exactly as `score_scale_lr` does
+        #     and for the same reason: `ScoreVolume` puts the same `score_bias`
+        #     on each. It replaces `AttentionDiscriminator.mix_bias`, which had
+        #     no key at all and so sat at the base 1e-4 -- at birds' 194 steps an
+        #     epoch that bounded its whole travel at 0.58 over thirty epochs,
+        #     against a score whose own opening spread is 0.577.
+        "score_bias_lr",
+        "score_bias",
         lambda pair: True,
     ),
     (

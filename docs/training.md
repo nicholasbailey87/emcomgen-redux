@@ -218,11 +218,23 @@ no successor. It was briefly gated on the bilinear class, when the other arm's
 readout was a plain `nn.Linear(d_model, 1)` whose weight carried the volume and
 there was no lone scalar for a rate to apply to.
 
+**`score_bias_lr`** — ungated for the same reason, and added by the commit that
+gave `ScoreVolume` a `score_bias` beside its volume. One offset per
+discriminator, so one key and one suffix reach both, and
+`AttentionDiscriminator.mix_bias` — which had no key at all — has no successor
+either. Elevated to 2e-3 like every other lone scalar here: a 0-d parameter moves
+about `lr` per step whatever its gradient, so its whole travel is bounded by
+`lr × steps`, and at the base 1e-4 `mix_bias` could cover 0.58 in thirty birds
+epochs against a score opening at 0.577 spread.
+
 Elevated, and that was once the accusation: at 2e-3 the listener could squash its
-own logits fast, which multiplied down the gradient reaching the speaker. What
-made the rate harmful has been removed instead of the rate — the scale is absent
-from the backward pass, see `ScoreVolume` in
-[architecture.md](architecture.md) — so a fast calibration is now just a fast
+own logits fast, which multiplied down the gradient reaching the speaker. The
+accusation was wrong rather than answered — AdamW updates by `m / √v`, so a
+uniform factor on a parameter's gradient cancels, and `clip_gradients`
+renormalises per submodule whatever survives that. `7b10d47` answered it by
+hiding the scale from the backward pass; `485b38e` removed that helper, since it
+made the forward and backward disagree about what the module was. So a fast
+calibration is now just a fast
 calibration.
 
 Do not read that gate as a verdict on the scale. That comparer lost its scale to
@@ -326,16 +338,24 @@ diagnostic columns separate them cheaply.
 speaker side stationary to four decimal places across tens of epochs:
 `realised_survival` flat near chance (`1 / vocabulary`), `logit_scale` at its
 `init_energy` solve, `contrast_gate` unmoved, `pool_effective_examples` pinned at
-the positive-example count, `polarity_separation` at its `2·sqrt(d_model)` init.
+the positive-example count, `polarity_separation` at its opening — `sqrt(2·d_model)`
+= 25.3 at 320 wide since `843dc81` drew the two polarity tags independently,
+where the antipodal pair it replaced opened at `2·sqrt(d_model)` = 35.8.
 The channel is carrying noise, the listener has nothing to learn from, and the
 speaker has no gradient telling it to sharpen.
 
 `score_scale` sliding downwards through this is a *symptom*, not the fault — it is
 the listener correctly declining to be confident about noise, and it is not by
 itself fatal (see [anecdotes.md](anecdotes.md), where a run does the collapse and
-learns anyway). Since `7b10d47` it is also not a mechanism: the scale is absent
-from the backward pass into the message, so a sliding `score_scale` no longer
-attenuates anything on the speaker's side of the channel.
+learns anyway). It is also not a mechanism, though not for the reason `7b10d47`
+gave: the scale is back in the backward pass since `485b38e`, and what makes it
+harmless is that AdamW divides a uniform factor out and `clip_gradients`
+renormalises whatever survives that.
+
+`score_bias` beside it reads differently, and is not part of the deadlock
+signature: it should sit near zero throughout on balanced games, so it is a
+finding rather than a symptom when it does not. See
+[measurement.md](measurement.md).
 
 **Then read the direction of `logit_scale` to tell the two apart.** Rising slowly
 means undertrained and more epochs help. Falling monotonically means the run is

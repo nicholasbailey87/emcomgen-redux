@@ -178,10 +178,11 @@ def test_the_staged_walkthrough_matches_the_forward_pass():
         are *not* standardised individually -- that would make `mix_weight` mean
         composition exactly and close the escape `mix_share` watches. `485b38e`
         removed the `standardise` that used to sit on the mix, so what is left
-        is a volume and an offset. The offset is after the volume, so that it is
-        an offset on the score rather than one the volume rescales, and it is
-        also why `decision` carries no bias -- one constant across candidates
-        per module.
+        is a volume and an offset, both from `ScoreVolume.readout`. The offset
+        is after the volume, so that it is an offset on the score rather than
+        one the volume rescales, and it is also why `decision` carries no bias
+        -- one constant across candidates per module. It was `mix_bias`, owned
+        by this module alone; it is `score_bias` now, on both discriminators.
 
     There was briefly a `BatchNorm1d(1)` and a fixed gain in this position,
         which had to be rebuilt on the same flattening `forward` used and left
@@ -200,7 +201,7 @@ def test_the_staged_walkthrough_matches_the_forward_pass():
             + weight * stages["attention readout"]
         )
         rebuilt = (
-            discriminator.score_scale * mixed + discriminator.mix_bias
+            discriminator.score_scale * mixed + discriminator.score_bias
         )
         actual = listener(referents, messages)
 

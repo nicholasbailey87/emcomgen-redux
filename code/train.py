@@ -362,7 +362,7 @@ def run(
             else:
                 this_loss = bce_criterion(lis_scores, lis_y)
                 # A fixed threshold at zero, against a score the readout no
-                #     longer centres. `mix_bias` and the discriminators' own
+                #     longer centres. `score_bias` and the discriminators' own
                 #     asymmetries are what move the decision off it. `train_acc`
                 #     is not comparable across the commit that removed the
                 #     centring, in either direction -- see
@@ -467,6 +467,22 @@ def run(
             # on the attention arm the branches also mix at their own
             # magnitudes, so there the norms set the mix as well.
             #
+            # `score_bias` is the offset half of the same readout, and the
+            # column to read against `train_acc`. `train.py` decides on
+            # `lis_scores > 0`, so this is the parameter that places the scores
+            # against that origin -- the only one on the bilinear arm, which had
+            # no bias anywhere before this column existed.
+            #
+            # Expect it near zero. Games are balanced 10 positive / 10 negative,
+            # so the loss-optimal global offset is about zero and a value that
+            # stays there means the scores were already sitting where the
+            # threshold assumes. A sustained drift is the finding: it says they
+            # are not, and that the listener is spending a parameter on saying
+            # so. It cannot correct a *per-game* offset -- the bilinear score's
+            # per-game mean is `mean_j(LN(r_j)) . proj`, which varies by game --
+            # so a bias that moves while accuracy does not means the offset was
+            # per-game and no scalar reaches it.
+            #
             # `mix_alpha` is the mixing *weight* and `mix_share` is the share
             # of the score each path actually contributes. They would agree only
             # if `forward` standardised the branches, which it deliberately does
@@ -479,6 +495,7 @@ def run(
                 ):
                     stats.update(
                         score_scale=discriminator.score_scale.item(),
+                        score_bias=discriminator.score_bias.item(),
                         bilinear_weight_norm=(
                             discriminator.bilinear.weight.norm().item()
                         ),
@@ -489,6 +506,7 @@ def run(
                 ):
                     stats.update(
                         score_scale=discriminator.score_scale.item(),
+                        score_bias=discriminator.score_bias.item(),
                         mix_alpha=discriminator.mix_alpha,
                         mix_share=discriminator.mix_share,
                         bilinear_weight_norm=(

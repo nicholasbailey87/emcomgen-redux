@@ -113,17 +113,32 @@ the whole story, and absent at initialisation where the spread is 0.567 whether
 the message carries signal or noise. That is recorded in docs/anecdotes.md
 rather than claimed here.
 
-So the readout is `s * u` on a score whose inputs are normalised, and the
+So the readout was `s * u` on a score whose inputs are normalised, and the
 opening is `1/sqrt(3)` at every width and under every backbone -- the same
 number the first round calibrated for, arrived at by keeping the operands
 normalised rather than by normalising the result.
 
+Round eight finished that. Removing the centring made the decision threshold a
+fixed origin -- `train.py` reads `lis_scores > 0` -- and only four of the
+sixteen rungs could place their scores against one. `AttentionDiscriminator`
+had a `mix_bias`; `BilinearDiscriminator`, and so rungs 1-12, had no bias
+anywhere, `bilinear` being built `bias=False`. So `ScoreVolume` gained a
+`score_bias` beside its volume, applied after it, and `mix_bias` retired into
+it: same position, same arithmetic, both arms, and now with a config key at
+`score_bias_lr` and a metrics column. The readout is `s * u + b`.
+
+It opens at zero and is expected to stay near it, because the games are balanced
+and the loss-optimal global offset is therefore about zero. It is insurance
+against a systematic offset, and it cannot reach a per-game one.
+
 Consequences the tests below follow. `bilinear.weight` carries volume as well as
 direction again, so `bilinear_weight_norm` is not the drift column it briefly
-was. `decision` still has no bias, now because `mix_bias` is the module's one
-constant across candidates rather than because a centring would annihilate it.
-And neither branch is standardised, which is what keeps a branch able to go quiet
-alone and `mix_share` worth reporting beside `mix_alpha`.
+was. `decision` still has no bias, now because `score_bias` is the module's one
+constant across candidates rather than because a centring would annihilate it --
+a bias there is worth `score_scale * mix_weight * b` on the score, which is what
+`score_bias` says directly. And neither branch is standardised, which is what
+keeps a branch able to go quiet alone and `mix_share` worth reporting beside
+`mix_alpha`.
 """
 
 import math
@@ -538,37 +553,50 @@ def test_untrained_bce_opens_within_reach_of_ln_2(build, referent_dim):
 #     weight matrices carry direction. See the sixth round in the preamble.
 # --------------------------------------------------------------------------
 
-def test_each_discriminator_owns_exactly_one_volume_scalar():
+def test_each_discriminator_owns_exactly_one_volume_and_one_offset():
     """
-    One per arm, under one name, so one config key and one suffix reach both.
-        `log_mix_scale` does not come back: `AttentionDiscriminator` uses the
-        same `ScoreVolume` the bilinear arm does.
+    One of each per arm, under one name, so one config key and one suffix reach
+        both. Neither `log_mix_scale` nor `mix_bias` comes back:
+        `AttentionDiscriminator` uses the same `ScoreVolume` the bilinear arm
+        does, for the offset as well as the volume.
+
+    The offset matters more on the bilinear arm than on the arm it came from.
+        `mix_bias` existed only on `AttentionDiscriminator`, so rungs 1-12 had
+        no bias anywhere -- `bilinear` is built `bias=False` -- and could not
+        place their scores against `train.py`'s fixed `lis_scores > 0` at all.
     """
     for build in (_comparer, _cross_comparer):
         named = dict(build().named_parameters())
         volumes = [name for name in named if name.endswith("log_score_scale")]
+        offsets = [name for name in named if name.endswith("score_bias")]
 
         assert len(volumes) == 1, sorted(named)
+        assert len(offsets) == 1, sorted(named)
         assert not [name for name in named if "log_mix_scale" in name]
+        assert not [name for name in named if "mix_bias" in name]
 
 
-def test_the_composed_bilinear_path_has_no_volume_of_its_own():
+def test_the_composed_bilinear_path_has_neither_of_its_own():
     """
     `AttentionDiscriminator` builds its bilinear path with `score_scale=False`,
-        because its own readout standardises downstream of that path and
-        `standardise(s * u) == standardise(u)` exactly. A scale there would take
-        identically zero gradient while still matching `score_scale_lr`'s suffix
-        and still reporting a constant 1.0.
+        and that flag gates both of `ScoreVolume`'s scalars.
+
+    The reason is degeneracy, for each of them. The composed path is one of two
+        branches multiplied by `1 - mix_weight` and read out through the outer
+        module downstream, so a scale on it says what `mix_logit` already says,
+        and a constant across candidates on it says what the outer `score_bias`
+        already says. Either would still match its `SPLIT_LEARNING_RATES` suffix
+        and still report a value.
 
     Absent rather than frozen, so `split_out_parameter`'s suffix match sees the
-        truth. `test_a_scale_on_a_standardised_path_would_have_been_inert` in
-        test_receiver_slots.py is the measurement behind the argument.
+        truth.
     """
     attention = _cross_comparer().discriminator
 
     assert attention.learns_score_scale
     assert not attention.bilinear.learns_score_scale
     assert not hasattr(attention.bilinear, "log_score_scale")
+    assert not hasattr(attention.bilinear, "score_bias")
 
 
 def test_both_the_scale_and_the_weight_reach_the_score_magnitude():
@@ -623,6 +651,58 @@ def test_scaling_the_volume_cannot_change_the_decision():
 
     assert torch.equal(quiet > 0, loud > 0)
     assert torch.equal(quiet.argmax(1), loud.argmax(1))
+
+
+def test_the_offset_is_downstream_of_the_volume():
+    """
+    Why `readout` is `score_scale * scores + score_bias` in that order, and the
+        property that made `mix_bias`'s position load-bearing.
+
+    An offset applied *before* the volume would be multiplied by it, so the
+        threshold would slide every time the listener changed how loudly it
+        spoke -- and `score_scale` moves fast, at `score_scale_lr` = 2e-3.
+        Downstream, a bias of `b` moves the score by exactly `b` whatever the
+        volume is doing, so the two parameters say independent things.
+    """
+    listener = _comparer().eval()
+    referents, messages = _inputs(listener)
+
+    with torch.no_grad():
+        listener.discriminator.log_score_scale.fill_(math.log(0.25))
+        before = listener(referents, messages)
+        listener.discriminator.score_bias.fill_(1.0)
+        after = listener(referents, messages)
+
+    # Exactly 1.0, not 0.25. Upstream of the volume it would have been 0.25.
+    assert torch.allclose(after - before, torch.ones_like(before), atol=1e-5)
+
+
+def test_moving_the_offset_does_change_the_decision():
+    """
+    The whole point of it, and the one thing `score_scale` cannot do -- pair
+        this with `test_scaling_the_volume_cannot_change_the_decision` above.
+
+    `train.py` decides on `lis_scores > 0`, a fixed origin since the readout
+        stopped centring each game on its own mean. A positive rescale moves
+        every candidate towards or away from zero without crossing it; an
+        offset is what actually moves the threshold. Before `score_bias`,
+        nothing on the bilinear arm could.
+    """
+    listener = _comparer().eval()
+    referents, messages = _inputs(listener)
+
+    with torch.no_grad():
+        before = listener(referents, messages)
+        # Comfortably past the opening spread of `1/sqrt(3)` = 0.577, so every
+        #     candidate in every game ends up on the positive side.
+        listener.discriminator.score_bias.fill_(50.0)
+        after = listener(referents, messages)
+
+    assert not torch.equal(before > 0, after > 0)
+    assert bool((after > 0).all())
+    # And the *ordering* is untouched, which is what makes it a threshold
+    #     rather than a re-ranking: it adds the same constant to every candidate.
+    assert torch.equal(before.argmax(1), after.argmax(1))
 
 
 def test_scaling_the_volume_does_change_the_loss():
@@ -749,7 +829,7 @@ def test_the_readout_is_a_plain_linear_layer():
         a constant added to every candidate is exactly what a centring removes,
         so it would have taken identically zero gradient. The centring is gone,
         so it is now merely redundant -- it adds the same constant across
-        candidates that `mix_bias` adds, one degree of freedom expressed by two
+        candidates that `score_bias` adds, one degree of freedom expressed by two
         parameters free to drift against each other. One offset per module.
     """
     discriminator = _cross_comparer(referent_dim=320).discriminator
@@ -775,7 +855,7 @@ def test_a_bias_on_the_decision_head_is_redundant_with_the_offset():
     It used to be that a bias there could not move the score at all -- the
         readout centred each game and a constant across candidates is exactly
         what a centring removes. Now it moves the score by precisely the amount
-        `mix_bias` would have to be moved to match it: the attention branch is
+        `score_bias` would have to be moved to match it: the attention branch is
         multiplied by `mix_weight` and read out through `score_scale`, so a bias
         of `b` on the head is worth `score_scale * mix_weight * b` on the score,
         the same constant for every candidate in the game. Two parameters, one
@@ -804,7 +884,7 @@ def test_a_bias_on_the_decision_head_is_redundant_with_the_offset():
         ).item()
 
     shift = after - before
-    # A constant across the game, and the one `mix_bias` also expresses.
+    # A constant across the game, and the one `score_bias` also expresses.
     assert shift.std(1, unbiased=False).max().item() < 1e-4
     assert shift.mean().item() == pytest.approx(expected, rel=1e-3)
 
@@ -1264,13 +1344,19 @@ def _pair_and_optimiser(config_file):
     return config, built["pair"], built["optimiser"]
 
 
-def test_the_volume_is_elevated_and_the_weight_that_turns_is_not():
+def test_the_readout_scalars_are_elevated_and_the_weight_that_turns_is_not():
     """
-    The split the rates encode. `score_scale_lr` moves a lone scalar, which
-        Adam takes about `lr` per step whatever the gradient, so its whole
-        travel over a run is bounded by `lr * steps` and it needs the elevated
-        rate to be able to calibrate inside one. `bilinear.weight` learns a
-        direction and stays at the base rate.
+    The split the rates encode. `score_scale_lr` and `score_bias_lr` each move a
+        lone scalar, which Adam takes about `lr` per step whatever the gradient,
+        so its whole travel over a run is bounded by `lr * steps` and it needs
+        the elevated rate to be able to calibrate inside one. `bilinear.weight`
+        learns a direction and stays at the base rate.
+
+    `score_bias` is the one this arm never had. Its predecessor `mix_bias`
+        existed only on `AttentionDiscriminator` and had no config key at all,
+        so it sat at the base 1e-4: at birds' 194 steps an epoch that bounded
+        its entire thirty-epoch travel at 0.58, against a score whose opening
+        spread is 0.577.
 
     `mix_scale_lr` has no successor: one `ScoreVolume` per discriminator means
         one key. A leftover key would be worse than a leftover parameter here --
@@ -1283,6 +1369,7 @@ def test_the_volume_is_elevated_and_the_weight_that_turns_is_not():
     elevated = config["optimiser"]["score_scale_lr"]
     base = config["optimiser"]["lr"]
     assert elevated != base
+    assert config["optimiser"]["score_bias_lr"] == elevated
 
     discriminator = pair.receiver.discriminator
 
@@ -1295,27 +1382,43 @@ def test_the_volume_is_elevated_and_the_weight_that_turns_is_not():
         return holding[0]["lr"]
 
     assert _group_lr(discriminator.log_score_scale) == elevated
+    assert _group_lr(discriminator.score_bias) == elevated
     assert _group_lr(discriminator.bilinear.weight) == base
+
+    # Separate groups, not one shared one. They open at the same rate, so the
+    #     only way to see the difference is by identity -- and a single group
+    #     would make one key silently move both.
+    def _group(parameter):
+        return next(
+            group for group in optimiser.param_groups
+            if any(p is parameter for p in group["params"])
+        )
+
+    assert _group(discriminator.log_score_scale) is not _group(
+        discriminator.score_bias
+    )
 
 
 def test_an_attention_rung_asks_for_the_mix_weight_rate_and_nothing_else():
     """
     Which parameters are left in an elevated group, on the rung that has the
         most of them. The groups cannot be told apart by their rate --
-        DEFAULT.toml opens all four remaining keys at 2e-3 -- so the assertion
+        DEFAULT.toml opens all five remaining keys at 2e-3 -- so the assertion
         is on membership.
 
     This rung's `SenderTransformerLM` earns the speaker's two and its contrast
-        stage a third. The listener contributes two: its volume, and the mixing
-        *weight*. They are separate keys because they are separate things --
-        `mix_logit` says what the score is made of, `log_score_scale` how loudly
-        it is stated -- and only one of them was ever accused of starving the
-        speaker.
+        stage a third. The listener contributes three: its volume, its offset,
+        and the mixing *weight*. They are separate keys because they are
+        separate things -- `mix_logit` says what the score is made of,
+        `log_score_scale` how loudly it is stated, `score_bias` where it sits
+        against `train.py`'s fixed `lis_scores > 0` -- and only one of them was
+        ever accused of starving the speaker.
 
-    Exactly one `log_score_scale` on the whole listener, and no
-        `log_mix_scale`: `AttentionDiscriminator` composes a bilinear path built
-        with `score_scale=False`, so the composed module contributes no second
-        volume.
+    Exactly one `log_score_scale` and one `score_bias` on the whole listener,
+        and no `log_mix_scale` or `mix_bias`: `AttentionDiscriminator` composes
+        a bilinear path built with `score_scale=False`, so the composed module
+        contributes neither a second volume nor a second offset, and the offset
+        it used to own itself now comes from `ScoreVolume` like the volume does.
     """
     config, pair, optimiser = _pair_and_optimiser(
         "16_birds_receiver_cross_attention_lm.toml"
@@ -1329,8 +1432,16 @@ def test_an_attention_rung_asks_for_the_mix_weight_rate_and_nothing_else():
         if name.endswith("log_score_scale")
     ]
     assert volumes == ["discriminator.log_score_scale"]
+
+    offsets = [
+        name for name, _ in pair.receiver.named_parameters()
+        if name.endswith("score_bias")
+    ]
+    assert offsets == ["discriminator.score_bias"]
+
     assert not any(
-        "log_mix_scale" in name for name, _ in pair.receiver.named_parameters()
+        "log_mix_scale" in name or "mix_bias" in name
+        for name, _ in pair.receiver.named_parameters()
     )
 
     named = {id(p): name for name, p in pair.named_parameters()}
@@ -1346,6 +1457,7 @@ def test_an_attention_rung_asks_for_the_mix_weight_rate_and_nothing_else():
         "sender.contrast.contrast_gate",
         "receiver.discriminator.mix_logit",
         "receiver.discriminator.log_score_scale",
+        "receiver.discriminator.score_bias",
     }
 
 

@@ -469,14 +469,14 @@ a rename into a silently-NaN column, and a silently-NaN column is how the
 cross-attention listener's collapse went unnoticed for a whole smoke test. A
 discriminator with no branch here raises rather than running unmeasured.
 
-Both hold their volume the same way — one `ScoreVolume.log_score_scale` in front
-of a score whose two operands are layer-normed — and differ only in what else
-they have to report:
+Both read out the same way — `ScoreVolume`'s `log_score_scale` and `score_bias`,
+a volume then an offset, in front of a score whose two operands are
+layer-normed — and differ only in what else they have to report:
 
 | | volume | shape | mix |
 |---|---|---|---|
-| `BilinearDiscriminator` | `score_scale`, `bilinear_weight_norm` | — | — |
-| `AttentionDiscriminator` | `score_scale`, `decision_spread`, `bilinear_weight_norm`, `decision_weight_norm` | `decision_kurtosis` | `mix_alpha`, `mix_share`, `path_agreement` |
+| `BilinearDiscriminator` | `score_scale`, `score_bias`, `bilinear_weight_norm` | — | — |
+| `AttentionDiscriminator` | `score_scale`, `score_bias`, `decision_spread`, `bilinear_weight_norm`, `decision_weight_norm` | `decision_kurtosis` | `mix_alpha`, `mix_share`, `path_agreement` |
 
 **`score_scale`** — both classes, one per discriminator.
 `AttentionDiscriminator` composes a `BilinearDiscriminator` built with
@@ -490,8 +490,27 @@ rungs without further arithmetic. On the attention arm it multiplies a mix whose
 opening depends on what `decision` emits — a fixed number per architecture, but
 not that one.
 
-`logit_scale` says how audibly the speaker states a message; this says how
-confidently the listener acts on one. Both dip during bootstrapping for the same
+**`score_bias`** — both classes, one per discriminator, and gated by the same
+`score_scale=False` that withholds the volume from the composed bilinear path.
+The offset half of the readout: `train.py` decides on `lis_scores > 0`, so this
+is the parameter that places the scores against that fixed origin.
+
+Read it *against* `train_acc`, and not as bigger-is-better. Games are balanced
+10 positive / 10 negative, so the loss-optimal global offset is about zero, and
+a column that sits there is the healthy reading — the scores are already where
+the threshold assumes. A sustained drift is a finding: it says they are not.
+A scalar cannot reach a *per-game* offset, the bilinear score's per-game mean
+being `mean_j(LN(r_j)) · proj`, so a bias that moves while accuracy does not
+means the offset was per-game and the readout is what needs changing.
+
+It replaced `AttentionDiscriminator.mix_bias`, which had neither a column nor a
+config key — it sat at the base `lr`, which at birds' 194 steps an epoch bounded
+its entire thirty-epoch travel at 0.58 against a score opening at 0.577 spread.
+An unmeasured parameter is how the readout's collapse went unnoticed the first
+time; this is the correction.
+
+`logit_scale` says how audibly the speaker states a message; `score_scale` says
+how confidently the listener acts on one. Both dip during bootstrapping for the same
 reason — neither agent should commit while the message is still noise — and
 `29b18ea` measured the separation that tells a productive dip from a collapse: a
 healthy speaker fell ~0.2 log-units and returned within a few epochs, where the
@@ -528,7 +547,7 @@ against `mix_alpha` is where that shows.
 exists to produce. The attention path's share of the score:
 
 ```
-score = score_scale * ( (1 - a) * bilinear + a * attention ) + bias
+score = score_scale * ( (1 - a) * bilinear + a * attention ) + score_bias
 a     = mix_floor + (1 - mix_floor) * sigmoid(mix_logit)
 ```
 

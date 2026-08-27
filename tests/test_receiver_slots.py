@@ -750,11 +750,12 @@ def test_the_two_arms_build_the_same_bilinear_comparison():
         bootstrapping and not a lookalike.
 
     They differ by their readout, and only there. `score_scale=False` on the
-        composed path is what makes them differ, and it is correct rather than
-        special-casing: `AttentionDiscriminator`'s own readout standardises
-        downstream, and a scale upstream of a standardise is annihilated
-        exactly -- see
-        `test_a_scale_on_a_standardised_path_would_have_been_inert` below.
+        composed path is what makes them differ, and it gates both of
+        `ScoreVolume`'s scalars: the composed path gets neither a volume nor an
+        offset. Both would be degenerate with the outer module's. The branch is
+        multiplied by `1 - mix_weight` and read out downstream, so a scale on it
+        says what `mix_logit` already says, and an inner constant across
+        candidates says what the outer `score_bias` already says.
     """
     attention = _attention_discriminator()
     bilinear = build_listener(
@@ -765,17 +766,24 @@ def test_the_two_arms_build_the_same_bilinear_comparison():
     assert bilinear.learns_score_scale
     assert not attention.bilinear.learns_score_scale
 
+    readout_scalars = ("log_score_scale", "score_bias")
+
     def _weights(module):
         return sorted(
             name for name, _ in module.named_parameters()
-            if not name.endswith("log_score_scale")
+            if not name.endswith(readout_scalars)
         )
 
     assert _weights(attention.bilinear) == _weights(bilinear)
     assert not any(
-        name.endswith("log_score_scale")
+        name.endswith(readout_scalars)
         for name, _ in attention.bilinear.named_parameters()
     )
+    # And the outer module has exactly one of each.
+    assert sorted(
+        name for name, _ in attention.named_parameters()
+        if name.endswith(readout_scalars)
+    ) == ["log_score_scale", "score_bias"]
 
 
 def test_the_composed_bilinear_weight_reaches_the_mixed_score():
@@ -814,13 +822,19 @@ def test_the_composed_bilinear_weight_reaches_the_mixed_score():
 
 def test_a_scale_on_a_standardised_path_would_have_been_inert():
     """
-    Why `AttentionDiscriminator` builds its composed bilinear path with
-        `score_scale=False`, and why `bilinear.weight` learns direction alone on
-        the arm that stands by itself. `standardise` subtracts a mean and
-        divides by a spread, both homogeneous of degree one in a positive
-        multiplier, so anything in front of it that only sets magnitude
-        cancels -- a scalar exactly, and a weight matrix in its radial
-        component.
+    Why the readout no longer standardises, kept as the measurement behind
+        `485b38e` rather than as a live justification. It used to be the reason
+        `AttentionDiscriminator` builds its composed path with
+        `score_scale=False`; that reason is now degeneracy with `mix_logit`,
+        which is asserted in
+        `test_the_two_arms_build_the_same_bilinear_comparison` above.
+
+    `standardise` subtracts a mean and divides by a spread, both homogeneous of
+        degree one in a positive multiplier, so anything in front of it that
+        only sets magnitude cancels -- a scalar exactly, and a weight matrix in
+        its radial component. That is what made a whole class of parameters
+        unable to learn their own magnitude, and it is the arithmetic worth
+        keeping pinned even though nothing in the forward path does it now.
 
     Exactly, in arithmetic; to float32 rounding, in fact -- which is why the
         comparison below is `allclose` and the gradient one is against a
@@ -936,7 +950,13 @@ def test_reset_parameters_leaves_nothing_trained(language_model, discriminator):
     assert not unchanged, f"reset_parameters missed {unchanged}"
 
 
-def test_resetting_returns_the_mix_to_its_opening():
+def test_resetting_returns_the_mix_and_the_readout_to_their_opening():
+    """
+    The offset resets through `ScoreVolume.reset_score_volume` now rather than
+        through this module's own `reset_parameters`, which is the point of
+        moving it: `BilinearDiscriminator` gets the same reset from the same
+        place, where before it had no offset to reset.
+    """
     listener = build_listener(
         "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
         config_file=rung(CROSS_RUNG),
@@ -946,12 +966,14 @@ def test_resetting_returns_the_mix_to_its_opening():
 
     with torch.no_grad():
         discriminator.mix_logit.fill_(3.0)
-        discriminator.mix_bias.fill_(1.0)
+        discriminator.score_bias.fill_(1.0)
+        discriminator.log_score_scale.fill_(2.0)
 
     discriminator.reset_parameters()
 
     assert discriminator.mix_weight.item() == pytest.approx(opening)
-    assert discriminator.mix_bias.item() == 0.0
+    assert discriminator.score_bias.item() == 0.0
+    assert discriminator.score_scale.item() == pytest.approx(1.0)
 
 
 if __name__ == "__main__":

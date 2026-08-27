@@ -692,11 +692,31 @@ machinery behind the scale was shaped for a volume of 1 whatever the forward
 used. See [anecdotes.md](anecdotes.md), round seven.
 
 **What the threshold does.** `train.py` decides on `lis_scores > 0` against a
-score nothing centres, so the threshold is a fixed origin and `mix_bias` is what
-moves the decision off it. `AttentionDiscriminator.decision` carries no bias
-because `mix_bias` is already the module's one constant across candidates and a
-second would be degenerate with it. `train_acc` is not comparable across the
-commits on either side of the centring.
+score nothing centres, so the threshold is a fixed origin and the listener has
+to place its scores against it. `ScoreVolume.score_bias` is what does that: a
+signed scalar, opening at zero, applied *after* the volume so that it is an
+offset on the score rather than one `score_scale` rescales — a threshold that
+slid every time the listener changed how loudly it spoke would be a second thing
+to learn. `AttentionDiscriminator.decision` carries no bias because
+`score_bias` is already the module's one constant across candidates and a second
+would be degenerate with it. `train_acc` is not comparable across the commits on
+either side of the centring.
+
+It replaced `mix_bias`, which lived on `AttentionDiscriminator` alone. That left
+the twelve rungs on the bilinear arm with no bias anywhere — `bilinear` is built
+`bias=False` and the readout was a bare multiply — so the only way for them to
+move all candidates together was for the projected message to align with
+whatever direction the candidates have in common, which is data-dependent and
+spends discriminative capacity in that direction. `mix_bias` also had no config
+key, so it sat at the base `lr`; `score_bias` is at `score_bias_lr` = 2e-3 like
+every other lone scalar here, and has a metrics column.
+
+Expect it near zero. Games are balanced 10 positive / 10 negative, so the
+loss-optimal *global* offset is about zero and staying there means the scores
+already sit where the threshold assumes. A scalar cannot correct a *per-game*
+offset — the bilinear score's per-game mean is `mean_j(LN(r_j)) · proj`, which
+varies by game — so a bias that moves while accuracy does not says the offset
+was per-game, and the answer is a different readout rather than a bigger bias.
 
 **And what the weights carry.** Nothing downstream divides a rescaling of
 `bilinear.weight` back out, so it carries volume as well as direction and
@@ -888,9 +908,12 @@ each of them cost.
 
 **The readout is a plain `nn.Linear(d_model, 1)` with no bias.** The bias has
 tracked whether anything downstream subtracts a mean; nothing does now, and it
-stays off for a different reason — `mix_bias` is already the module's one
-constant across candidates, so a second one would be degenerate with it and the
-pair would be free to drift against each other. `decision_spread` and
+stays off for a different reason — `ScoreVolume.score_bias` is already the
+module's one constant across candidates, so a second one would be degenerate
+with it and the pair would be free to drift against each other. Measured: a bias
+of `b` on `decision` moves the score by `score_scale · mix_weight · b`, the same
+constant for every candidate in the game, which is precisely what `score_bias`
+expresses directly. `decision_spread` and
 `decision_kurtosis` read the magnitude and the shape of what comes out — see
 [measurement.md](measurement.md).
 
@@ -903,7 +926,8 @@ score = score_scale · ( (1 − a) · bilinear + a · attention ) + bias
 a     = mix_floor + (1 − mix_floor) · sigmoid(mix_logit)
 ```
 
-so the volume is the same `ScoreVolume` the bilinear arm carries.
+so the volume — and the offset — are the same `ScoreVolume` the bilinear arm
+carries.
 
 **Neither branch is standardised,** and that is a choice with a cost on each
 side. Standardising per branch would make `a` mean *composition* exactly, and
