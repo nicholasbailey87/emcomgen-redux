@@ -237,11 +237,14 @@ SPLIT_LEARNING_RATES = (
         #     listener could squash its own logits fast, which multiplied down
         #     the gradient reaching the speaker. `a9a6a9c` answered that by
         #     deleting the scalar, which left the volume in a 320x320 matrix
-        #     that moved 1.3% in thirty epochs. What made the rate harmful has
-        #     since been removed instead -- the scale is absent from the
-        #     backward pass into the message, see
-        #     `model_util.scale_without_attenuating` -- so a fast calibration is
-        #     now just a fast calibration.
+        #     that moved 1.3% in thirty epochs; `7b10d47` answered it by hiding
+        #     the scale from the backward pass. Both were answering a coupling
+        #     that never reached the optimiser. AdamW updates by `m / sqrt(v)`,
+        #     so a uniform factor on a parameter's gradient cancels, and
+        #     `train.py`'s `clip_gradients` renormalises each submodule to
+        #     `clip_grad_norm` whenever it binds -- which at recorded speaker
+        #     norms of ~10 against a ceiling of 1.0 it does. A fast calibration
+        #     is just a fast calibration.
         #
         # One key covers both discriminators: `ScoreVolume` puts the same
         #     `log_score_scale` on each, so the `mix_scale_lr` that used to

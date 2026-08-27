@@ -67,22 +67,31 @@ also have to serve as a token prior, and the shape that suits the listener is no
 the shape that maximises sharpness. One parameter per job. It also keeps
 argmax-preservation, which a per-token gain would cost.
 
-**And it is absent from the backward pass into the stack behind it.** The gain
-goes on through `model_util.scale_without_attenuating`, so the forward is exactly
-`normalised × logit_scale` — the fidelity against the fixed 1.283 noise floor,
-which is the scale's real job and is untouched — while `∂/∂normalised` does not
-carry the scale. `∂L/∂log_logit_scale` is unchanged, so
-`scripts/ignition_audit.py`'s covariance reading is unaffected.
+**And it is a plain product, briefly not.** `7b10d47` put the gain through
+`model_util.scale_without_attenuating` — same forward, `∂/∂normalised` forced to
+1 — so that a scale sliding down would not multiply down every gradient reaching
+`outputs2vocab`, the stack and the vision model. It does slide in every run that
+fails: 0.9094 → 0.6547 on rung 10 and 0.8648 → 0.7784 on rung 9, monotone. The
+same reasoning put `ScoreVolume` on the listener.
 
-The reason is the same one that put `ScoreVolume` on the listener, and it is a
-loop rather than a cost: a scale sliding down multiplies down every gradient
-reaching `outputs2vocab`, the stack and the vision model — the machinery that
-would have made raising it worthwhile. It slides in every run that fails,
-0.9094 → 0.6547 on rung 10 and 0.8648 → 0.7784 on rung 9, monotone.
+Both were answering a coupling that never reached the optimiser. AdamW updates by
+`m / √v`, so a uniform factor on a parameter's gradient scales the numerator and
+the denominator alike and cancels; `train.py`'s `clip_gradients` is per-submodule
+and renormalises each module to `clip_grad_norm` whenever it binds, which at
+recorded speaker norms of ~10 against a ceiling of 1.0 it does. What the helper
+added instead was an inconsistent gradient — `∂L/∂scale = x` is the true partial
+while `∂L/∂x = J` is not, the truth being `scale · J` — so the stack was shaped
+for a channel of volume 1 whatever the forward used. See
+[anecdotes.md](anecdotes.md), round seven.
 
-**The helper wraps the scalar and nothing else.** It sits between
-`layer_norm_logits` and `mask_reserved_tokens`, upstream of the sampler;
-`gumbel_softmax(hard=True)` keeps its own straight-through untouched. The
+The forward was never in question either way, so the fidelity against the fixed
+1.283 noise floor — the scale's real job — and `∂L/∂log_logit_scale`, which is
+what `scripts/ignition_audit.py`'s covariance reads, are unaffected by the
+removal.
+
+**The gain sits between `layer_norm_logits` and `mask_reserved_tokens`,**
+upstream of the sampler; `gumbel_softmax(hard=True)` keeps its own
+straight-through untouched. The
 gradient into the raw logits is a product of three factors:
 
 ```
@@ -141,10 +150,11 @@ default a referent at RMS 0.01 comes out 4.5% off, taking the *relative* scores
 between candidates back out of the listener's hands and putting them in the
 backbone's. Not currently binding — ViT2 emits RMS 0.23 — but closing it costs
 nothing. The score's overall magnitude is no longer at stake there: the
-listener's readout standardises per game, so `score_scale` sets it whatever the
-operands do. What `referent_layer_norm` still buys is that a large candidate is
-not read *loudly for being large*, which a per-game normalisation downstream
-cannot undo. See `ScoreVolume` in [architecture.md](architecture.md).
+listener normalises both operands of its bilinear form, so what a backbone emits
+reaches the score only through its *direction*. `referent_layer_norm` is half of
+that, and it is also what stops a large candidate being read loudly for being
+large — which is the half no downstream normalisation could have undone. See
+`ScoreVolume` in [architecture.md](architecture.md).
 
 ## `mask_reserved_tokens`
 
@@ -381,9 +391,7 @@ samples at the configured `tau`.
 Both decode loops do this:
 
 ```python
-logits = mask_reserved_tokens(
-    model_util.scale_without_attenuating(normalised, self.logit_scale)
-)
+logits = mask_reserved_tokens(normalised * self.logit_scale)
 ```
 
 rather than scaling the already-masked tensor. `d(logits · scale)/d(scale)`

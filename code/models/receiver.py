@@ -26,6 +26,8 @@ encoder: it reads whatever the language model produced. No configuration builds
 two encoders, and if one ever looks necessary the slot contract is wrong.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -48,25 +50,15 @@ def standardise(scores):
     """
     Per game: remove the mean over candidates and scale to unit spread.
 
-    Every discriminator's readout runs through this. It is the shape half of the
-        shape/volume split both agents now have -- `logit_spread` against
-        `logit_scale` on the speaker, this against `score_scale` here -- so a
-        score's magnitude is a learned scalar and nothing else, at any width and
-        under any backbone.
+    A telemetry helper, and nothing else. `AttentionDiscriminator` runs it over
+        each branch separately, which is what makes `path_agreement` a Pearson r
+        and lets `mix_share` compare two unstandardised branches like with like.
 
-    Note what it does *not* pin. The location and the scale of a game's scores
-        go; the shape stays free. `train.py` decides on `scores > 0`, so the
-        threshold is the game's own mean, which is where a listener facing
-        balanced candidates would put it anyway -- but a listener wanting one
-        target out of twenty scores it at `sqrt(19) = 4.359` and the other
-        nineteen at `-1/sqrt(19) = -0.229`, which is mean-zero and unit-spread
-        and puts exactly one candidate above the threshold. The centring is an
-        opening, not a constraint. It does mean `train_acc` is not comparable
-        across the commit that introduced it.
-
-    Also used by `AttentionDiscriminator`'s telemetry, on each branch
-        separately, where it is what makes `path_agreement` a Pearson r and lets
-        `mix_share` compare two unstandardised branches like with like.
+    It was briefly on the live path, as `ScoreVolume.readout`'s shape half. That
+        is what put each game's own margin in the denominator of the gradient
+        going back upstream -- see `ScoreVolume` for what it cost. Measuring a
+        correlation with it is fine; deciding with it is not, and the difference
+        is that the telemetry block runs under `no_grad`.
 
     `unbiased=False` because this is a population statistic over the candidate
         set, not an estimate from a sample of it, and the clamp keeps a game
@@ -90,22 +82,48 @@ class ScoreVolume:
         `state_dict` key is the one `split_out_parameter` matches by suffix and
         the one earlier checkpoints were written against.
 
-    The readout is `score_scale * standardise(scores)`, applied through
-        `model_util.scale_without_attenuating` so the scale is absent from the
-        backward pass into everything upstream. That is the whole point of this
-        module and the reasoning is in the helper's docstring: BCE at `p = 0.5`
-        is right to turn a listener down on a message carrying nothing, and a
-        scalar at the front of the score turns the *speaker* down at the same
-        time, which is what keeps the message carrying nothing.
+    The readout is a plain `score_scale * scores`. The scalar still sits in
+        front of a normalised quantity -- that pairing is what stops the volume
+        meaning something different under every backbone -- but the normalising
+        happens on the discriminator's *inputs* rather than on its output.
+        `BilinearDiscriminator` layer-norms both operands of its bilinear form,
+        so its score opens at `1 / sqrt(3)` at any width and any backbone by
+        construction, and there is nothing left for a normaliser downstream to
+        fix.
 
-    With the readout normalising, the volume cannot live anywhere else. A
-        `BilinearDiscriminator` standing alone is exactly scale-invariant in
-        `bilinear.weight`, so that matrix now learns direction only -- read
-        `bilinear_weight_norm` as drift rather than as volume, and note that
-        with `weight_decay = 0.0` a scale-invariant weight's norm can only grow
-        while its effective learning rate, `~ lr * sqrt(d) / ||W||` under Adam,
-        decays with it. Inside `AttentionDiscriminator` the branch magnitudes
-        still set the mix, so there the norms stay load-bearing.
+    **Why not standardise the score.** `7b10d47` read out
+        `score_scale * standardise(scores)`, dividing each game by the spread of
+        its own candidate scores. Two reasons it is gone, and the weaker one is
+        listed second deliberately.
+
+        It is redundant. Both of `BilinearDiscriminator`'s operands are already
+        normalised, so the score is already backbone-independent and already
+        opens at a stated number. A second normaliser downstream of that buys
+        nothing and costs the calibration -- `7b10d47` deleted the exact
+        `1/sqrt(d)` on the grounds that a standardise divides any constant out,
+        which traded an analytic opening for an empirical one.
+
+        It re-weights games by their own margin, but *only once the listener can
+        already discriminate*, which is not the regime it was suspected in.
+        Measured on this module: with `bilinear.weight` at its random init the
+        score's spread is 0.567 whether the message carries the separating
+        direction or pure noise, so standardise is a uniform 1.77x there and
+        AdamW cancels it. With a listener that can read the message the spreads
+        do come apart -- 4.20 against 0.98 -- and standardise then damps the
+        informative games relative to the noise ones by about 1.4x. Real, wrong
+        way round, and far too small to be the 382-445x slowdown in the sender's
+        pre-channel parameters that the 2026-08-26 rung 9 and 10 runs showed.
+        **That correlation is unexplained.** `standardise` is present in exactly
+        the frozen runs and absent from every run that was merely dead, but this
+        measurement rules out the obvious mechanism, so do not read the removal
+        as a diagnosis. See docs/anecdotes.md.
+
+    The volume is therefore shared with the weights again.
+        `bilinear_weight_norm` means volume as well as direction, as it did
+        before `7b10d47`: nothing downstream divides a rescaling of
+        `bilinear.weight` back out. Inside `AttentionDiscriminator` the branch
+        magnitudes also set the mix, so there the norms are doubly
+        load-bearing.
     """
 
     def _init_score_volume(self, learns_score_scale=True):
@@ -115,51 +133,48 @@ class ScoreVolume:
 
         `learns_score_scale=False` is passed only from inside
             `AttentionDiscriminator`, to the bilinear path it composes, because
-            that path's output is standardised by the readout downstream of it
-            and `standardise(s * u) == standardise(u)` exactly for positive `s`.
-            A scale there would take identically zero gradient, report a
-            constant 1.0, and sit in an elevated learning-rate group doing
-            nothing. Absent rather than frozen, so `split_out_parameter`'s
-            suffix match sees the truth.
+            a volume there is degenerate with the one that module already has:
+            the composed path is one of two branches multiplied by
+            `1 - mix_weight` and then read out through this mixin downstream, so
+            a scale on the branch and a move in `mix_logit` express the same
+            thing and the pair would drift against each other. One volume per
+            discriminator. Absent rather than frozen, so
+            `split_out_parameter`'s suffix match sees the truth.
         """
         self.learns_score_scale = learns_score_scale
 
         if self.learns_score_scale:
             # Stored as its log so `exp` keeps it strictly positive: gradient
             #     descent cannot walk a volume through zero and out the far
-            #     side. Opens at 1.0, and after `standardise` that is a genuine
-            #     unit-spread opening rather than a number whose meaning depends
-            #     on the backbone.
+            #     side. Opens at 1.0, which on the bilinear arm leaves the score
+            #     at its own calibrated opening of `1 / sqrt(3)` -- see
+            #     `BilinearDiscriminator.forward`.
             self.log_score_scale = nn.Parameter(torch.zeros(()))
 
     @property
     def score_scale(self):
         """
-        The multiplier applied to the standardised scores, always positive. Read
-            here rather than exponentiating at the use site so `forward` and the
-            metrics column cannot drift apart.
+        The multiplier applied to the score, always positive. Read here rather
+            than exponentiating at the use site so `forward` and the metrics
+            column cannot drift apart.
         """
         return self.log_score_scale.exp()
 
     def readout(self, scores):
         """
-        Standardise per game, then apply the volume without attenuating the
-            gradient reaching the message.
+        Apply the volume. Nothing else -- the normalising this used to do is on
+            the discriminator's inputs instead, where it cannot put the game's
+            own margin in the denominator. See the class docstring.
 
-        A discriminator built with `learns_score_scale=False` returns the raw
-            comparison untouched -- not standardised either. Its caller owns the
-            readout and will standardise downstream, and standardising here as
-            well would pin this branch to unit spread before the mix, which is
-            the arrangement `AttentionDiscriminator` is deliberately not in: it
-            would make `mix_logit` mean composition exactly and close the escape
-            of turning one branch down that `mix_share` exists to watch.
+        A discriminator built with `learns_score_scale=False` returns the
+            comparison untouched. Its caller owns the volume for the whole
+            module and a second one here would be degenerate with the mix
+            weight.
         """
         if not self.learns_score_scale:
             return scores
 
-        return model_util.scale_without_attenuating(
-            standardise(scores), self.score_scale
-        )
+        return self.score_scale * scores
 
     def reset_score_scale(self):
         """
@@ -434,17 +449,18 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
             relationship between message and object; a bias would add a
             message-independent per-object prior. See docs/architecture.md.
 
-        `bilinear` learns a *direction* and nothing else. The readout
-            standardises per game, so the module is exactly scale-invariant in
-            this weight: scaling it cannot change the score, the decision or the
-            loss. That is a reversal of the arrangement immediately before,
-            where the volume lived in this matrix on the argument that a matrix
-            has no cheap move downwards -- true, and the problem: it had no
-            usable move at all, 1.3% of its norm over thirty epochs against the
-            scalar it replaced travelling 59%. jayelm's `CopyListener.compare`
-            does hold its volume this way, on unnormalised operands, and
-            `LegacyBilinearGRUComparer`, in tests/test_receiver_slots.py,
-            still records what that was.
+        `bilinear` carries volume as well as direction. Nothing downstream
+            divides a rescaling of it back out, so `bilinear_weight_norm` reads
+            as volume again -- which is what it meant before `7b10d47`
+            standardised the readout, and what jayelm's `CopyListener.compare`
+            has always done, though on unnormalised operands.
+            `LegacyBilinearGRUComparer`, in tests/test_receiver_slots.py, still
+            records that arrangement. The matrix sharing the volume with
+            `log_score_scale` is not a problem the way two scalars would be: a
+            320x320 matrix under Adam spends its step turning and only a small
+            fraction of it radially, which is why the scalar exists (it moved
+            59% where the matrix managed 1.3%), and the scalar is the fast
+            path rather than a competing one.
 
         Args:
             referent_embedding_size: width of the backbone's output
@@ -501,29 +517,32 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
         """
         message_embeddings = message_repr[:, -1, :]
 
-        # Normalised *before* the projection. The scaling half of this norm is
-        #     now redundant -- the message is one vector per game, so any factor
-        #     on it multiplies all the candidates' scores equally and the
-        #     readout's `standardise` divides it straight back out. The centring
-        #     is not redundant, and neither norm is free: both set where
-        #     `bilinear` starts, and it is only the direction that has to be
-        #     learned from there.
+        # Both operands normalised, and both halves of each norm load-bearing
+        #     now that nothing downstream normalises the score. The message norm
+        #     divides out whatever magnitude the language model happens to emit,
+        #     which would otherwise be a common factor on every candidate; the
+        #     referent norm treats each candidate separately, so it changes
+        #     their relative order and not just a common scale -- without it a
+        #     large referent is read loudly for being large.
         projected = self.bilinear(self.message_layer_norm(message_embeddings))
-
-        # This one *is* load-bearing after the readout. It normalises each
-        #     candidate independently, so it changes the scores' relative order
-        #     and not just their common scale -- without it a large referent is
-        #     read loudly for being large, which `standardise` could not undo.
         referents = self.referent_layer_norm(referents)
 
         scores = torch.einsum("ijh,ih->ij", (referents, projected)) # (batch, n_objects)
 
-        # There was a `1/sqrt(referent_embedding_size)` here, to make the score
-        #     open at a width-independent magnitude with `bilinear` at the
-        #     default init. `standardise` divides out any constant factor
-        #     exactly, so it now opens at unit spread at every width by
-        #     construction and the calibration has nothing left to do.
-        return self.readout(scores)
+        # The calibration, and it is exact rather than approximate because both
+        #     operands arrive normalised. Each is at per-element unit variance,
+        #     so `|r| = |m| = sqrt(d)`, and with `nn.Linear`'s default init --
+        #     uniform on `+/- 1/sqrt(d)`, standard deviation `1/sqrt(3d)` -- the
+        #     score's standard deviation at init is `sigma_w * d = sqrt(d / 3)`.
+        #     Dividing by `sqrt(d)` leaves `1/sqrt(3)` = 0.577 at every width
+        #     and under every backbone, which is what makes the opening a number
+        #     this repo can state rather than measure per rung.
+        #
+        # `log_score_scale` opens at 0, so the readout opens there too. BCE on
+        #     a random map at that spread is 0.725 against `ln 2` = 0.693; at
+        #     unit spread it would be 0.804. The gentler opening is the point of
+        #     leaving the scalar at 1.0 rather than calibrating it to `sqrt(3)`.
+        return self.readout(scores / math.sqrt(self.referent_embedding_size))
 
     def reset_parameters(self):
         self.bilinear.reset_parameters()
@@ -573,25 +592,21 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
             two. The composed bilinear path is built with `score_scale=False`
             because it now feeds this readout instead of being one.
 
-        `standardise` runs on the *mixed* score and not on each branch. That is
-            the difference from the arrangement this replaces, where
-            standardising per branch made `a` mean composition exactly and left
-            `log_mix_scale` as the only magnitude. Standardising after the mix
-            gets the single volume knob without pinning the branches to equal
-            spread, so a branch can still be loud or quiet on its own and
-            `mix_share` against `mix_alpha` still measures it -- the first is
-            the share the score is actually made of, the second the share
-            `mix_logit` asked for.
+        Neither branch is standardised, so `a` is a weight and not a share:
+            a loud branch can dominate a heavily-weighted quiet one. That is
+            deliberate. Standardising per branch would make `a` mean composition
+            exactly and close off the escape of turning one branch down, which
+            is the failure `mix_share` against `mix_alpha` exists to catch --
+            the first is the share the score is actually made of, the second the
+            share `mix_logit` asked for.
 
         Neither is this the change that once stopped four rungs learning. That
             was the attention readout pinned to a *fixed gain*, which cannot go
             quiet while the message is still noise and so forces a listener to
             commit before there is anything to commit to (see
             docs/anecdotes.md). This listener can go as quiet as BCE asks it to,
-            and going quiet no longer costs the speaker anything, which is what
-            `model_util.scale_without_attenuating` is for. The bilinear path
-            still carries the decision through the opening, so nothing has to be
-            confident early.
+            and the bilinear path carries the decision through the opening, so
+            nothing has to be confident early.
 
         The floor is in the parameterisation and **never a `clamp`**:
             `clamp`'s gradient is zero below the bound, so a mix that drifted
@@ -717,12 +732,12 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         )
 
         # A weight whose magnitude is free, and no bias. The bias was removed
-        #     once and restored, and is now removed again for a different and
-        #     narrower reason: it adds the same constant to every candidate, and
-        #     the readout's centring subtracts the mean over candidates, so it
-        #     would take identically zero gradient. The score's one offset is
-        #     `mix_bias` below, downstream of the readout where it survives. See
-        #     docs/anecdotes.md.
+        #     once, restored, and removed again when the readout's centring
+        #     would have annihilated it. The centring has since gone and the
+        #     bias stays off, for a third reason: it adds the same constant to
+        #     every candidate, and so does `mix_bias` below, so the two would be
+        #     degenerate and free to drift against each other. One offset per
+        #     module, and it is `mix_bias`. See docs/anecdotes.md.
         #
         # It reads straight off the referent stack's last post-norm, which is an
         #     `RMSNorm` and so already equalises the candidates' lengths -- no
@@ -734,9 +749,10 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         #     the module that was measured bootstrapping and not a lookalike.
         #     It reads `message_repr`; it owns no encoder.
         #
-        # Built without a volume: this module's readout standardises downstream
-        #     of it, and a scale upstream of a standardise is annihilated
-        #     exactly. See `ScoreVolume._init_score_volume`.
+        # Built without a volume: this branch is multiplied by `1 - mix_weight`
+        #     and read out through this module's own `score_scale`, so a scalar
+        #     here would say the same thing `mix_logit` already says. See
+        #     `ScoreVolume._init_score_volume`.
         self.bilinear = BilinearDiscriminator(
             self.referent_embedding_size,
             self.message_width,
@@ -751,9 +767,12 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         )
 
         # The score's offset, and the only thing downstream of the readout.
-        #     It has to be downstream: an offset applied before `standardise`
-        #     is a constant across candidates and the centring removes it. That
-        #     is also why `decision` above lost its bias.
+        #     Downstream so that it is an offset on the score itself rather than
+        #     one the volume rescales -- `score_scale` moves fast at
+        #     `score_scale_lr`, and a threshold that slid every time the listener
+        #     changed how loudly it spoke would be a second thing to learn. It
+        #     is also the module's one constant across candidates, which is why
+        #     `decision` above has no bias.
         #
         # This is where a `log_mix_scale` used to sit, carrying the volume for
         #     the whole module. There is again exactly one volume scalar here,
@@ -773,8 +792,7 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
 
         # The realised share of the attention path, measured from the branches
         #     standardised per game -- which is what `mix_alpha` alone would
-        #     mean if `forward` standardised them separately rather than
-        #     standardising the mix.
+        #     mean if `forward` standardised them separately.
         self.mix_share = float("nan")
 
         # `corr(attention_hat, bilinear_hat)` within a game. Necessary because
@@ -783,21 +801,20 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         #     `mix_alpha` alone, and they are different findings.
         self.path_agreement = float("nan")
 
-        # The standard deviation of the scores. Now `score_scale` by
-        #     construction -- the readout standardises and then multiplies, so
-        #     this measures the same thing the `score_scale` column does, up to
-        #     `mix_bias` and the pooling over the batch. Kept because it is
-        #     defined on any discriminator with a `forward`, where the scale is
-        #     a parameter this one happens to have. Read `score_scale`.
+        # The standard deviation of the scores, and independent again now that
+        #     the readout does not pin it: it is `score_scale` times the mixed
+        #     branches' own spread, so it reads the volume and what the module
+        #     is actually doing with it together, where `score_scale` alone
+        #     reads only the parameter.
         self.decision_spread = float("nan")
 
         # Excess kurtosis of the scores. Negative means bimodal, which is what
         #     discriminating looks like; sustained positive alongside chance
         #     accuracy is a listener with nothing to say.
         #
-        # The column carrying information the others do not, now that the
-        #     readout fixes the spread: kurtosis is invariant to the scale, so
-        #     it reads the *shape* `standardise` leaves free.
+        # Kurtosis is invariant to the scale, so this reads shape where
+        #     `decision_spread` reads magnitude. The two were briefly redundant,
+        #     while the readout pinned the spread and left only this free.
         self.decision_kurtosis = float("nan")
 
     @property
@@ -822,14 +839,18 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         message_repr: torch.Tensor # (batch, slots, message_width)
         ) -> torch.Tensor: # -> (batch, n_objects)
         """
-        The two paths are mixed at their own magnitudes, and the *mix* is
-            standardised by the readout. `standardise` used to run on each of
-            them separately here, which made `mix_logit` mean composition
-            exactly; running it after the mix keeps one volume scalar without
-            pinning the branches to equal spread, so a branch can still escape
-            being learned by turning itself down -- watch `mix_share` against
-            `mix_alpha`. It still runs per branch in the telemetry block below,
-            where that is what `path_agreement` and `mix_share` need.
+        The two paths are mixed at their own magnitudes and the mix is scaled,
+            not standardised. A branch can therefore escape being learned by
+            turning itself down -- watch `mix_share` against `mix_alpha`, which
+            is the only place `standardise` still runs, under `no_grad` in the
+            telemetry block below where `path_agreement` and `mix_share` need
+            it.
+
+        Note this module's opening is not the bilinear arm's calibrated
+            `1/sqrt(3)`: the attention branch arrives at whatever magnitude
+            `decision` gives it and the mix is a weighted sum of the two. It is
+            a fixed number per architecture rather than a moving one -- measure
+            it with a forward pass if a rung needs its openings matched.
         """
         adapted = self.referent_layer_norm(self.referent_adapter(referents))
         memory = self.memory_layer_norm(self.memory_adapter(message_repr))
@@ -889,10 +910,10 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         #     any positive rescale of the readout, which is why the accuracy
         #     column cannot see a volume collapse. `score_scale` can.
         #
-        # The readout's centring moves that threshold onto each game's own mean
-        #     score, and `mix_bias` is what moves it back off. The centring
-        #     fixes location and scale but not shape, so an arbitrary target
-        #     count stays representable; see `standardise`.
+        # The threshold is a fixed zero again, not each game's own mean score:
+        #     the readout no longer centres, so `mix_bias` moves the threshold
+        #     against a fixed origin rather than against a moving one. `train_acc`
+        #     is not comparable across this change in either direction.
         return scores
 
     def reset_parameters(self):

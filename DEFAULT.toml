@@ -284,36 +284,39 @@ mup_reference_width = 1024
 logit_scale_lr = 2e-3
 
 # The listener's counterpart, `ScoreVolume.log_score_scale`, reported as
-# `train_score_scale`. One scalar per discriminator, in front of the per-game
-# standardised candidate scores exactly as the key above sits in front of the
+# `train_score_scale`. One scalar per discriminator, in front of a score whose
+# two operands are layer-normed, exactly as the key above sits in front of the
 # layer-normed vocabulary logits, and elevated for the same arithmetic: a lone
 # scalar moves about `lr` per step whatever its gradient, so its whole travel
 # over a run is bounded by `lr * steps`.
 #
 # One key covers both arms. `AttentionDiscriminator` used to carry its own
-# volume under a second key, `mix_scale_lr`, because it standardised its two
-# branches separately and put a `log_mix_scale` downstream of the mix; it now
-# standardises the mix itself and uses the same `ScoreVolume` the bilinear arm
+# volume under a second key, `mix_scale_lr`, alongside a `log_mix_scale`
+# downstream of the mix; it now uses the same `ScoreVolume` the bilinear arm
 # does, so `mix_scale_lr` has no successor.
 #
-# The history, because this rate was the accused. The listener spent it turning
-# its own logits down -- 0.9021 -> 0.3731 on rung 09, monotone and never
-# returning -- and a scalar at the front of the score multiplies down every
-# gradient going back through the message and the channel into the speaker, so
-# going quiet starved the speaker that would have made it worth listening to.
-# `a9a6a9c` answered by deleting both scalars and putting each volume in the
-# weight matrices. That stopped the volume moving: `bilinear_weight_norm`
-# travelled 1.3% over thirty epochs, because a 320x320 matrix under Adam spends
-# its step turning and only a small fraction of it radially. Rung 10, the one
-# rung that has ever ignited, then sat above `ln 2` for a whole run.
+# The history, because this rate was the accused twice over. The listener spent
+# it turning its own logits down -- 0.9021 -> 0.3731 on rung 09, monotone and
+# never returning -- and a scalar at the front of the score multiplies down
+# every gradient going back through the message and the channel into the
+# speaker, so going quiet looked like it starved the speaker that would have
+# made it worth listening to. `a9a6a9c` answered by deleting both scalars and
+# putting each volume in the weight matrices. That stopped the volume moving:
+# `bilinear_weight_norm` travelled 1.3% over thirty epochs, because a 320x320
+# matrix under Adam spends its step turning and only a small fraction of it
+# radially. Rung 10, the one rung that has ever ignited, then sat above `ln 2`
+# for a whole run. `7b10d47` answered the same objection the other way, hiding
+# the scale from the backward pass.
 #
-# So the rate was never the problem. What made it harmful was the coupling
-# between the forward scale and the backward gradient, and that is what has been
-# removed -- see `model_util.scale_without_attenuating`. Shrinking is still
+# Both were answering something that never reached the optimiser. AdamW updates
+# by `m / sqrt(v)`, so a uniform factor on a parameter's gradient scales the
+# numerator and the denominator alike and cancels; `train.py`'s
+# `clip_gradients` then renormalises each submodule whenever it binds, which at
+# recorded speaker norms of ~10 against `clip_grad_norm = 1.0` it does. So the
+# rate was never the problem and neither was the coupling. Shrinking stays
 # correct on a message carrying nothing, since BCE's minimiser is `p = 0.5`
-# everywhere; it just no longer costs the speaker anything. Read
-# `train_score_scale` as before, a dip and a return against a monotone slide,
-# but do not read a slide as a collapse on its own any more.
+# everywhere. Read `train_score_scale` as before: a dip and a return is a
+# listener declining to commit, a monotone slide is a collapse.
 score_scale_lr = 2e-3
 
 # The same elevated rate, for `SenderTransformerLM.polarity_embedding` -- the
@@ -984,12 +987,14 @@ alpha = "deepnorm" # As above, resolved for this stack's own depth.
 beta = "deepnorm"
 # The attention path's minimum share of the score:
 #
-#     score = s * [ (1 - a) * bilinear_hat + a * attention_hat ] + bias
+#     score = s * [ (1 - a) * bilinear + a * attention ] + bias
 #     a     = mix_floor + (1 - mix_floor) * sigmoid(mix_logit)
 #
-# Both paths are standardised per game before mixing, so `a` means composition
-# and `s` alone means volume -- the same shape/volume split the speaker has in
-# `logit_spread` and `logit_scale`.
+# Neither path is standardised before the mix, so `a` is a *weight* and not a
+# share: a loud branch can dominate a heavily-weighted quiet one. Deliberate --
+# standardising per branch would make `a` mean composition exactly and close off
+# the escape of turning one branch down, which is the failure `mix_share`
+# against `mix_alpha` exists to catch.
 #
 # The floor exists because at `a = 0` the whole attention stack would receive
 # zero gradient and could never earn its way in. At 0.1 it always contributes and
@@ -999,9 +1004,10 @@ beta = "deepnorm"
 # under the floor would weld there permanently. That bug cost an afternoon in the
 # prototype.
 #
-# Because the attention path is standardised it also cannot go quiet, so an
-# uninformative one cannot be escaped by turning it down. It has to be made
-# informative or paid for.
+# The floor does not stop the attention path going quiet, though: with the
+# branches unstandardised it can shrink its own magnitude and contribute little
+# at any `a`. `mix_share` against `mix_alpha` is what reads that, and a gap
+# between them is the finding.
 mix_floor = 0.1
 # -4.0 puts `a` at 0.116 for the floor above, so the discriminator opens
 # essentially *as* the bilinear comparison and departs only if attention pays.

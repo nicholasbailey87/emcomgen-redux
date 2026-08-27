@@ -183,7 +183,7 @@ def test_the_score_deliberately_no_longer_matches_the_legacy_module():
         be written down here rather than patched into the copy, so: **the
         scores no longer match, in exactly one place, on purpose.**
 
-    The divergence is now in three places, all in the readout, and the legacy
+    The divergence is in three places, all in the readout, and the legacy
         module still has the GRU half bit-identical.
 
     One: the ordering. The legacy path is `message_layer_norm(bilinear(m))`,
@@ -191,16 +191,15 @@ def test_the_score_deliberately_no_longer_matches_the_legacy_module():
         `BilinearDiscriminator` runs `bilinear(message_layer_norm(m))`, so the
         norm sets where `bilinear` starts rather than where it ends.
 
-    Two: `/sqrt(referent_embedding_size)` is gone, because `standardise`
-        divides out any constant factor exactly, so the calibration it bought
-        has nothing left to do.
+    Two: the referents are layer-normed before the dot product, so no candidate
+        is read loudly for being large. The legacy module compares them raw.
 
-    Three: the score is standardised per game and then multiplied by
-        `score_scale`. That is the difference that matters -- the legacy module
-        holds its volume in the product of the backbone's magnitude and its
-        weight, the way jayelm's unnormalised `compare` does, and this one holds
-        it in one scalar that is absent from the backward pass. See
-        test_score_scale.py for why.
+    Three: `score_scale`. The legacy module holds its volume in the product of
+        the backbone's magnitude and its weight, the way jayelm's unnormalised
+        `compare` does; this one normalises both operands, keeps the exact
+        `/sqrt(referent_embedding_size)` that makes the opening `1/sqrt(3)` at
+        any width, and puts the volume in one scalar on top. See
+        test_score_scale.py.
 
     Everything else about the pairing is unchanged, which is what the two tests
         above still pin. This one exists so the divergence cannot widen
@@ -226,7 +225,9 @@ def test_the_score_deliberately_no_longer_matches_the_legacy_module():
         )
         normed = discriminator.referent_layer_norm(referents)
         raw = torch.einsum("ijh,ih->ij", (normed, projected))
-        rebuilt = discriminator.score_scale * R.standardise(raw)
+        rebuilt = discriminator.score_scale * (
+            raw / math.sqrt(discriminator.referent_embedding_size)
+        )
 
     assert torch.allclose(
         rebuilt, listener(referents, messages), atol=1e-6
@@ -860,14 +861,14 @@ def test_the_pair_can_still_go_quiet():
 
     It has lived in `log_mix_scale`, then in the two branch weights, and is now
         `ScoreVolume.log_score_scale` -- one cheap knob on an elevated learning
-        rate again. Being cheap was the objection, and what made it dangerous
-        was that the same scalar multiplied the gradient going back to the
-        speaker; that coupling is what has gone instead. See
-        `model_util.scale_without_attenuating` and test_score_scale.py.
+        rate again. Being cheap was the objection, on the grounds that the same
+        scalar multiplied the gradient going back to the speaker; that objection
+        did not survive AdamW's `m / sqrt(v)` and per-submodule clipping, both
+        of which divide a uniform factor out. See test_score_scale.py.
 
-    What this no longer pins, deliberately, is that neither path can go quiet
-        *alone*. Standardising each branch guaranteed that; standardising the
-        mix does not, and `mix_share` against `mix_alpha` is what watches it.
+    What this does not pin, deliberately, is that neither path can go quiet
+        *alone*. Standardising each branch would guarantee it; nothing does, and
+        `mix_share` against `mix_alpha` is what watches it.
     """
     listener = build_listener(
         "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,

@@ -781,17 +781,30 @@ class GumbelChannel:
             every step -- silently, except for a frozen `logit_spread`. See
             docs/channel.md.
 
-        The gain goes on through `model_util.scale_without_attenuating`, so the
-            forward is exactly `normalised * logit_scale` -- the fidelity of the
-            channel against the fixed 1.283 Gumbel noise floor is the scale's
-            real job and is untouched -- while the backward into `normalised`,
-            and so into this speaker's whole stack and vision model, does not
-            carry the scale as a factor. `dL/dlogit_scale` is unchanged, so the
-            covariance `scripts/ignition_audit.py` measures still reads what it
-            always did; what changes is that a scale sliding down no longer
-            turns down the machinery that would have made raising it worthwhile.
-            The listener's `ScoreVolume` is the same treatment on the same
-            shape. See the helper's docstring.
+        The gain is a plain product. `7b10d47` put it through a
+            straight-through helper instead -- forward `normalised *
+            logit_scale`, backward `d/dnormalised = 1` -- so that a scale
+            sliding down would not multiply down the gradient reaching this
+            speaker's stack and vision model. Two things say that was answering
+            a coupling which never reached the optimiser:
+
+            AdamW updates by `m / sqrt(v)`, and a uniform factor on a
+            parameter's gradient scales both, so it cancels. `clip_gradients`
+            then renormalises each submodule to `clip_grad_norm` whenever it
+            binds -- the ablation recorded speaker norms around 10 against a
+            ceiling of 1.0, so it binds -- which erases any remaining uniform
+            factor before the optimiser sees the gradient at all.
+
+            What the helper did cost is consistency. `dL/dlogit_scale = x` is
+            the true partial while `dL/dnormalised = J` is not, the truth being
+            `logit_scale * J`, so the pair is not the gradient of anything and
+            the stack was shaped for a channel of volume 1 whatever the forward
+            actually used. See docs/anecdotes.md.
+
+            The forward is unchanged either way, so the channel's fidelity
+            against the fixed 1.283 Gumbel noise floor -- the scale's real job
+            -- is untouched, and so is `dL/dlogit_scale` and the covariance
+            `scripts/ignition_audit.py` measures from it.
         """
         normalised = layer_norm_logits(logits, self.vocabulary)
         masked = mask_reserved_tokens(normalised)
@@ -804,9 +817,7 @@ class GumbelChannel:
                 None,
             )
 
-        scaled = mask_reserved_tokens(
-            model_util.scale_without_attenuating(normalised, self.logit_scale)
-        )
+        scaled = mask_reserved_tokens(normalised * self.logit_scale)
 
         if self.uniform_weight > 0.0:
             scaled = flatten_logit_distribution(scaled, self.uniform_weight)

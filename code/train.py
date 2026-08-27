@@ -361,6 +361,12 @@ def run(
                 this_acc = per_game_acc.mean()
             else:
                 this_loss = bce_criterion(lis_scores, lis_y)
+                # A fixed threshold at zero, against a score the readout no
+                #     longer centres. `mix_bias` and the discriminators' own
+                #     asymmetries are what move the decision off it. `train_acc`
+                #     is not comparable across the commit that removed the
+                #     centring, in either direction -- see
+                #     `receiver.ScoreVolume`.
                 lis_pred = (lis_scores > 0).float()
                 per_game_acc = (lis_pred == lis_y).float().mean(1).cpu().numpy()
                 this_acc = per_game_acc.mean()
@@ -448,26 +454,23 @@ def run(
             # producing a NaN column. See docs/measurement.md.
             #
             # `score_scale` is the volume column on both arms: one scalar per
-            # discriminator, downstream of the readout's per-game standardise.
+            # discriminator, in front of a score whose *inputs* are normalised.
             # Read it the way it always was -- a dip and a return is a healthy
             # listener declining to commit while the message is noise, a
-            # monotone slide is a collapse -- with one change: a slide no longer
-            # starves the speaker, because the scale is absent from the backward
-            # pass into the message. So a low `score_scale` beside a rising
-            # `logit_scale` is now a coherent state rather than a contradiction.
+            # monotone slide is a collapse. On the bilinear arm it multiplies a
+            # score calibrated to open at `1/sqrt(3)`, so the column is
+            # comparable across rungs and backbones without further arithmetic.
             #
-            # The weight norms stay, and mean different things on the two arms.
-            # On the bilinear arm the readout standardises, so `bilinear.weight`
-            # is exactly scale-invariant and its norm is *drift*: with
-            # `weight_decay = 0.0` a scale-invariant weight's norm can only
-            # grow, and its effective learning rate decays with it. On the
-            # attention arm the branches mix at their own magnitudes before the
-            # readout, so both norms still set the mix and remain load-bearing.
+            # The weight norms stay and are volume again on both arms. Nothing
+            # downstream divides a rescaling of `bilinear.weight` back out, so
+            # its norm is not the drift it was while the readout standardised;
+            # on the attention arm the branches also mix at their own
+            # magnitudes, so there the norms set the mix as well.
             #
             # `mix_alpha` is the mixing *weight* and `mix_share` is the share
-            # of the score each path actually contributes. They agreed while
-            # `forward` standardised the branches and no longer do, so both are
-            # reported -- a gap between them is a loud or quiet branch.
+            # of the score each path actually contributes. They would agree only
+            # if `forward` standardised the branches, which it deliberately does
+            # not, so both are reported -- a gap is a loud or quiet branch.
             if training:
                 discriminator = pair.receiver.discriminator
 

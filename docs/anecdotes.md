@@ -234,6 +234,91 @@ Whether any of this makes a rung ignite is unknown at the time of writing. It
 removes a coupling that could hold the bootstrap shut; it does not supply what
 opens it.
 
+### Attempt seven: the coupling was never reaching the optimiser
+
+Attempt six had a premise five rounds deep and nobody had measured it: that a
+scalar at the front of the score, by multiplying the backward pass, changes what
+the parameters behind it do. Under this repo's optimiser it does not.
+
+**AdamW divides it out.** The update is `m / √v`. A uniform factor `c` on a
+parameter's gradient scales `m` by `c` and `√v` by `c`, so the step is
+unchanged. Attempts four, five and six were all arguing about a quantity the
+optimiser normalises away before it becomes a step.
+
+**And clipping divides out whatever is left.** `train.py`'s `clip_gradients` is
+per-submodule, not global: each module is renormalised to `clip_grad_norm`
+whenever its norm exceeds it. The ablation recorded speaker gradient norms around
+10 against a ceiling of 1.0, so it binds, and a module whose gradient is clipped
+arrives at the optimiser at a fixed norm regardless of any factor upstream.
+
+What `scale_without_attenuating` did add is an inconsistent gradient. `∂L/∂s = x`
+is the true partial; `∂L/∂x = J` is not, the truth being `s · J`. The pair is not
+the gradient of any function, so nothing guarantees the joint `(x, s)` dynamics
+descend the loss, and concretely the machinery behind the scale is shaped for a
+volume of 1 whatever the forward uses. At `score_scale` 0.085 — where
+`brand-new-birds.csv` ended — that is a listener trained as though it were ten
+times louder than it is.
+
+So the helper is gone from both agents and the scalars are plain products again.
+
+**The standardise went with it, and for a better reason than the one first
+given.** It was redundant: `BilinearDiscriminator` already layer-norms both
+operands of its bilinear form, so the score is already backbone-independent, and
+normalising it again downstream bought nothing while costing the exact
+`/√referent_embedding_size` that `7b10d47` deleted on the grounds that a
+standardise divides any constant out. Restoring it puts the opening back at
+`1/√3` = 0.577 at every width and under every backbone — analytic, rather than a
+number to measure per rung.
+
+The reason first given was that `standardise` divides each game by the spread of
+its own candidate scores, and that spread is the *margin* — so it hands every
+game the same magnitude whether its message carried signal or noise, damping the
+informative games relative to the uninformative ones. At bootstrap the games that
+accidentally do better are the only signal there is, so that weighting is exactly
+backwards.
+
+**Measured, it is real and far too small.** On `BilinearDiscriminator`:
+
+| regime | score spread, informative vs noise | effect of `standardise` |
+|---|---|---|
+| `bilinear.weight` at random init | 0.567 vs 0.567 | uniform 1.77×, which AdamW cancels |
+| `bilinear.weight` = identity | 4.20 vs 0.98 | damps informative by ~1.4× |
+
+At initialisation the listener cannot read the message yet, so there is no margin
+to divide by and the effect is absent from exactly the regime it was argued
+from. It appears only once discrimination exists — which, read forwards, predicts
+takeoff followed by collapse rather than a flat failure, and `shapeworld-no-mup.csv`
+does exactly that: test accuracy 0.590 and colour accuracy 0.610 at epochs 6–10
+with `unique_message_fraction` falling 0.833 → 0.276, then epoch 11 at `uniq`
+0.120 and chance.
+
+**What is not explained.** `standardise` is present in exactly the runs whose
+*sender* parameters froze — `pool_score_norm` and `polarity_separation` moving
+382–445× slower than in the rung 10 that learned — and absent from every run that
+was merely dead at chance with those parameters still moving:
+
+| run | `standardise` | `accumulator_steps` | sender pre-channel |
+|---|---|---|---|
+| rung 10 at `1b512f0` | no | 1 | moving, learned |
+| `new_10.csv` | no | 1 | moving, dead |
+| `mid_run_birds.csv` | no | 1 | moving, dead |
+| `brand-new-birds.csv` | yes | 1 | frozen from epoch 5 |
+| `shapeworld-no-mup.csv` | yes | 4 | frozen from epoch 11 |
+| `birds-accumulator-2.csv` | yes | 2 | not frozen by epoch 30 |
+
+A 1.4× reweighting, active only after takeoff, is not obviously a 400× freeze.
+The correlation is recorded because it is what prompted the change; it is not a
+diagnosis, and the removal should not be reported as one.
+
+**The lesson, which is not the one attempts four to six were reaching for.** Five
+rounds went into where the volume should live and how it should reach the
+backward pass, and the answer to the second half was that the optimiser had
+already decided. Before designing around a gradient magnitude, check whether the
+optimiser can see it: Adam normalises per parameter, clipping normalises per
+module, and `weight_decay = 0.0` removes the one mechanism that would have made
+absolute scale matter. What survives all three is a gradient's *direction*.
+
+
 ## Frozen logit spread: NaN through a masked gradient
 
 `logit_spread` bit-identical across epochs is the signature of the AMP
