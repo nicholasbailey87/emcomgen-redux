@@ -32,34 +32,6 @@
 
 name = "ablation"
 
-[data]
-# 0.0 rather than the ShapeWorld default of 0.5, and this is what makes this
-# rung differ from the one it is named after. Set 2026-08-25 while chasing why
-# this rung never ignites.
-#
-# The default silhouettes the *receiver's* view on half of all training games to
-# break the colour shortcut, while `silhouette_p_sender` stays at 0.0, so the
-# speaker always sees colour. The channel only opens once the listener has
-# learned the speaker's accidental concept-to-symbol map -- the random but fixed
-# map a freshly initialised speaker has -- because only then does the gradient on
-# `log_logit_scale` acquire a consistent sign. A map is learnable only if it
-# holds still, and silhouetting scrambles the referent side of it on half the
-# games, on the listener's side, at exactly the point the listener has to learn
-# it.
-#
-# The evidence this is aimed at. `scripts/ignition_audit.py` put the sign of
-# `log_logit_scale`'s gradient at 49-52% negative over 1100 steps here -- a coin
-# flip, so no net travel -- against rung 07 crossing to ~79% at step 475. Rung
-# 10 is this rung on CUB, architecturally identical, and it ignites; CUB sets
-# `silhouette_p_receiver = 0.0` in `[birds.data]`.
-#
-# The cost is the colour shortcut coming back, which is exactly what the 0.5 was
-# bought with, so read `test_same_acc_md_shape` alongside the channel columns.
-# This rung is a diagnostic, not a replacement for the ladder's rung 9: if the
-# sign fraction crosses here and not at 0.5, the finding is about silhouetting
-# and the fix belongs somewhere that does not cost the shortcut.
-silhouette_p_receiver = 0.5
-
 [sender]
 feature_model = "ViT2"
 prototyper = "AttentionPrototyper"

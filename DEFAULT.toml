@@ -83,43 +83,6 @@ n_workers = 0
 # per game, at training time only. This attacks the colour-only local minimum
 # the paper reports (~83% accuracy, appendix A.1): with the six colours sitting
 # at six distinct luma values, only thresholding actually removes colour.
-#
-# The receiver is the side to constrain. Silhouetting the *sender* teaches it
-# shape-from-silhouette, which is not the shape-from-colour-image competence
-# that eval requires and `probe_shape.py` measures, and it shifts the sender's
-# input distribution out from under that probe. Silhouetting the receiver
-# leaves the sender's inputs alone but makes colour messages unrewardable, so
-# the shape gradient still reaches the sender's vision model through the
-# channel. It also denies the receiver the option of clustering its own set by
-# colour and treating the message as a coarse pointer.
-#
-# Cost: a colour concept needs both agents to see colour, so it is answerable
-# only (1 - p) of the time. Setting both rates to p makes that (1 - p)^2 --
-# strictly worse ceiling for the same shape pressure.
-#
-# The rate: back at 0.5 as of 2026-08-25, on the recollection that it worked
-# well. Note this reverses an earlier reading, which is left here because it has
-# not been reconciled: 0.5 arrived untitrated in 536c59e, and the last ShapeWorld
-# run at that rate had colour at 0.788 and shape at exactly chance by epoch 37 --
-# the paper's failure mode rather than the one silhouetting was added to prevent
-# -- which is what 0.1 was chosen against. The two readings may be of different
-# runs, or that run may have failed for an unrelated reason.
-#
-# The argument for a rate this high is the gradient ratio. Shape is visible in
-# both views, so it earns gradient on every turn; colour earns it only on the
-# (1 - p) of turns where the receiver can see colour to match a colour message
-# against. At 0.1 that ratio is 1 : 0.9, which is nowhere near enough against how
-# much cheaper colour is to learn -- six luma values one conv filter can
-# threshold. At 0.5 it is 1 : 0.5.
-#
-# What to watch at this rate: eval is never silhouetted, so the receiver's
-# BatchNorm running statistics are now averaging two very different pixel
-# distributions and are matched to neither. `test_same_acc_md_shape` leaving
-# chance is the result this is for; a fall in `test_same_acc_md_color` on its own
-# is the failure mode the 0.1 reading describes.
-#
-# Birds overrides both rates to 0.0 in `[birds.data]`: CUB species genuinely
-# depend on plumage colour, and `cub.py` does not thread these through anyway.
 silhouette_p_sender = 0.0
 silhouette_p_receiver = 0.5
 
