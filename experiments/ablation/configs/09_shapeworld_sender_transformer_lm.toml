@@ -88,52 +88,8 @@ layers = 6
 # causal arm needs because only it reads a symbol back.
 bidirectional = false
 
-# The four rates the removed width/depth rule was producing for this rung when
-# it was removed, restated as literals so this rung keeps running what it was
-# running. They are `1e-4 * 1024 / d_model / layers`: 320 wide and 10 blocks for
-# `ViT2`, 320 and 1 for `AttentionPrototyper` and `ExampleContrast`, 320 and 6
-# for `SenderTransformerLM`. Everything else stays at the base `lr`, which is
-# what the rule gave it too -- the listener is a 1024-wide GRU and a
-# `BilinearDiscriminator` whose fan-in is that same 1024.
-#
-# Kept rather than flattened to 1e-4 because flat is not a neutral baseline
-# here: it is the pre-`89ab6fc` configuration, under which `ignition_audit.py`
-# recorded this rung as never leaving `ln 2` across a whole run. The shape of
-# these four is also the shape that took birds off at epoch 0 -- the two
-# single-layer sender stages carrying the highest rates in the pair and the ViT
-# the lowest by an order of magnitude. Whether that shape is right is now an
-# empirical question with a knob attached, which is the point of the change that
-# introduced this table.
-[optimiser.module_lr]
-sender_vision = 3.2e-5
-sender_prototyper = 3.2e-4
-sender_contrast = 3.2e-4
-sender_language_model = 5.333333e-5
-
 [scheduler]
 epochs = 30
-
-# Ten epochs of linear ascent to the configured rates before the schedule
-# proper, added 2026-08-28 alongside DEFAULT's move to 6e-3 on the scaling
-# scalars.
-#
-# The two changes are one experiment. 6e-3 is there so the traverses -- the
-# channel's fidelity, the listener's volume and offset, the contrast gate -- are
-# not what the run is waiting on; the warm-up is there so that arriving fast is
-# not the same as arriving first. A scalar at 6e-3 crosses its whole useful
-# range in a few hundred steps, and a channel that opens while the speaker's
-# argmax is still close to input-independent is exactly the co-adaptation
-# `logit_scale`'s docstring warns about. Under the ramp the scalars reach full
-# rate only at epoch 10, by which time the representations have had ten epochs
-# at their own rates.
-#
-# Ten of thirty is a third of this rung's budget and a tenth of the 100-epoch
-# runs the real ablation uses; if this is kept, revisit the fraction rather than
-# the number. `PASS` scales each parameter group from its own recorded base rate,
-# so the ramp applies to the elevated groups and the module groups alike and
-# preserves the ratio between them throughout -- which is the quantity the 5e-5
-# and 4e-3 runs suggested ignition is actually set by.
-warm_up_epochs = 10
 
 [experiment]
 repeats = 1

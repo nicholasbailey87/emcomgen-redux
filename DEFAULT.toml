@@ -400,44 +400,114 @@ contrast_gate_lr = 6e-3
 # that differs from another at the same width does so because of the depth
 # term, which is the half with nothing behind it.
 #
-# Everything here opens at the base rate. Rungs 9 and 10 override four of these
-# to keep what was in flight when the rule came out; see their configs.
+# No rung overrides any of these today, so this table is the whole of the
+# per-module story on every rung. Rungs 9 and 10 briefly restated the four rates
+# the removed rule had been producing for them; those contradicted the ordering
+# below -- they put the speaker's language model at 5.3e-5 against the
+# listener's 1e-4, i.e. the listener running ahead -- and were dropped when the
+# ordering was adopted.
 #
-# A group's rate applies to every parameter in it -- weights, biases, norm gains,
-# activation parameters and embedding tables alike. That is a change from the
-# rule, which exempted anything below two dimensions and anything named
-# "embedding" or "query" and left those at base. Both exemptions were muP's and
-# had muP's justification: a tensor with no fan-in has no 1/fan_in to scale by,
-# and an embedding's fan-in is a one-hot index rather than a width. Neither
-# argument survives rates that are chosen rather than derived, so the exemptions
-# went with the rule. On rungs 9 and 10 that moves 155 tensors off the base rate
-# and onto their module's -- most of `ViT2`'s norms and biases to 3.2e-5, the
-# speaker language model's to 5.3e-5, and its `token_embedding` with them. It is
-# the one behavioural difference those two rungs took from this change, and if a
-# run turns on it, this paragraph is the thing to suspect.
+# The opening rates are not flat, and they are not eight independent numbers
+# either. Every one of them is `1e-4` times two factors of two:
 #
-# The exception is the four scaling scalars, which are held out on purpose; see
-# below.
+#                        vision      everything else
+#     speaker            1e-4        2e-4
+#     listener           5e-5        1e-4
 #
-# What is *not* here. The scaling scalars -- `log_logit_scale`,
-# `log_score_scale`, `mix_logit`, `contrast_gate` -- are excluded from their
-# module's group by `models.builder.claimed_separately` and take their rate from
-# the `*_lr` keys above, so setting a module's rate here never moves one of
-# them. `score_bias` and `polarity_embedding` are not excluded and so *would*
-# follow their module, except that their own keys above already move them.
+# **Each agent's vision model runs at half the rest of that agent, and the whole
+# listener runs at half the whole speaker.** Two claims, two factors, and the
+# ratios are the setting -- `1e-4` is only where the grid is pinned, at the
+# listener's language model, because that is the module jayelm tuned it on.
+#
+# *The listener slower than the speaker* is Rita et al., "On the role of
+# population heterogeneity in emergent communication" (arXiv:2204.12982). They
+# vary the two agents' training speeds against each other and find that a
+# speaker running ahead of its listener gives markedly better compositionality
+# and lower message entropy, while the reverse ordering gives the reverse
+# effects -- a slow listener acting as a bottleneck that forces a clearer
+# protocol. They also report that the *ratio* matters far more than the absolute
+# speeds, which is the same thing this repo's own rung 9 runs kept saying: the
+# 5e-5 run's `pool_score_norm` grew 17x in 11 epochs against 4.2x in 18 at twice
+# the rate, so the pre-ignition creep is limited by gradient sign consistency
+# and by the scalar-to-module ratio, not by the step size.
+#
+# Their knob is not this one, and the transfer is worth stating rather than
+# assuming. They control speed by the *number* of gradient updates -- a
+# probability `p` of an agent being optimised on any iteration -- where this
+# controls the size of each. Under AdamW the two meet at `lr * steps`, which
+# bounds how far a parameter can travel however large its gradient is, so
+# halving `p` and halving `lr` buy the same travel budget. They are not the same
+# thing in the second moment: skipping updates leaves stale momentum and changes
+# the noise the optimiser averages over, where a smaller rate does not. Treat
+# this as their ordering applied through the knob this codebase has.
+#
+# *Vision slower than the rest of its agent* is the ordering the VLM
+# fine-tuning literature keeps arriving at, and it is the same argument the
+# removed depth term was reaching for from the wrong end: the backbone is deep,
+# so the function it computes moves much further per step than any one of its
+# matrices does, and it is also the module whose representations everything
+# downstream is trying to ground. A backbone that keeps moving is a moving
+# target for the language model above it.
+#
+# The speaker's prototyper and contrast stage take the speaker's rate rather
+# than the vision one. They are not backbones -- neither has a residual stack to
+# accumulate along, both are single stages -- and they sit downstream of the
+# vision model on the path to the message, which is the side of the split the
+# argument puts them on. `receiver_token_embedding` and `receiver_discriminator`
+# are the listener's counterparts and take the listener's rate for the same
+# reason.
+#
+# What this is not. Two claims with a literature behind them, at magnitudes with
+# nothing behind them -- factors of two, chosen because the ordering is the
+# claim and the size is not. There is no transfer guarantee here of the kind muP
+# offers for width, and no run yet separates the orderings from the magnitudes.
+# If a run moves, the grid above is what to vary: change one factor at a time.
+#
+# Note also what it does to the baselines. Rungs 1 and 2 are jayelm's
+# architecture at jayelm's `lr = 1e-4`, and this leaves only their listener
+# language model there. The ablation stays internally consistent, since every
+# rung takes the same table; what is given up is the claim that the bottom of
+# the ladder reproduces jayelm exactly. If a baseline reading has to be
+# comparable to theirs, flatten the table in that rung rather than everywhere.
 [optimiser.module_lr]
 sender_vision = 1e-4
-sender_prototyper = 1e-4
-sender_contrast = 1e-4
-sender_language_model = 1e-4
-receiver_vision = 1e-4
+sender_prototyper = 2e-4
+sender_contrast = 2e-4
+sender_language_model = 2e-4
+receiver_vision = 5e-5
 receiver_token_embedding = 1e-4
 receiver_language_model = 1e-4
 receiver_discriminator = 1e-4
 
 [scheduler]
 epochs = 100
-warm_up_epochs = 0
+
+# Ten epochs of linear ascent to the configured rates before the schedule
+# proper, set 2026-08-28 alongside the move to 6e-3 on the scaling scalars.
+#
+# The two are one change. 6e-3 is there so that the traverses -- the channel's
+# fidelity, the listener's volume and offset, the contrast gate -- are not what
+# a run is waiting on; the ramp is there so that arriving fast is not the same
+# as arriving first. A lone scalar at 6e-3 crosses its whole useful range in a
+# few hundred steps, and a channel that opens while the speaker's argmax is
+# still close to input-independent is exactly the co-adaptation
+# `logit_scale`'s docstring warns about. Under the ramp the scalars reach full
+# rate only at epoch 10, by which time the representations have had ten epochs
+# at their own rates.
+#
+# Ten of `epochs` above is a tenth of a real run and a third of the 30-epoch
+# smoke runs rungs 9 and 10 have been using; if this is kept, revisit it as a
+# fraction rather than as a count. `train.py` takes
+# `min(warm_up_epochs, epochs)`, so a run shorter than this is all ramp rather
+# than an error.
+#
+# `PASS` scales each parameter group from its own recorded base rate, so the
+# ramp applies to the elevated scalar groups and the module groups alike and
+# holds the ratio between them constant throughout. That ratio is the quantity
+# rung 9's 5e-5 and 4e-3 runs suggested ignition is actually set by, so a warm-up
+# that preserved it was the only kind worth adding: one that ramped only the
+# base `lr` would have moved the thing under test.
+warm_up_epochs = 10
 lr_schedule_shape = "ascent"
 cool_point_multiplier = 1.0
 range_test = false

@@ -117,16 +117,43 @@ def test_the_group_names_are_the_module_lr_keys():
     }
 
 
-def test_the_default_rates_are_all_the_base_rate():
+def test_the_default_rates_are_two_factors_of_two():
     """
-    Every group opens at `lr`, so the table is inert until a rung moves one.
-        A difference here would apply to all sixteen rungs at once and silently.
+    DEFAULT's table is not flat and is not eight independent numbers: every rate
+        is the base `lr` times two factors, one per claim. Each agent's vision
+        model runs at half the rest of that agent, and the whole listener runs
+        at half the whole speaker. See DEFAULT.toml for the argument and for
+        what it costs the baselines.
+
+    Asserted as the grid rather than as eight literals, because the magnitudes
+        are chosen and the structure is the claim. A change that keeps the grid
+        is a retune; one that breaks it is a different position, and this is
+        where a reader is told which happened. It applies to all sixteen rungs
+        at once either way.
     """
     config = parse_config.get_config()
     base_lr = config["optimiser"]["lr"]
+    rates = config["optimiser"]["module_lr"]
 
     assert base_lr == 1e-4
-    assert set(config["optimiser"]["module_lr"].values()) == {base_lr}
+
+    # The grid is pinned at the listener's language model, the module jayelm
+    #     tuned `lr` on.
+    speaker = 2.0
+    vision = 0.5
+
+    expected = {
+        "sender_vision": base_lr * speaker * vision,
+        "sender_prototyper": base_lr * speaker,
+        "sender_contrast": base_lr * speaker,
+        "sender_language_model": base_lr * speaker,
+        "receiver_vision": base_lr * vision,
+        "receiver_token_embedding": base_lr,
+        "receiver_language_model": base_lr,
+        "receiver_discriminator": base_lr,
+    }
+
+    assert rates == pytest.approx(expected)
 
 
 def test_a_module_lr_key_naming_no_group_is_rejected():
@@ -153,32 +180,33 @@ def test_a_module_lr_that_is_not_a_positive_number_is_rejected(bad):
         parse_config.validate_config(config)
 
 
-def test_the_two_rungs_carrying_overrides_carry_the_ones_they_were_running():
+def test_no_rung_overrides_the_default_table():
     """
-    Rungs 9 and 10 restate the four rates the removed width/depth rule was
-        producing when it was removed, so that neither rung's behaviour moved
-        with the mechanism. Written out here as well because the point of the
-        change is that they are now *choices*: if one of them moves, this test
-        is where the reader is told it was deliberate.
+    Every rung takes DEFAULT's grid, so the two orderings hold across the whole
+        ladder and a comparison between rungs is a comparison of architectures.
+
+    This is an assertion about the experiment rather than about the code: a rung
+        *may* override, and `parse_config` merges the table key by key so a
+        partial override works. What it may not do is override silently, and a
+        rung that starts to is a rung whose reading is no longer comparable to
+        the rest at the level of learning rates. Rungs 9 and 10 carried four
+        overrides for a day -- the rates the removed width/depth rule had been
+        producing -- and they contradicted the ordering: 5.3e-5 on the speaker's
+        language model against 1e-4 on the listener's is the listener running
+        ahead, which is the direction Rita et al. report as the harmful one.
     """
-    expected = {
-        "sender_vision": 3.2e-5,
-        "sender_prototyper": 3.2e-4,
-        "sender_contrast": 3.2e-4,
-        "sender_language_model": 5.333333e-5,
-    }
+    default = parse_config.get_config()["optimiser"]["module_lr"]
 
-    for config_file in (
-        "09_shapeworld_sender_transformer_lm.toml",
-        "10_birds_sender_transformer_lm.toml",
-    ):
-        config = parse_config.get_config(rung(config_file))
+    for config_file in RUNGS:
+        rates = parse_config.get_config(rung(config_file))["optimiser"]["module_lr"]
 
-        for name, lr in expected.items():
-            assert config["optimiser"]["module_lr"][name] == pytest.approx(lr), (
-                f"{config_file} has {name} at "
-                f"{config['optimiser']['module_lr'][name]}"
+        assert rates == default, (
+            f"{config_file} overrides module_lr: "
+            + ", ".join(
+                f"{k} {default[k]} -> {v}"
+                for k, v in rates.items() if default[k] != v
             )
+        )
 
 
 # --------------------------------------------------------------------------
