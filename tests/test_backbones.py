@@ -44,6 +44,7 @@ import math
 import os
 import tempfile
 
+import pytest
 import torch
 import torch.nn as nn
 import torchvision
@@ -87,10 +88,10 @@ def _backbones():
     ]
 
 
-def _pair(dataset, n_feats, name):
+def _pair(dataset, n_feats, name, extra=""):
     """A sender/receiver pair built through `models.builder`, as training does."""
     with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
-        f.write(f'name = "test"\n[data]\ndataset = "{dataset}"\n')
+        f.write(f'name = "test"\n[data]\ndataset = "{dataset}"\n{extra}')
         path = f.name
     try:
         config = parse_config.get_config(path)
@@ -422,9 +423,26 @@ def test_attention_listener_reset_covers_its_adapters():
             assert not stale, f"{slot}.{name} not reset: {stale}"
 
 
-def _pair_with_gradients():
+def _pair_with_gradients(contrast=False):
+    """
+    A ShapeWorld pair that has backpropped, so every group has a real gradient.
+
+    `contrast` is a parameter rather than a default because DEFAULT.toml has the
+        stage off, and building only from DEFAULT is what made the partition
+        test below blind for as long as it was: `sender.contrast`'s ten tensors
+        were falling to the `other` catch-all on every rung that had the stage,
+        and the one pair these tests built was the one pair where that could not
+        show. The partition itself is asserted over all sixteen rungs in
+        `tests/test_module_learning_rates.py`, which needs no backward pass;
+        what needs one is everything below about the norms.
+    """
     torch.manual_seed(0)
-    config, pair = _pair("../data/shapeworld_40", SHAPEWORLD_FEATS, "shapeworld")
+    config, pair = _pair(
+        "../data/shapeworld_40",
+        SHAPEWORLD_FEATS,
+        "shapeworld",
+        extra="[sender]\ncontrast = true\n" if contrast else "",
+    )
     n_examples = config["data"]["n_examples"]
     inputs = torch.randn(2, n_examples, *SHAPEWORLD_FEATS)
     targets = torch.zeros(2, n_examples)
@@ -435,43 +453,105 @@ def _pair_with_gradients():
     return pair
 
 
-def test_clip_gradients_partitions_every_parameter():
+@pytest.mark.parametrize("contrast", [False, True])
+def test_clip_gradients_reports_every_group_and_leaves_nothing_over(contrast):
     """
-    `CLIP_GROUPS` must cover the pair. The `other` fallback catches anything a
-    future architecture adds, so its presence is the alarm, not the fix.
+    `MODULE_GROUPS` must cover the pair, and every group that exists on it must
+    report a real norm rather than a NaN.
+
+    `other` is the alarm and not the fix: it catches whatever a future
+    architecture adds so that nothing goes unclipped, and it is NaN when there
+    is nothing in it. It was not NaN before `sender_contrast` was added -- it
+    held the whole contrast stage, under a name that said nothing about it.
     """
-    pair = _pair_with_gradients()
-    grouped = set()
-    for _, select in train.CLIP_GROUPS:
-        grouped.update(id(p) for p in select(pair).parameters())
-    missing = [n for n, p in pair.named_parameters() if id(p) not in grouped]
-    assert not missing, f"outside CLIP_GROUPS: {missing[:5]}"
+    pair = _pair_with_gradients(contrast=contrast)
+    norms = train.clip_gradients(pair, 1.0)
 
-    assert "other" not in train.clip_gradients(pair, 1.0)
+    assert tuple(norms) == models.builder.GROUP_NAMES
+    assert math.isnan(norms["other"])
+
+    for name, params in models.builder.group_parameters(pair):
+        if name == "other":
+            continue
+        # An empty group is NaN for the same reason an absent one is; the only
+        # empty group here is `AveragePrototyper`, which has no parameters.
+        expected_nan = not any(p.grad is not None for p in params)
+        assert math.isnan(norms[name]) is expected_nan, f"{name}: {norms[name]}"
+
+    assert math.isnan(norms["contrast_gate"]) is not contrast
 
 
-def test_clip_gradients_bounds_each_module_independently():
+@pytest.mark.parametrize("contrast", [False, True])
+def test_clip_gradients_bounds_each_module_independently(contrast):
     """
-    The point of clipping per module: a module under the ceiling is left alone
-    however large another module's gradient is. Under one global norm the
+    The point of clipping per group: a group under the ceiling is left alone
+    however large another group's gradient is. Under one global norm the
     speaker's vision model was scaled by ~86x because of the comparer.
     """
-    pair = _pair_with_gradients()
+    pair = _pair_with_gradients(contrast=contrast)
     before = train.clip_gradients(pair, 1.0)
-    assert before, "no gradients to clip"
+    assert not all(math.isnan(v) for v in before.values()), "no gradients"
 
-    for name, select in train.CLIP_GROUPS:
-        grads = [p.grad for p in select(pair).parameters() if p.grad is not None]
+    for name, params in models.builder.group_parameters(pair):
+        grads = [p.grad for p in params if p.grad is not None]
         if not grads:
             continue
         after = torch.norm(torch.stack([g.norm() for g in grads])).item()
         assert after <= 1.0 + 1e-4, f"{name} left at {after}"
-        if before.get(name, 0.0) <= 1.0:
+        if before[name] <= 1.0:
             # Was already inside the ceiling, so it must not have been touched.
             assert math.isclose(after, before[name], rel_tol=1e-4), (
                 f"{name} was {before[name]} before clipping and {after} after, "
                 f"despite never reaching the ceiling"
             )
+
+
+def test_a_lone_scalar_is_not_clipped_by_its_modules_norm():
+    """
+    Why the scaling scalars are groups of their own. `clip_grad_norm_` takes one
+    norm across a group and scales every member by one factor, so a scalar
+    sharing a group with a thousand matrices is renormalised by *their* norm --
+    at recorded speaker norms of ~10 against `clip_grad_norm = 1.0`, a tenfold
+    attenuation applied on every step that binds, to a parameter whose whole
+    travel is already bounded by `lr * steps`.
+
+    Asserted at a ceiling chosen to sit between the scalar's own gradient and
+    its module's, because that is the whole of the claim: at such a ceiling the
+    module is scaled down and the scalar, alone in its group, is not. A real
+    run's ceiling is 1.0 and its speaker norms are an order of magnitude above
+    it; this batch is two games and does not reproduce those magnitudes, so the
+    ceiling is derived from the pair in hand rather than hardcoded.
+    """
+    pair = _pair_with_gradients()
+    scale = pair.sender.language_model.log_logit_scale
+    assert scale.grad is not None
+
+    module = [
+        p for p in pair.sender.language_model.parameters() if p.grad is not None
+    ]
+    module_norm = torch.norm(
+        torch.stack([p.grad.norm() for p in module])
+    ).item()
+    scale_grad = scale.grad.item()
+
+    assert abs(scale_grad) < module_norm, (
+        "the scalar's own gradient is the whole of its module's, so there is "
+        "nothing here to distinguish"
+    )
+    ceiling = (abs(scale_grad) + module_norm) / 2
+
+    before = scale.grad.clone()
+    largest = max(p.grad.norm().item() for p in module if p is not scale)
+
+    norms = train.clip_gradients(pair, ceiling)
+
+    # The module bound and was scaled; the scalar was inside the ceiling on its
+    # own and so was left exactly alone.
+    assert norms["sender_language_model"] > ceiling
+    assert torch.equal(scale.grad, before)
+    assert max(
+        p.grad.norm().item() for p in module if p is not scale
+    ) < largest
 
 
 if __name__ == "__main__":

@@ -99,122 +99,41 @@ weight_decay = 0.0
 clip_grad_norm = 1.0
 log_interval = 100
 
-# The width `lr` above was tuned at, and the numerator of the per-module rule:
+# The five keys below -- `logit_scale_lr`, `score_scale_lr`, `score_bias_lr`,
+# `mix_logit_lr` and `contrast_gate_lr` -- are the scaling scalars and the one
+# offset that pairs with one of them, and they all sit at 6e-3 as of 2026-08-28.
+# Each block below carries its own arithmetic for what distance that parameter
+# has to cover, and each of those arithmetics was written against 2e-3; read
+# them as the argument for the *shape* of the setting and multiply the per-epoch
+# figures by three for the current value.
 #
-#     lr(module) = lr * mup_reference_width / d_model(module) / layers(module)
+# Why 6e-3 rather than the 2e-3 those arithmetics ask for. Every one of these is
+# a lone parameter whose whole travel over a run is bounded by `lr * steps`,
+# because AdamW moves a parameter by about `lr` per step whatever the gradient's
+# size. That bound is the only thing 2e-3 was chosen to clear, and clearing it is
+# not the same as clearing it early: rung 9 at 4e-3 still had not ignited, and a
+# fuse that burns a third of the epoch budget is a fact about the learning rate
+# rather than about the language. Overshoot is cheap on all five -- the
+# fidelity's gap saturates at `uniform_weight`'s 4.84, the volume's gradient
+# vanishes once the scores are calibrated, the mixing weight parks at whatever
+# mix the loss wants, and the gate parks at whatever share the branch is worth --
+# so a larger rate buys earlier arrival rather than a different endpoint.
 #
-# Two corrections with opposite signs. The width half is muP; the depth half is
-# not, and is described below under "The depth term".
+# What it costs is the bootstrapping window, and that cost is real. `init_energy`
+# opens the channel near-random on purpose so that the listener has no premature
+# structure to co-adapt to, and a channel that opens while the speaker's argmax
+# is still close to input-independent is exactly the co-adaptation
+# `logit_scale`'s docstring warns about. The brake is `uniform_weight`'s floor:
+# 10% of tokens are resampled uniformly however sharp the speaker gets, so a code
+# formed early still has to survive that corruption. Whether the brake holds at
+# this rate is what the next runs test, and the tell is `realised_survival`
+# against shape accuracy -- a channel that opens while accuracy stays at chance
+# is the failure, not a slow channel.
 #
-# One rule stated once rather than six literal rates, because the rates are a
-# consequence of the widths and depths, and would go stale the moment either
-# moved.
-# `build_models` applies it, `split_out_module` does the regrouping, and the
-# resolved rates are written back into the saved config as
-# `[optimiser] resolved_mup_lrs` so args.json records what was actually built.
-#
-# 1024 is jayelm's `--speaker_hidden_size` and `--listener_hidden_size`. Their
-# runs are where `lr = 1e-4` comes from, so 1024 is the width at which this rule
-# is the identity and every other width is a departure from a tuned setting
-# rather than from a guess.
-#
-# Why any of this. Under muP, Adam's stable learning rate for a matrix that maps
-# one width to another goes as 1/fan_in: the update is a matrix-vector product
-# whose output variance grows with the fan-in, so a rate that is right at 1024 is
-# too small at 320 by the ratio. This repo has inherited 1e-4 unchanged across
-# modules three times narrower than jayelm's. The August 2026 ablation's rungs 9,
-# 11, 13 and 15 never left `ln 2`: every learned quantity on the speaker side was
-# stationary to four decimal places for thirty epochs, with a loss falling slowly
-# and monotonically and no spikes anywhere -- the signature of too little rate,
-# not too much. Rung 9 is exactly where `sender_language_model.d_model` drops
-# 1024 -> 320, which under the width term alone wants 3.2x.
-#
-# That reading is what `89ab6fc` tested and it did not survive: the width term
-# alone broke rungs 9 and 10 outright. Read the depth term below as the
-# correction to it, and this whole paragraph as the argument that motivated the
-# width half rather than as a finding that still stands unqualified.
-#
-# The depth term. muP's 1/fan_in is a statement about one matrix: how large an
-# update it can take before its output variance blows up. It says nothing about
-# how many such matrices sit in series, and AdamW moves every parameter by about
-# `lr` per step whatever its gradient's size -- so a residual stack of depth L
-# moves the *function* about L times as far per step as any one of its matrices
-# moves. Swapping a one-cell GRU for a six-layer transformer, or a ResNet for a
-# ten-block ViT, is a large increase in travel per step at an unchanged rate,
-# pulling opposite to the width term.
-#
-# This half is a heuristic with no parametrisation behind it, and it is adopted
-# for a measured reason rather than a derived one: `89ab6fc` reinstated the width
-# rule alone and rungs 9 and 10 both failed to converge, which says those rungs
-# sit nearer their stable rate than the flat-at-`ln 2` reading assumed. Do not
-# report the pair as "muP" in the paper.
-#
-# Note broccoli's DeepNorm already attenuates by depth and much more weakly --
-# `beta` goes as `(8L)^(-1/4)`, i.e. 0.33 at ten blocks against the 0.1 this
-# applies. They are different corrections and compose rather than double-count:
-# `beta` scales a branch's output, this scales the update. But the combined
-# attenuation at depth is steep, and it is the first thing to suspect if the deep
-# modules now fail to move at all.
-#
-# At the current widths and depths that gives, for rungs 9 and 10:
-#
-#     ViT2                  320 wide, 10 deep   3.2e-5
-#     AttentionPrototyper   320 wide,  1 deep   3.2e-4
-#     ExampleContrast       320 wide,  1 deep   3.2e-4
-#     SenderTransformerLM   320 wide,  6 deep   5.3e-5
-#     ReceiverGRULM        1024 wide,  1 deep   1.0e-4  (unchanged)
-#
-# and on the rungs that have them, 6.7e-5 for `ReceiverCrossAttentionLM` (256
-# wide, 6 deep) and 1.3e-4 for `AttentionDiscriminator` (256 wide, 3 deep).
-#
-# Note the shape of that: the two single-layer sender stages now carry the
-# highest rates in the pair, and the ViT the lowest by an order of magnitude.
-# `AttentionPrototyper` is deliberate -- `pool_score_norm` opens at exactly zero
-# and its travel is bounded by `lr * steps`, so it is one of the parameters
-# ignition waits on.
-#
-# Two exemptions, both by rule rather than by list, so a module added later is
-# covered without anyone having to remember to add it. See `is_mup_exempt`.
-#
-# Tensors with fewer than two dimensions -- biases, norm gains, and every learned
-# scalar -- have no fan-in to scale by. This is also what keeps muP's groups
-# disjoint from the five scalar overrides below without either loop having to
-# know about the other.
-#
-# Tensors whose name contains "embedding" or "query" -- `polarity_embedding`,
-# `label_embedding`, `token_embedding`, `query`, `output_query`. muP gives input
-# embeddings a Theta(1) rate, because their fan-in is a one-hot index and not a
-# width; every one of these is Theta(1)-initialised as well, so scaling their
-# rate by width would be scaling against an init that never shrank. Matched as a
-# substring exactly as `gradboard`'s `EXCLUDE_FROM_WEIGHT_DECAY` matches
-# "embedding", and the same caveat applies -- a rename would move a tensor
-# silently.
-#
-# Whole modules out of scope, all of them by the same test: no `d_model`
-# attribute.
-#
-# The convolutional backbones. `ResNet18.final_feat_dim` is a hardcoded 512 with
-# no width to vary, muP's rules are stated for transformers, and a ResNet at 1e-4
-# is precisely what jayelm tuned.
-#
-# `BilinearDiscriminator`, which reads nothing from its own table: its single
-# tensor is `nn.Linear(message_width, referent_embedding_size, bias=False)` whose
-# fan-in is the language model's `output_size`. With `[receiver_language_model]`
-# restored to jayelm's 1024 that fan-in *is* the reference width, so the factor
-# would be 1.0 and the group would be a group at base rate.
-#
-# What this rule does *not* claim. muP transfers a tuned rate across a change of
-# width in one architecture. Two of the changes here are not that: the speaker's
-# language model goes GRU -> Transformer as well as 1024 -> 320, and `ViT2`
-# replaces a ResNet with no 1024 anywhere in it. Principled heuristic, not
-# transfer guarantee, and the paper should say so.
-#
-# Only the learning-rate half of muP is being adopted. Broccoli's `nn.Linear`
-# init is already 1/sqrt(fan_in), `msa_scaling = "d"` is already muP's attention
-# scaling, and `layer_norm_logits` already makes the speaker's readout scale
-# width-invariant. The `mup` package in requirements.txt stays unimported; the
-# rule is one line of arithmetic.
-mup_reference_width = 1024
+# `polarity_embedding_lr` is deliberately not in this group and stays at 2e-3.
+# It is a 2-d tag rather than a scalar, it no longer has a traverse to cover
+# since it opens as an antipodal draw at `referent_layer_norm`'s own scale, and
+# its own block below says why it wants to be separable from the channel.
 
 # Learning rate for the speaker's `log_logit_scale` alone. Set to `lr` to
 # disable the override.
@@ -287,7 +206,7 @@ mup_reference_width = 1024
 # and it competes with `Wh` for control of the message. LayerNorm bounds the
 # magnitude of `Wh + b` but not the ratio between them, so a bias that outruns
 # the matrix leaves an input-independent message -- the single-message collapse.
-logit_scale_lr = 2e-3
+logit_scale_lr = 6e-3
 
 # The listener's counterpart, `ScoreVolume.log_score_scale`, reported as
 # `train_score_scale`. One scalar per discriminator, in front of a score whose
@@ -323,7 +242,7 @@ logit_scale_lr = 2e-3
 # correct on a message carrying nothing, since BCE's minimiser is `p = 0.5`
 # everywhere. Read `train_score_scale` as before: a dip and a return is a
 # listener declining to commit, a monotone slide is a collapse.
-score_scale_lr = 2e-3
+score_scale_lr = 6e-3
 
 # The offset half of the same readout: `ScoreVolume.score_bias`, added after
 # the volume, on both discriminators.
@@ -352,7 +271,7 @@ score_scale_lr = 2e-3
 # per-game offset, and the bilinear score's per-game mean is
 # `mean_j(LN(r_j)) . proj`, which varies by game. If this moves and accuracy
 # does not, the offset was per-game and the answer is a different readout.
-score_bias_lr = 2e-3
+score_bias_lr = 6e-3
 
 # The same elevated rate, for `SenderTransformerLM.polarity_embedding` -- the
 # learned tag that tells that speaker which of its two prototypes is the
@@ -423,7 +342,7 @@ polarity_embedding_lr = 2e-3
 # Note the ceiling is not a prediction. Only a sign-consistent gradient spends
 # it, and the probe's free-alpha arms climbed to 0.33-0.44 over 2,000 steps,
 # well inside it.
-mix_logit_lr = 2e-3
+mix_logit_lr = 6e-3
 
 # `ExampleContrast.contrast_gate`, the one scalar between the speaker's contrast
 # stage and the identity. Inert unless `[sender] contrast` is true.
@@ -443,7 +362,78 @@ mix_logit_lr = 2e-3
 # contributed anything at all, and `out_projection` starting at a properly
 # scaled random direction means the branch is at a sensible magnitude the moment
 # the gate opens. See `ExampleContrast`'s docstring.
-contrast_gate_lr = 2e-3
+contrast_gate_lr = 6e-3
+
+# One learning rate per module clip group, and the only mechanism in the
+# codebase giving different modules different rates.
+#
+# The keys are the names in `models.builder.MODULE_GROUPS`, which is also what
+# `train.py` clips over: one table, so a module cannot be rateable without being
+# clipped or the other way round. An absent key means the base `lr` above; a key
+# naming no group raises in `parse_config`, so a typo cannot sit here looking
+# like a setting while the module it was meant for runs at base. `build_models`
+# writes the resolved rates back as `[optimiser] resolved_module_lrs` so
+# args.json records what each group actually ran at, and which groups existed --
+# `sender_contrast` is absent when the stage is off.
+#
+# Stated rather than computed, and that is a reversal. Until August 2026 these
+# rates came out of a rule -- `lr * reference_width / d_model / layers`. The
+# width half was muP, whose claim is that Adam's stable rate for a matrix
+# mapping one width to another goes as 1/fan_in, so a rate tuned at jayelm's
+# 1024 is too small at 320 by the ratio. The depth half was not muP and had no
+# parametrisation behind it at all; the exponent the literature gives this
+# architecture is 1/sqrt(L) rather than 1/L, and broccoli's DeepNorm already
+# puts the stack in that regime -- its alpha and beta give an effective branch
+# scale of exactly 0.5 * L^(-1/2).
+#
+# The rule was tried twice and neither half survived on its own terms. `89ab6fc`
+# reinstated the width half alone and rungs 9 and 10 both failed to converge,
+# which says those rungs sit nearer their stable rate than the flat-at-`ln 2`
+# reading assumed. `afcefd0` added the depth half to pull the other way, and the
+# rates below are what it produced. So what the rule bought was never a
+# principled exponent; it was the per-module *structure*, and the structure is
+# what is kept here. A number in this table is a number somebody chose, and can
+# be argued with on the evidence of a run rather than defended as a derivation.
+#
+# Note also what a width rule could not have expressed: at 320 wide it cannot
+# tell a ten-block ViT from a one-layer scoring projection. Every rate below
+# that differs from another at the same width does so because of the depth
+# term, which is the half with nothing behind it.
+#
+# Everything here opens at the base rate. Rungs 9 and 10 override four of these
+# to keep what was in flight when the rule came out; see their configs.
+#
+# A group's rate applies to every parameter in it -- weights, biases, norm gains,
+# activation parameters and embedding tables alike. That is a change from the
+# rule, which exempted anything below two dimensions and anything named
+# "embedding" or "query" and left those at base. Both exemptions were muP's and
+# had muP's justification: a tensor with no fan-in has no 1/fan_in to scale by,
+# and an embedding's fan-in is a one-hot index rather than a width. Neither
+# argument survives rates that are chosen rather than derived, so the exemptions
+# went with the rule. On rungs 9 and 10 that moves 155 tensors off the base rate
+# and onto their module's -- most of `ViT2`'s norms and biases to 3.2e-5, the
+# speaker language model's to 5.3e-5, and its `token_embedding` with them. It is
+# the one behavioural difference those two rungs took from this change, and if a
+# run turns on it, this paragraph is the thing to suspect.
+#
+# The exception is the four scaling scalars, which are held out on purpose; see
+# below.
+#
+# What is *not* here. The scaling scalars -- `log_logit_scale`,
+# `log_score_scale`, `mix_logit`, `contrast_gate` -- are excluded from their
+# module's group by `models.builder.claimed_separately` and take their rate from
+# the `*_lr` keys above, so setting a module's rate here never moves one of
+# them. `score_bias` and `polarity_embedding` are not excluded and so *would*
+# follow their module, except that their own keys above already move them.
+[optimiser.module_lr]
+sender_vision = 1e-4
+sender_prototyper = 1e-4
+sender_contrast = 1e-4
+sender_language_model = 1e-4
+receiver_vision = 1e-4
+receiver_token_embedding = 1e-4
+receiver_language_model = 1e-4
+receiver_discriminator = 1e-4
 
 [scheduler]
 epochs = 100

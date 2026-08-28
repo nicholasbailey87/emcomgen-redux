@@ -78,61 +78,200 @@ def split_out_parameter(optimiser, pair, suffix, lr, config_key):
     return _regroup(optimiser, selected, lr)
 
 
-# Substrings marking a tensor as an *input* to the network rather than a
-#     transformation within it. Matched case-insensitively anywhere in the
-#     `named_parameters` name, as `gradboard.optimiser`'s
-#     `EXCLUDE_FROM_WEIGHT_DECAY` does, rather than enumerated: the same rule
-#     then covers a module added later without anyone having to remember this
-#     list. Covers `polarity_embedding`, `label_embedding`, `token_embedding`,
-#     `query` and `token_embedding`. It used to cover `output_query` too; the
-#     speaker's two arms now read the message off the tail of the latent array
-#     rather than through a learned readout, so that parameter is gone. The rule
-#     is unchanged -- "query" still matches `query`.
-MUP_EMBEDDING_LIKE = ("embedding", "query")
+# `(name, selector)` for the modules that get a gradient-clipping group and a
+#     learning rate of their own. The module is picked off the constructed pair
+#     rather than named through its parameters, because "every tensor in
+#     `sender.language_model`" is not expressible as a suffix and an attribute
+#     lookup cannot be quietly broken by a rename the way a suffix match can.
+#
+# A selector may return None -- `sender.contrast` is `None` when the stage is
+#     off -- which means the group does not exist on this pair. Nothing else
+#     built so far is optional.
+#
+# One table serving two mechanisms that used to disagree. `train.py` had its own
+#     `CLIP_GROUPS`, which omitted `sender.contrast` and so clipped the whole
+#     stage under the `other` catch-all -- on every rung with the stage on,
+#     `other` *was* the contrast stage under a misleading name. `MUP_MODULES`
+#     was a second list, which included the contrast stage and omitted the
+#     listener's embedding table. Neither was derivable from the other and
+#     nothing held them in step, so adding a module to one was a silent partial
+#     change. Add a module here and it is clipped and rateable at once.
+MODULE_GROUPS = (
+    ("sender_vision", lambda pair: pair.sender.feat_model),
+    ("sender_prototyper", lambda pair: pair.sender.prototyper),
+    ("sender_contrast", lambda pair: pair.sender.contrast),
+    ("sender_language_model", lambda pair: pair.sender.language_model),
+    ("receiver_vision", lambda pair: pair.receiver.feature_model),
+    ("receiver_token_embedding", lambda pair: pair.receiver.token_embedding),
+    ("receiver_language_model", lambda pair: pair.receiver.language_model),
+    ("receiver_discriminator", lambda pair: pair.receiver.discriminator),
+)
 
 
-def is_mup_exempt(name, parameter):
+# `(name, applies to)` for the scaling scalars, each of which is a clipping
+#     group to itself. The name is also the `named_parameters` suffix: there is
+#     one tensor per name, it is 0-d, and the group is that one tensor.
+#
+# Why they are not left inside their modules. `clip_grad_norm_` takes one norm
+#     across a whole group and scales every member by one factor, so a scalar
+#     sharing a group with a thousand matrices is renormalised by *their* norm.
+#     At recorded speaker norms of ~10 against `clip_grad_norm = 1.0` that is a
+#     tenfold attenuation, applied on every step that binds, to a parameter
+#     whose whole travel is already bounded by `lr * steps` -- and these are the
+#     parameters the run's ignition waits on. Alone in a group, a scalar is
+#     clipped by its own magnitude or not at all.
+#
+# Why these four and not the other two. These are the scalars that *scale*
+#     something: a channel fidelity, a score volume, a mixing weight, a gate.
+#     `score_bias` is an offset and `polarity_embedding` is a 2-d tag, and both
+#     belong to the norm of the module producing the output they modify. Both
+#     still take a rate of their own through `SPLIT_LEARNING_RATES` -- a clip
+#     group and a learning rate are separate questions, and this table answers
+#     only the first.
+#
+# The gate is on the architecture rather than on finding the parameter, exactly
+#     as `SPLIT_LEARNING_RATES`'s is: a `BilinearDiscriminator` has no mixing
+#     weight and a speaker without the contrast stage has no gate, so for those
+#     the group is inapplicable rather than missing, and `group_parameters`
+#     raises if an applicable one matches nothing.
+SCALAR_GROUPS = (
+    ("log_logit_scale", lambda pair: True),
+    ("log_score_scale", lambda pair: True),
+    (
+        "mix_logit",
+        lambda pair: isinstance(
+            pair.receiver.discriminator, receiver.AttentionDiscriminator
+        ),
+    ),
+    ("contrast_gate", lambda pair: pair.sender.contrast is not None),
+)
+
+
+SCALAR_SUFFIXES = tuple(name for name, _ in SCALAR_GROUPS)
+
+
+# Every group name, in reporting order, with the catch-all last. `train.py`
+#     reports one gradient-norm column per entry on every rung, NaN where the
+#     group does not exist on that architecture, so that the metrics header
+#     keeps its shape across a resume -- the same rule the contrast columns
+#     follow.
+GROUP_NAMES = (
+    tuple(name for name, _ in MODULE_GROUPS) + SCALAR_SUFFIXES + ("other",)
+)
+
+
+def claimed_separately(name, parameter=None):
     """
-    Whether `parameter` keeps the base learning rate rather than the muP one.
+    Whether `parameter` has a group of its own rather than belonging to its
+        module's.
 
-    muP's rule is per *tensor type*, not per module: only the matrices that map
-        one width to another take a learning rate in 1/fan_in. Two kinds do not.
-
-        Anything with fewer than two dimensions -- biases, norm gains, and every
-        learned scalar -- has no fan-in to scale by, and its update is not a
-        matrix-vector product whose variance grows with width.
-
-        Embedding-like tensors take a Theta(1) rate under muP because their
-        "fan-in" is a one-hot index rather than a width. Every one of them here
-        is also Theta(1)-*initialised* -- `nn.init.normal_(std=1.0)` in
-        `SenderTransformerLM.reset_parameters` -- so scaling their rate by width
-        would be scaling against an init that never shrank.
-
-    The exemption is load-bearing for a second reason: it makes the muP groups
-        disjoint from every entry in `SPLIT_LEARNING_RATES` by construction.
-        `log_logit_scale`, `log_score_scale`, `score_bias`, `mix_logit` and
-        `contrast_gate` are all 0-d; `polarity_embedding` is 2-d but matches
-        "embedding". So no parameter can be claimed twice however the two loops
-        are ordered.
+    The four scaling scalars of `SCALAR_GROUPS`, and nothing else. One statement
+        covering both mechanisms: they are clipped alone, and they keep whatever
+        rate `SPLIT_LEARNING_RATES` gives them rather than inheriting their
+        module's. A module group that also claimed them would clip them twice --
+        once alone and once inside the module's norm, which they would inflate
+        on the way -- and would make `contrast_gate_lr = lr` mean "follow the
+        contrast stage" rather than the documented "no override".
 
     Args:
-        name: the parameter's name, relative to the module being split out
-        parameter: the tensor itself
+        name: the parameter's name, relative to whatever is being walked. Every
+            one of these is 0-d with a distinctive name, so a suffix match is
+            unambiguous at any depth.
+        parameter: unused. Present so this can be passed as `split_out_module`'s
+            `exclude`, which calls it with both.
 
     Returns:
-        True if it should stay at the base rate.
+        True if another group has it.
     """
-    if parameter.dim() < 2:
-        return True
-
-    return any(
-        fragment in name.lower() for fragment in MUP_EMBEDDING_LIKE
-    )
+    return name.endswith(SCALAR_SUFFIXES)
 
 
-def split_out_module(optimiser, module, lr, config_key, exempt=is_mup_exempt):
+def group_parameters(pair):
     """
-    Move every non-exempt parameter of `module` into a group of its own at `lr`.
+    Partition `pair`'s parameters across `SCALAR_GROUPS` and `MODULE_GROUPS`.
+
+    The single definition of what is clipped together; `train.py`'s
+        `clip_gradients` walks this, and so do the tests that assert the
+        partition is total. The scalars are claimed first so that the module
+        groups can be stated as "everything else in the module", which is what
+        makes the exclusion one fact rather than two lists that have to agree.
+
+    Args:
+        pair: the constructed `base.Pair`
+
+    Returns:
+        A list of `(name, parameters)` covering every entry of `GROUP_NAMES`, in
+            that order. A group that does not exist on this pair, or that exists
+            and holds nothing, is an empty list rather than an omission --
+            `AveragePrototyper` has no parameters at all, and that is not the
+            same thing as a group having gone missing. The final `other` entry
+            is whatever nothing claimed: anything in it is a module somebody
+            added without adding it here, and its presence is the alarm rather
+            than the fix.
+
+    Raises:
+        RuntimeError: if a scalar group applies to this pair but matches no
+            parameter, or if two module groups claim the same tensor. Both would
+            otherwise be silent -- the first clips and steps a scalar with its
+            module after all, the second clips and steps a parameter twice --
+            and both would read as an architecture result.
+    """
+    groups = {name: [] for name in GROUP_NAMES}
+    owner = {}
+
+    for name, applies_to in SCALAR_GROUPS:
+        if not applies_to(pair):
+            continue
+
+        selected = [p for n, p in pair.named_parameters() if n.endswith(name)]
+
+        if not selected:
+            raise RuntimeError(
+                f"`{name}` applies to this pair but no parameter is named for "
+                "it, so it would be clipped and stepped with its module "
+                "instead. Has the parameter been renamed?"
+            )
+
+        groups[name] = selected
+        owner.update({id(p): name for p in selected})
+
+    for name, select in MODULE_GROUPS:
+        module = select(pair)
+
+        if module is None:
+            continue
+
+        selected = []
+
+        for parameter_name, parameter in module.named_parameters():
+            if claimed_separately(parameter_name, parameter):
+                continue
+
+            held_by = owner.get(id(parameter))
+
+            if held_by is not None:
+                raise RuntimeError(
+                    f"`{parameter_name}` is in both `{held_by}` and `{name}`. "
+                    "The groups must partition the pair: a parameter in two of "
+                    "them is clipped twice and, if the two rates differ, "
+                    "stepped twice."
+                )
+
+            owner[id(parameter)] = name
+            selected.append(parameter)
+
+        groups[name] = selected
+
+    groups["other"] = [p for p in pair.parameters() if id(p) not in owner]
+
+    return [(name, groups[name]) for name in GROUP_NAMES]
+
+
+def split_out_module(optimiser, module, lr, config_key,
+                     exclude=claimed_separately):
+    """
+    Move every parameter of `module` that no other group has claimed into a
+        parameter group of its own at `lr`.
 
     Selects on the module object, so unlike `split_out_parameter` there is no
         name to match and nothing a rename can quietly break. "Every tensor in
@@ -146,121 +285,31 @@ def split_out_module(optimiser, module, lr, config_key, exempt=is_mup_exempt):
         module: the submodule whose parameters are being regrouped
         lr: learning rate for the new group
         config_key: what asked for this, for the caller's own reporting
-        exempt: `(name, parameter) -> bool`, called with names relative to
-            `module`. Defaults to muP's rule; see `is_mup_exempt`.
+        exclude: `(name, parameter) -> bool`, called with names relative to
+            `module`. Defaults to `claimed_separately`, which holds back the
+            four scaling scalars so this and `group_parameters` take the same
+            view of what a module group contains.
 
     Returns:
         The same optimiser, mutated in place. Unchanged if every parameter of
-            `module` is exempt -- a module that is nothing but norms and biases
-            is a legitimate thing to ask about, and an empty group would only
-            add a row to what `PASS` has to zip.
+            `module` is excluded or frozen -- a module that is nothing but a
+            gate is a legitimate thing to ask about, and an empty group would
+            only add a row to what `PASS` has to zip.
     """
     # `requires_grad` filtered to match `get_optimiser`, which skips frozen
     #     parameters entirely. Without it a frozen tensor could be moved *into*
     #     the optimiser by this function, which is the opposite of what
     #     regrouping is for. `ViT2` has ten of them -- the blocks' rotary
-    #     `freqs` -- and they are 1-d, so today the exemption catches them
-    #     first; the filter is here so that stays true of a 2-d one.
+    #     `freqs`.
     selected = [
         p for name, p in module.named_parameters()
-        if p.requires_grad and not exempt(name, p)
+        if p.requires_grad and not exclude(name, p)
     ]
 
     if not selected:
         return optimiser
 
     return _regroup(optimiser, selected, lr)
-
-
-def mup_width(module):
-    """
-    The fan-in the muP rule is keyed on, or None if the module is out of scope.
-
-    `d_model` is the width every transformer-shaped module in this repo states,
-        and it is exact for the attention projections that dominate the
-        parameter count. Reading it as an attribute rather than from the config
-        is deliberate: several of these widths are *derived* --
-        `SenderTransformerLM` and `AttentionPrototyper` take theirs from the
-        vision model's `final_feat_dim` -- so a config key would be a second
-        statement of the same number, able to be wrong.
-
-    Absent `d_model` means out of scope, and three things fall out that way, all
-        of them correctly.
-
-        The convolutional backbones. `ResNet18.final_feat_dim` is a hardcoded
-        512 with no width to vary, muP's rules are stated for transformers, and
-        a ResNet at 1e-4 is what jayelm tuned.
-
-        `AveragePrototyper` and `nn.Embedding`, which have no matrices between
-        widths at all.
-
-        `BilinearDiscriminator`, which reads nothing from its config table: its
-        single tensor is `nn.Linear(message_width, referent_embedding_size)`,
-        whose fan-in is the language model's `output_size`. With the listener
-        GRU restored to jayelm's 1024 that fan-in *is* the reference width, so
-        the factor would be 1.0 and the group would be a group at base rate.
-
-    Args:
-        module: a constructed submodule of the pair
-
-    Returns:
-        Its width as an int, or None.
-    """
-    return getattr(module, "d_model", None)
-
-
-def mup_depth(module):
-    """
-    The number of residual blocks the module's update passes through, or 1.
-
-    The second half of the rate, and it pulls the opposite way to the width.
-        muP's `1/fan_in` is a statement about one matrix: how large an update
-        that matrix can take before its output variance blows up. It says
-        nothing about how many such matrices sit in series. AdamW moves every
-        parameter by about `lr` per step whatever its gradient's size, so in a
-        residual stack of depth `L` the *function* moves by something like
-        `L * lr` while any one matrix moves by `lr`. Replacing a one-cell GRU
-        with a six-layer transformer, or a ResNet with a ten-block ViT, is
-        therefore a large increase in how far the module travels per step at an
-        unchanged rate -- in the direction opposite to the one the width term
-        corrects for.
-
-    `layers` rather than a count of `blocks`, read off the constructed module as
-        `mup_width` reads `d_model`. Every module in `MUP_MODULES` that has a
-        stack states it, `ViT2` included -- it took `layers` as a kwarg for
-        `resolve_residual_scaling` and now keeps it.
-        `test_declared_depth_matches_the_blocks_built` asserts the stated number
-        against the `ModuleList` actually built, which is the check that keeps
-        this from being a config key able to be wrong.
-
-    Absent `layers` means depth 1, which is right for every module that falls
-        that way: `AttentionPrototyper` is a single scoring projection and
-        `ExampleContrast` a single gated stage. Neither has a residual path to
-        accumulate along, so neither takes a depth penalty -- and note that this
-        leaves them at the full width-scaled rate, the largest in the pair.
-
-    What this is *not*. Depth-scaling the learning rate is not part of muP, and
-        muP makes no transfer claim across a change of depth. It is a separate
-        heuristic, adopted here for a measured reason: reinstating the width
-        rule alone in `89ab6fc` broke rungs 9 and 10, which is evidence those
-        rungs are nearer their stable rate than the flat-at-`ln 2` reading
-        assumed. See docs/training.md, and do not report the pair as "muP".
-
-    Note also that broccoli's DeepNorm already attenuates by depth, and much
-        more weakly -- `beta` goes as `(8L)^(-1/4)`, so 0.33 at ten blocks
-        against the 0.1 this applies. The two are not the same correction:
-        `beta` scales a branch's *output* and leaves the update alone, while
-        this scales the update. They compose rather than double-count, but the
-        combined attenuation at depth is steep and is the first thing to
-        suspect if these rungs now fail to move at all.
-
-    Args:
-        module: a constructed submodule of the pair
-
-    Returns:
-        Its depth as a positive int.
-    """
-    return getattr(module, "layers", 1)
 
 
 # `(config key, parameter suffix, applies to)`, in the order the groups are
@@ -348,103 +397,55 @@ SPLIT_LEARNING_RATES = (
 )
 
 
-# `(name, selector, width_fn)`, the modules the muP learning-rate rule applies
-#     to. Shaped after `train.py`'s `CLIP_GROUPS` and read the same way -- pick
-#     the module off the constructed pair rather than name its parameters --
-#     but note this is not that list. `CLIP_GROUPS` omits `sender.contrast`,
-#     which falls to its `other` group; here the stage has a width of its own
-#     and wants a rate to match. `receiver.token_embedding` is the other
-#     difference and goes the other way: it is in `CLIP_GROUPS` and is out of
-#     scope here, because an embedding table has no fan-in to scale by.
-#
-# A selector may return None -- `sender.contrast` is `None` when the stage is
-#     off -- and `mup_width` may return None for a module with no `d_model`.
-#     Both mean "leave this module at the base rate".
-MUP_MODULES = (
-    ("sender_vision", lambda pair: pair.sender.feat_model, mup_width),
-    ("sender_prototyper", lambda pair: pair.sender.prototyper, mup_width),
-    ("sender_contrast", lambda pair: pair.sender.contrast, mup_width),
-    ("sender_language_model", lambda pair: pair.sender.language_model, mup_width),
-    ("receiver_vision", lambda pair: pair.receiver.feature_model, mup_width),
-    (
-        "receiver_language_model",
-        lambda pair: pair.receiver.language_model,
-        mup_width,
-    ),
-    (
-        "receiver_discriminator",
-        lambda pair: pair.receiver.discriminator,
-        mup_width,
-    ),
-)
-
-
-def resolve_mup_learning_rates(pair, base_lr, reference_width):
+def resolve_module_learning_rates(config, pair, base_lr):
     """
-    Apply
+    Read one learning rate per module group out of `[optimiser.module_lr]`.
 
-        lr(module) = base_lr * reference_width / fan_in(module) / depth(module)
+    Rates are stated rather than computed. The rule that used to compute them
+        multiplied `base_lr` by `reference_width / d_model / layers`; the width
+        half was muP and the depth half was a heuristic with no parametrisation
+        behind it, and reinstating the width half alone broke rungs 9 and 10
+        outright. What that rule actually bought was not a principled exponent
+        but the only mechanism in the codebase giving different modules
+        different rates. That is worth keeping; the derivation was not. See
+        docs/training.md.
 
-        across `MUP_MODULES`.
-
-    Two corrections with opposite signs, and it matters that they are separable.
-        The width term is muP: a matrix mapping one width to another has a
-        stable Adam rate going as `1/fan_in`, so a module narrower than the one
-        `base_lr` was tuned on is being trained too slowly. The depth term is
-        not muP at all -- see `mup_depth` -- and says that a stack of `L` such
-        matrices in series moves the function about `L` times as far per step as
-        one of them does. A 320-wide six-layer speaker language model is 3.2x
-        under-rated by the first and 6x over-rated by the second, and lands
-        slightly below `base_lr` rather than well above it.
-
-    One rate per module keyed on `d_model`, not one per tensor keyed on that
-        tensor's own fan-in. Exact for the attention projections, which are
-        square in `d_model` and are most of the parameters; approximate for the
-        feedforward inner layers and for adapters that read a foreign width. The
-        rule is a heuristic being applied at module granularity, and saying so
-        is cheaper than a per-tensor scheme nobody can check by eye.
-
-    Note what muP does and does not promise here. It transfers a tuned learning
-        rate across a change of *width* in one architecture. Two of the changes
-        this is being asked to cover are not that: the speaker's language model
-        goes GRU -> Transformer as well as 1024 -> 320, and `ViT2` replaces a
-        ResNet that has no width to speak of. Principled heuristic, not
-        transfer guarantee -- and the depth half is a heuristic with no
-        parametrisation behind it whatsoever.
+    Absent key means `base_lr`, and `parse_config.validate_config` rejects a key
+        that names no group -- so a typo raises rather than quietly leaving a
+        module at base, which is the failure `split_out_parameter` already
+        guards against for the scalars.
 
     Args:
+        config: the parsed config, for `[optimiser] module_lr`
         pair: the constructed `base.Pair`
-        base_lr: `[optimiser] lr`, the rate the reference width was tuned at
-        reference_width: `[optimiser] mup_reference_width`
+        base_lr: `[optimiser] lr`
 
     Returns:
-        A list of `(name, module, lr)` for the modules in scope, and a flat
-            `{name: lr}` covering every module that was *built*, in-scope or
-            not, for `save_args` to record. The second is a superset of the
-            first: an exempt module reports the base rate, which is what its
-            parameters will actually be trained at.
+        A list of `(name, module, lr)` for the groups whose rate differs from
+            `base_lr` and so need a group of their own, and a flat `{name: lr}`
+            covering every module group that was *built*, moved or not, for
+            `save_args` to record. The second is a superset of the first: a
+            module left at base reports the base rate, which is what its
+            parameters are trained at.
     """
-    in_scope = []
+    rates = config['optimiser'].get('module_lr') or {}
+
+    to_split = []
     resolved = {}
 
-    for name, select, width_of in MUP_MODULES:
+    for name, select in MODULE_GROUPS:
         module = select(pair)
 
         if module is None:
             continue
 
-        width = width_of(module)
-
-        if width is None:
-            resolved[name] = base_lr
-            continue
-
-        lr = base_lr * reference_width / width / mup_depth(module)
-
-        in_scope.append((name, module, lr))
+        lr = rates.get(name, base_lr)
         resolved[name] = lr
 
-    return in_scope, resolved
+        if lr != base_lr:
+            to_split.append((name, module, lr))
+
+    return to_split, resolved
 
 
 def build_models(dataloaders, config):
@@ -565,27 +566,27 @@ def build_models(dataloaders, config):
 
     base_lr = config['optimiser']['lr']
 
-    # muP first. It claims whole modules and `SPLIT_LEARNING_RATES` claims lone
-    #     named tensors, and `is_mup_exempt` keeps the two disjoint by
-    #     construction rather than by ordering -- every scalar in that table is
-    #     0-d and `polarity_embedding` matches "embedding". Running muP first
-    #     anyway, so that if the exemption rule is ever loosened the elevated
-    #     scalar rates are the ones that survive.
-    mup_in_scope, resolved_mup_lrs = resolve_mup_learning_rates(
-        pair, base_lr, config['optimiser']['mup_reference_width']
+    # Module groups first. They claim whole modules and `SPLIT_LEARNING_RATES`
+    #     claims lone named tensors, and the two are disjoint by construction
+    #     rather than by ordering: `claimed_separately` holds back the four
+    #     scaling scalars here as well as in `group_parameters`, so the only
+    #     tensors both loops can reach are `score_bias` and
+    #     `polarity_embedding`, which are deliberately in their module's clip
+    #     group and take their rate from the key below. Running the modules
+    #     first means those two end up at the rate their own key names.
+    module_lrs, resolved_module_lrs = resolve_module_learning_rates(
+        config, pair, base_lr
     )
-    
-    for name, module, lr in mup_in_scope:
-        if lr != base_lr:
-            optimiser = split_out_module(optimiser, module, lr, name)
-    
-    # Written back so `save_args` records what was *built*. Several of these
-    #     widths are derived rather than declared, so a config key is not
-    #     evidence the module was built that way -- see docs/training.md. Note
-    #     the rate here is the one the module's matrices got: its biases, norms,
-    #     scalars and embedding tables stayed at the base rate, and any scalar
-    #     named below moved again.
-    config['optimiser']['resolved_mup_lrs'] = resolved_mup_lrs
+
+    for name, module, lr in module_lrs:
+        optimiser = split_out_module(optimiser, module, lr, name)
+
+    # Written back so `save_args` records what was *built*. `sender_contrast`
+    #     is absent when the stage is off, so this says which groups existed as
+    #     well as what rate each ran at. Note the rate here is the one the
+    #     module's own parameters got: the scalars that clip separately kept
+    #     theirs, and `score_bias` and `polarity_embedding` move again below.
+    config['optimiser']['resolved_module_lrs'] = resolved_module_lrs
 
     for config_key, suffix, applies_to in SPLIT_LEARNING_RATES:
         lr = config['optimiser'].get(config_key, base_lr)

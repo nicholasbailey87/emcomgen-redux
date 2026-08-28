@@ -21,14 +21,6 @@ class ViT2(nn.Module):
         
         self.d_model = kwargs["d_model"]
 
-        # Stated alongside `d_model` because the muP rule keys on both: the
-        #     width sets the per-matrix rate and the depth divides it. Every
-        #     other module in `MUP_MODULES` already carries `layers`; this one
-        #     only used it in passing, so it is kept here rather than left to
-        #     be counted back out of `backbone.encoder.transformer.blocks`.
-        #     `test_declared_depth_matches_the_blocks_built` holds the two
-        #     together.
-        self.layers = kwargs["layers"]
 
         self.alpha, self.beta = resolve_residual_scaling(
             kwargs["alpha"], kwargs["beta"], kwargs["layers"]

@@ -1402,9 +1402,14 @@ def test_the_readout_scalars_are_elevated_and_the_weight_that_turns_is_not():
 def test_an_attention_rung_asks_for_the_mix_weight_rate_and_nothing_else():
     """
     Which parameters are left in an elevated group, on the rung that has the
-        most of them. The groups cannot be told apart by their rate --
-        DEFAULT.toml opens all five remaining keys at 2e-3 -- so the assertion
-        is on membership.
+        most of them. Four of the five remaining keys cannot be told apart by
+        their rate -- DEFAULT.toml opens the scaling scalars and `score_bias`
+        together at 6e-3 -- so the assertion is on membership.
+
+    `polarity_embedding` is the fifth and is deliberately *not* with them, at
+        2e-3. It is a 2-d tag rather than a scalar, and it has no traverse to
+        cover since it opens as an antipodal draw at `referent_layer_norm`'s own
+        scale, so the argument that put the others at 6e-3 does not reach it.
 
     This rung's `SenderTransformerLM` earns the speaker's two and its contrast
         stage a third. The listener contributes three: its volume, its offset,
@@ -1453,12 +1458,23 @@ def test_an_attention_rung_asks_for_the_mix_weight_rate_and_nothing_else():
 
     assert elevated == {
         "sender.language_model.log_logit_scale",
-        "sender.language_model.polarity_embedding",
         "sender.contrast.contrast_gate",
         "receiver.discriminator.mix_logit",
         "receiver.discriminator.log_score_scale",
         "receiver.discriminator.score_bias",
     }
+
+    # The tag is elevated too, at a rate of its own, and its being in a separate
+    #     group is the whole point of it having a separate key: turning the
+    #     channel up must not retune it, because `log_logit_scale` lives on both
+    #     speakers and the tag on only one.
+    tag = config["optimiser"]["polarity_embedding_lr"]
+    assert tag not in (wanted, config["optimiser"]["lr"])
+    assert {
+        named[id(p)]
+        for group in optimiser.param_groups if group["lr"] == tag
+        for p in group["params"]
+    } == {"sender.language_model.polarity_embedding"}
 
 
 if __name__ == "__main__":

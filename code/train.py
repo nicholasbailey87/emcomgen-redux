@@ -18,6 +18,7 @@ import torch.nn as nn
 
 import models
 import models.backbone
+import models.builder
 import models.sender
 import models.receiver
 
@@ -164,49 +165,39 @@ def log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats):
     logging.info(f"Epoch {epoch} [{data_i}/{data_total} ({pct}%)] {meter_str}")
 
 
-# The submodules gradients are clipped over, in place of one norm across the
-#     whole pair. See docs/training.md. The groups partition the pair; the
-#     `other` group in `clip_gradients` catches anything a future architecture
-#     adds, so no parameter can silently go unclipped.
-CLIP_GROUPS = (
-    ("sender_vision", lambda pair: pair.sender.feat_model),
-    ("sender_prototyper", lambda pair: pair.sender.prototyper),
-    ("sender_language_model", lambda pair: pair.sender.language_model),
-    ("receiver_vision", lambda pair: pair.receiver.feature_model),
-    ("receiver_token_embedding", lambda pair: pair.receiver.token_embedding),
-    ("receiver_language_model", lambda pair: pair.receiver.language_model),
-    ("receiver_discriminator", lambda pair: pair.receiver.discriminator),
-)
-
-
 def clip_gradients(pair, max_norm):
     """
-    Clip each submodule's gradients to `max_norm` independently. See
+    Clip each group's gradients to `max_norm` independently. See
         docs/training.md.
+
+    The groups come from `models.builder`, which is also where each one's
+        learning rate is read, so a module cannot be rateable without being
+        clipped or the other way round. That list used to live here and had
+        drifted: it omitted `sender.contrast`, so on every rung with the stage
+        on the `other` group *was* the contrast stage under a misleading name.
 
     Args:
         pair: the sender/receiver `Pair`, with gradients already unscaled
-        max_norm: the per-module ceiling, `[optimiser] clip_grad_norm`
+        max_norm: the per-group ceiling, `[optimiser] clip_grad_norm`
 
     Returns:
-        A dict of module name -> that module's gradient norm *before* clipping,
-            for logging. Every group is reported.
+        `{group name: that group's gradient norm *before* clipping}`, with a key
+            for every entry of `builder.GROUP_NAMES` on every rung and `nan`
+            where the group does not exist on this architecture or holds nothing
+            with a gradient. The shape is fixed so that the metrics header
+            survives a resume against a config that toggles a stage, exactly as
+            the contrast columns are NaN-filled rather than absent.
     """
-    grouped = set()
     norms = {}
 
-    for name, select in CLIP_GROUPS:
-        module = select(pair)
-        grouped.update(id(p) for p in module.parameters())
-        params = [p for p in module.parameters() if p.grad is not None]
-        if params:
-            norms[name] = torch.nn.utils.clip_grad_norm_(params, max_norm).item()
+    for name, params in models.builder.group_parameters(pair):
+        with_grad = [p for p in params if p.grad is not None]
 
-    ungrouped = [
-        p for p in pair.parameters() if id(p) not in grouped and p.grad is not None
-    ]
-    if ungrouped:
-        norms["other"] = torch.nn.utils.clip_grad_norm_(ungrouped, max_norm).item()
+        norms[name] = (
+            torch.nn.utils.clip_grad_norm_(with_grad, max_norm).item()
+            if with_grad
+            else float("nan")
+        )
 
     return norms
 
@@ -289,7 +280,17 @@ def run(
         https://docs.pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping
         """
         scaler.unscale_(optimizer)
-        clip_gradients(pair, config['optimiser']['clip_grad_norm'])
+
+        # Recorded per optimiser step rather than per example -- a gradient
+        # norm is a property of the step, and the trailing partial
+        # accumulation is one step like any other. `clip_gradients` reports
+        # every group on every rung, NaN where the group does not exist, so
+        # these columns keep their shape across a resume.
+        stats.update(**{
+            f"clip_{name}": norm for name, norm in
+            clip_gradients(pair, config['optimiser']['clip_grad_norm']).items()
+        })
+
         scaler.step(optimizer)
         scaler.update()
         scheduler.step(loss.item())
@@ -826,9 +827,10 @@ if __name__ == "__main__":
     model_config = models.builder.build_models(dataloaders, config)
 
     # After `build_models`, not before: it resolves the per-module muP learning
-    #     rates from widths that are derived rather than declared, and writes
-    #     them back into `config`, so running this first would record a config
-    #     that does not say what was built. Nothing is lost on the failure path
+    #     rates and writes them back into `config` as `resolved_module_lrs`,
+    #     which says which groups were built as well as what each ran at, so
+    #     running this first would record a config that does not say what was
+    #     built. Nothing is lost on the failure path
     #     -- `load_dataloaders` above could already fail after args.json was
     #     written. See docs/training.md.
     util.save_args(config, exp_dir)

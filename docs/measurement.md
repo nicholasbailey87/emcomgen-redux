@@ -637,6 +637,52 @@ The `.item()` calls in `forward` cost a sync and a graph break under
 reports `pool_effective_examples` exactly this way, and a metric nobody can read
 is how the last collapse ran for a whole smoke test.
 
+### Gradient norms, on the train pass only
+
+**`train_clip_<group>`** — the gradient norm of one clip group, taken *before*
+clipping, for every group in `models.builder.GROUP_NAMES`. Twelve named groups —
+eight modules and the four scaling scalars — plus `other`. See
+[training.md](training.md#the-group-table) for what is in each.
+
+Averaged **per optimiser step**, not per example: a gradient norm is a property
+of the step, and the trailing partial accumulation counts once like any other.
+`nan` means the group does not exist on this architecture, or exists and holds
+nothing with a gradient — `sender_contrast` on a rung with the stage off,
+`mix_logit` on a `BilinearDiscriminator`, `sender_prototyper` under
+`AveragePrototyper`, which has no parameters at all. Every column is present on
+every rung so that the header survives a resume, exactly as the contrast columns
+are.
+
+**`train_clip_other` should be `nan`.** It is the catch-all that keeps a module
+nobody registered from going unclipped, so a number there is not a reading — it
+is a report that something was built without being added to `MODULE_GROUPS`, and
+whatever it is has been clipped under a name that says nothing about it. That
+was the state of the repo until August 2026, when `other` was silently the whole
+`sender.contrast` stage.
+
+**What these are and are not for.** They say how hard clipping is biting on each
+group: a norm far above `clip_grad_norm` means that group is renormalised on
+every step, and one below it means clipping never touched it. That is worth
+knowing about the scaling scalars in particular, which is most of why they were
+given groups of their own — the reasoning is in
+[training.md](training.md#the-group-table), and these columns are the first
+measurement of it, since no run before August 2026 recorded a gradient norm at
+all. `clip_gradients` had built them and documented them "for logging" since it
+was written, and the call site discarded the return.
+
+They are **not** evidence about a learning rate. AdamW updates by `m̂/√v̂`, so a
+uniform rescale of a group's gradients cancels before it becomes a step; a large
+norm does not mean the group is learning too fast, and a small one does not mean
+it is starved. Read them for the clipping and nothing else.
+
+Two shapes worth watching. A group whose norm climbs steadily while others stay
+flat is being renormalised harder over time, which changes the *ratio* between it
+and the rest — clipping per group removes the cross-module noise coupling but not
+this. And a norm that collapses towards zero on the speaker side while the
+listener's holds is the signature the per-module clipping was introduced for: the
+speaker's vision model used to take a coefficient set by the listener's comparer,
+which supplies ~90% of the pair's squared norm at init.
+
 ### Per-epoch, all splits
 
 **`unique_message_fraction`** — how much the language compresses. A speaker that

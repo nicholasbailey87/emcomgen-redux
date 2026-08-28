@@ -72,14 +72,14 @@ Results land at `<output_root>/<experiment>/<config_stem>_seed<seed>/`, where
 pair whose name ends in it. That is the right selector for the lone scalars of
 `SPLIT_LEARNING_RATES`, each of which is one distinctively named tensor.
 
-`split_out_module` takes a **module object** and moves every non-exempt
-parameter in it. "Every tensor in `sender.language_model`" is not a suffix, and
-a prefix would be no better — the widths that decide these rates live on the
-constructed module, not in its name. Selecting on the object means there is no
-name-matching ambiguity at all, and nothing a rename can quietly break. It is a
-sibling rather than an argument to the suffix version because the two differ in
+`split_out_module` takes a **module object** and moves every parameter in it
+that no other group has claimed. "Every tensor in `sender.language_model`" is not
+a suffix, and a prefix would be no better. Selecting on the object means there is
+no name-matching ambiguity at all, and nothing a rename can quietly break. It is
+a sibling rather than an argument to the suffix version because the two differ in
 how they *fail*: an unmatched suffix is a rename and raises, whereas a module
-whose parameters are all exempt is a legitimate answer and returns unchanged.
+whose parameters are all claimed elsewhere or frozen is a legitimate answer and
+returns unchanged.
 
 Both share `_regroup`, which is the part that actually moves anything: filter the
 selected ids out of every existing group, then `add_param_group`.
@@ -113,130 +113,115 @@ If the suffix matches nothing, `split_out_parameter` raises rather than silently
 doing nothing — the error names the config key so a rename says which knob went
 quiet. `split_out_module` has no equivalent, because it cannot fail that way.
 
-### The per-module rule
+### The group table
 
-Every module with a width takes
+One table in `models/builder.py` decides both what is clipped together and what
+is trained at what rate.
 
-```
-lr(module) = [optimiser] lr × [optimiser] mup_reference_width
-             / d_model(module) / layers(module)
-```
+`MODULE_GROUPS` names eight modules, each picked off the constructed pair by
+attribute:
 
-with the reference width at **1024**: jayelm's `--speaker_hidden_size` and
-`--listener_hidden_size`, and therefore the width at which `lr = 1e-4` was tuned.
-`resolve_mup_learning_rates` applies it and `split_out_module` does the
-regrouping.
+`sender_vision`, `sender_prototyper`, `sender_contrast`,
+`sender_language_model`, `receiver_vision`, `receiver_token_embedding`,
+`receiver_language_model`, `receiver_discriminator`
 
-**Two corrections with opposite signs, and only the first is muP.** Keep them
-separable when writing this up.
+`SCALAR_GROUPS` names the four scaling scalars — `log_logit_scale`,
+`log_score_scale`, `mix_logit`, `contrast_gate` — each of which is a group of
+one tensor. `claimed_separately` holds them out of their module's group on both
+sides, so a scalar is never clipped twice, never inflates its module's norm, and
+never inherits its module's rate.
 
-*Width* (`mup_width`, muP). Adam's stable rate for a matrix mapping one width to
-another goes as 1/fan_in, so a module three times narrower than the one the rate
-was tuned on is being trained three times too slowly.
+**Why one table.** There used to be three lists and none was derivable from
+another. `train.py` had its own `CLIP_GROUPS`, which omitted `sender.contrast`,
+so on every rung with the stage on the `other` catch-all *was* the contrast
+stage under a name that said nothing about it. `MUP_MODULES` was a second list,
+which included the contrast stage and omitted the listener's embedding table.
+`SPLIT_LEARNING_RATES` was the third. Adding a module to one and not the others
+was a silent partial change. Now a module added to `MODULE_GROUPS` is clipped
+and rateable at once, and `group_parameters` is the single walk both mechanisms
+take.
 
-*Depth* (`mup_depth`, **not** muP). That is a statement about one matrix. It says
-nothing about how many sit in series, and AdamW moves every parameter by about
-`lr` per step whatever its gradient's size — so a residual stack of depth L moves
-the *function* roughly L times as far per step as any one of its matrices moves.
-Replacing a one-cell GRU with a six-layer transformer, or a ResNet with a
-ten-block ViT, is a large increase in travel per step at an unchanged rate.
+**Why the scalars are alone.** `clip_grad_norm_` takes one norm across a group
+and scales every member by one factor, so a scalar sharing a group with a
+thousand matrices is renormalised by *their* norm. At recorded speaker norms of
+~10 against `clip_grad_norm = 1.0` that is a tenfold attenuation, applied on
+every step that binds, to a parameter whose whole travel is already bounded by
+`lr × steps` — and these are the parameters ignition waits on.
+`scripts/ignition_audit.py` finds `logit_scale`, `contrast_gate` and
+`pool_score_norm` leaving the plateau in the same epoch, so what constrains them
+constrains the run.
 
-The depth half has no parametrisation behind it and was adopted for a measured
-reason: `89ab6fc` reinstated the width rule alone and rungs 9 and 10 both failed
-to converge. That is evidence those rungs sit nearer their stable rate than the
-flat-at-`ln 2` diagnosis assumed — the argument for muP was that they were
-starved of rate, and a bump disrupting them entirely tells against it.
+**Why `score_bias` and `polarity_embedding` are not.** An offset is not a scale
+and a 2-d tag is not a scalar; both belong to the norm of the module producing
+the output they modify. Both still take a rate of their own through
+`SPLIT_LEARNING_RATES`, which is why the mapping from clip group to config key
+is not 1:1 — a clip group and a learning rate are separate questions.
 
-**It is not the same correction as DeepNorm's `beta`, and does not double-count
-with it.** `beta` goes as (8L)^(−1/4) — 0.33 at ten blocks, against the 0.1 this
-applies — and it scales a residual *branch's output* while leaving the update
-alone; this scales the update. They compose. But the combined attenuation at
-depth is steep, and it is the first thing to suspect if the deep modules now fail
-to move at all.
+### Per-module learning rates
 
-The rule is stated once rather than as literal rates, because the rates are a
-consequence of widths and depths that move. `mup_width` reads `d_model` and
-`mup_depth` reads `layers` off the **constructed module** rather than out of the
-config: several of these widths are derived — `SenderTransformerLM` and
-`AttentionPrototyper` take theirs from the vision model's `final_feat_dim` — so a
-config key would be a second statement of the same number, able to disagree with
-it. `layers` is declared rather than derived, so
-`test_declared_depth_matches_the_blocks_built` asserts each stated depth against
-the `ModuleList` actually built.
+`[optimiser.module_lr]` gives one rate per module group, keyed by the group's
+name. An absent key means the base `lr`; a key naming no group raises in
+`parse_config`, which is the same guard `split_out_parameter` gives the scalars,
+moved to parse time because a module group selects an attribute and so cannot
+fail by rename. `resolve_module_learning_rates` reads the table and
+`split_out_module` does the regrouping.
 
-**What it comes to at rungs 9 and 10:**
+DEFAULT.toml states all eight at `1e-4`, so the surface is discoverable from the
+config and the table is inert until a rung moves one. Rungs 9 and 10 override
+four:
 
-| module | width | depth | rate |
-|---|---|---|---|
-| `ViT2` | 320 | 10 | 3.2e-5 |
-| `AttentionPrototyper` | 320 | 1 | 3.2e-4 |
-| `ExampleContrast` | 320 | 1 | 3.2e-4 |
-| `SenderTransformerLM` | 320 | 6 | 5.3e-5 |
-| `ReceiverGRULM` | 1024 | 1 | 1.0e-4 (unchanged) |
+| group | rate |
+|---|---|
+| `sender_vision` (`ViT2`) | 3.2e-5 |
+| `sender_prototyper` (`AttentionPrototyper`) | 3.2e-4 |
+| `sender_contrast` (`ExampleContrast`) | 3.2e-4 |
+| `sender_language_model` (`SenderTransformerLM`) | 5.333e-5 |
 
-and on the rungs that have them, 6.7e-5 for `ReceiverCrossAttentionLM` (256 wide,
-6 deep) and 1.3e-4 for `AttentionDiscriminator` (256 wide, 3 deep).
+**These are literals now, and that is the change.** Until August 2026 they came
+out of a rule: `lr × reference_width / d_model / layers`, with the reference
+width at 1024 — jayelm's `--speaker_hidden_size`, and therefore the width
+`lr = 1e-4` was tuned at. The width half was muP, whose claim is that Adam's
+stable rate for a matrix mapping one width to another goes as 1/fan_in. The
+depth half was not muP and had nothing behind it.
 
-Note the shape of that: the two single-layer sender stages now carry the highest
-rates in the pair and the ViT the lowest by an order of magnitude. The
-prototyper's is deliberate — `pool_score_norm` opens at exactly zero and its
-travel is bounded by `lr × steps`, and `scripts/ignition_audit.py` finds it
-leaving the plateau in the same epoch as `logit_scale` and `contrast_gate`, so it
-is one of the parameters ignition waits on.
+The rule was tried twice and neither half survived on its own terms. `89ab6fc`
+reinstated the width half alone and rungs 9 and 10 both failed to converge —
+which is evidence against the reading that motivated it, namely that those rungs
+were starved of rate. `afcefd0` added the depth half to pull the other way, and
+the four rates above are what it produced.
 
-**One rate per module, keyed on `d_model`.** Exact for the attention projections,
-which are square in it and are most of the parameters; approximate for the
-feedforward inner layers and for adapters that read a foreign width. This is a
-heuristic applied at module granularity, and saying so is cheaper than a
-per-tensor scheme nobody can check by eye.
+Two things are worth keeping from that. First, the exponent: the literature's
+figure for a residual stack is 1/√L rather than 1/L, and broccoli's DeepNorm
+already puts this architecture in that regime — its α = (2L)^(1/4) and
+β = (8L)^(−1/4) give an effective branch scale of exactly `0.5·L^(−1/2)`, so
+dividing the rate by L on top of that over-corrects by √L. Second, and more
+usefully: what the rule bought was never a principled exponent, it was the
+per-module *structure*. A width rule alone cannot express any of it — at 320 wide
+it cannot tell a ten-block ViT from a one-layer scoring projection. Every rate
+above that differs from another at the same width does so because of the half
+with nothing behind it.
 
-**Two exemptions, both by rule rather than by list** (`is_mup_exempt`), so a
-module added later is covered without anyone having to remember a list.
+So the structure is kept and the derivation is not. A number in that table is a
+number somebody chose, and it can be argued with on the evidence of a run rather
+than defended as arithmetic. **Do not report any of this as muP.**
 
-- `p.dim() < 2` — biases, norm gains, and every learned scalar. No fan-in to
-  scale by.
-- name containing `"embedding"` or `"query"` — `polarity_embedding`,
-  `label_embedding`, `token_embedding` and `query`. muP gives input
-  embeddings a Θ(1) rate because their fan-in is a one-hot index rather than a
-  width, and every one of these is Θ(1)-*initialised* as well, so scaling their
-  rate by width would be scaling against an init that never shrank. Matched as a
-  substring exactly as `gradboard`'s `EXCLUDE_FROM_WEIGHT_DECAY` matches
-  `"embedding"`, and with the same caveat: a rename would move a tensor silently.
+Note the shape of what rungs 9 and 10 carry: the two single-layer sender stages
+have the highest rates in the pair and the ViT the lowest by an order of
+magnitude. The prototyper's is deliberate — `pool_score_norm` opens at exactly
+zero and its travel is bounded by `lr × steps`. Rung 10 took off in epoch 0
+under these four, having previously spent whole runs above `ln 2` at a flat
+1e-4; rung 9 carries the same four and has not ignited under them. Flat 1e-4 is
+therefore not a neutral baseline to fall back to — it is a configuration with its
+own record.
 
-The dimension exemption is load-bearing twice over. It is also what makes the muP
-groups **disjoint from `SPLIT_LEARNING_RATES` by construction** — every scalar in
-that table is 0-d, and `polarity_embedding` is 2-d but matches `"embedding"`. No
-ordering trick is needed. muP runs first anyway, so that if the exemption is ever
-loosened the elevated scalar rates are the ones that survive.
-
-**Whole modules out of scope**, all by the same test — no `d_model` attribute.
-Scope is decided by the width alone; `mup_depth` is never consulted for these.
-The convolutional backbones (`ResNet18.final_feat_dim` is a hardcoded 512, muP's
-rules are stated for transformers, and a ResNet at 1e-4 is what jayelm tuned);
-`AveragePrototyper` and `nn.Embedding`, which have no matrices between widths;
-and `BilinearDiscriminator`, whose single tensor's fan-in is the language model's
-`output_size` — 1024 on the restored listener GRU, i.e. the reference width, so
-its factor would be 1.0.
-
-**What the rule does not claim.** muP transfers a tuned learning rate across a
-change of *width* in one architecture. Two of the changes here are not that: the
-speaker's language model goes GRU → Transformer as well as 1024 → 320, and `ViT2`
-replaces a ResNet with no 1024 anywhere in it. Principled heuristic, not transfer
-guarantee — and the depth half is a heuristic with no parametrisation behind it
-at all, so muP transfers nothing across a change of depth here either.
-
-Only the learning-rate half of muP is adopted. Broccoli's `nn.Linear` init is
-already 1/√fan_in, `msa_scaling = "d"` is already muP's attention scaling, and
-`layer_norm_logits` already makes the speaker's readout scale width-invariant.
-The `mup` package in `requirements.txt` stays unimported.
-
-**Do not read the `CLIP_GROUPS` norms as evidence about these rates.** Under Adam
-a uniform rescale of a module's gradients cancels in `m̂/√v̂`, so gradient
+**Do not read the clip norms as evidence about these rates.** Under Adam a
+uniform rescale of a module's gradients cancels in `m̂/√v̂`, so gradient
 magnitude says nothing about whether a learning rate suits the module.
 
 **Do not reach for the LR range test either.** `PASS._apply_range_test_result`
 calls `set_all_lr` and then overwrites `original_param_groups`, which would
-flatten every split rate — muP's and the scalars' alike — permanently.
+flatten every split rate — the module groups' and the scalars' alike —
+permanently.
 
 ### The overrides, and why each is gated the way it is
 
@@ -329,10 +314,21 @@ gradient. It does not change the *ratio* between modules — a uniform rescale
 never did, and AdamW normalises per coordinate anyway — what it removes is the
 cross-module noise coupling.
 
-`CLIP_GROUPS` partitions the pair into six named modules; an `other` group
-catches anything a future architecture adds, so no parameter can silently go
-unclipped. Every group's pre-clip norm is returned for logging, including ones
-that did not reach the ceiling.
+The groups are `models.builder`'s — eight modules and four lone scalars, see
+[the group table](#the-group-table) — and an `other` group catches anything a
+future architecture adds, so no parameter can silently go unclipped. `other`
+being non-empty is the alarm and not the fix: it held the whole of
+`sender.contrast` until August 2026, because `train.py` kept a list of its own
+that had never been given the stage.
+
+Every group's pre-clip norm is recorded, including ones that did not reach the
+ceiling, as `train_clip_<group>` in `metrics.csv`. They are averaged **per
+optimiser step** rather than per example — a gradient norm is a property of the
+step — and NaN-filled where the group does not exist on that architecture, so
+the header keeps its shape across a resume against a config that toggles a
+stage. These columns are new in August 2026: `clip_gradients` had built the
+norms and documented them "for logging" since it was written, and the call site
+discarded the return, so no run before then recorded one.
 
 ## AMP and accumulation
 
@@ -521,10 +517,10 @@ is already done.
 original tooling, the latter for the new), stamped with the git hash and with
 `dependency_versions`.
 
-**It runs after `build_models`, not before.** `build_models` resolves the muP
-learning rates from widths that are derived rather than declared and writes them
-back as `[optimiser] resolved_mup_lrs`, so saving first would record a config
-that does not say what was built. Nothing is lost on the failure path — the
+**It runs after `build_models`, not before.** `build_models` writes the resolved
+per-module learning rates back as `[optimiser] resolved_module_lrs`, which says
+which groups were actually *built* as well as what each ran at, so saving first
+would record a config that does not say what was built. Nothing is lost on the failure path — the
 dataloaders are constructed before either, so a run could already fail after
 `args.json` was written.
 
@@ -544,13 +540,13 @@ several widths are derived rather than declared: `SenderTransformerLM` takes its
 [architecture.md](architecture.md)). A config key is not evidence that the
 module was built that way.
 
-`[optimiser] resolved_mup_lrs` is the one derived quantity that *is* recorded, and
-deliberately: it is a per-module `name → lr` mapping computed from those same
-derived widths, so it is a statement about the pair that was constructed rather
-than about the pair the config asked for. Read it as the answer to "which module
-was trained at what rate", and note that it describes each module's matrices —
-its biases, norms, scalars and embedding tables stayed at the base rate, and the
-scalars named in `SPLIT_LEARNING_RATES` then moved again.
+`[optimiser] resolved_module_lrs` is the one derived quantity that *is* recorded,
+and deliberately: it is a `group → lr` mapping over the groups that were
+constructed, so `sender_contrast` is absent when the stage is off and its
+presence is itself a fact about the run. Read it as the answer to "which module
+was trained at what rate", and note what it does not cover — the four scaling
+scalars keep their own rate whatever their module's is, and `score_bias` and
+`polarity_embedding` are moved again afterwards by `SPLIT_LEARNING_RATES`.
 
 **Measure against the pinned dependency, not the installed one.** The version
 string in site-packages can match `dependency_versions` while the commit does

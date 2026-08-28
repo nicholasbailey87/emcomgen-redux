@@ -268,23 +268,34 @@ calls that would do that — `scale_parameters(self.v_proj, self.beta)` and
 and the scaling is applied as `processed *= self.beta` in the block's forward
 instead. They read as an abandoned edit and are not one.
 
-### Why that matters: DeepNorm here composes with muP
+### Why that matters: the init scheme is left free
 
 Because `beta` never touches an initialisation, the init scheme is left entirely
-free — so muP's rules can be layered on top of this DeepNorm without the two
-schemes fighting over the same tensors. Under the paper's form they would: muP
-sets init variance per fan-in, DeepNorm's `beta` would then multiply it by a
-depth-derived constant, and neither parametrisation's guarantees would survive.
+free, and a parametrisation can be layered on top of this DeepNorm without the
+two fighting over the same tensors. Under the paper's form they would: a scheme
+setting init variance per fan-in would have `beta` multiply it by a
+depth-derived constant afterwards, and neither's guarantees would survive.
 
-That composability has been checked in practice, and it is the reason a muP
-learning-rate rule — Adam lr ∝ 1/fan_in, so a module narrowing from 1024 to 320
-wants 3.2× — can be applied to one of these stacks directly. That rule is now in
-the repo: scope it to the module whose fan-in actually moved, via
-`split_out_module` (see [training.md](training.md)), rather than scaling the
-whole pair. `split_out_parameter`, its sibling, is for lone named scalars and is
-the wrong selector for this.
+That is worth keeping in mind if a per-module learning rate is ever derived
+rather than chosen again. The repo does not derive them now — `[optimiser]
+module_lr` states one rate per module group as a literal, see
+[training.md](training.md) — but the reason a width rule *could* be applied to
+one of these stacks directly is this one, and it would be scoped through
+`split_out_module` to the module whose fan-in actually moved rather than applied
+to the whole pair. `split_out_parameter`, its sibling, is for lone named scalars
+and is the wrong selector for it.
 
-broccoli's `scaling="d"` attention option is pointing the same way: it gives
+**What `alpha` and `beta` do to depth, which is the thing to check first.**
+`deepnorm_constants` gives the encoder α = (2L)^(1/4) and β = (8L)^(−1/4), and
+the block is `post_norm(α·x + β·f(x))`, so the branch enters the residual stream
+at `β/α` — which works out to exactly `0.5·L^(−1/2)` at every depth (verified at
+L = 1, 3, 6, 10, 20). That is the 1/√L branch scaling Depth-μP is stated for, so
+this stack is already in that regime and a further 1/L on the learning rate
+over-corrects by √L. A rate rule that divided by `layers` was in the repo
+between `afcefd0` and its removal; do not reintroduce one without this
+arithmetic in hand.
+
+broccoli's `scaling="d"` attention option points the same way: it gives
 `8 / head_dim` rather than `1 / sqrt(head_dim)`, which is the muP attention
 scaling rather than the standard one, and it is what this repository passes
 everywhere.

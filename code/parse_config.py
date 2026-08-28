@@ -86,23 +86,43 @@ def validate_config(config: dict) -> bool:
             f"— got {init_energy}."
         )
 
-    # Checked here for the same reason as `init_energy` above: `SafeDict` only
-    # warns on a missing key and hands back None, and a missing reference width
-    # would make every muP factor `None / d_model`. Only the declared half is
-    # checkable at parse time -- the widths it is divided by are read off the
-    # constructed modules, several of them derived, so `build_models` owns that
-    # end.
-    reference_width = config['optimiser'].get('mup_reference_width')
-    if (
-        not isinstance(reference_width, (int, float))
-        or isinstance(reference_width, bool)
-        or reference_width <= 0
-    ):
+    # `[optimiser.module_lr]`, one rate per module clip group. Checked here
+    # rather than in `build_models` because the whole point of the check is that
+    # a key naming no group must *raise*: an unknown key would otherwise sit in
+    # the config looking like a setting while the module it was meant for ran at
+    # base rate, which is the silent failure `split_out_parameter` already
+    # guards against for the scalars. Absent keys are fine and mean base rate.
+    #
+    # Imported here rather than at module scope so that parsing a config does
+    # not pull in torch by way of `models`.
+    from models.builder import MODULE_GROUPS
+
+    group_names = {name for name, _ in MODULE_GROUPS}
+    module_lr = config['optimiser'].get('module_lr') or {}
+
+    if not isinstance(module_lr, dict):
         raise InvalidConfig(
-            "`optimiser.mup_reference_width` must be present and a positive "
-            "number — it is the width `optimiser.lr` was tuned at, and every "
-            f"per-module rate is `lr * it / d_model` — got {reference_width}."
+            "`optimiser.module_lr` must be a table of group name -> learning "
+            f"rate, got {type(module_lr).__name__}."
         )
+
+    for key, rate in module_lr.items():
+        if key not in group_names:
+            raise InvalidConfig(
+                f"`optimiser.module_lr.{key}` names no clip group. The groups "
+                f"are {', '.join(sorted(group_names))} — see "
+                "`models.builder.MODULE_GROUPS`."
+            )
+
+        if (
+            not isinstance(rate, (int, float))
+            or isinstance(rate, bool)
+            or rate <= 0
+        ):
+            raise InvalidConfig(
+                f"`optimiser.module_lr.{key}` must be a positive number, got "
+                f"{rate}."
+            )
 
     for key in ('silhouette_p_sender', 'silhouette_p_receiver'):
         p = config['data'][key]
