@@ -89,14 +89,25 @@ layers = 6
 bidirectional = false
 
 [optimiser]
-# Halved from DEFAULT's 1e-4, 2026-08-28. Rung 9 ignites here but slowly -- epoch
-# 19 of 30 -- while birds ignites at epoch 0, and birds got there by having its
-# rates attenuated rather than raised. So this pushes the same lever further on
-# the rung that is still slow. Halving the base rate halves every module rate the
-# width/depth rule derives from it; the six `*_lr` scalar overrides are absolute
-# and stay at 2e-3, which is deliberate -- those are the parameters ignition
-# waits on, and slowing them is not what this is testing.
-lr = 5e-5
+# Scalars doubled from DEFAULT's 2e-3, base `lr` back at 1e-4, 2026-08-28.
+#
+# Same scalar-to-module ratio as the 5e-5 run (40x), reached by raising the
+# calibration rather than lowering the representations. If ignition is set by
+# that ratio -- which the 5e-5 run's `pool_score_norm` growing 17x in 11 epochs
+# against 4.2x in 18 at *twice* the rate says it is -- this should ignite around
+# epoch 12 as that run did, while the modules keep learning at full speed. The
+# 5e-5 run ignited early into the colour shortcut and shape never left chance
+# (0.554 at epoch 24 against 0.758); the question is whether the early ignition
+# survives without that cost.
+#
+# `mix_logit_lr` is inert here -- rung 9 has a `BilinearDiscriminator`, which has
+# no mixing weight -- and is doubled with the rest for uniformity.
+logit_scale_lr = 4e-3
+score_scale_lr = 4e-3
+score_bias_lr = 4e-3
+polarity_embedding_lr = 4e-3
+mix_logit_lr = 4e-3
+contrast_gate_lr = 4e-3
 
 [scheduler]
 epochs = 30
