@@ -99,12 +99,16 @@ weight_decay = 0.0
 clip_grad_norm = 1.0
 log_interval = 100
 
-# The width `lr` above was tuned at, and the numerator of the muP rule:
+# The width `lr` above was tuned at, and the numerator of the per-module rule:
 #
-#     lr(module) = lr * mup_reference_width / d_model(module)
+#     lr(module) = lr * mup_reference_width / d_model(module) / layers(module)
+#
+# Two corrections with opposite signs. The width half is muP; the depth half is
+# not, and is described below under "The depth term".
 #
 # One rule stated once rather than six literal rates, because the rates are a
-# consequence of the widths and would go stale the moment a width moved.
+# consequence of the widths and depths, and would go stale the moment either
+# moved.
 # `build_models` applies it, `split_out_module` does the regrouping, and the
 # resolved rates are written back into the saved config as
 # `[optimiser] resolved_mup_lrs` so args.json records what was actually built.
@@ -123,12 +127,51 @@ log_interval = 100
 # stationary to four decimal places for thirty epochs, with a loss falling slowly
 # and monotonically and no spikes anywhere -- the signature of too little rate,
 # not too much. Rung 9 is exactly where `sender_language_model.d_model` drops
-# 1024 -> 320, which under this rule wants 3.2x.
+# 1024 -> 320, which under the width term alone wants 3.2x.
 #
-# At the current widths that gives 3.2e-4 for `ViT2`, `AttentionPrototyper`,
-# `ExampleContrast` and `SenderTransformerLM` (320 wide), 4.0e-4 for
-# `ReceiverCrossAttentionLM` and `AttentionDiscriminator` (256), and an unchanged
-# 1e-4 for `SenderGRULM` and `ReceiverGRULM`, which are at the reference width.
+# That reading is what `89ab6fc` tested and it did not survive: the width term
+# alone broke rungs 9 and 10 outright. Read the depth term below as the
+# correction to it, and this whole paragraph as the argument that motivated the
+# width half rather than as a finding that still stands unqualified.
+#
+# The depth term. muP's 1/fan_in is a statement about one matrix: how large an
+# update it can take before its output variance blows up. It says nothing about
+# how many such matrices sit in series, and AdamW moves every parameter by about
+# `lr` per step whatever its gradient's size -- so a residual stack of depth L
+# moves the *function* about L times as far per step as any one of its matrices
+# moves. Swapping a one-cell GRU for a six-layer transformer, or a ResNet for a
+# ten-block ViT, is a large increase in travel per step at an unchanged rate,
+# pulling opposite to the width term.
+#
+# This half is a heuristic with no parametrisation behind it, and it is adopted
+# for a measured reason rather than a derived one: `89ab6fc` reinstated the width
+# rule alone and rungs 9 and 10 both failed to converge, which says those rungs
+# sit nearer their stable rate than the flat-at-`ln 2` reading assumed. Do not
+# report the pair as "muP" in the paper.
+#
+# Note broccoli's DeepNorm already attenuates by depth and much more weakly --
+# `beta` goes as `(8L)^(-1/4)`, i.e. 0.33 at ten blocks against the 0.1 this
+# applies. They are different corrections and compose rather than double-count:
+# `beta` scales a branch's output, this scales the update. But the combined
+# attenuation at depth is steep, and it is the first thing to suspect if the deep
+# modules now fail to move at all.
+#
+# At the current widths and depths that gives, for rungs 9 and 10:
+#
+#     ViT2                  320 wide, 10 deep   3.2e-5
+#     AttentionPrototyper   320 wide,  1 deep   3.2e-4
+#     ExampleContrast       320 wide,  1 deep   3.2e-4
+#     SenderTransformerLM   320 wide,  6 deep   5.3e-5
+#     ReceiverGRULM        1024 wide,  1 deep   1.0e-4  (unchanged)
+#
+# and on the rungs that have them, 6.7e-5 for `ReceiverCrossAttentionLM` (256
+# wide, 6 deep) and 1.3e-4 for `AttentionDiscriminator` (256 wide, 3 deep).
+#
+# Note the shape of that: the two single-layer sender stages now carry the
+# highest rates in the pair, and the ViT the lowest by an order of magnitude.
+# `AttentionPrototyper` is deliberate -- `pool_score_norm` opens at exactly zero
+# and its travel is bounded by `lr * steps`, so it is one of the parameters
+# ignition waits on.
 #
 # Two exemptions, both by rule rather than by list, so a module added later is
 # covered without anyone having to remember to add it. See `is_mup_exempt`.

@@ -113,27 +113,76 @@ If the suffix matches nothing, `split_out_parameter` raises rather than silently
 doing nothing — the error names the config key so a rename says which knob went
 quiet. `split_out_module` has no equivalent, because it cannot fail that way.
 
-### The muP rule
+### The per-module rule
 
 Every module with a width takes
 
 ```
-lr(module) = [optimiser] lr × [optimiser] mup_reference_width / d_model(module)
+lr(module) = [optimiser] lr × [optimiser] mup_reference_width
+             / d_model(module) / layers(module)
 ```
 
 with the reference width at **1024**: jayelm's `--speaker_hidden_size` and
 `--listener_hidden_size`, and therefore the width at which `lr = 1e-4` was tuned.
-Under muP, Adam's stable rate for a matrix mapping one width to another goes as
-1/fan_in, so a module three times narrower than the one the rate was tuned on is
-being trained three times too slowly. `resolve_mup_learning_rates` applies it and
-`split_out_module` does the regrouping.
+`resolve_mup_learning_rates` applies it and `split_out_module` does the
+regrouping.
 
-The rule is stated once rather than as six literal rates, because the rates are a
-consequence of widths that move. `mup_width` reads `d_model` off the
-**constructed module** rather than out of the config: several of these widths are
-derived — `SenderTransformerLM` and `AttentionPrototyper` take theirs from the
-vision model's `final_feat_dim` — so a config key would be a second statement of
-the same number, able to disagree with it.
+**Two corrections with opposite signs, and only the first is muP.** Keep them
+separable when writing this up.
+
+*Width* (`mup_width`, muP). Adam's stable rate for a matrix mapping one width to
+another goes as 1/fan_in, so a module three times narrower than the one the rate
+was tuned on is being trained three times too slowly.
+
+*Depth* (`mup_depth`, **not** muP). That is a statement about one matrix. It says
+nothing about how many sit in series, and AdamW moves every parameter by about
+`lr` per step whatever its gradient's size — so a residual stack of depth L moves
+the *function* roughly L times as far per step as any one of its matrices moves.
+Replacing a one-cell GRU with a six-layer transformer, or a ResNet with a
+ten-block ViT, is a large increase in travel per step at an unchanged rate.
+
+The depth half has no parametrisation behind it and was adopted for a measured
+reason: `89ab6fc` reinstated the width rule alone and rungs 9 and 10 both failed
+to converge. That is evidence those rungs sit nearer their stable rate than the
+flat-at-`ln 2` diagnosis assumed — the argument for muP was that they were
+starved of rate, and a bump disrupting them entirely tells against it.
+
+**It is not the same correction as DeepNorm's `beta`, and does not double-count
+with it.** `beta` goes as (8L)^(−1/4) — 0.33 at ten blocks, against the 0.1 this
+applies — and it scales a residual *branch's output* while leaving the update
+alone; this scales the update. They compose. But the combined attenuation at
+depth is steep, and it is the first thing to suspect if the deep modules now fail
+to move at all.
+
+The rule is stated once rather than as literal rates, because the rates are a
+consequence of widths and depths that move. `mup_width` reads `d_model` and
+`mup_depth` reads `layers` off the **constructed module** rather than out of the
+config: several of these widths are derived — `SenderTransformerLM` and
+`AttentionPrototyper` take theirs from the vision model's `final_feat_dim` — so a
+config key would be a second statement of the same number, able to disagree with
+it. `layers` is declared rather than derived, so
+`test_declared_depth_matches_the_blocks_built` asserts each stated depth against
+the `ModuleList` actually built.
+
+**What it comes to at rungs 9 and 10:**
+
+| module | width | depth | rate |
+|---|---|---|---|
+| `ViT2` | 320 | 10 | 3.2e-5 |
+| `AttentionPrototyper` | 320 | 1 | 3.2e-4 |
+| `ExampleContrast` | 320 | 1 | 3.2e-4 |
+| `SenderTransformerLM` | 320 | 6 | 5.3e-5 |
+| `ReceiverGRULM` | 1024 | 1 | 1.0e-4 (unchanged) |
+
+and on the rungs that have them, 6.7e-5 for `ReceiverCrossAttentionLM` (256 wide,
+6 deep) and 1.3e-4 for `AttentionDiscriminator` (256 wide, 3 deep).
+
+Note the shape of that: the two single-layer sender stages now carry the highest
+rates in the pair and the ViT the lowest by an order of magnitude. The
+prototyper's is deliberate — `pool_score_norm` opens at exactly zero and its
+travel is bounded by `lr × steps`, and `scripts/ignition_audit.py` finds it
+leaving the plateau in the same epoch as `logit_scale` and `contrast_gate`, so it
+is one of the parameters ignition waits on.
 
 **One rate per module, keyed on `d_model`.** Exact for the attention projections,
 which are square in it and are most of the parameters; approximate for the
@@ -161,6 +210,7 @@ ordering trick is needed. muP runs first anyway, so that if the exemption is eve
 loosened the elevated scalar rates are the ones that survive.
 
 **Whole modules out of scope**, all by the same test — no `d_model` attribute.
+Scope is decided by the width alone; `mup_depth` is never consulted for these.
 The convolutional backbones (`ResNet18.final_feat_dim` is a hardcoded 512, muP's
 rules are stated for transformers, and a ResNet at 1e-4 is what jayelm tuned);
 `AveragePrototyper` and `nn.Embedding`, which have no matrices between widths;
@@ -172,7 +222,8 @@ its factor would be 1.0.
 change of *width* in one architecture. Two of the changes here are not that: the
 speaker's language model goes GRU → Transformer as well as 1024 → 320, and `ViT2`
 replaces a ResNet with no 1024 anywhere in it. Principled heuristic, not transfer
-guarantee.
+guarantee — and the depth half is a heuristic with no parametrisation behind it
+at all, so muP transfers nothing across a change of depth here either.
 
 Only the learning-rate half of muP is adopted. Broccoli's `nn.Linear` init is
 already 1/√fan_in, `msa_scaling = "d"` is already muP's attention scaling, and

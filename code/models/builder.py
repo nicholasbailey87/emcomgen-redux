@@ -209,6 +209,60 @@ def mup_width(module):
     return getattr(module, "d_model", None)
 
 
+def mup_depth(module):
+    """
+    The number of residual blocks the module's update passes through, or 1.
+
+    The second half of the rate, and it pulls the opposite way to the width.
+        muP's `1/fan_in` is a statement about one matrix: how large an update
+        that matrix can take before its output variance blows up. It says
+        nothing about how many such matrices sit in series. AdamW moves every
+        parameter by about `lr` per step whatever its gradient's size, so in a
+        residual stack of depth `L` the *function* moves by something like
+        `L * lr` while any one matrix moves by `lr`. Replacing a one-cell GRU
+        with a six-layer transformer, or a ResNet with a ten-block ViT, is
+        therefore a large increase in how far the module travels per step at an
+        unchanged rate -- in the direction opposite to the one the width term
+        corrects for.
+
+    `layers` rather than a count of `blocks`, read off the constructed module as
+        `mup_width` reads `d_model`. Every module in `MUP_MODULES` that has a
+        stack states it, `ViT2` included -- it took `layers` as a kwarg for
+        `resolve_residual_scaling` and now keeps it.
+        `test_declared_depth_matches_the_blocks_built` asserts the stated number
+        against the `ModuleList` actually built, which is the check that keeps
+        this from being a config key able to be wrong.
+
+    Absent `layers` means depth 1, which is right for every module that falls
+        that way: `AttentionPrototyper` is a single scoring projection and
+        `ExampleContrast` a single gated stage. Neither has a residual path to
+        accumulate along, so neither takes a depth penalty -- and note that this
+        leaves them at the full width-scaled rate, the largest in the pair.
+
+    What this is *not*. Depth-scaling the learning rate is not part of muP, and
+        muP makes no transfer claim across a change of depth. It is a separate
+        heuristic, adopted here for a measured reason: reinstating the width
+        rule alone in `89ab6fc` broke rungs 9 and 10, which is evidence those
+        rungs are nearer their stable rate than the flat-at-`ln 2` reading
+        assumed. See docs/training.md, and do not report the pair as "muP".
+
+    Note also that broccoli's DeepNorm already attenuates by depth, and much
+        more weakly -- `beta` goes as `(8L)^(-1/4)`, so 0.33 at ten blocks
+        against the 0.1 this applies. The two are not the same correction:
+        `beta` scales a branch's *output* and leaves the update alone, while
+        this scales the update. They compose rather than double-count, but the
+        combined attenuation at depth is steep and is the first thing to
+        suspect if these rungs now fail to move at all.
+
+    Args:
+        module: a constructed submodule of the pair
+
+    Returns:
+        Its depth as a positive int.
+    """
+    return getattr(module, "layers", 1)
+
+
 # `(config key, parameter suffix, applies to)`, in the order the groups are
 #     added. The test gates on the architecture rather than on finding the
 #     parameter: a GRU speaker has no polarity tag, and
@@ -327,8 +381,21 @@ MUP_MODULES = (
 
 def resolve_mup_learning_rates(pair, base_lr, reference_width):
     """
-    Apply `lr(module) = base_lr * reference_width / fan_in(module)` across
-        `MUP_MODULES`.
+    Apply
+
+        lr(module) = base_lr * reference_width / fan_in(module) / depth(module)
+
+        across `MUP_MODULES`.
+
+    Two corrections with opposite signs, and it matters that they are separable.
+        The width term is muP: a matrix mapping one width to another has a
+        stable Adam rate going as `1/fan_in`, so a module narrower than the one
+        `base_lr` was tuned on is being trained too slowly. The depth term is
+        not muP at all -- see `mup_depth` -- and says that a stack of `L` such
+        matrices in series moves the function about `L` times as far per step as
+        one of them does. A 320-wide six-layer speaker language model is 3.2x
+        under-rated by the first and 6x over-rated by the second, and lands
+        slightly below `base_lr` rather than well above it.
 
     One rate per module keyed on `d_model`, not one per tensor keyed on that
         tensor's own fan-in. Exact for the attention projections, which are
@@ -342,7 +409,8 @@ def resolve_mup_learning_rates(pair, base_lr, reference_width):
         this is being asked to cover are not that: the speaker's language model
         goes GRU -> Transformer as well as 1024 -> 320, and `ViT2` replaces a
         ResNet that has no width to speak of. Principled heuristic, not
-        transfer guarantee.
+        transfer guarantee -- and the depth half is a heuristic with no
+        parametrisation behind it whatsoever.
 
     Args:
         pair: the constructed `base.Pair`
@@ -371,7 +439,7 @@ def resolve_mup_learning_rates(pair, base_lr, reference_width):
             resolved[name] = base_lr
             continue
 
-        lr = base_lr * reference_width / width
+        lr = base_lr * reference_width / width / mup_depth(module)
 
         in_scope.append((name, module, lr))
         resolved[name] = lr

@@ -1,12 +1,19 @@
 """
-The muP learning-rate rule, as `models/builder.py` applies it to the ladder.
+The per-module learning-rate rule, as `models/builder.py` applies it to the
+ladder.
 
 The rule is
 
-    lr(module) = [optimiser] lr * [optimiser] mup_reference_width / d_model
+    lr(module) = [optimiser] lr * [optimiser] mup_reference_width
+                 / d_model(module) / layers(module)
 
 with the reference width 1024 -- jayelm's `--speaker_hidden_size` and
 `--listener_hidden_size`, and therefore the width `lr = 1e-4` was tuned at.
+
+Two corrections with opposite signs, and only the width half is muP. The depth
+half is a separate heuristic -- see `mup_depth` and docs/training.md -- so the
+parametrised tests below name width and depth separately rather than asserting
+one combined factor, and a failure says which of the two moved.
 
 What these tests exist to catch is not the arithmetic, which is one line, but
 the *partition*. Six overrides already move named scalars into groups of their
@@ -54,10 +61,16 @@ WIDTH_256 = "15_shapeworld_receiver_cross_attention_lm.toml"
 SCALAR_OVERRIDES = (
     ("log_logit_scale", "logit_scale_lr"),
     ("log_score_scale", "score_scale_lr"),
+    ("score_bias", "score_bias_lr"),
     ("polarity_embedding", "polarity_embedding_lr"),
     ("mix_logit", "mix_logit_lr"),
     ("contrast_gate", "contrast_gate_lr"),
 )
+
+# The two all-ResNet, all-GRU baselines. They are the only rungs with no
+#     transformer stack anywhere, so they are the only ones where finding no
+#     declared depth to check is the right answer rather than a broken walk.
+BASELINE_RUNGS = ("01_shapeworld_baseline.toml", "02_birds_baseline.toml")
 
 
 def _build(config_file):
@@ -123,31 +136,43 @@ def test_a_missing_reference_width_is_rejected():
 
 
 @pytest.mark.parametrize(
-    "config_file,module_name,width,lr",
+    "config_file,module_name,width,depth,lr",
     [
-        # The GRU pair, at the reference width, unchanged at base.
-        ("01_shapeworld_baseline.toml", "sender_language_model", 1024, 1e-4),
-        ("01_shapeworld_baseline.toml", "receiver_language_model", 1024, 1e-4),
-        # `ViT2`, and everything the speaker sizes from `final_feat_dim`.
-        ("03_shapeworld_sender_vit.toml", "sender_vision", 320, 3.2e-4),
-        ("05_shapeworld_attention_prototyper.toml", "sender_prototyper", 320, 3.2e-4),
-        ("07_shapeworld_sender_contrast.toml", "sender_contrast", 320, 3.2e-4),
-        # Rung 9 is the drop this whole change is aimed at: 1024 -> 320.
-        (WIDTH_320, "sender_language_model", 320, 3.2e-4),
-        ("11_shapeworld_receiver_vit.toml", "receiver_vision", 320, 3.2e-4),
+        # The GRU pair, at the reference width and one layer deep: neither
+        #     correction bites, so this stays at base and is the control.
+        ("01_shapeworld_baseline.toml", "sender_language_model", 1024, 1, 1e-4),
+        ("01_shapeworld_baseline.toml", "receiver_language_model", 1024, 1, 1e-4),
+        # `ViT2`. Ten blocks against 3.2x from the width, so the depth term
+        #     dominates and this lands an order of magnitude *below* base --
+        #     the largest single change the rule makes anywhere on the ladder.
+        ("03_shapeworld_sender_vit.toml", "sender_vision", 320, 10, 3.2e-5),
+        # The speaker's two single-layer stages, which take the width bump with
+        #     no depth penalty and so carry the highest rates in the pair.
+        #     `pool_score_norm` opens at exactly zero and is bounded by
+        #     `lr * steps`, so this is the one ignition waits on.
+        ("05_shapeworld_attention_prototyper.toml", "sender_prototyper", 320, 1, 3.2e-4),
+        ("07_shapeworld_sender_contrast.toml", "sender_contrast", 320, 1, 3.2e-4),
+        # Rung 9 is the drop the width half was aimed at, 1024 -> 320, and the
+        #     rung the width half alone broke in `89ab6fc`. Six layers against
+        #     3.2x puts it just below base rather than well above it.
+        (WIDTH_320, "sender_language_model", 320, 6, 5.333333e-5),
+        ("11_shapeworld_receiver_vit.toml", "receiver_vision", 320, 10, 3.2e-5),
         # The listener's own transformers, at 256.
-        ("13_shapeworld_attention_discriminator.toml", "receiver_discriminator", 256, 4.0e-4),
-        (WIDTH_256, "receiver_language_model", 256, 4.0e-4),
+        ("13_shapeworld_attention_discriminator.toml", "receiver_discriminator", 256, 3, 1.333333e-4),
+        (WIDTH_256, "receiver_language_model", 256, 6, 6.666667e-5),
     ],
 )
-def test_each_width_gets_the_rate_the_rule_predicts(
-    config_file, module_name, width, lr
+def test_each_module_gets_the_rate_the_rule_predicts(
+    config_file, module_name, width, depth, lr
 ):
     config, built = _build(config_file)
     select = dict((n, s) for n, s, _ in builder.MUP_MODULES)[module_name]
     module = select(built["pair"])
 
+    # Width and depth separately, so a failure says which half moved rather
+    #     than only that the product did.
     assert builder.mup_width(module) == width
+    assert builder.mup_depth(module) == depth
 
     lr_of = _lr_by_id(built["optimiser"])
     rates = {
@@ -181,6 +206,9 @@ def test_the_modules_without_a_width_stay_at_base(config_file, module_name):
     select = dict((n, s) for n, s, _ in builder.MUP_MODULES)[module_name]
     module = select(built["pair"])
 
+    # Out of scope is decided by the width alone. `mup_depth` is never
+    #     consulted for these, and a `ResNet` reporting a depth would not drag
+    #     it back into scope.
     assert builder.mup_width(module) is None
 
     base_lr = config["optimiser"]["lr"]
@@ -221,6 +249,62 @@ def test_the_bilinear_discriminators_fan_in_really_is_the_reference_width():
 # --------------------------------------------------------------------------
 # The exemptions, asserted directly.
 # --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("config_file", RUNGS)
+def test_declared_depth_matches_the_blocks_built(config_file):
+    """
+    Every stated `layers` equals the `ModuleList` the module actually built.
+
+    `mup_width` reads a width that is mostly *derived*, so it cannot disagree
+        with the module. `mup_depth` reads `layers`, which is declared in the
+        config and passed down -- exactly the "second statement of the same
+        number, able to be wrong" that `mup_width`'s docstring warns about. This
+        is the check that closes that gap, and it is why `ViT2` may state its
+        depth rather than having it counted back out of the backbone.
+
+    Modules with no block stack are the other half of the rule: `mup_depth`
+        returns 1 for them, and that must be because they are genuinely one
+        layer deep rather than because an attribute went missing.
+    """
+    _, built = _build(config_file)
+    pair = built["pair"]
+
+    checked = 0
+
+    for name, select, _ in builder.MUP_MODULES:
+        module = select(pair)
+
+        if module is None:
+            continue
+
+        stacks = [
+            len(child) for child_name, child in module.named_modules()
+            if isinstance(child, torch.nn.ModuleList)
+            and child_name.endswith("blocks")
+        ]
+
+        depth = builder.mup_depth(module)
+
+        if stacks:
+            # One stack per module in everything built so far. A second would
+            #     make "the depth" ambiguous and wants a decision, not a
+            #     silently-picked first element.
+            assert len(stacks) == 1, f"{name} has {len(stacks)} block stacks"
+            assert depth == stacks[0], (
+                f"{name} declares layers={depth} but built {stacks[0]} blocks"
+            )
+            checked += 1
+        else:
+            assert depth == 1, (
+                f"{name} has no block stack but reports depth {depth}"
+            )
+
+    # Above the baselines every rung has at least the speaker's vision model or
+    #     language model carrying a stack, so checking nothing there means the
+    #     walk stopped finding them rather than that the ladder changed.
+    if config_file not in BASELINE_RUNGS:
+        assert checked > 0
+
 
 @pytest.mark.parametrize("name", ["anything", "attn.q_proj.weight"])
 def test_anything_below_two_dimensions_is_exempt(name):
