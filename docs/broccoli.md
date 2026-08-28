@@ -268,16 +268,25 @@ calls that would do that — `scale_parameters(self.v_proj, self.beta)` and
 and the scaling is applied as `processed *= self.beta` in the block's forward
 instead. They read as an abandoned edit and are not one.
 
-### Why that matters: the init scheme is left free
+### Why that matters: DeepNorm here composes with muP
 
-Because `beta` never touches an initialisation, any init scheme can be layered on
-top of this DeepNorm without the two fighting over the same tensors. Under the
-paper's form they would: an init that sets variance per fan-in would have its
-variance multiplied again by a depth-derived constant, and neither scheme's
-guarantees would survive.
+Because `beta` never touches an initialisation, the init scheme is left entirely
+free — so muP's rules can be layered on top of this DeepNorm without the two
+schemes fighting over the same tensors. Under the paper's form they would: muP
+sets init variance per fan-in, DeepNorm's `beta` would then multiply it by a
+depth-derived constant, and neither parametrisation's guarantees would survive.
 
-Note also that broccoli's `scaling="d"` attention option gives `8 / head_dim`
-rather than `1 / sqrt(head_dim)`, and it is what this repository passes
+That composability has been checked in practice, and it is the reason a muP
+learning-rate rule — Adam lr ∝ 1/fan_in, so a module narrowing from 1024 to 320
+wants 3.2× — can be applied to one of these stacks directly. That rule is now in
+the repo: scope it to the module whose fan-in actually moved, via
+`split_out_module` (see [training.md](training.md)), rather than scaling the
+whole pair. `split_out_parameter`, its sibling, is for lone named scalars and is
+the wrong selector for this.
+
+broccoli's `scaling="d"` attention option is pointing the same way: it gives
+`8 / head_dim` rather than `1 / sqrt(head_dim)`, which is the muP attention
+scaling rather than the standard one, and it is what this repository passes
 everywhere.
 
 `deepnorm_constants` raises below one layer: a stack with no blocks has no
