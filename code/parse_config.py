@@ -6,6 +6,37 @@ import copy
 class InvalidConfig(Exception):
     pass
 
+
+# `[scheduler] lr_schedule_shape` -> the `gradboard.cycles.FN_LIBRARY` name the
+#     post-warm-up cycle runs, and whether that shape reads
+#     `cool_point_multiplier`.
+#
+# The config names an *intention*, not a curve. It used to name the curve --
+#     any key of `FN_LIBRARY` -- and two of those keys, `ascent` and `triangle`,
+#     open at their trough rather than their peak, so putting a warm-up in front
+#     of one threw the warm-up's rate away at the handover and re-climbed it over
+#     the rest of the run. Nothing in the config said so. Restricting the surface
+#     to shapes that open at their peak makes a warm-up compose continuously with
+#     whatever follows it, by construction rather than by the reader knowing
+#     which curves are safe.
+#
+# `flat` is `ascent` pinned at `low = high = 1.0`, which is constant at the base
+#     rate whatever the generating function does. It takes no floor: there is
+#     nothing for a floor to mean when the rate never descends, and a
+#     `cool_point_multiplier` sitting unread beside it is how the ten-epoch
+#     warm-up came to spend three weeks doing nothing. `validate_config` rejects
+#     the combination rather than ignoring it.
+#
+# `cosine` is `half_cosine`, the falling half -- 1.0 at step zero down to 0.0 at
+#     the last step, mapped onto `[cool_point_multiplier, 1.0]`. `FN_LIBRARY`'s
+#     own `cosine` is the *full* period, 1.0 down to 0.0 and back up to 1.0, which
+#     would end a run at its opening rate. That is a cosine restart and not what
+#     "cosine schedule" means anywhere else, so the sentinel maps to the half.
+LR_SCHEDULE_SHAPES = {
+    "flat": ("ascent", False),
+    "cosine": ("half_cosine", True),
+}
+
 def recursive_update(store: dict, items: dict) -> dict:
     """
     Update `store` in place with `items`, merging recursively where both hold a
@@ -123,6 +154,56 @@ def validate_config(config: dict) -> bool:
                 f"`optimiser.module_lr.{key}` must be a positive number, got "
                 f"{rate}."
             )
+
+    # `[scheduler]`. The shape is a sentinel rather than a `FN_LIBRARY` name --
+    # see `LR_SCHEDULE_SHAPES` for why the surface is this narrow -- and the
+    # floor is required by exactly the shapes that descend.
+    shape = config['scheduler'].get('lr_schedule_shape')
+
+    if shape not in LR_SCHEDULE_SHAPES:
+        raise InvalidConfig(
+            f"`scheduler.lr_schedule_shape` must be one of "
+            f"{', '.join(sorted(LR_SCHEDULE_SHAPES))}, got {shape!r}. These are "
+            "intentions rather than curve names; see "
+            "`parse_config.LR_SCHEDULE_SHAPES`."
+        )
+
+    _, takes_floor = LR_SCHEDULE_SHAPES[shape]
+    floor = config['scheduler'].get('cool_point_multiplier')
+
+    if takes_floor:
+        if (
+            not isinstance(floor, (int, float))
+            or isinstance(floor, bool)
+            or not 0.0 <= floor < 1.0
+        ):
+            raise InvalidConfig(
+                f"`scheduler.lr_schedule_shape = {shape!r}` descends, so "
+                "`scheduler.cool_point_multiplier` must be present and in "
+                f"[0, 1) -- the fraction of the base rate it descends to -- got "
+                f"{floor!r}. A floor of 1.0 would be a flat schedule; ask for "
+                'that with `lr_schedule_shape = "flat"`.'
+            )
+    elif floor is not None:
+        raise InvalidConfig(
+            f"`scheduler.lr_schedule_shape = {shape!r}` does not descend, so "
+            f"`scheduler.cool_point_multiplier` ({floor!r}) would never be "
+            "read. Remove it. It is rejected rather than ignored because a "
+            "scheduler key that looks set and is not is how the ten-epoch "
+            "warm-up ran on no rung for three weeks."
+        )
+
+    warm_up_epochs = config['scheduler'].get('warm_up_epochs')
+
+    if (
+        not isinstance(warm_up_epochs, int)
+        or isinstance(warm_up_epochs, bool)
+        or warm_up_epochs < 0
+    ):
+        raise InvalidConfig(
+            "`scheduler.warm_up_epochs` must be a non-negative integer, got "
+            f"{warm_up_epochs!r}."
+        )
 
     for key in ('silhouette_p_sender', 'silhouette_p_receiver'):
         p = config['data'][key]

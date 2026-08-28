@@ -134,6 +134,93 @@ def compute_language_metrics(
     )
 
 
+def build_lr_schedule(config, training_examples, batch_size):
+    """
+    The learning-rate schedule: `[scheduler] warm_up_epochs` ascending from zero
+    to the base rate, then `[scheduler] lr_schedule_shape` over the rest.
+
+    **The warm-up always starts at zero and always ends at the base rate**, and
+    the shape that follows always *opens* at the base rate, so the two meet.
+    `parse_config.LR_SCHEDULE_SHAPES` is what makes the second half of that true:
+    the config names an intention -- `flat` or `cosine` -- rather than a
+    `gradboard.cycles.FN_LIBRARY` curve, and the two curves it can name are the
+    two that open at their peak.
+
+    **`cool_point_multiplier` governs only what comes after the warm-up.** It is
+    how far a descending shape may fall, as a fraction of the base rate, and it
+    has nothing to say about how a run opens. `flat` does not descend and so does
+    not take one at all; `validate_config` rejects it there rather than leaving
+    it unread.
+
+    Neither of those was true before. `PASS.update_learning_rates` computes
+    `min_lr + (base_lr - min_lr) * multiplier` with a single
+    `min_lr = base_lr * cool_point_multiplier` for the whole run, so handing it
+    the configured floor started the warm-up at `floor * base_lr` rather than at
+    zero -- and at the `1.0` every rung inherited, pinned every step to `base_lr`
+    and flattened the schedule out of existence. `d5c47f5` set that floor
+    deliberately alongside `warm_up_epochs = 0`, which was coherent; `b298da5`
+    re-enabled the warm-up three weeks later without touching it, and the ramp it
+    advertised ran on no rung.
+
+    So the floor is carried in the descending cycle's own `low`, against a `high`
+    of 1.0, and `PASS` is built with a floor of 0.0 -- leaving its multiplier to
+    act directly on each group's base rate. Every shape in `FN_LIBRARY` returns
+    0.0 at its trough and 1.0 at its peak, so `low` and `high` are the fractions
+    of base the cycle bottoms and tops out at, uniformly across shapes.
+
+    `PASS` records `cool_point_multiplier` in its `state_dict`, so a run resumed
+    from a checkpoint written before this change restores the old floor and goes
+    flat again. Start such a run fresh rather than resuming it.
+
+    Args:
+        config: the parsed config, for `[scheduler]`
+        training_examples: `len(dataset)` for the training split
+        batch_size: the *effective* batch, `[data] batch_size` times
+            `[optimiser] accumulator_steps`
+
+    Returns:
+        A `gradboard.cycles.CycleSequence` over one or two stages.
+    """
+    epochs = config['scheduler']['epochs']
+    warmup_epochs = min(config['scheduler']['warm_up_epochs'], epochs)
+
+    shape, takes_floor = parse_config.LR_SCHEDULE_SHAPES[
+        config['scheduler']['lr_schedule_shape']
+    ]
+    # `validate_config` has already rejected a floor that is absent where it is
+    #     needed or present where it is not, so this reads it only where it is
+    #     read at all. `flat` is `low = high = 1.0`: constant at base.
+    floor = config['scheduler']['cool_point_multiplier'] if takes_floor else 1.0
+
+    lr_stages = []
+
+    if warmup_epochs:
+        lr_stages.append(
+            gradboard.cycles.Cycle(
+                gradboard.cycles.ascent,
+                training_examples,
+                warmup_epochs,
+                batch_size,
+                low=0.0,
+                high=1.0
+            )
+        )
+
+    if epochs > warmup_epochs:
+        lr_stages.append(
+            gradboard.cycles.Cycle(
+                shape,
+                training_examples,
+                epochs - warmup_epochs,
+                batch_size,
+                low=floor,
+                high=1.0
+            )
+        )
+
+    return gradboard.cycles.CycleSequence(lr_stages)
+
+
 def compute_metrics_by_md(all_lang, md_vocab=None):
     metrics_by_md = {}
     per_md_acc = all_lang[["md", "acc"]].groupby("md").mean()
@@ -837,39 +924,21 @@ if __name__ == "__main__":
     scaler = GradScaler()
 
     training_examples = len(dataloaders['train'].dataset)
-    epochs = config['scheduler']['epochs']
-    warmup_epochs = min(config['scheduler']['warm_up_epochs'], epochs)
     batch_size = config['data']['batch_size'] * config['optimiser']['accumulator_steps']
 
-    lr_stages = []
-
-    if warmup_epochs:
-        lr_stages.append(
-            gradboard.cycles.Cycle(
-                gradboard.cycles.ascent,
-                training_examples,
-                warmup_epochs,
-                batch_size
-            )
-        )
-
-    if epochs > warmup_epochs:
-        lr_stages.append(
-            gradboard.cycles.Cycle(
-                config['scheduler']['lr_schedule_shape'],
-                training_examples,
-                epochs - warmup_epochs,
-                batch_size
-            )
-        )
-    
     scheduler = PASS(
-        gradboard.cycles.CycleSequence(lr_stages),
+        build_lr_schedule(config, training_examples, batch_size),
         model_config['pair'],
         model_config['optimiser'],
         scaler=scaler,
         range_test=config['scheduler']['range_test'],
-        cool_point_multiplier=config['scheduler']['cool_point_multiplier']
+        # Deliberately not `[scheduler] cool_point_multiplier`. `PASS` would
+        #     apply that floor to every cycle alike, warm-up included, which is
+        #     not what the floor means. `build_lr_schedule` carries it in the
+        #     post-warm-up cycle's own `low` instead, so the multiplier reaching
+        #     `PASS` is already the fraction of the base rate to run at. See
+        #     that function.
+        cool_point_multiplier=0.0
     )
 
     checkpoint_path = os.path.join(exp_dir, "checkpoint_last.pt")

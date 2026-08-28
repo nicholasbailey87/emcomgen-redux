@@ -35,6 +35,23 @@ name = "ablation"
 [data]
 dataset = "../data/cub"
 
+# 5,000 games an epoch rather than birds' default 3,100, for step parity with
+# ShapeWorld under the `accumulator_steps = 2` below: 5,000 / (16 x 2) = 156.25,
+# and ShapeWorld's 20,000 / (32 x 4) = 156.25. The same number and the same
+# remainder, so the odd trailing batch is left unstepped on both.
+#
+# Parity is retaken here rather than restored in general. DEFAULT.toml retired
+# it deliberately when 3,100 was set for coverage -- the coupon-collector point
+# at which an epoch first reaches all 150 species' training images, `N ln N / 20`
+# = 3,123 -- and coverage is not what is being traded away: 5,000 clears that
+# point by 60%, and `CUBDataset.__getitem__` ignores its index and samples a
+# fresh game, so nothing is exhausted by drawing more of them.
+#
+# What it does not buy is parity of gradient quality. Birds still sees 5,000
+# games an epoch at an effective batch of 32 against ShapeWorld's 20,000 at 128.
+# The steps are matched; what goes into each of them is not.
+games_per_epoch = 5000
+
 [sender]
 feature_model = "ViT2"
 prototyper = "AttentionPrototyper"
@@ -79,7 +96,65 @@ layers = 6
 # causal arm needs because only it reads a symbol back.
 bidirectional = false
 
+[optimiser]
+# Effective batch 32 rather than birds' default 16 (`batch_size` 16 at
+# `[birds.optimiser] accumulator_steps = 1`), against ShapeWorld's 128.
+#
+# This is the batch-side arm of the observation that this rung wants either half
+# the rate or twice the batch. That the two are interchangeable at all is the
+# diagnosis: they only buy the same thing in a noise-dominated regime, since a
+# step that were simply too large for the curvature would not be rescued by
+# averaging more samples into it. The target is therefore the variance of the
+# speaker's gradient rather than the size of the step, and this arm attacks it
+# where halving `lr` only makes the run less sensitive to it.
+#
+# What it does not cost. `games_per_epoch = 3100` is set for coverage -- the
+# coupon-collector point at which an epoch first reaches all of the training
+# images -- and an epoch still draws 3,100 games, so the clock the epoch counter
+# provides for `training_progress` and the `logit_scale` traverse is unchanged.
+#
+# What it does cost. Accumulation halves the step count at a fixed game count,
+# which is why `games_per_epoch` above moves with it -- 5,000 games at an
+# effective batch of 32 restores the 156 steps an epoch that 3,100 at 16 was
+# producing, so no `lr * steps` travel budget is given up. Without that raise
+# the cost would fall hardest on the scaling scalars, and docs/anecdotes.md
+# works out why: sign consistency less 0.5 grows as the root of the batch while
+# the step count falls as the batch, so accumulation is a net loss for a lone
+# Adam scalar even where it is a net gain for the modules above it. At 156 steps
+# and the 6e-3 those scalars now carry, `logit_scale` travels up to 0.94
+# log-units an epoch against the ~1.9 birds needs, which is not the binding
+# constraint -- but it is still the first column to check if this run stalls
+# with the scale short of where `new_10.csv` had it.
+#
+# Note those figures are the rate after the warm-up. This rung takes
+# DEFAULT.toml's `warm_up_epochs = 10` and its `lr_schedule_shape = "flat"`, so
+# the rate ascends from zero over the first ten epochs and then holds at the
+# configured value for the remaining ninety. The traverse budget over a whole
+# run is therefore 95% of what a flat opening would give -- the ramp averages
+# half rate across ten of a hundred epochs -- which does not move any of the
+# arithmetic above.
+#
+# This is the first rung to run a warm-up at all: it was configured on every
+# rung from `b298da5` and ran on none of them until the schedule was fixed. See
+# `train.build_lr_schedule` and docs/training.md.
+accumulator_steps = 2
+
 [scheduler]
+# The smoke-run length rungs 9 and 10 have been using, and the same 30 every
+# other rung on the ladder states for itself. DEFAULT.toml's 100 is the notional
+# full run and no rung takes it.
+#
+# Comfortable against the `[slurm] time` below. At ~4 min an epoch on 3,100
+# games, 5,000 scales that to ~6.5 min and 30 epochs to ~3.3h against the 24h
+# budget; `accumulator_steps` costs nothing, compute following games seen rather
+# than optimiser steps. Even the 5.84 min an epoch an older rung 10 ran at
+# (`run-10-maybe-old.csv`) would come in around 4.7h.
+#
+# Note what this does to the warm-up. Ten epochs of ramp is a third of a
+# 30-epoch run rather than the tenth DEFAULT.toml sized it as -- its own comment
+# says to revisit the figure as a fraction rather than a count if it is kept.
+# Rung 9 is in the same position, so the two stay comparable, but neither is
+# comparable to a birds trace opening at full rate.
 epochs = 30
 
 [experiment]

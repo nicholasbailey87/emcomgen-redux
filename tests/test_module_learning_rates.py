@@ -40,7 +40,6 @@ import torch
 
 import _bootstrap  # noqa: F401
 
-import gradboard.cycles
 from gradboard.scheduler import PASS
 
 import models.builder as builder
@@ -425,23 +424,29 @@ def test_pass_builds_over_the_groups_and_still_reports_base(config_file):
     """
     `PASS` deep-copies the groups at construction and zips them `strict=True`,
         so this is the test that would fail if `build_models` ever regrouped
-        after the scheduler existed. `PASS.lr` reads group 0, which stays the
-        one `get_optimiser` made.
+        after the scheduler existed. Group 0 stays the one `get_optimiser` made.
+
+    Read off `original_param_groups` rather than off `PASS.lr`, which reports
+        the *live* rate. Under a warm-up the live rate at step 0 is zero -- as it
+        should be -- and this test is about the groups surviving construction,
+        not about the schedule. It asserted the live rate until the warm-up
+        started working, at which point every rung carrying one began failing
+        here. See `tests/test_lr_schedule.py`.
     """
     config, built = _build(config_file)
 
     scheduler = PASS(
-        gradboard.cycles.CycleSequence(
-            [gradboard.cycles.Cycle(gradboard.cycles.ascent, 1_000, 1, 32)]
-        ),
+        train.build_lr_schedule(config, 1_000, 32),
         built["pair"],
         built["optimiser"],
         scaler=None,
         range_test=False,
-        cool_point_multiplier=config["scheduler"]["cool_point_multiplier"],
+        # As `train.py` builds it: the floor lives in the descending cycle, not
+        #     in `PASS`. See `train.build_lr_schedule`.
+        cool_point_multiplier=0.0,
     )
 
-    assert scheduler.lr == config["optimiser"]["lr"]
+    assert scheduler.original_param_groups[0]["lr"] == config["optimiser"]["lr"]
     assert len(scheduler.original_param_groups) == len(
         built["optimiser"].param_groups
     )

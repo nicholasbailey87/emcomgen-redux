@@ -339,21 +339,57 @@ clipping recipe. A trailing partial accumulation is flushed after the loop.
 
 The scheduler is `gradboard.scheduler.PASS`, driven by
 `gradboard.cycles.CycleSequence` over up to two stages: an `ascent` warm-up of
-`warm_up_epochs`, then `lr_schedule_shape` for the remainder.
+`warm_up_epochs`, then `lr_schedule_shape` for the remainder. `train.build_lr_
+schedule` builds it, and its docstring is the fuller account.
 
-**`cool_point_multiplier = 1.0` makes `lr_schedule_shape` a complete no-op**, and
-the configs in the August 2026 ablation all set it there. `PASS.update_learning_
-rates` computes
+**Two invariants**, and the second is what makes the first safe:
+
+* the warm-up ascends from **zero** to the configured rates, whatever else is
+  set;
+* the shape after it **opens at** the configured rates, so the handover is
+  continuous.
+
+`lr_schedule_shape` takes an intention — `flat` or `cosine` — rather than a
+`gradboard.cycles.FN_LIBRARY` curve name. That restriction is the second
+invariant: two `FN_LIBRARY` curves, `ascent` and `triangle`, open at their
+*trough*, so a warm-up in front of one is discarded at the handover and
+re-climbed over the remaining epochs. Naming intentions makes that unreachable
+rather than merely unused. `parse_config.LR_SCHEDULE_SHAPES` holds the mapping;
+`cosine` is `half_cosine`, the falling half, because `FN_LIBRARY`'s own `cosine`
+is a full period that ends where it began.
+
+`cool_point_multiplier` is the fraction of the base rate a descending shape falls
+to, and it governs **only** the shape after the warm-up. `flat` does not descend
+and takes no floor at all; `validate_config` rejects one set beside it rather
+than leaving it unread.
+
+### What this replaced, and what it means for old traces
+
+Until 2026-08-28 the configured floor was passed straight to `PASS`, which
+applies one floor across every cycle alike:
 
 ```python
 min_lr = base_lr * self.cool_point_multiplier
 current_lr = min_lr + (base_lr - min_lr) * self._schedule_multiplier
 ```
 
-so at a multiplier of 1 the floor equals the ceiling and every group sits at its
-own `base_lr` for the whole run, whatever shape is named in the config. The knob
-reads as live and is not. Check it before attributing anything — a flat opening,
-a late takeoff — to the schedule.
+At `cool_point_multiplier = 1.0` the floor equals the ceiling, so every group sat
+at its own `base_lr` for the whole run whatever shape the config named. `d5c47f5`
+set that on 2026-08-09, deliberately and coherently, alongside
+`warm_up_epochs = 0` and a flat shape. `b298da5` then set `warm_up_epochs = 10`
+without touching the floor, and **the ten-epoch warm-up it advertised ran on no
+rung**. Traces written between those dates ran flat whatever their `[scheduler]`
+said, so nothing measured in that window is contaminated — but nothing in it
+tests a warm-up either.
+
+The floor now lives in the descending cycle's own `low` and `PASS` is built with
+a floor of `0.0`, leaving its multiplier to act directly on each group's base
+rate. `PASS` records `cool_point_multiplier` in its `state_dict`, so **a run
+resumed from a checkpoint written before this change restores the old floor and
+goes flat again**. Start such a run fresh rather than resuming it.
+
+`tests/test_lr_schedule.py` asserts both invariants against a real `PASS` at real
+step counts, and against every rung.
 
 **One optimiser step per `accumulator_steps` batches, and the scheduler steps
 with it.** `scheduler.step` is called from inside `optimiser_step`, so the

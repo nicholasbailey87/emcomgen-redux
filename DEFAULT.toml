@@ -507,9 +507,38 @@ epochs = 100
 # rung 9's 5e-5 and 4e-3 runs suggested ignition is actually set by, so a warm-up
 # that preserved it was the only kind worth adding: one that ramped only the
 # base `lr` would have moved the thing under test.
+#
+# **None of the above described a run until 2026-08-28.** The warm-up went in
+# without touching `cool_point_multiplier`, which was 1.0, and `PASS` applied
+# that floor to every cycle alike -- pinning the rate to base from the first step
+# and flattening the schedule out of existence. `build_lr_schedule` now carries
+# the floor in the descending cycle rather than in `PASS`, and `warm_up_epochs`
+# does what it says. Traces written before that date ran flat whatever their
+# `[scheduler]` said. See `train.build_lr_schedule` and `tests/test_lr_schedule.py`.
 warm_up_epochs = 10
-lr_schedule_shape = "ascent"
-cool_point_multiplier = 1.0
+
+# `flat` or `cosine` -- an intention, not a curve.
+#
+# `flat` holds the configured rates for the whole run after the warm-up. `cosine`
+# descends from them to `cool_point_multiplier` of them along the falling half of
+# a cosine. Both *open* at the base rate, so the warm-up hands over continuously
+# whichever is chosen; that is the property the sentinel surface exists to
+# guarantee, and it is why `gradboard.cycles.FN_LIBRARY`'s own names are no
+# longer accepted here. Two of them -- `ascent` and `triangle` -- open at their
+# trough, so a warm-up in front of one threw its rate away at the handover and
+# re-climbed it over the remaining epochs, with nothing in the config saying so.
+#
+# `flat` stays the default because it is what every trace in this repo was
+# actually run under, whatever its config said, and because a decay is a claim
+# about a run that has already ignited. See `parse_config.LR_SCHEDULE_SHAPES`.
+lr_schedule_shape = "flat"
+
+# `cool_point_multiplier` belongs here, and is deliberately absent: `flat` does
+# not descend, so there is nothing for a floor to mean, and `validate_config`
+# rejects one set beside it rather than leaving it to sit unread. Set it -- the
+# fraction of the base rate the schedule descends to, in [0, 1) -- in the same
+# breath as `lr_schedule_shape = "cosine"`, and nowhere else.
+
 range_test = false
 
 [sender]
