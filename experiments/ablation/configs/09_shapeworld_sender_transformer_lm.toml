@@ -88,6 +88,16 @@ layers = 6
 # causal arm needs because only it reads a symbol back.
 bidirectional = false
 
+[optimiser]
+# Halved from DEFAULT's 1e-4, 2026-08-28. Rung 9 ignites here but slowly -- epoch
+# 19 of 30 -- while birds ignites at epoch 0, and birds got there by having its
+# rates attenuated rather than raised. So this pushes the same lever further on
+# the rung that is still slow. Halving the base rate halves every module rate the
+# width/depth rule derives from it; the six `*_lr` scalar overrides are absolute
+# and stay at 2e-3, which is deliberate -- those are the parameters ignition
+# waits on, and slowing them is not what this is testing.
+lr = 5e-5
+
 [scheduler]
 epochs = 30
 
