@@ -72,16 +72,7 @@ Results land at `<output_root>/<experiment>/<config_stem>_seed<seed>/`, where
 pair whose name ends in it. That is the right selector for the lone scalars of
 `SPLIT_LEARNING_RATES`, each of which is one distinctively named tensor.
 
-`split_out_module` takes a **module object** and moves every non-exempt
-parameter in it. "Every tensor in `sender.language_model`" is not a suffix, and
-a prefix would be no better — the widths that decide these rates live on the
-constructed module, not in its name. Selecting on the object means there is no
-name-matching ambiguity at all, and nothing a rename can quietly break. It is a
-sibling rather than an argument to the suffix version because the two differ in
-how they *fail*: an unmatched suffix is a rename and raises, whereas a module
-whose parameters are all exempt is a legitimate answer and returns unchanged.
-
-Both share `_regroup`, which is the part that actually moves anything: filter the
+It calls `_regroup`, which is the part that actually moves anything: filter the
 selected ids out of every existing group, then `add_param_group`.
 
 **Why after the fact rather than asking `get_optimiser` for it:** that function
@@ -111,73 +102,7 @@ answers to neither the loss nor that scale.
 
 If the suffix matches nothing, `split_out_parameter` raises rather than silently
 doing nothing — the error names the config key so a rename says which knob went
-quiet. `split_out_module` has no equivalent, because it cannot fail that way.
-
-### The muP rule
-
-Every module with a width takes
-
-```
-lr(module) = [optimiser] lr × [optimiser] mup_reference_width / d_model(module)
-```
-
-with the reference width at **1024**: jayelm's `--speaker_hidden_size` and
-`--listener_hidden_size`, and therefore the width at which `lr = 1e-4` was tuned.
-Under muP, Adam's stable rate for a matrix mapping one width to another goes as
-1/fan_in, so a module three times narrower than the one the rate was tuned on is
-being trained three times too slowly. `resolve_mup_learning_rates` applies it and
-`split_out_module` does the regrouping.
-
-The rule is stated once rather than as six literal rates, because the rates are a
-consequence of widths that move. `mup_width` reads `d_model` off the
-**constructed module** rather than out of the config: several of these widths are
-derived — `SenderTransformerLM` and `AttentionPrototyper` take theirs from the
-vision model's `final_feat_dim` — so a config key would be a second statement of
-the same number, able to disagree with it.
-
-**One rate per module, keyed on `d_model`.** Exact for the attention projections,
-which are square in it and are most of the parameters; approximate for the
-feedforward inner layers and for adapters that read a foreign width. This is a
-heuristic applied at module granularity, and saying so is cheaper than a
-per-tensor scheme nobody can check by eye.
-
-**Two exemptions, both by rule rather than by list** (`is_mup_exempt`), so a
-module added later is covered without anyone having to remember a list.
-
-- `p.dim() < 2` — biases, norm gains, and every learned scalar. No fan-in to
-  scale by.
-- name containing `"embedding"` or `"query"` — `polarity_embedding`,
-  `label_embedding`, `token_embedding` and `query`. muP gives input
-  embeddings a Θ(1) rate because their fan-in is a one-hot index rather than a
-  width, and every one of these is Θ(1)-*initialised* as well, so scaling their
-  rate by width would be scaling against an init that never shrank. Matched as a
-  substring exactly as `gradboard`'s `EXCLUDE_FROM_WEIGHT_DECAY` matches
-  `"embedding"`, and with the same caveat: a rename would move a tensor silently.
-
-The dimension exemption is load-bearing twice over. It is also what makes the muP
-groups **disjoint from `SPLIT_LEARNING_RATES` by construction** — every scalar in
-that table is 0-d, and `polarity_embedding` is 2-d but matches `"embedding"`. No
-ordering trick is needed. muP runs first anyway, so that if the exemption is ever
-loosened the elevated scalar rates are the ones that survive.
-
-**Whole modules out of scope**, all by the same test — no `d_model` attribute.
-The convolutional backbones (`ResNet18.final_feat_dim` is a hardcoded 512, muP's
-rules are stated for transformers, and a ResNet at 1e-4 is what jayelm tuned);
-`AveragePrototyper` and `nn.Embedding`, which have no matrices between widths;
-and `BilinearDiscriminator`, whose single tensor's fan-in is the language model's
-`output_size` — 1024 on the restored listener GRU, i.e. the reference width, so
-its factor would be 1.0.
-
-**What the rule does not claim.** muP transfers a tuned learning rate across a
-change of *width* in one architecture. Two of the changes here are not that: the
-speaker's language model goes GRU → Transformer as well as 1024 → 320, and `ViT2`
-replaces a ResNet with no 1024 anywhere in it. Principled heuristic, not transfer
-guarantee.
-
-Only the learning-rate half of muP is adopted. Broccoli's `nn.Linear` init is
-already 1/√fan_in, `msa_scaling = "d"` is already muP's attention scaling, and
-`layer_norm_logits` already makes the speaker's readout scale width-invariant.
-The `mup` package in `requirements.txt` stays unimported.
+quiet.
 
 **Do not read the `CLIP_GROUPS` norms as evidence about these rates.** Under Adam
 a uniform rescale of a module's gradients cancels in `m̂/√v̂`, so gradient
@@ -185,7 +110,7 @@ magnitude says nothing about whether a learning rate suits the module.
 
 **Do not reach for the LR range test either.** `PASS._apply_range_test_result`
 calls `set_all_lr` and then overwrites `original_param_groups`, which would
-flatten every split rate — muP's and the scalars' alike — permanently.
+flatten every split rate permanently.
 
 ### The overrides, and why each is gated the way it is
 
@@ -470,13 +395,6 @@ is already done.
 original tooling, the latter for the new), stamped with the git hash and with
 `dependency_versions`.
 
-**It runs after `build_models`, not before.** `build_models` resolves the muP
-learning rates from widths that are derived rather than declared and writes them
-back as `[optimiser] resolved_mup_lrs`, so saving first would record a config
-that does not say what was built. Nothing is lost on the failure path — the
-dataloaders are constructed before either, so a run could already fail after
-`args.json` was written.
-
 **Diff the flattened `args.json` when comparing runs, never the `config.toml`
 text.** The two agree, but the toml carries per-dataset blocks of differing
 length, so a line-by-line `diff` between a ShapeWorld run and a birds run pairs
@@ -492,14 +410,6 @@ several widths are derived rather than declared: `SenderTransformerLM` takes its
 `receiver_language_model.output_size` (see
 [architecture.md](architecture.md)). A config key is not evidence that the
 module was built that way.
-
-`[optimiser] resolved_mup_lrs` is the one derived quantity that *is* recorded, and
-deliberately: it is a per-module `name → lr` mapping computed from those same
-derived widths, so it is a statement about the pair that was constructed rather
-than about the pair the config asked for. Read it as the answer to "which module
-was trained at what rate", and note that it describes each module's matrices —
-its biases, norms, scalars and embedding tables stayed at the base rate, and the
-scalars named in `SPLIT_LEARNING_RATES` then moved again.
 
 **Measure against the pinned dependency, not the installed one.** The version
 string in site-packages can match `dependency_versions` while the commit does

@@ -77,6 +77,5 @@ wheel==0.45.1
 # emcomgen-redux produces. `pandas` is a shared dependency and is pinned above.
 timm
 datasets
-mup
 lightning>=2.0
 imagenetv2-pytorch @ git+https://github.com/modestyachts/ImageNetV2_pytorch.git

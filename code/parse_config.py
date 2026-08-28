@@ -86,24 +86,6 @@ def validate_config(config: dict) -> bool:
             f"— got {init_energy}."
         )
 
-    # Checked here for the same reason as `init_energy` above: `SafeDict` only
-    # warns on a missing key and hands back None, and a missing reference width
-    # would make every muP factor `None / d_model`. Only the declared half is
-    # checkable at parse time -- the widths it is divided by are read off the
-    # constructed modules, several of them derived, so `build_models` owns that
-    # end.
-    reference_width = config['optimiser'].get('mup_reference_width')
-    if (
-        not isinstance(reference_width, (int, float))
-        or isinstance(reference_width, bool)
-        or reference_width <= 0
-    ):
-        raise InvalidConfig(
-            "`optimiser.mup_reference_width` must be present and a positive "
-            "number — it is the width `optimiser.lr` was tuned at, and every "
-            f"per-module rate is `lr * it / d_model` — got {reference_width}."
-        )
-
     for key in ('silhouette_p_sender', 'silhouette_p_receiver'):
         p = config['data'][key]
         if not 0.0 <= p <= 1.0:
