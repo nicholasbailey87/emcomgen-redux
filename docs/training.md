@@ -466,8 +466,15 @@ this failure:
   multiplying every speaker gradient.
 - **`logit_margin`** says whether the scale or the *shape* did it. Here the
   scale was unremarkable and the margin was ~3.35 sd against the ~0.44 a Gaussian
-  gives at V = 14. The speaker grew kurtosis, which `layer_norm_logits` leaves
-  free, and no clamp on `logit_scale` would have caught it.
+  gives at V = 14 — 86% of the entire budget `layer_norm_logits` permits, whose
+  maximum is 3.883. The speaker grew kurtosis, which the normaliser leaves free,
+  and no clamp on `logit_scale` would have caught it.
+- **`logit_prior_share`** says whether that concentration meant anything. A
+  peaked distribution whose peak moves with the input is the best channel there
+  is; one that peaks on the same token every time is confidence with no
+  information, and every other channel column reads the same in both cases. It
+  opens near 0.55 on a fresh speaker, not near 0 — `outputs2vocab.bias` sits
+  before the normaliser — so read the direction, not the level.
 - **`shuffled_message_acc`** says whether the run was ever communicating.
   `train_acc` kept rising after the channel died, entirely from the listener's
   image-only route.

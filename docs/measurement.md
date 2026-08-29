@@ -389,6 +389,37 @@ together, as they did on the run that died, and it still says nothing about the
 margin: `logit_spread` would read the same for a head whose output is uniformly
 larger and for one that has grown a spike.
 
+**`logit_prior_share`** — the fraction of the normalised logits' variance that is
+the same for *every input*, from the orthogonal split of the batch into a common
+component and the residual that varies. It answers the question a large
+`logit_margin` leaves open.
+
+A concentrated distribution is not a failure. One whose peak *moves with the
+input* is the best channel available — confident and informative. One that peaks
+on the same token whatever the speaker saw is confidence with zero information,
+and `realised_survival`, `logit_scale` and `logit_margin` read **identically** in
+the two cases. This is the column that separates them. At 1.0 the speaker emits
+one message for every game, which is where
+`shapeworld-post-silhouette-update.csv` ended: `test_unique_message_count` of 1
+across 1,000 games.
+
+Two reference points, because 0 is not the healthy value. Logits with nothing in
+common across inputs sit at about `1 / batch_size` — the mean of B independent
+rows carries 1/B of their energy — so 0.031 at ShapeWorld's 32. But a *freshly
+initialised* speaker measures around **0.55**, because `outputs2vocab.bias` sits
+before the normaliser and survives it as a fixed pattern, and it is on the
+weight-decay exclusion list. So the column opens high and the reading is which
+way it moves, not its distance from zero. Read it against that bias.
+
+**Why the shape columns exist at all.** `layer_norm_logits` fixes the second
+moment, so the speaker has a bounded shape budget and the only question is what
+it spends it on. The most concentrated distribution the normaliser permits is one
+token at `sqrt(V-1)` and the other thirteen at `-1/sqrt(V-1)` — a margin of
+**3.883** sd — and that reaches survival 0.717 against the 0.907 ceiling at a
+`logit_scale` of **one**. The 2026-08-29 run had used 86% of that budget. Fidelity
+does not have to come from the scale, which is why a clamp on `logit_scale` would
+not have bounded saturation and a clamp on survival would.
+
 **`logit_scale` and `logit_spread`** are read together with it, and say which of
 two things a falling survival means: a flatter policy, which is the speaker's own
 doing, or a collapsing scale. They are indistinguishable in survival alone.

@@ -631,6 +631,95 @@ def test_unmixed_survival_is_what_the_gradient_sees():
     assert unmixed > 0.999
 
 
+def test_logit_prior_share_separates_confident_from_mute():
+    """
+    A peaked distribution whose peak moves with the input is a perfect channel;
+    one that peaks on the same token every time is confidence with no
+    information. `realised_survival`, `logit_scale` and `logit_margin` are
+    identical in the two cases -- this is the column that is not.
+
+    The decomposition is orthogonal, so the share is exactly the fraction of the
+    logits' energy that is common to every input.
+    """
+    vocabulary = 14
+
+    def normalised(raw):
+        return S.mask_reserved_tokens(S.layer_norm_logits(raw, vocabulary))
+
+    # A speaker with nothing in common across inputs sits at about 1/batch:
+    # the mean of B independent rows carries 1/B of their energy.
+    for batch in (8, 32, 128):
+        generator = torch.Generator().manual_seed(0)
+        raw = torch.randn(batch, 5, vocabulary + 4, generator=generator)
+        share = S.logit_prior_share(normalised(raw)).item()
+        assert share == pytest.approx(1.0 / batch, rel=0.35), (batch, share)
+
+    # A speaker emitting the same logits whatever it saw sits at exactly 1.
+    generator = torch.Generator().manual_seed(1)
+    one = torch.randn(1, 5, vocabulary + 4, generator=generator)
+    collapsed = one.expand(32, 5, vocabulary + 4).contiguous()
+    assert S.logit_prior_share(normalised(collapsed)).item() == pytest.approx(1.0)
+
+    # And it moves monotonically between the two as the shared part grows.
+    varied = torch.randn(32, 5, vocabulary + 4, generator=generator)
+    shares = [
+        S.logit_prior_share(
+            normalised(one * common + varied * (1.0 - common))
+        ).item()
+        for common in (0.0, 0.25, 0.5, 0.75)
+    ]
+    assert shares == sorted(shares), shares
+
+    # A ratio of two sums of squares, so the gain cannot move it -- which is why
+    # it reads the shape where `logit_scale` reads the volume.
+    reference = S.logit_prior_share(normalised(varied)).item()
+    for scale in (0.1, 3.0, 40.0):
+        assert S.logit_prior_share(
+            normalised(varied) * scale
+        ).item() == pytest.approx(reference, rel=1e-5)
+
+    # A batch of one is its own mean, so the share is 1 by construction and
+    # means nothing. NaN rather than a confident-looking 1.0.
+    assert math.isnan(S.logit_prior_share(normalised(one)).item())
+
+
+def test_the_shape_budget_is_bounded_by_the_normaliser():
+    """
+    Why `logit_margin` and `logit_prior_share` are worth having at all: fidelity
+    does not have to come from `logit_scale`, so a clamp on the scale does not
+    bound saturation.
+
+    `layer_norm_logits` fixes the logits' second moment, and the most
+    concentrated shape that allows is one token at `sqrt(V-1)` and the rest at
+    `-1/sqrt(V-1)`. That reaches survival 0.717 against a 0.907 ceiling at a
+    scale of *one*, which is most of the way to a committed channel with the
+    scale untouched.
+    """
+    vocabulary, uniform_weight = 14, 0.1
+    low = -1.0 / math.sqrt(vocabulary - 1)
+    high = -(vocabulary - 1) * low
+
+    extreme = torch.full((1, 1, vocabulary + 4), low)
+    extreme[..., :4] = float("-inf")
+    extreme[..., 4] = high
+
+    # It is a legal output of the normaliser: zero mean, unit variance.
+    emittable = extreme[..., 4:]
+    assert emittable.mean().item() == pytest.approx(0.0, abs=1e-6)
+    assert emittable.var(unbiased=False).item() == pytest.approx(1.0)
+
+    assert S.mean_logit_margin(extreme).item() == pytest.approx(3.883, abs=1e-3)
+
+    at_unit_scale = S.mean_winning_probability(extreme, 1.0, uniform_weight)
+    assert at_unit_scale.item() == pytest.approx(0.717, abs=1e-3)
+
+    # And the cap is reachable from here with a scale under 3.
+    cap = 1.0 - uniform_weight + uniform_weight / vocabulary
+    assert S.mean_winning_probability(
+        extreme, 2.62, uniform_weight
+    ).item() == pytest.approx(cap, abs=1e-3)
+
+
 @pytest.mark.parametrize(
     "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
 )
@@ -645,10 +734,12 @@ def test_both_survival_columns_reach_metrics(build):
 
     assert math.isnan(speaker.unmixed_survival)
     assert math.isnan(speaker.logit_margin)
+    assert math.isnan(speaker.logit_prior_share)
 
     speaker.decode(_prototypes(speaker))
     assert speaker.unmixed_survival >= speaker.realised_survival - 1e-6
     assert speaker.logit_margin > 0.0
+    assert 0.0 <= speaker.logit_prior_share <= 1.0
 
     unmixed = build(uniform_weight=0.0).train()
     unmixed.decode(_prototypes(unmixed))

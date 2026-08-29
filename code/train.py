@@ -583,6 +583,7 @@ def run(
                     realised_survival=language_model.realised_survival,
                     unmixed_survival=language_model.unmixed_survival,
                     logit_margin=language_model.logit_margin,
+                    logit_prior_share=language_model.logit_prior_share,
                     logit_spread=language_model.logit_spread,
                     logit_scale=language_model.logit_scale.item(),
                     sampling_tau=language_model.sampling_tau.item(),

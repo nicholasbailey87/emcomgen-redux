@@ -339,6 +339,59 @@ def mean_logit_margin(logits: torch.Tensor) -> torch.Tensor:
     return (top_two[..., 0] - top_two[..., 1]).mean()
 
 
+def logit_prior_share(logits: torch.Tensor) -> torch.Tensor:
+    """
+    The fraction of the normalised logits' variance that is the *same for every
+        input*, i.e. the `logit_prior_share` column.
+
+    **The question no other channel column answers.** `layer_norm_logits` pins
+        each position's emittable logits to unit variance, so the speaker's
+        whole shape budget is fixed and the only question is what it spends it
+        on. Concentrating that budget on one token is not a failure -- a sharply
+        peaked distribution whose peak *moves with the input* is a perfect
+        channel, confident and informative. The failure is peaking on the same
+        token whatever it saw, which is confidence with zero information, and
+        `realised_survival`, `logit_scale` and `logit_margin` all read
+        identically in the two cases.
+
+        This separates them. Split the logits over the batch into the component
+        common to every input and the residual that varies: the two are
+        orthogonal, so the shares sum to 1. Near 0 the shape is entirely
+        input-driven. At 1 the speaker emits one message for every game.
+
+    **Why the shape budget is worth watching at all.** The most concentrated
+        distribution the normaliser permits is one token at `sqrt(V-1)` and the
+        rest at `-1/sqrt(V-1)` -- a margin of 3.883 sd at V = 14, which reaches
+        survival 0.717 against the 0.907 ceiling at a `logit_scale` of *one*.
+        The 2026-08-29 ShapeWorld run had used 86% of that budget. So fidelity
+        does not have to come from the scale, no clamp on the scale would have
+        caught it, and shape spent on confidence is shape not spent on meaning.
+
+    The cheapest way to buy input-independent shape is `outputs2vocab.bias`,
+        which sits before the normaliser and so survives it as a fixed pattern,
+        and which is on the weight-decay exclusion list. Read this column
+        against that parameter.
+
+    Purely a measurement, like the two above.
+
+    Args:
+        logits: (batch, ..., vocabulary + 4), normalised, reserved tokens first
+
+    Returns:
+        A scalar tensor in [0, 1], or NaN for a batch of one, where every input
+            is trivially its own mean and the share is 1 by construction
+    """
+    emittable = logits[..., 4:]
+
+    if emittable.size(0) < 2:
+        return torch.full((), float("nan"), device=logits.device)
+
+    common = emittable.mean(0, keepdim=True).expand_as(emittable)
+    total = emittable.pow(2).sum()
+
+    return common.pow(2).sum() / total if total > 0.0 else torch.zeros(())
+
+
 class ExampleContrast(nn.Module):
     """
     Let the referents inform each other before they are pooled.
@@ -780,6 +833,7 @@ class GumbelChannel:
         self.realised_survival = float("nan")
         self.unmixed_survival = float("nan")
         self.logit_margin = float("nan")
+        self.logit_prior_share = float("nan")
         self.logit_spread = float("nan")
         self.polarity_separation = float("nan")
 
@@ -939,9 +993,9 @@ class GumbelChannel:
 
     def record_survival(self, pre_gain_logits):
         """
-        Three columns off one tensor: the channel's fidelity with the uniform
-            mixture applied, the same thing without it, and the shape parameter
-            that decides both.
+        Four columns off one tensor: the channel's fidelity with the uniform
+            mixture applied, the same thing without it, and the two shape
+            readings that say what the fidelity was bought with.
 
         `unmixed_survival` is the *straight-through* quantity.
             `gumbel_softmax(hard=True)` differentiates the soft sample, whose
@@ -954,6 +1008,14 @@ class GumbelChannel:
             that actually sets the gradient is 0.99951. Two orders of magnitude
             of attenuation, invisible in the mixed column. Same function, same
             order of operations, mixture off.
+
+        `logit_margin` and `logit_prior_share` are the shape pair. The first is
+            how concentrated the distribution is, the second how much of that
+            concentration is the same whatever the speaker saw. A peaked
+            distribution whose peak *moves* is a perfect channel; one that
+            peaks on the same token every time is confidence with no
+            information, and the survival columns read identically in the two
+            cases.
         """
         detached = pre_gain_logits.float()
         scale = self.logit_scale.detach()
@@ -965,6 +1027,7 @@ class GumbelChannel:
             detached, scale, 0.0
         ).item()
         self.logit_margin = mean_logit_margin(detached).item()
+        self.logit_prior_share = logit_prior_share(detached).item()
 
 
 class SenderGRULM(GumbelChannel, nn.Module):
