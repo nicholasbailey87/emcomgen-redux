@@ -166,16 +166,20 @@ moved to parse time because a module group selects an attribute and so cannot
 fail by rename. `resolve_module_learning_rates` reads the table and
 `split_out_module` does the regrouping.
 
-DEFAULT.toml states all eight at `1e-4`, so the surface is discoverable from the
-config and the table is inert until a rung moves one. Rungs 9 and 10 override
-four:
+DEFAULT.toml states all eight and no rung overrides any of them, so this is what
+every rung runs:
 
 | group | rate |
 |---|---|
-| `sender_vision` (`ViT2`) | 3.2e-5 |
-| `sender_prototyper` (`AttentionPrototyper`) | 3.2e-4 |
-| `sender_contrast` (`ExampleContrast`) | 3.2e-4 |
-| `sender_language_model` (`SenderTransformerLM`) | 5.333e-5 |
+| `sender_vision`, `sender_prototyper`, `sender_contrast`, `sender_language_model` | 2e-4 |
+| `receiver_vision`, `receiver_token_embedding`, `receiver_language_model`, `receiver_discriminator` | 1e-4 |
+
+One factor of two — the whole listener at half the whole speaker — pinned at
+`1e-4` on `receiver_language_model`, the module jayelm tuned `lr` on. Nothing is
+split *within* an agent. The vision backbones took half their agent's rate until
+2026-08-29, on an ordering borrowed from the VLM fine-tuning literature; that
+argument is about preserving a pretrained representation, and nothing here is
+pretrained. See DEFAULT.toml's `[optimiser.module_lr]` block.
 
 **These are literals now, and that is the change.** Until August 2026 they came
 out of a rule: `lr × reference_width / d_model / layers`, with the reference
@@ -205,14 +209,14 @@ So the structure is kept and the derivation is not. A number in that table is a
 number somebody chose, and it can be argued with on the evidence of a run rather
 than defended as arithmetic. **Do not report any of this as muP.**
 
-Note the shape of what rungs 9 and 10 carry: the two single-layer sender stages
-have the highest rates in the pair and the ViT the lowest by an order of
-magnitude. The prototyper's is deliberate — `pool_score_norm` opens at exactly
-zero and its travel is bounded by `lr × steps`. Rung 10 took off in epoch 0
-under these four, having previously spent whole runs above `ln 2` at a flat
-1e-4; rung 9 carries the same four and has not ignited under them. Flat 1e-4 is
-therefore not a neutral baseline to fall back to — it is a configuration with its
-own record.
+Note what the record here is, because no grid on this ladder is a neutral
+baseline. Under the derived rates above — the two single-layer sender stages
+highest in the pair and the ViT lowest by an order of magnitude — rung 10 took
+off in epoch 0, having previously spent whole runs above `ln 2` at a flat 1e-4;
+rung 9 carried the same four and did not ignite. The prototyper's elevation was
+the deliberate part: `pool_score_norm` opens at exactly zero and its travel is
+bounded by `lr × steps`. Flat 1e-4 has its own record too, and so does every
+grid since.
 
 **Do not read the clip norms as evidence about these rates.** Under Adam a
 uniform rescale of a module's gradients cancels in `m̂/√v̂`, so gradient
@@ -234,11 +238,13 @@ overhaul.
 **`logit_scale_lr`** — ungated. `log_logit_scale` exists on both speakers.
 
 **`polarity_embedding_lr`** — gated on `isinstance(language_model,
-SenderTransformerLM)`. Deliberately *not* tied to `logit_scale_lr`, though
-`DEFAULT.toml` opens them at the same value: `log_logit_scale` exists on *both*
-speakers, so raising it to help the polarity tag would also retune the GRU
-baseline's channel and shift the comparison the ablation is there to make. Two
-keys, one number, and either can move alone.
+SenderTransformerLM)`. Deliberately *not* tied to `logit_scale_lr`:
+`log_logit_scale` exists on *both* speakers, so raising it to help the polarity
+tag would also retune the GRU baseline's channel and shift the comparison the
+ablation is there to make. They opened at one number while the tag had a
+traverse to cover; since `2026-08-29` the tag takes the speaker's module rate,
+`2e-4`, and the channel scalar is at `6e-3`. Separable was always the point, and
+now the two values say so.
 
 Gated on the speaker class rather than on finding the parameter, because the two
 failures need different answers. A GRU speaker has no polarity tag by

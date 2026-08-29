@@ -116,13 +116,12 @@ def test_the_group_names_are_the_module_lr_keys():
     }
 
 
-def test_the_default_rates_are_two_factors_of_two():
+def test_the_default_rates_are_one_factor_of_two():
     """
     DEFAULT's table is not flat and is not eight independent numbers: every rate
-        is the base `lr` times two factors, one per claim. Each agent's vision
-        model runs at half the rest of that agent, and the whole listener runs
-        at half the whole speaker. See DEFAULT.toml for the argument and for
-        what it costs the baselines.
+        is the base `lr` times one factor, carrying one claim. The whole listener
+        runs at half the whole speaker, and nothing is split within an agent. See
+        DEFAULT.toml for the argument and for what it costs the baselines.
 
     Asserted as the grid rather than as eight literals, because the magnitudes
         are chosen and the structure is the claim. A change that keeps the grid
@@ -137,16 +136,18 @@ def test_the_default_rates_are_two_factors_of_two():
     assert base_lr == 1e-4
 
     # The grid is pinned at the listener's language model, the module jayelm
-    #     tuned `lr` on.
+    #     tuned `lr` on. One factor, and no split within an agent: the `vision`
+    #     half of the grid was withdrawn on 2026-08-29, so a backbone taking
+    #     anything other than its own agent's rate is now a broken grid rather
+    #     than a retune.
     speaker = 2.0
-    vision = 0.5
 
     expected = {
-        "sender_vision": base_lr * speaker * vision,
+        "sender_vision": base_lr * speaker,
         "sender_prototyper": base_lr * speaker,
         "sender_contrast": base_lr * speaker,
         "sender_language_model": base_lr * speaker,
-        "receiver_vision": base_lr * vision,
+        "receiver_vision": base_lr,
         "receiver_token_embedding": base_lr,
         "receiver_language_model": base_lr,
         "receiver_discriminator": base_lr,

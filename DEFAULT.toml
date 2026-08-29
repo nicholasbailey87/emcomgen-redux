@@ -130,10 +130,11 @@ log_interval = 100
 # against shape accuracy -- a channel that opens while accuracy stays at chance
 # is the failure, not a slow channel.
 #
-# `polarity_embedding_lr` is deliberately not in this group and stays at 2e-3.
-# It is a 2-d tag rather than a scalar, it no longer has a traverse to cover
-# since it opens as an antipodal draw at `referent_layer_norm`'s own scale, and
-# its own block below says why it wants to be separable from the channel.
+# `polarity_embedding_lr` is deliberately not in this group and sits at the
+# speaker's module rate, 2e-4. It is a 2-d tag rather than a scalar, it no
+# longer has a traverse to cover since it opens as an antipodal draw at
+# `referent_layer_norm`'s own scale, and its own block below says why it wants
+# to be separable from the channel.
 
 # Learning rate for the speaker's `log_logit_scale` alone. Set to `lr` to
 # disable the override.
@@ -276,10 +277,9 @@ score_bias_lr = 6e-3
 # The same elevated rate, for `SenderTransformerLM.polarity_embedding` -- the
 # learned tag that tells that speaker which of its two prototypes is the
 # positive concept. Deliberately a second key rather than a reuse of the one
-# above, even though they open at the same number: `log_logit_scale` exists on
-# both speakers, so turning that knob up to hurry the tag along would also
-# retune the GRU baseline's channel and move the comparison the ablation is
-# there to make. These two want to be separable, and one of them is
+# above: `log_logit_scale` exists on both speakers, so turning that knob up to
+# hurry the tag along would also retune the GRU baseline's channel and move the
+# comparison the ablation is there to make. These two want to be separable, and one of them is
 # Transformer-only.
 #
 # It was originally here for the same reason as the rate above: the tag was
@@ -300,20 +300,44 @@ score_bias_lr = 6e-3
 # It still wants to be a key of its own for the reason above:
 # `log_logit_scale` lives on both speakers, and retuning the tag through it
 # would move the GRU baseline's channel and with it the comparison the ablation
-# exists to make.
+# exists to make. Separable is not the same as elevated, and the two questions
+# were being answered by one number.
 #
-# There is no arithmetic here, because there is no target to compute one
+# 2e-4 as of 2026-08-29, from the 2e-3 it carried while it was one of the lone
+# scalars. The elevation was the retired traverse's, and nothing replaced the
+# argument when the traverse went: 2e-3 was 20x the base rate and 10x the group
+# the parameter physically sits in, held there by inheritance rather than by a
+# claim. 2e-4 is `[optimiser.module_lr] sender_language_model`, which is the
+# clip group `polarity_embedding` belongs to and the rate every other speaker
+# tensor takes. A tag that wants to be separable from the
+# channel does not thereby want to be separable from the module it lives in.
+#
+# The two arguments for elevating an embedding both fail here. muP's rule is
+# that embedding-like tensors take a Theta(1) rate rather than 1/fan_in -- do
+# not scale them *down* with width, not scale them up -- and muP is gone from
+# this repo since `dc16734` in any case. The other is sparse vocabulary tables,
+# where a row is updated only on the steps its token appears and the rate is
+# raised to compensate; this is two rows, tagging positive against negative on
+# every example of every batch, which is the least sparse embedding in the
+# model.
+#
+# There is still no arithmetic here, because there is no target to compute one
 # against. How large a tag the cross-attention wants is set by whatever scale
 # `referent_layer_norm` hands it, which is a property of the trained backbone.
-# `polarity_separation` in metrics.csv is the readout. Read it against rung 10's
-# trace rather than against zero: 0.098 at epoch 0, crossing 1.0 at epoch 4,
-# 6.1 by epoch 7, 13.2 by 29, with `train_acc` leaving chance in the same epoch
-# the tag crosses 1.0 and plateauing when it does. That lockstep is why the
-# init changed.
+# `polarity_separation` in metrics.csv is the readout, and it is what says the
+# old rate was not binding: under the zero init rung 10 ran 0.098 at epoch 0,
+# crossing 1.0 at epoch 4, 6.1 by epoch 7, 13.2 by 29, with `train_acc` leaving
+# chance in the same epoch the tag crossed 1.0 and plateauing when it did --
+# the lockstep that is why the init changed. Under the antipodal init the tag
+# opens at 23.5-24 and barely moves: 24.03 -> 23.93 over rung 9's thirty epochs
+# and 23.46 -> 21.91 over rung 10's. Neither trace is straining against a
+# ceiling, so this drop is expected to be readable in `polarity_separation` as
+# no change at all. If it is not, the tag was doing more than those traces show
+# and this key is where to put it back.
 #
 # Applies only to `SenderTransformerLM`; `build_models` skips it for a GRU
 # speaker, which is told its polarities apart by `init_h`.
-polarity_embedding_lr = 2e-3
+polarity_embedding_lr = 2e-4
 
 # `AttentionDiscriminator.mix_logit`, the weight on the attention path,
 # reported as `train_mix_alpha`. Named `mix_*` and not `alpha_*` because this
@@ -408,16 +432,16 @@ contrast_gate_lr = 6e-3
 # ordering was adopted.
 #
 # The opening rates are not flat, and they are not eight independent numbers
-# either. Every one of them is `1e-4` times two factors of two:
+# either. Every one of them is `1e-4` times one factor of two:
 #
-#                        vision      everything else
-#     speaker            1e-4        2e-4
-#     listener           5e-5        1e-4
+#                        every module
+#     speaker            2e-4
+#     listener           1e-4
 #
-# **Each agent's vision model runs at half the rest of that agent, and the whole
-# listener runs at half the whole speaker.** Two claims, two factors, and the
-# ratios are the setting -- `1e-4` is only where the grid is pinned, at the
-# listener's language model, because that is the module jayelm tuned it on.
+# **The whole listener runs at half the whole speaker, and nothing is split
+# within an agent.** One claim, one factor, and the ratio is the setting --
+# `1e-4` is only where the grid is pinned, at the listener's language model,
+# because that is the module jayelm tuned it on.
 #
 # *The listener slower than the speaker* is Rita et al., "On the role of
 # population heterogeneity in emergent communication" (arXiv:2204.12982). They
@@ -441,27 +465,47 @@ contrast_gate_lr = 6e-3
 # the noise the optimiser averages over, where a smaller rate does not. Treat
 # this as their ordering applied through the knob this codebase has.
 #
-# *Vision slower than the rest of its agent* is the ordering the VLM
-# fine-tuning literature keeps arriving at, and it is the same argument the
-# removed depth term was reaching for from the wrong end: the backbone is deep,
-# so the function it computes moves much further per step than any one of its
-# matrices does, and it is also the module whose representations everything
-# downstream is trying to ground. A backbone that keeps moving is a moving
-# target for the language model above it.
+# *Vision slower than the rest of its agent* was the second claim, and it is
+# withdrawn as of 2026-08-29. The backbones now take their own agent's rate:
+# `sender_vision` 1e-4 -> 2e-4, `receiver_vision` 5e-5 -> 1e-4.
 #
-# The speaker's prototyper and contrast stage take the speaker's rate rather
-# than the vision one. They are not backbones -- neither has a residual stack to
-# accumulate along, both are single stages -- and they sit downstream of the
-# vision model on the path to the message, which is the side of the split the
-# argument puts them on. `receiver_token_embedding` and `receiver_discriminator`
-# are the listener's counterparts and take the listener's rate for the same
-# reason.
+# It was taken from the VLM fine-tuning literature, where the ordering is about
+# not wrecking a representation you already have. Nothing here is pretrained --
+# `pretrained` appears nowhere in this repo and `ViT2` is built from scratch --
+# so there is no representation to protect, and the transfer was a copy-over
+# rather than an argument.
 #
-# What this is not. Two claims with a literature behind them, at magnitudes with
-# nothing behind them -- factors of two, chosen because the ordering is the
-# claim and the size is not. There is no transfer guarantee here of the kind muP
-# offers for width, and no run yet separates the orderings from the magnitudes.
-# If a run moves, the grid above is what to vary: change one factor at a time.
+# The version stated here was a different argument wearing the same result: the
+# backbone is deep, so its function moves further per step than any one of its
+# matrices, and everything downstream is grounding on it, so a backbone that
+# keeps moving is a moving target. That bites once the backbone computes
+# something worth grounding on. At initialisation it does not: a slow backbone
+# is not a stable target, it is a stationary random one, and a readout with
+# nothing input-dependent to say is exactly the condition under which it starts
+# buying channel fidelity by concentrating its logits instead. See
+# docs/anecdotes.md for rung 9's version of that.
+#
+# What this does *not* claim is that the vision rate caused any particular run
+# to fail. Under AdamW a parameter's travel is `lr * steps * sign consistency`
+# and a gradient norm measures none of the three, so the collapsed speaker
+# gradients on rung 9 are not evidence either way. The claim is only that the
+# ordering had no argument behind it, and an unargued factor of two is not worth
+# keeping.
+#
+# Note the direction of travel. muP was producing 3.2e-5 for both backbones --
+# 1e-4 x 1024/320/10 at ViT2's ten layers -- so `dc16734`'s flat table had
+# already raised them to 1e-4 and 5e-5, and this raises them again. Vision has
+# been the fastest-moving entry in this table across three regimes.
+#
+# The speaker's prototyper and contrast stage, and the listener's token
+# embedding and discriminator, took their agent's rate under the two-claim grid
+# too. Nothing about them changes; there is simply no longer a split for them to
+# be on a side of.
+#
+# What this is not. One claim with a literature behind it, at a magnitude with
+# nothing behind it -- a factor of two, chosen because the ordering is the claim
+# and the size is not. There is no transfer guarantee here of the kind muP
+# offers for width, and no run yet separates the ordering from the magnitude.
 #
 # Note also what it does to the baselines. Rungs 1 and 2 are jayelm's
 # architecture at jayelm's `lr = 1e-4`, and this leaves only their listener
@@ -470,11 +514,11 @@ contrast_gate_lr = 6e-3
 # the ladder reproduces jayelm exactly. If a baseline reading has to be
 # comparable to theirs, flatten the table in that rung rather than everywhere.
 [optimiser.module_lr]
-sender_vision = 1e-4
+sender_vision = 2e-4
 sender_prototyper = 2e-4
 sender_contrast = 2e-4
 sender_language_model = 2e-4
-receiver_vision = 5e-5
+receiver_vision = 1e-4
 receiver_token_embedding = 1e-4
 receiver_language_model = 1e-4
 receiver_discriminator = 1e-4

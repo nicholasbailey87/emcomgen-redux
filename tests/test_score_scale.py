@@ -1406,10 +1406,12 @@ def test_an_attention_rung_asks_for_the_mix_weight_rate_and_nothing_else():
         their rate -- DEFAULT.toml opens the scaling scalars and `score_bias`
         together at 6e-3 -- so the assertion is on membership.
 
-    `polarity_embedding` is the fifth and is deliberately *not* with them, at
-        2e-3. It is a 2-d tag rather than a scalar, and it has no traverse to
-        cover since it opens as an antipodal draw at `referent_layer_norm`'s own
-        scale, so the argument that put the others at 6e-3 does not reach it.
+    `polarity_embedding` is the fifth and is deliberately *not* with them. It is
+        a 2-d tag rather than a scalar, and it has no traverse to cover since it
+        opens as an antipodal draw at `referent_layer_norm`'s own scale, so the
+        argument that put the others at 6e-3 does not reach it. Since
+        `2026-08-29` it takes the speaker's module rate, so it is asserted on
+        group membership below rather than by looking a group up by its rate.
 
     This rung's `SenderTransformerLM` earns the speaker's two and its contrast
         stage a third. The listener contributes three: its volume, its offset,
@@ -1464,17 +1466,31 @@ def test_an_attention_rung_asks_for_the_mix_weight_rate_and_nothing_else():
         "receiver.discriminator.score_bias",
     }
 
-    # The tag is elevated too, at a rate of its own, and its being in a separate
-    #     group is the whole point of it having a separate key: turning the
-    #     channel up must not retune it, because `log_logit_scale` lives on both
-    #     speakers and the tag on only one.
+    # The tag keeps a group of its own, which is the whole point of it having a
+    #     separate key: turning the channel up must not retune it, because
+    #     `log_logit_scale` lives on both speakers and the tag on only one. That
+    #     is a claim about the partition and not about the number, so it is
+    #     asserted by finding the group that holds the tag rather than by
+    #     collecting every group at the tag's rate. The two were the same
+    #     question only while the tag was elevated to a value nothing else took;
+    #     at the speaker's module rate they are not, and the rate-based form
+    #     would sweep up the whole language model.
     tag = config["optimiser"]["polarity_embedding_lr"]
-    assert tag not in (wanted, config["optimiser"]["lr"])
-    assert {
-        named[id(p)]
-        for group in optimiser.param_groups if group["lr"] == tag
-        for p in group["params"]
-    } == {"sender.language_model.polarity_embedding"}
+    assert tag != wanted
+
+    holding_the_tag = [
+        group for group in optimiser.param_groups
+        if any(
+            named[id(p)] == "sender.language_model.polarity_embedding"
+            for p in group["params"]
+        )
+    ]
+
+    assert len(holding_the_tag) == 1
+    assert {named[id(p)] for p in holding_the_tag[0]["params"]} == {
+        "sender.language_model.polarity_embedding"
+    }
+    assert holding_the_tag[0]["lr"] == tag
 
 
 if __name__ == "__main__":
