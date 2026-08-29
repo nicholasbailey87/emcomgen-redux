@@ -40,7 +40,9 @@ missing key rather than raising.
   speaker's constructor, because `SafeDict` only warns on a missing key and hands
   back `None`, which would fail confusingly deep inside the decode instead of at
   parse time.
-- `silhouette_p_sender` / `silhouette_p_receiver` in [0, 1].
+- `silhouette_p_sender` / `silhouette_p_receiver` / `silhouette_fill` in
+  [0, 1]. All three are fractions, two of games and one of maximum intensity,
+  which is why one loop checks them.
 - `data.dataset` present.
 
 `builder.build_models` additionally asserts `receiver_only`, `copy_receiver`,

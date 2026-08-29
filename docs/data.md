@@ -111,25 +111,59 @@ the nominal class range.
 
 ## The silhouette intervention
 
-`generic.silhouette` renders each image as a white-on-black silhouette of its
-object.
+`generic.silhouette` repaints each image's object in a flat achromatic fill,
+keeping its shape.
 
 ShapeWorld's six colours (red, blue, green, yellow, white, gray) sit at six
 distinct luma values — roughly 29, 76, 128, 150, 226, 255 — so a plain grayscale
 conversion does not remove colour, it re-encodes it as a single scalar that one
-conv filter can threshold. Thresholding does remove it: with a single object on a
-black ground every colour renders identically, so the mutual information between
-colour and pixels is zero *by construction* rather than by hoping two
+conv filter can threshold. A flat repaint does remove it: with a single object on
+a black ground every colour renders identically, so the mutual information
+between colour and pixels is zero *by construction* rather than by hoping two
 distributions overlap.
 
-**The threshold is half of each image's own peak luma.** A fixed threshold would
-not do, because blue peaks at 0.114 while white peaks at 1.0; taking it relative
-to the peak binarises both, and puts the cut below the anti-aliased edge pixels
-either way. An all-black image has peak 0 and must stay black rather than turn
-white, so the `peak > 0` guard is load-bearing.
+**Shape is carried by coverage, not by a threshold.** Every pixel is scaled by
+`luma / peak`, its object coverage. For a flat object on black a fully covered
+pixel has `luma == peak` and a pixel at coverage `k` has `luma == k * peak`, so
+that ratio recovers the coverage exactly and does so independently of colour.
+The peak is per image, which is what makes it colour-invariant: blue peaks at
+0.114 where white peaks at 1.0, and a fixed divisor would render one far dimmer
+than the other. An all-black image has peak 0 and must stay black, so the
+`peak > 0` guard is load-bearing — without it the ratio is a NaN rather than a
+zero.
 
-dtype and range are preserved, so uint8 images come back in {0, 255} and float
-images in {0.0, 1.0}. A new tensor is returned; the input is untouched.
+This replaced a `luma > peak / 2` threshold on 2026-08-29. The threshold was
+colour-invariant too, but it promoted every partly-lit edge pixel to fully lit,
+so the repainted region came back larger than the object it replaced.
+`test_coverage_is_preserved` pins the difference.
+
+**The fill is `[data] silhouette_fill` of maximum in all three channels, half by
+default.** That is a claim about the receiver's input BatchNorm. `ViT2` passes
+`initial_batch_norm=True`, so broccoli puts an `nn.BatchNorm2d(3)` over raw RGB
+at `preprocess[0]`, and ShapeWorld gets no other input normalisation — whatever
+this function emits lands directly on that layer's statistics. Since eval is
+never silhouetted (below), those running statistics are gathered on a mixture
+and then applied to clean images, and any gap between the two is a fixed offset
+of `(μ_clean − μ_running) / σ` on every eval activation. The learned affine
+cannot absorb it, because at train the offset is zero.
+
+White was the worst available answer: the brightest image the model ever sees.
+Against the palette as `tests/test_silhouette.py` states it — mean object
+channels (148.8, 148.8, 106.3) — a rate of 0.5 put the running means at 1.36×,
+1.36× and 1.70× the eval distribution, worst on blue. Half of maximum is the
+maximum-entropy answer for a palette the code does not know, and is robust to
+how that ignorance is formalised: uniform over the RGB cube, uniform over the
+six saturated primaries and secondaries, and uniform over hue at full saturation
+and value all give 0.5 per channel. DEFAULT.toml carries what that costs against
+a measured constant, and why a per-image random colour was rejected despite
+matching the distribution better.
+
+One palette colour is always the transform's fixed point, and the fill decides
+which: at 0.5 it is `gray`, where under the white fill it was `white`.
+
+dtype and range are preserved — the fill is read against 255 for integer images
+and against 1.0 for floating-point ones, and integer output is rounded rather
+than truncated. A new tensor is returned; the input is untouched.
 
 ### Rolled per game, not per image
 

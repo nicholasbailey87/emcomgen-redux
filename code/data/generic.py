@@ -25,13 +25,45 @@ def vis_image(inp, overwrite=True, **kwargs):
 _LUMA = torch.tensor([0.299, 0.587, 0.114])
 
 
-def silhouette(imgs):
-    """
-    Render each image as a white-on-black silhouette of its object.
+# Half of maximum intensity, in every channel. See `silhouette` and docs/data.md
+#     for why half and not something measured off the palette.
+DEFAULT_SILHOUETTE_FILL = 0.5
 
-    `imgs` is (n, C, H, W) with a black background. dtype and range are
-    preserved, so uint8 images come back in {0, 255} and float images in
-    {0.0, 1.0}. Returns a new tensor; the input is left untouched.
+
+def silhouette(imgs, fill=DEFAULT_SILHOUETTE_FILL):
+    """
+    Repaint each image's object in a flat achromatic `fill`, keeping its shape.
+
+    `imgs` is (n, C, H, W) with a black background. Every pixel is scaled by the
+    object's coverage there, so a fully covered pixel comes back at `fill` of
+    maximum intensity, the background stays at zero, and an anti-aliased edge
+    keeps the coverage it had. dtype and range are preserved -- `fill` is read
+    against 255 for integer images and against 1.0 for floating-point ones.
+    Returns a new tensor; the input is left untouched.
+
+    Coverage rather than a threshold. For a flat object on black, a fully
+    covered pixel has `luma == peak` and a pixel at coverage `k` has
+    `luma == k * peak`, so `luma / peak` recovers the coverage exactly and does
+    so independently of the object's colour -- the same colour-invariance the
+    old `luma > peak / 2` threshold had, without discarding the edges on the way
+    through. The threshold promoted every partly-lit edge pixel to fully lit,
+    which made the repainted region larger than the object it replaced.
+
+    `fill` rather than white. The receiver's `ViT2` opens with
+    `nn.BatchNorm2d(3)` over raw RGB and ShapeWorld gets no other input
+    normalisation, so what this function emits lands directly on that layer's
+    statistics -- and eval is never silhouetted, so the running stats are
+    gathered on a mixture and then used on clean images. A white object is the
+    brightest image the model ever sees and drags those stats well above the
+    distribution they are applied to. Half of maximum is the maximum-entropy
+    answer for a palette you do not know: colours uniform over the RGB cube give
+    0.5 per channel, as do colours uniform over the six saturated primaries and
+    secondaries, and as does hue uniform at full saturation and value.
+
+    Assumes one object on a black ground, as the old threshold did. Two objects
+    of different colours would come back at different intensities, which leaks
+    their relative luma -- though it leaks less than the threshold did, which
+    erased the darker of the two outright.
 
     See docs/data.md.
     """
@@ -39,13 +71,22 @@ def silhouette(imgs):
         raise ValueError(f"expected 3 channels, got shape {tuple(imgs.shape)}")
 
     luma = (imgs.float() * _LUMA.to(imgs.device).view(1, 3, 1, 1)).sum(1)
-    # Per image, so that a dim object binarises the same way a bright one does.
+    # Per image, so that a dim object repaints the same way a bright one does.
     peak = luma.amax(dim=(1, 2), keepdim=True)
-    # An all-black image has peak 0 and must stay black rather than turn white.
-    on = (luma > peak / 2) & (peak > 0)
+    # An all-black image has peak 0 and must stay black rather than turn grey,
+    #     and dividing by it would be a NaN rather than a zero.
+    lit = peak > 0
+    safe_peak = torch.where(lit, peak, torch.ones_like(peak))
+    coverage = torch.where(lit, luma / safe_peak, torch.zeros_like(luma))
 
-    on_value = 255 if not imgs.dtype.is_floating_point else 1.0
-    return (on.unsqueeze(1) * on_value).to(imgs.dtype).expand_as(imgs).contiguous()
+    max_value = 255 if not imgs.dtype.is_floating_point else 1.0
+    out = coverage.unsqueeze(1) * (fill * max_value)
+
+    # Integer dtypes truncate on cast, so `0.999 * 128` would land at 127.
+    if not imgs.dtype.is_floating_point:
+        out = out.round()
+
+    return out.to(imgs.dtype).expand_as(imgs).contiguous()
 
 
 class ConceptDataset:
@@ -62,6 +103,7 @@ class ConceptDataset:
         image_size=None,
         silhouette_p_sender=0.0,
         silhouette_p_receiver=0.0,
+        silhouette_fill=DEFAULT_SILHOUETTE_FILL,
         **kwargs,
     ):
         self.x = data["x"]
@@ -85,6 +127,7 @@ class ConceptDataset:
         self.percent_novel = percent_novel
         self.silhouette_p_sender = silhouette_p_sender
         self.silhouette_p_receiver = silhouette_p_receiver
+        self.silhouette_fill = silhouette_fill
         assert self.n_examples % 2 == 0
         # Assign the rest of the kwargs
         for name, val in kwargs.items():
@@ -101,9 +144,9 @@ class ConceptDataset:
         are independent. See docs/data.md.
         """
         if self.silhouette_p_sender and np.random.rand() < self.silhouette_p_sender:
-            spk_inp = silhouette(spk_inp)
+            spk_inp = silhouette(spk_inp, self.silhouette_fill)
         if self.silhouette_p_receiver and np.random.rand() < self.silhouette_p_receiver:
-            lis_inp = silhouette(lis_inp)
+            lis_inp = silhouette(lis_inp, self.silhouette_fill)
         return spk_inp, lis_inp
 
     def _game_language(self, i, pos_i):

@@ -205,7 +205,11 @@ def validate_config(config: dict) -> bool:
             f"{warm_up_epochs!r}."
         )
 
-    for key in ('silhouette_p_sender', 'silhouette_p_receiver'):
+    # `silhouette_fill` shares the check because it shares the units: all three
+    #     are fractions, two of games and one of maximum intensity.
+    for key in (
+        'silhouette_p_sender', 'silhouette_p_receiver', 'silhouette_fill'
+    ):
         p = config['data'][key]
         if not 0.0 <= p <= 1.0:
             raise InvalidConfig(f"`{key}` must be in [0, 1], got {p}.")

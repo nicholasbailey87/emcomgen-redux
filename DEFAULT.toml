@@ -79,12 +79,62 @@ percent_novel = 1.0
 n_examples = 20 # number of examples seen by agents, including distractors
 n_workers = 0
 
-# Probability of rendering an agent's whole view as white-on-black silhouettes,
-# per game, at training time only. This attacks the colour-only local minimum
-# the paper reports (~83% accuracy, appendix A.1): with the six colours sitting
-# at six distinct luma values, only thresholding actually removes colour.
+# Probability of repainting an agent's whole view as flat achromatic
+# silhouettes, per game, at training time only. This attacks the colour-only
+# local minimum the paper reports (~83% accuracy, appendix A.1): with the six
+# colours sitting at six distinct luma values, a grayscale conversion would
+# re-encode colour as a scalar rather than remove it, where a flat repaint
+# removes it outright.
 silhouette_p_sender = 0.0
 silhouette_p_receiver = 0.5
+
+# The intensity a fully covered pixel comes back at, as a fraction of maximum,
+# in all three channels. Partly covered pixels scale down with their coverage.
+#
+# **Half, because the palette is not something this key should have to know.**
+# The receiver's `ViT2` opens with `nn.BatchNorm2d(3)` over raw RGB
+# (`initial_batch_norm=True`, and broccoli's `vit.py` puts it at
+# `preprocess[0]`), and ShapeWorld gets no other input normalisation, so
+# whatever `silhouette` emits lands directly on that layer's statistics. Eval is
+# never silhouetted, so those running statistics are gathered on a mixture and
+# then applied to clean images: any gap between the two is a fixed offset of
+# `(mu_clean - mu_running) / sigma` on every eval activation, and the learned
+# affine cannot absorb it because the offset is zero at train.
+#
+# White is the worst available answer. It is the brightest image the model ever
+# sees, and taking the palette as `tests/test_silhouette.py` states it -- mean
+# object channels (148.8, 148.8, 106.3) -- a rate of 0.5 put the running means
+# at 1.36x, 1.36x and 1.70x the eval distribution, worst on blue.
+#
+# Half of maximum is the maximum-entropy answer for a palette you do not know,
+# and it is robust to how the ignorance is written down: colours uniform over
+# the RGB cube give 0.5 per channel; uniform over the six saturated primaries
+# and secondaries gives 0.5; uniform over hue at full saturation and value gives
+# 0.5, since the trapezoidal hue-to-RGB curve is 1 for a third of the circle, 0
+# for a third, and averages 0.5 across the ramps.
+#
+# What that costs against a measured constant. ShapeWorld's own mean is (0.584,
+# 0.584, 0.417) -- each channel exactly 0.083 off neutral, because the palette
+# carries yellow but neither cyan nor magenta, so blue appears in one fewer
+# colour than red or green. Half therefore leaves R and G about 14% low and B
+# about 20% high rather than matching. That residual is the price of a constant
+# that does not depend on the dataset, and it is a large improvement on 1.36x
+# and 1.70x either way.
+#
+# A constant cannot match the second moment at all: a repainted object has zero
+# colour variance, so `running_var` still sits below the eval distribution.
+# Matching both would need a per-image draw from the colour distribution, which
+# was considered and rejected -- a randomly recoloured object is
+# indistinguishable from a real one, so the receiver could not learn to gate on
+# "colour is absent here" and would instead learn that colour is globally
+# unreliable, degrading the games where colour is genuine. A constant stays
+# detectable, and that detectability is the point.
+#
+# Note what half collides with. 0.5 of 255 is 128, which is exactly ShapeWorld's
+# `gray`, so a repainted view is indistinguishable from a genuine all-gray one.
+# That is one palette colour in six, and it is the same trade white made with
+# `white` -- a lateral move, not a regression.
+silhouette_fill = 0.5
 
 [optimiser]
 class = "AdamW"

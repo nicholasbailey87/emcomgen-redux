@@ -129,6 +129,9 @@ def load(config, fast=False):
             silhouette_p_receiver=(
                 config['data']['silhouette_p_receiver'] if split == "train" else 0.0
             ),
+            # Not split-gated: the fill only has an effect where a rate is
+            # non-zero, and eval's rates are already 0.0 above.
+            silhouette_fill=config['data']['silhouette_fill'],
             shapes=datas[split]["shapes"],
             metadata_vocab=md_vocab,
             **dataset_kwargs,
