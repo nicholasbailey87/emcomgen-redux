@@ -64,6 +64,38 @@ def _halves(samples):
     return samples[:, :half], samples[:, half:]
 
 
+def _set_scorer(prototyper, norm, seed=1):
+    """
+    Point both pools along one random direction of a chosen norm.
+
+    The norm is the knob, not the raw entries: scoring runs off `score_norm`'s
+    output, whose projection onto a unit direction is about standard normal, so
+    `||w||` *is* the score spread the pools will produce. That is what makes the
+    targets below readable as the spreads they are meant to construct.
+    """
+    generator = torch.Generator().manual_seed(seed)
+    direction = torch.randn(1, prototyper.d_model, generator=generator)
+    direction = norm * direction / direction.norm()
+
+    with torch.no_grad():
+        prototyper.pos_pool.attention[0].weight.copy_(direction)
+        prototyper.neg_pool.attention[0].weight.copy_(direction)
+
+
+def _direct_score_sd(prototyper, samples):
+    """The pre-softmax scores' spread, computed rather than recovered."""
+    positive, negative = _halves(samples)
+    return torch.cat(
+        [
+            pool.attention[0](prototyper.score_norm(half)).squeeze(-1)
+            for pool, half in (
+                (prototyper.pos_pool, positive),
+                (prototyper.neg_pool, negative),
+            )
+        ]
+    ).std(-1).mean().item()
+
+
 # ------------------------------------------------- 1. where the pooler opens --
 
 @pytest.mark.parametrize("scale", [CONV4_SCALE, NORMALISED_SCALE])
@@ -221,6 +253,71 @@ def test_effective_examples_falls_as_the_pooler_commits():
     assert prototyper.pool_score_norm > 0.0
 
 
+def test_pool_score_sd_is_the_scores_own_spread():
+    """
+    `pool_score_sd` is recovered from the weights rather than recomputed, on the
+    identity `log w = s - logsumexp(s)`: an additive constant per game, so the
+    standard deviation over examples is the pre-softmax scores' exactly. Checked
+    against the scores computed directly, because if that identity were wrong
+    the column would be silently wrong too and nothing else would notice.
+    """
+    prototyper = S.AttentionPrototyper(D_MODEL)
+    samples = _examples(NORMALISED_SCALE)
+
+    _set_scorer(prototyper, 0.8, seed=3)
+    prototyper(samples)
+
+    assert prototyper.pool_score_sd == pytest.approx(
+        _direct_score_sd(prototyper, samples), rel=1e-4
+    )
+
+    # The recovery is exact only while the softmax has not underflowed. Past a
+    # gap of about 87 nats a loser's weight is 0 in fp32 and the unclamped log
+    # would give NaN -- which reads as "no pooler at all" rather than as the
+    # total commitment it is, so the floor has to hold.
+    _set_scorer(prototyper, 60.0, seed=3)
+    prototyper(samples)
+
+    assert math.isfinite(prototyper.pool_score_sd)
+    assert prototyper.pool_score_sd > 10.0
+    assert prototyper.pool_effective_examples < 1.1
+
+
+def test_pool_score_sd_resolves_where_the_effective_count_cannot():
+    """
+    The reason for the column. `1 / sum(p^2)` is about `n / (1 + sd^2)`, so near
+    its ceiling it compresses brutally: the 2026-08-29 ShapeWorld run read
+    9.86323 and 9.99613 in consecutive dead stretches, a 1.3% difference in the
+    count that was sixfold in the spread -- and the difference between a
+    collapse the speaker climbed out of and one it did not.
+
+    Constructed here at those two spreads, and the assertion is that the counts
+    agree to about a percent while the sd column separates them by six.
+    """
+    prototyper = S.AttentionPrototyper(D_MODEL)
+    samples = _examples(NORMALISED_SCALE, seed=4)
+
+    readings = {}
+    for name, spread in (("faint", 0.118), ("fainter", 0.020)):
+        _set_scorer(prototyper, spread, seed=5)
+        prototyper(samples)
+        readings[name] = (
+            prototyper.pool_effective_examples, prototyper.pool_score_sd
+        )
+
+    (count_faint, sd_faint), (count_fainter, sd_fainter) = (
+        readings["faint"], readings["fainter"]
+    )
+
+    # Both read as "uniform pooling" in the count, within a percent of each
+    # other and of the ten-example ceiling.
+    assert count_faint / count_fainter > 0.98
+    assert count_faint > 0.98 * (N_EXAMPLES // 2)
+
+    # The sd column separates them by the sixfold that is actually there.
+    assert sd_faint / sd_fainter > 4.0
+
+
 def test_average_prototyper_reports_the_same_columns():
     """
     Both arms write the same header, so the ladder's rungs can be read side by
@@ -235,6 +332,7 @@ def test_average_prototyper_reports_the_same_columns():
         prototyper.pool_effective_examples, N_EXAMPLES // 2, rel_tol=1e-9
     )
     assert math.isnan(prototyper.pool_score_norm)
+    assert math.isnan(prototyper.pool_score_sd)
 
 
 if __name__ == "__main__":

@@ -240,13 +240,15 @@ log_interval = 100
 # channel that opens while accuracy stays at chance is the failure, not a slow
 # channel.
 #
-# Two other things move with it. The tau coupling in `sampling_tau` tracks
-# `logit_scale / initial_logit_scale`, so a fast climb makes the surrogate very
-# soft very early, and straight-through bias is at its worst exactly while the
-# pair is choosing its code. And `training_progress` retires that coupling on
-# the epoch counter, calibrated in 3b3b857 against takeoff at epoch 11 for
-# ShapeWorld and 40 for birds; at this rate both take off fully coupled and the
-# honest-tau phase arrives long after the code has settled.
+# One other thing used to move with it, and no longer does. The tau coupling in
+# `sampling_tau` tracked `logit_scale / initial_logit_scale`, retiring over
+# training on `training_progress`, so a fast climb made the surrogate very soft
+# very early. `0603e27` commented it out and `tau` is now flat at its configured
+# value for the whole of any run, which means the surrogate sharpens with the
+# scale instead: nothing bounds the straight-through estimator's saturation, and
+# a run can lose its channel without `logit_scale` ever looking high. Watch
+# `unmixed_survival` and `logit_margin` rather than this rate. See
+# docs/channel.md, "Where that left it".
 #
 # If `realised_survival` climbs promptly and accuracy still does not follow,
 # the traverse was never the constraint and this knob should go rather than

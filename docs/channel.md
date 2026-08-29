@@ -309,6 +309,13 @@ scheme exists to avoid.
 
 ## `sampling_tau`
 
+> **Currently off.** `0603e27` commented the coupling out as a hypothesis test on
+> rung 9's flat start, and `sampling_tau` returns the bare configured `tau`, flat
+> for the whole of any run. Everything below describes the five commented lines
+> and is right again the moment they are uncommented, which is why it was left
+> standing. What the test has since returned is in **Where that left it** at the
+> end of this section.
+
 The temperature handed to `gumbel_softmax`: the configured `tau`, adjusted
 towards `tau × logit_scale / initial_logit_scale` by a cosine schedule over
 training.
@@ -386,6 +393,39 @@ counter on resume rather than checkpointed, and 0.0 until told otherwise, so a
 speaker used outside a training loop — ACRe, the tests, an interactive session —
 samples at the configured `tau`.
 
+### Where that left it
+
+`0603e27` turned the coupling off because it is a **pin on the scale**, not a
+floor. Under it the surrogate reduces to `softmax(L + g / scale)`, and
+`layer_norm_logits` holds `L` at unit variance, so the scale leaves the signal
+term entirely: the only gradient `log_logit_scale` still receives is through
+`g / scale` — "these particular Gumbel draws would have hurt less had I been
+louder" — which is a different answer every batch. Rung 9 moved
+`log_logit_scale` by −0.008 over ten epochs, 0.2% of its travel bound, at chance
+throughout.
+
+Both halves of that trade have now been observed, and neither side is free.
+
+`0603e27` predicted the cost of removing it with a named tell: *the speaker's
+stack stalling after the scale is high — `pool_score_norm` and
+`polarity_separation` flattening while `logit_scale` and `realised_survival` keep
+climbing.* `shapeworld-post-silhouette-update.csv` fired it exactly. From epoch
+21 `pool_score_norm` is frozen at 0.2720 and `polarity_separation` at 24.0450,
+while `logit_scale` went 3.018 → 3.046 and survival closed the last 0.0003 to its
+cap. The uncoupled surrogate saturated, and the speaker's four gradient norms
+fell to ~2e-7.
+
+What the same run also says is that the traverse the removal was meant to buy was
+never step-limited. `log_logit_scale` moved 0.05–0.09 log-units in epochs 1–4 and
+0.010–0.014 in the stall at 5–6, against a bound of at least 0.28 — 4% of it. It
+was gradient-limited, and the pin was not what was holding it.
+
+So this is not a straight revert. The coupling removes the *scale* route to
+saturation and leaves the shape route open, since `softmax((z + g/s)/c)` still
+saturates if `z`'s top-two gap grows — which is the route that run actually took.
+`logit_margin` (docs/measurement.md) is the column that now measures that
+directly, and it is what a reinstated coupling would have to be judged against.
+
 ## Scale the unmasked logits, then re-mask
 
 Both decode loops do this:
@@ -417,7 +457,18 @@ Order within the loop matters throughout:
 ## `mean_winning_probability`
 
 The fraction of symbols that survive the Gumbel noise, averaged over slots, and
-the source of the `realised_survival` column.
+the source of **both** the `realised_survival` and `unmixed_survival` columns —
+the same call with `uniform_weight` passed and with it zeroed.
+
+The pair is there because the mixture caps the reported number without capping
+the channel. `realised_survival` cannot exceed `(1 − w) + w / V`, 0.90714 at
+ShapeWorld's settings, so a speaker that has committed entirely still reads 0.91.
+The straight-through gradient runs through the soft sample, whose Jacobian is
+`diag(p) − p pᵀ`, and the `p` there is pre-mixture — so `1 − unmixed_survival` is
+the factor multiplying every speaker gradient, and it is the column with the
+dynamic range. On `shapeworld-post-silhouette-update.csv` a reported 0.90670
+inverted to 0.99951, a 510× attenuation against epoch 0 that the mixed column
+could not show.
 
 By the Gumbel-max identity, the probability that a slot's argmax is unchanged by
 the noise is exactly the winning token's softmax probability. So survival can be

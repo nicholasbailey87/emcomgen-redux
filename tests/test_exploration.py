@@ -596,6 +596,113 @@ def test_uniform_weight_is_the_ceiling_on_fidelity():
     assert S.mean_winning_probability(logits, 1e5, 0.0).item() > cap
 
 
+def test_unmixed_survival_is_what_the_gradient_sees():
+    """
+    The mixture is a ceiling on the *reported* number and not on the channel, so
+    `realised_survival` cannot say how saturated the softmax actually is.
+
+    The straight-through gradient runs through the soft sample, whose Jacobian
+    is `diag(p) - p pT`, and the `p` in it is pre-mixture. On the 2026-08-29
+    ShapeWorld run a reported 0.90670 against a cap of 0.90714 was an unmixed
+    0.99951 -- so `1 - p` was 4.9e-4 where the mixed column suggested 0.093, a
+    factor of 190 in the gradient that was invisible.
+
+    The two are the same function with the mixture switched off, which is what
+    stops them drifting, and the mixture is affine in the model's probability,
+    so the unmixed value is recoverable exactly.
+    """
+    vocabulary, uniform_weight = 14, 0.1
+    cap = 1.0 - uniform_weight + uniform_weight / vocabulary
+    logits = _masked(_logit_shapes(vocabulary, seed=3)["peaked"])
+
+    # Never below the mixed reading: mixing in a uniform can only flatten.
+    for scale in (0.5, 2.0, 10.0, 1e3):
+        mixed = S.mean_winning_probability(logits, scale, uniform_weight).item()
+        unmixed = S.mean_winning_probability(logits, scale, 0.0).item()
+        assert unmixed >= mixed - 1e-6, f"scale {scale}: {unmixed} < {mixed}"
+
+        # `p_mixed = (1 - w) * p_model + w / V`, inverted.
+        recovered = (mixed - uniform_weight / vocabulary) / (1.0 - uniform_weight)
+        assert recovered == pytest.approx(unmixed, abs=1e-5)
+
+    # And the point of the column: at the ceiling the mixed reading is pinned
+    # while the unmixed one keeps going, which is the regime that kills a run.
+    assert mixed == pytest.approx(cap, abs=1e-4)
+    assert unmixed > 0.999
+
+
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
+def test_both_survival_columns_reach_metrics(build):
+    """
+    The pair has to be written by every speaker arm, be NaN before a train pass
+    the way `realised_survival` is, and collapse onto each other exactly when
+    there is no mixture to remove -- which is CUB's setting.
+    """
+    torch.manual_seed(0)
+    speaker = build().train()
+
+    assert math.isnan(speaker.unmixed_survival)
+    assert math.isnan(speaker.logit_margin)
+
+    speaker.decode(_prototypes(speaker))
+    assert speaker.unmixed_survival >= speaker.realised_survival - 1e-6
+    assert speaker.logit_margin > 0.0
+
+    unmixed = build(uniform_weight=0.0).train()
+    unmixed.decode(_prototypes(unmixed))
+    assert unmixed.unmixed_survival == pytest.approx(
+        unmixed.realised_survival, abs=1e-6
+    )
+
+
+def test_logit_margin_reads_the_top_two_gap_in_sd_units():
+    """
+    The shape parameter that saturates the channel alongside the scale, and the
+    one `layer_norm_logits` leaves free: it pins the second moment and says
+    nothing about the gap between the top two.
+
+    Constructed so the answer is known: standard normal logits with a fixed
+    amount added to one token, after normalisation.
+    """
+    vocabulary = 14
+    generator = torch.Generator().manual_seed(7)
+    raw = torch.randn(64, 5, vocabulary + 4, generator=generator)
+
+    # A known gap, read off the normalised tensor the speaker actually samples.
+    normalised = S.mask_reserved_tokens(S.layer_norm_logits(raw, vocabulary))
+    emittable = normalised[..., 4:]
+    top_two = emittable.topk(2, dim=-1).values
+    expected = (top_two[..., 0] - top_two[..., 1]).mean().item()
+
+    assert S.mean_logit_margin(normalised).item() == pytest.approx(expected)
+
+    # The reserved slots are -inf and must not be picked up as the runner-up.
+    assert math.isfinite(S.mean_logit_margin(normalised).item())
+
+    # Homogeneous in the logits, which is exactly why it must be fed the
+    # *pre-gain* tensor: fed the scaled one it would report `scale * margin` and
+    # stop being the independent shape reading `logit_scale` cannot give.
+    for scale in (0.5, 3.0, 50.0):
+        assert S.mean_logit_margin(normalised * scale).item() == pytest.approx(
+            expected * scale, rel=1e-5
+        )
+
+    # It moves with the shape, which `logit_scale` cannot see. Sharpening one
+    # token raises the margin while the normaliser holds the variance at 1.
+    peaked = raw.clone()
+    peaked[..., 4] += 6.0
+    sharper = S.mean_logit_margin(
+        S.mask_reserved_tokens(S.layer_norm_logits(peaked, vocabulary))
+    ).item()
+    assert sharper > expected + 0.5, (sharper, expected)
+
+    # A Gaussian sanity check against the documented reference: the expected
+    # top-two spacing of V standard normals is about `1 / sqrt(2 ln V)`.
+    assert expected == pytest.approx(1.0 / math.sqrt(2.0 * math.log(vocabulary)), abs=0.2)
+
+
 # --------------------------------------------------- 5. eval is the policy --
 
 def _decode_message(speaker, prototypes):

@@ -348,6 +348,47 @@ architecture.
 speaker's own logit *shape* buys it, so it is a finding rather than a restatement
 of a target. Expected to climb over a run as the speaker grows confident.
 
+**`unmixed_survival`** is the same measurement with `uniform_weight`'s mixture
+switched off, and it is the one to read for saturation. `realised_survival` is
+bounded above by `(1 − w) + w / V`, which is **0.90714** at ShapeWorld's `w` 0.1
+and `vocabulary` 14, so a channel that has committed entirely still reads as 0.91
+and looks unremarkable next to a healthy 0.85.
+
+The gap matters because the straight-through gradient runs through the *soft*
+sample, whose Jacobian is `diag(p) − p pᵀ`. That vanishes as `p → 1`, so `1 − p`
+is the factor multiplying every speaker gradient — and the `p` in it is the one
+*before* the mixture. On `shapeworld-post-silhouette-update.csv`,
+`realised_survival` pinned at 0.90670, 99.95% of the way to the cap, which
+inverts to an unmixed 0.99951. Read against 0.4779 at epoch 0, `p(1 − p)` fell by
+a factor of 510, and `clip_sender_vision` went from 2.5e-2 to 1.9e-7 alongside
+it. None of that was legible in the mixed column.
+
+Expect the two to open close together and separate as the run sharpens. Watch
+`1 − unmixed_survival` on a log scale; it is the quantity with the dynamic range.
+
+**`logit_margin`** — the winning token's lead over the runner-up, in units of the
+logits' own standard deviation, averaged over slots. Taken after
+`layer_norm_logits` and before the gain, so it is invariant to `logit_scale` by
+construction and comparable across vocabularies without rescaling.
+
+This is the *shape* parameter that decides saturation, and until it existed
+nothing measured it. The winner's probability goes roughly as
+`1 − p ≈ (V − 1)·exp(−logit_scale × logit_margin)`, so the scale and the margin
+saturate the channel interchangeably — and `layer_norm_logits` pins the second
+moment while pinning nothing about the shape, which leaves the margin free. That
+is the route the 2026-08-29 ShapeWorld run took: `logit_scale` reached only
+3.046, well inside what looks safe, but inverting the observed 0.99951 gives a
+margin of about **3.35**, against the **0.44** that i.i.d. standard normal logits
+over 14 tokens would give (`1/√(2 ln V)`, the Gumbel top-two spacing). Seven
+times sharper than Gaussian: the speaker grew kurtosis, not volume.
+
+Do not read `logit_spread` for this. That is the standard deviation of the *raw*
+logits taken before the normaliser divides it out, so it reports the head's
+output magnitude and the normaliser then discards exactly that. The two can rise
+together, as they did on the run that died, and it still says nothing about the
+margin: `logit_spread` would read the same for a head whose output is uniformly
+larger and for one that has grown a spike.
+
 **`logit_scale` and `logit_spread`** are read together with it, and say which of
 two things a falling survival means: a flatter policy, which is the speaker's own
 doing, or a collapsing scale. They are indistinguishable in survival alone.
@@ -385,6 +426,44 @@ and rung 1 would only be visible in a checkpoint. `pool_score_norm` is NaN under
 `AveragePrototyper`, which has no scoring vector to report;
 `pool_effective_examples` is the example count by construction there, since
 averaging *is* pooling with uniform weights.
+
+**`pool_score_sd`** — the standard deviation of the pre-softmax pooling scores
+over the examples in a game, which is what `pool_effective_examples` is a
+compressed function of. For a spread `σ` the effective count is about
+`n / (1 + σ²)`, so the entire range from "faintly structured" to "exactly
+uniform" is squashed into the last fraction of a percent below `n`. On the
+2026-08-29 run, 9.86323 and 9.99613 differ by 1.3% in the count and by **six
+times** in `σ` — 0.118 against 0.020 — and that was precisely the difference
+between the collapse the speaker climbed back out of at epoch 17 and the one at
+epoch 21 it never did. Keep both: the count is the interpretable column and this
+is the one with resolution where the run is decided.
+
+Recovered from the weights rather than recomputed, since `log w = s − logsumexp(s)`
+makes the two standard deviations identical and nothing has to reach past
+`SequencePool.attention_scores` into broccoli's `Sequential`. NaN under
+`AveragePrototyper` for the same reason `pool_score_norm` is.
+
+**`referent_spread` and `referent_spread_backbone`** — how much the referents
+within one polarity still differ from each other, relative to what they share:
+subtract each polarity's own mean, then take the RMS of the residual over the RMS
+of the means. The same decomposition `contrast_within_share` uses, so the two are
+read on one basis, and dimensionless, so a global rescale of the embeddings does
+not move it.
+
+They exist to break an ambiguity `pool_score_sd` cannot. A flat pooling score has
+two causes that call for opposite fixes — the examples genuinely collapsed onto
+one point, or the single scoring direction rotated somewhere they do not vary —
+and these columns never touch the scoring vector, so a collapse here is the
+backbone and a flat `pool_score_sd` alongside a healthy spread here is the pool.
+
+`referent_spread_backbone` is taken on `embed_images`' output and `referent_spread`
+after the contrast stage, so they bracket it. They are **equal** on a rung without
+the stage, which is the informative reading and the reason neither is NaN there.
+A gap between them is the contrast branch homogenising the referents, which is
+live enough to be worth watching: `contrast_share` reached 0.32 on the 2026-08-29
+run while `contrast_within_share` was 1.6e-4, a branch that was 99.98% a shared
+vector plus a per-polarity offset. Adding a common vector lowers this ratio by
+construction — that is what it is for.
 
 **`polarity_separation`** — `norm(e_pos − e_neg)` for the Transformer speaker's
 `polarity_embedding`. A constant added to both rows shifts every key and value
@@ -689,6 +768,38 @@ which supplies ~90% of the pair's squared norm at init.
 has learned to say something reuses messages across instances of a concept; one
 whose channel is too noisy to learn through emits a near-unique message every
 game, so this reads close to 1.0 while accuracy sits at chance.
+
+**`unique_message_count`** — the same quantity before dividing, because the
+fraction cannot be read without knowing the split's size and the splits differ by
+a factor of twenty. On the 2026-08-29 run `test_unique_message_fraction` 0.001
+was one message over 1,000 eval games, i.e. a constant policy; the fraction alone
+does not say so. Note also that a small fraction on the *train* pass is not
+independent evidence of anything, because the train pass samples through the
+Gumbel noise while eval is greedy (`sender.sample_symbols`, line 814): 0.0551
+over 20,000 games is 1,102 distinct messages, and a single underlying message at
+`realised_survival` 0.9067 over 5 content slots predicts 1,108 — 61% clean, all
+65 single substitutions seen, about 908 of the 1,690 doubles, 134 triples. Read
+the eval column for the policy and the train column only against that prediction.
+
+**`shuffled_message_acc`** (eval splits only) — the listener's accuracy on the
+same candidates when the message is another game's, so the message is in
+distribution and carries no information about this game. The gap between `acc`
+and this is what the channel is buying; the level of this is the image-only route
+the channel has to beat before it earns any gradient at all.
+
+Both halves have bitten. On the 2026-08-29 ShapeWorld run the listener reached
+0.588 train and 0.55 `test_same` on shape concepts *while the speaker emitted one
+message for every game*, so most of what `acc` reported was never communication —
+and there was no way to see that until the speaker had already died, which is too
+late to act on. Expect it near chance early. A rise in this column with `acc`
+flat is the listener moving its capacity off the message path, which is the
+leading indicator of the speaker's gradient collapsing.
+
+Rolled by one along the batch rather than permuted: a permutation leaves about
+one game in `batch_size` holding its own message, biasing the baseline up by ~3%
+at 32. Eval only, because it costs a second receiver forward pass and the train
+pass is where the compute is. Reported as a single scalar, not broken down by
+`md`.
 
 **`acc_md_*`** (ShapeWorld only) — accuracy broken down by the metadata class of
 the concept: `shape`, `color`, `and_color_shape`, and so on.

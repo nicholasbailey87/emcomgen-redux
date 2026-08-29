@@ -303,6 +303,42 @@ def mean_winning_probability(
     return scaled.softmax(-1).max(-1).values.mean()
 
 
+def mean_logit_margin(logits: torch.Tensor) -> torch.Tensor:
+    """
+    The winning token's lead over the runner-up, averaged over slots, i.e. the
+        `logit_margin` column.
+
+    **Why this and not `logit_spread`.** Saturation is set by the margin times
+        `logit_scale`, not by the scale alone: `1 - p` is about
+        `(V - 1) * exp(-scale * margin)` for the winner's probability `p`.
+        `layer_norm_logits` pins the emittable logits' *second moment* and pins
+        nothing about their shape, so a speaker can saturate its channel shut
+        without moving the scale at all, by growing this instead. That is what
+        the 2026-08-29 ShapeWorld run did: at `logit_scale` 3.046 the winner sat
+        at 0.99951, which inverts to a margin of ~3.35, against the ~0.44 that
+        i.i.d. standard normal logits over V = 14 would give. Nothing in
+        metrics.csv could see it -- `logit_spread` is the std of the *raw*
+        logits, taken before the normaliser divides exactly that back out, so it
+        reads the head's output magnitude and would report the same for a head
+        that grew uniformly as for one that grew a spike.
+
+    Taken on the emittable slice only, and *after* `layer_norm_logits`, so the
+        result is already in units of the logits' own standard deviation and
+        needs no further scaling to compare across runs or vocabularies. Pass
+        the same tensor `record_survival` is given.
+
+    Purely a measurement, like `mean_winning_probability` above.
+
+    Args:
+        logits: (..., vocabulary + 4), normalised, reserved tokens first
+
+    Returns:
+        A scalar tensor, the mean over all slots of the top-two gap
+    """
+    top_two = logits[..., 4:].topk(2, dim=-1).values
+    return (top_two[..., 0] - top_two[..., 1]).mean()
+
+
 class ExampleContrast(nn.Module):
     """
     Let the referents inform each other before they are pooled.
@@ -554,9 +590,11 @@ class AveragePrototyper(nn.Module):
         # Per-batch diagnostics, defined here as well as on
         #     `AttentionPrototyper` so both arms write the same columns.
         #     Averaging is pooling with uniform weights, so the effective count
-        #     is the example count and there is no scoring vector to report.
+        #     is the example count and there is no scoring vector to report --
+        #     neither its norm nor the spread of the scores it would produce.
         self.pool_effective_examples = float("nan")
         self.pool_score_norm = float("nan")
+        self.pool_score_sd = float("nan")
 
     def forward(self, samples, labels=None):
         """
@@ -612,6 +650,7 @@ class AttentionPrototyper(nn.Module):
         #     docs/measurement.md.
         self.pool_effective_examples = float("nan")
         self.pool_score_norm = float("nan")
+        self.pool_score_sd = float("nan")
 
         self.reset_parameters()
 
@@ -646,13 +685,42 @@ class AttentionPrototyper(nn.Module):
 
     @torch.no_grad()
     def _record_diagnostics(self, positive_weights, negative_weights):
-        effective = torch.cat(
-            [
-                1.0 / positive_weights.pow(2).sum(-1),
-                1.0 / negative_weights.pow(2).sum(-1),
-            ]
-        ).mean()
-        self.pool_effective_examples = effective.item()
+        """
+        `pool_effective_examples` compresses; `pool_score_sd` does not.
+
+        The effective count is `1 / sum(w^2)`, which for a score spread `sigma`
+            is about `n / (1 + sigma^2)` -- so the whole interval from "barely
+            structured" to "perfectly uniform" is squeezed into the last
+            fraction of a percent below `n`. On the 2026-08-29 ShapeWorld run
+            9.86 and 9.996 differ by 1.3% in this column and by *sixfold* in the
+            underlying spread, and that was the difference between a collapse
+            the speaker recovered from at epoch 17 and the one it did not at
+            epoch 21. Both columns are kept: the count is the interpretable one
+            and this is the one with resolution where it matters.
+        """
+        weights = torch.cat([positive_weights, negative_weights])
+
+        self.pool_effective_examples = (1.0 / weights.pow(2).sum(-1)).mean().item()
+
+        # The scores themselves, recovered rather than recomputed: softmax makes
+        #     `log w = s - logsumexp(s)`, an additive constant per game, so the
+        #     standard deviation over examples is the scores' own exactly. That
+        #     avoids reaching past `SequencePool.attention_scores` into the
+        #     `Sequential` it is built from, whose layout is broccoli's to
+        #     change. `float` first: under autocast the weights arrive in fp16
+        #     and the log of a small one loses most of its digits there.
+        #
+        # Clamped because the recovery is only exact while the softmax has not
+        #     underflowed. Past a score gap of about 87 nats a loser's weight is
+        #     0 in fp32, `log` gives -inf and the standard deviation is NaN --
+        #     which would read as "no pooler" rather than as the total
+        #     commitment it is. The floor turns that into a large finite number
+        #     instead, and it is unreachable in any regime the column is
+        #     informative in: the largest spread observed on a live run is 0.93.
+        floor = torch.finfo(torch.float32).tiny
+        self.pool_score_sd = (
+            weights.float().clamp_min(floor).log().std(-1).mean().item()
+        )
 
         self.pool_score_norm = 0.5 * (
             self.pos_pool.attention[0].weight.norm().item()
@@ -710,6 +778,8 @@ class GumbelChannel:
             than unused on the GRU. See docs/measurement.md.
         """
         self.realised_survival = float("nan")
+        self.unmixed_survival = float("nan")
+        self.logit_margin = float("nan")
         self.logit_spread = float("nan")
         self.polarity_separation = float("nan")
 
@@ -724,19 +794,50 @@ class GumbelChannel:
     @property
     def sampling_tau(self):
         """
-        The temperature handed to `gumbel_softmax`: the configured `tau`,
-            adjusted towards `tau * logit_scale / initial_logit_scale` by a
-            cosine schedule over training.
+        The temperature handed to `gumbel_softmax`. Currently the configured
+            `tau` and nothing else -- the coupling to `logit_scale` below is
+            commented out, and the column is flat for the whole of any run.
+
+        **What the dead lines did**, since `0603e27` left them in deliberately
+            and reinstating them is uncommenting five lines:
 
             ratio  = max(logit_scale / initial_logit_scale, 1)
             weight = (1 + cos(pi * training_progress)) / 2
             tau    = configured_tau * (1 + weight * (ratio - 1))
 
-        A run opens fully coupled and ends at exactly the configured `tau`. The
-            schedule is open-loop on purpose, the ratio is floored at 1, and the
-            scale is detached -- a differentiable tau would put inf into the
-            gradient w.r.t. the scale. All of that, and what the coupling buys,
-            is in docs/channel.md.
+        `tau` shapes the soft sample the straight-through estimator
+            differentiates and leaves the hard forward sample alone, since the
+            emitted symbol is `argmax(logits + g)` for any positive tau. So this
+            is a pure backward knob, and holding it fixed while the speaker
+            triples its scale is what lets the surrogate saturate: the Jacobian
+            `diag(p) - p pT` goes to zero and every speaker gradient with it.
+            `17ae9f9` added the coupling for exactly that reason, measuring the
+            effective token count holding at 9.0-9.5 across the range rather than
+            falling from 4.9 to 1.6.
+
+        **Why it is off.** Under the coupling the surrogate reduces to
+            `softmax(L + g / scale)`, and `layer_norm_logits` pins `L` to unit
+            variance, so the scale leaves the signal term entirely. The only
+            gradient `log_logit_scale` still receives is through `g / scale` --
+            "these particular Gumbel draws would have hurt less had I been
+            louder" -- which is a different answer every batch. It is a pin, not
+            a floor: rung 9 moved `log_logit_scale` by -0.008 over ten epochs,
+            0.2% of its travel bound, at chance throughout.
+
+        Reinstating it trades one failure for the other, and both have now been
+            observed. `0603e27` predicted the cost with a named tell -- the
+            speaker's stack stalling after the scale is high, `pool_score_norm`
+            and `polarity_separation` flattening while `logit_scale` and
+            `realised_survival` keep climbing -- and
+            `shapeworld-post-silhouette-update.csv` fired it exactly, from epoch
+            21. What that run also shows is that the traverse the removal was
+            meant to buy was never step-limited: the scale moved 0.05-0.09
+            log-units in epochs 1-4 and 0.010-0.014 in the stall at 5-6, against
+            a bound of at least 0.28. It was gradient-limited, and the pin was
+            not what held it.
+
+        See docs/channel.md, and `logit_margin` in docs/measurement.md for the
+            column that now measures the saturation directly.
         """
         # `torch.as_tensor` only so `train.py`'s `.item()` still works.
         return torch.as_tensor(self.tau)
@@ -837,11 +938,33 @@ class GumbelChannel:
         return onehot, masked.detach()
 
     def record_survival(self, pre_gain_logits):
+        """
+        Three columns off one tensor: the channel's fidelity with the uniform
+            mixture applied, the same thing without it, and the shape parameter
+            that decides both.
+
+        `unmixed_survival` is the *straight-through* quantity.
+            `gumbel_softmax(hard=True)` differentiates the soft sample, whose
+            Jacobian is `diag(p) - p pT`, so `1 - p` is the factor every
+            speaker gradient is multiplied by -- and `p` there is the winner's
+            probability before `flatten_logit_distribution` mixes in the
+            uniform. The mixture hides it: `realised_survival` is capped at
+            `(1 - w) + w / V`, which is 0.90714 at the ShapeWorld default, and
+            a run pinned against that cap reads as 0.9067 while the probability
+            that actually sets the gradient is 0.99951. Two orders of magnitude
+            of attenuation, invisible in the mixed column. Same function, same
+            order of operations, mixture off.
+        """
+        detached = pre_gain_logits.float()
+        scale = self.logit_scale.detach()
+
         self.realised_survival = mean_winning_probability(
-            pre_gain_logits.float(),
-            self.logit_scale.detach(),
-            self.uniform_weight,
+            detached, scale, self.uniform_weight
         ).item()
+        self.unmixed_survival = mean_winning_probability(
+            detached, scale, 0.0
+        ).item()
+        self.logit_margin = mean_logit_margin(detached).item()
 
 
 class SenderGRULM(GumbelChannel, nn.Module):
@@ -1537,6 +1660,67 @@ class Sender(nn.Module):
         self.vision_dropout = nn.Dropout(p=vision_dropout)
         self.prototype_dropout = nn.Dropout(p=prototype_dropout)
 
+        # Per-batch diagnostics, read by `train.py` for metrics.csv. On the
+        #     agent rather than on a submodule because the pair brackets the
+        #     contrast stage and so belongs to neither side of it. See
+        #     `_record_referent_spread` and docs/measurement.md.
+        self.referent_spread = float("nan")
+        self.referent_spread_backbone = float("nan")
+
+    @torch.no_grad()
+    def _record_referent_spread(self, embedded, attribute):
+        """
+        How much the referents within one polarity still differ from each other,
+            relative to what they share.
+
+        **What it is for.** `AttentionPrototyper` scores each example and pools
+            by softmax, and `pool_score_sd` reads the spread of those scores --
+            but a flat score can mean two different things, and they call for
+            opposite fixes: the examples genuinely collapsed onto one point, or
+            the single scoring direction rotated somewhere they do not vary.
+            This column separates them. It measures the referents themselves and
+            never touches the scoring vector, so a collapse here is the backbone
+            and a flat `pool_score_sd` with this holding up is the pool.
+
+        **The decomposition** is `ExampleContrast._record_diagnostics`', so the
+            two are read on the same basis: subtract each polarity's own mean,
+            then take the RMS of what is left over the RMS of the means
+            themselves. Within a polarity because that is the unit the
+            prototyper pools over -- a positive/negative difference is signal,
+            not spread -- and as a ratio so it is dimensionless and unmoved by a
+            global rescale of the embeddings.
+
+        It falls when a vector *common* to the examples grows, which is the
+            second thing worth catching: `contrast_share` reached 0.32 on the
+            2026-08-29 run while `contrast_within_share` was 1.6e-4, a branch
+            that was 99.98% a shared vector plus a per-polarity offset. Taken
+            either side of that stage, the pair says whether the contrast branch
+            is the thing doing the homogenising.
+
+        Args:
+            embedded: (batch, 2n, embedding size), positives first
+            attribute: the name to write the result to
+        """
+        n_positive = embedded.size(1) // 2
+        positive, negative = embedded[:, :n_positive], embedded[:, n_positive:]
+
+        polarity_means = torch.cat(
+            (
+                positive.mean(1, keepdim=True).expand_as(positive),
+                negative.mean(1, keepdim=True).expand_as(negative),
+            ),
+            dim=1,
+        )
+
+        common = polarity_means.float().pow(2).mean().sqrt()
+        within = (embedded - polarity_means).float().pow(2).mean().sqrt()
+
+        setattr(
+            self,
+            attribute,
+            (within / common).item() if common > 0.0 else 0.0,
+        )
+
     def embed_images(self, samples):
         """
         Embed every referent image in a batch, reshaping (batch, referents, ...)
@@ -1566,6 +1750,10 @@ class Sender(nn.Module):
 
         embedded = self.embed_images(samples)
 
+        # Train pass only, matching every other diagnostic on the speaker.
+        if self.training:
+            self._record_referent_spread(embedded, "referent_spread_backbone")
+
         # Between the vision model and the pooling, so the contrast sees the
         #     same `vision_dropout` mask the prototyper does and what it returns
         #     is pooled exactly as the backbone's own output would have been.
@@ -1573,6 +1761,13 @@ class Sender(nn.Module):
         #     `reset_parameters` below.
         if self.contrast is not None:
             embedded = self.contrast(embedded, targets)
+
+        # After the contrast stage, so this is what the prototyper actually
+        #     pools. Recorded unconditionally rather than only when the stage is
+        #     on, so the two columns are equal on a rung without it rather than
+        #     one of them being NaN -- equality is the informative reading.
+        if self.training:
+            self._record_referent_spread(embedded, "referent_spread")
 
         prototypes = self.prototyper(embedded, targets)
 

@@ -448,6 +448,34 @@ signature: it should sit near zero throughout on balanced games, so it is a
 finding rather than a symptom when it does not. See
 [measurement.md](measurement.md).
 
+**The saturation signature is the opposite failure and reads almost the same.**
+Everything on the speaker frozen to four decimals — but at a *high*
+`realised_survival` rather than a low one, and after a run that was
+communicating. `shapeworld-post-silhouette-update.csv` is the reference:
+`logit_scale` at 3.046, survival at 0.90670 against its 0.90714 cap,
+`pool_score_norm` frozen at 0.2720, `polarity_separation` at 24.0450, the four
+speaker gradient norms at ~2e-7, and one distinct message across the whole eval
+split. It had reached 0.719 on colour concepts thirteen epochs earlier.
+
+Three columns separate it from the deadlock, and none of them existed before
+this failure:
+
+- **`unmixed_survival`** is the one to read. `realised_survival` is capped by the
+  uniform mixture, so a fully committed channel still reads 0.91 and looks
+  ordinary; the unmixed reading was 0.99951, and `1 − p` is the factor
+  multiplying every speaker gradient.
+- **`logit_margin`** says whether the scale or the *shape* did it. Here the
+  scale was unremarkable and the margin was ~3.35 sd against the ~0.44 a Gaussian
+  gives at V = 14. The speaker grew kurtosis, which `layer_norm_logits` leaves
+  free, and no clamp on `logit_scale` would have caught it.
+- **`shuffled_message_acc`** says whether the run was ever communicating.
+  `train_acc` kept rising after the channel died, entirely from the listener's
+  image-only route.
+
+The response differs too. A deadlock wants more epochs or a louder channel; this
+wants the channel held *quieter* — and since the pathway is the shape rather than
+the scale, that means bounding survival rather than bounding `logit_scale`.
+
 **Then read the direction of `logit_scale` to tell the two apart.** Rising slowly
 means undertrained and more epochs help. Falling monotonically means the run is
 drifting *away* from escape and more epochs will not reach it. In the August 2026

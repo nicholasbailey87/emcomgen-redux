@@ -252,6 +252,40 @@ def log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats):
     logging.info(f"Epoch {epoch} [{data_i}/{data_total} ({pct}%)] {meter_str}")
 
 
+def per_game_accuracy(lis_scores, lis_y, reference_game_xent):
+    """
+    The listener's per-game accuracy, one number per game in the batch.
+
+    Lifted out of the loop so that `shuffled_message_acc` is scored by exactly
+        the code the live accuracy is scored by. A control computed a second way
+        is not a control: any divergence between the two would read as
+        communication.
+
+    Args:
+        lis_scores: (batch, n_objects), the discriminator's output
+        lis_y: (batch, n_objects), 1.0 for candidates matching the concept
+        reference_game_xent: `[config] reference_game_xent`, which decides
+            whether this is a pick-one game or a per-candidate judgement
+
+    Returns:
+        A numpy array of shape (batch,), each entry in [0, 1]
+    """
+    if reference_game_xent:
+        # Take only 0th receiver score + after midpoint, and the target is
+        # always index 0 by construction.
+        assert lis_scores.shape[1] % 2 == 0
+        midp = lis_scores.shape[1] // 2
+        selected = torch.cat((lis_scores[:, :1], lis_scores[:, midp:]), 1)
+        return (selected.argmax(1) == 0).float().cpu().numpy()
+
+    # A fixed threshold at zero, against a score the readout no longer centres.
+    #     `score_bias` and the discriminators' own asymmetries are what move the
+    #     decision off it. `train_acc` is not comparable across the commit that
+    #     removed the centring, in either direction -- see
+    #     `receiver.ScoreVolume`.
+    return ((lis_scores > 0).float() == lis_y).float().mean(1).cpu().numpy()
+
+
 def clip_gradients(pair, max_norm):
     """
     Clip each group's gradients to `max_norm` independently. See
@@ -444,20 +478,51 @@ def run(
                 lis_scores_xent = torch.cat((lis_scores[:, :1], lis_scores[:, midp:]), 1)
                 zeros = torch.zeros(batch_size, dtype=torch.int64, device=lis_scores.device)
                 this_loss = xent_criterion(lis_scores_xent, zeros)
-                lis_pred = lis_scores_xent.argmax(1)
-                per_game_acc = (lis_pred == 0).float().cpu().numpy()
-                this_acc = per_game_acc.mean()
             else:
                 this_loss = bce_criterion(lis_scores, lis_y)
-                # A fixed threshold at zero, against a score the readout no
-                #     longer centres. `score_bias` and the discriminators' own
-                #     asymmetries are what move the decision off it. `train_acc`
-                #     is not comparable across the commit that removed the
-                #     centring, in either direction -- see
-                #     `receiver.ScoreVolume`.
-                lis_pred = (lis_scores > 0).float()
-                per_game_acc = (lis_pred == lis_y).float().mean(1).cpu().numpy()
-                this_acc = per_game_acc.mean()
+
+            per_game_acc = per_game_accuracy(
+                lis_scores, lis_y, config['reference_game_xent']
+            )
+            this_acc = per_game_acc.mean()
+
+            # For `vis.report` at the end of the pass, and nothing else -- the
+            # accuracy above is `per_game_accuracy`'s, so this cannot drift from
+            # the metric the way it could when the two were computed together.
+            lis_pred = (
+                lis_scores_xent.argmax(1)
+                if config['reference_game_xent']
+                else (lis_scores > 0).float()
+            )
+
+            # The listener's image-only baseline: the same candidates scored
+            # against another game's message. Anything `acc` holds above this is
+            # what the channel is actually buying -- and without it a run cannot
+            # be read at all, because a listener that has stopped conditioning
+            # on the message still scores well above chance from the images
+            # alone. On the 2026-08-29 ShapeWorld run it reached 0.588 on shape
+            # concepts with the speaker emitting one message for every game.
+            #
+            # `roll` and not `randperm`: a permutation leaves about one game in
+            # `batch_size` holding its own message, which biases the baseline
+            # upwards by ~3% at 32. Rolling by one pairs nothing with itself and
+            # is reproducible without touching the run's RNG.
+            #
+            # Eval splits only. `torch.set_grad_enabled(training)` is already
+            # False here so this is a forward pass and no graph, but it re-embeds
+            # the candidates, and the train pass is where the compute is.
+            # `batch_size > 1` because rolling a batch of one pairs it with
+            # itself, which would report the live accuracy as the baseline. A
+            # trailing partial batch can be that small.
+            if not training and speaking and batch_size > 1:
+                shuffled_acc = per_game_accuracy(
+                    pair.receiver(lis_inp, torch.roll(lang, 1, 0)),
+                    lis_y,
+                    config['reference_game_xent'],
+                ).mean()
+                stats.update(
+                    shuffled_message_acc=shuffled_acc, batch_size=batch_size
+                )
 
             # Save language
             if config['use_lang']:
@@ -516,11 +581,16 @@ def run(
 
                 stats.update(
                     realised_survival=language_model.realised_survival,
+                    unmixed_survival=language_model.unmixed_survival,
+                    logit_margin=language_model.logit_margin,
                     logit_spread=language_model.logit_spread,
                     logit_scale=language_model.logit_scale.item(),
                     sampling_tau=language_model.sampling_tau.item(),
                     pool_effective_examples=prototyper.pool_effective_examples,
                     pool_score_norm=prototyper.pool_score_norm,
+                    pool_score_sd=prototyper.pool_score_sd,
+                    referent_spread=pair.sender.referent_spread,
+                    referent_spread_backbone=pair.sender.referent_spread_backbone,
                     polarity_separation=language_model.polarity_separation,
                     contrast_gate=(
                         contrast.contrast_gate.item()
@@ -640,10 +710,26 @@ def run(
     )
 
     # How much the language compresses. See docs/measurement.md.
+    #
+    # The count as well as the fraction, because the fraction cannot be read
+    # without knowing the split's size and the splits differ: 0.001 on a 1,000
+    # game eval split is one message and total collapse, while 0.0551 on 20,000
+    # training games is 1,102 messages -- which is *also* total collapse, being
+    # what a single message looks like after the Gumbel noise has corrupted it.
+    # One of those two numbers says so on its face.
     if speaking and len(all_lang) > 0:
         metrics["unique_message_fraction"] = (
             all_lang["lang"].nunique() / len(all_lang)
         )
+        metrics["unique_message_count"] = float(all_lang["lang"].nunique())
+
+    # The column has to exist on every eval pass whether or not any batch was
+    # large enough to roll, or a split that produced none would shift every
+    # column after it in the appended row. It cannot be NaN-filled per batch the
+    # way an absent module's is, because `Statistics` takes a running mean and
+    # one NaN would poison the average rather than mark a gap.
+    if not training and speaking:
+        metrics.setdefault("shuffled_message_acc", float("nan"))
 
     if collect and all_messages:
         concept_keys = concept_keys_from_true_lang(
