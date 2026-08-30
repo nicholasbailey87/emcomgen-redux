@@ -120,7 +120,7 @@ n_workers = 0
 # `test_acc_md_shape` / `test_acc_md_color` breakdown, never on the aggregate,
 # which reads the same for a language with one feature and for one with both.
 silhouette_p_sender = 0.0
-silhouette_p_receiver = 0.0
+silhouette_p_receiver = 0.1
 
 # The intensity a fully covered pixel comes back at, as a fraction of maximum,
 # in all three channels. Partly covered pixels scale down with their coverage.
