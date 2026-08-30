@@ -585,8 +585,8 @@ def run(
                     logit_margin=language_model.logit_margin,
                     logit_prior_share=language_model.logit_prior_share,
                     logit_spread=language_model.logit_spread,
-                    logit_scale=language_model.logit_scale.item(),
-                    sampling_tau=language_model.sampling_tau.item(),
+                    logit_scale=language_model.logit_scale,
+                    sampling_tau=language_model.tau,
                     pool_effective_examples=prototyper.pool_effective_examples,
                     pool_score_norm=prototyper.pool_score_norm,
                     pool_score_sd=prototyper.pool_score_sd,
@@ -818,11 +818,6 @@ def profile_train_epoch(run_args, active_steps, trace_path):
 
     wait, warmup = 3, 3
     _PROFILE_UNTIL = wait + warmup + active_steps
-
-    # `training_progress` is set per epoch in the training loop, and drives the
-    # speaker's tau schedule. Set it here too so the profiled step is the step
-    # epoch 0 would run, not one with an unset attribute.
-    run_args[0].sender.language_model.training_progress = 0.0
 
     profiler_schedule = torch.profiler.schedule(
         wait=wait, warmup=warmup, active=active_steps, repeat=1
@@ -1131,12 +1126,6 @@ if __name__ == "__main__":
             model_config['pair'].receiver.reset_parameters()
 
         metrics["epoch"] = epoch
-
-        # Position in the speaker's tau schedule, set here so it is recovered
-        #     from the epoch counter on resume. See `SenderGRULM.sampling_tau`.
-        model_config['pair'].sender.language_model.training_progress = (
-            epoch / max(config['scheduler']['epochs'] - 1, 1)
-        )
 
         # Train
         train_metrics, lang = run("train", epoch, *run_args)

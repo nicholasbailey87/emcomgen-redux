@@ -16,34 +16,39 @@ because it has nowhere to go but up:
     11     0.0064   0.0069   0.0069   0.0069   never left the plateau
     13     0.0099   0.0121   0.0121   0.2121   escaped late, ~epoch 20
 
-`logit_scale`, `contrast_gate` and `pool_score_norm` leave the plateau in the
-same epoch, so this is one event and not three: the speaker sharpens because the
-listener started to decode, and the listener decodes because the speaker
-sharpened. Ignition, not learning.
+`logit_scale`, `contrast_gate` and `pool_score_norm` used to leave the plateau
+in the same epoch, so this is one event and not three: the speaker sharpens
+because the listener started to decode, and the listener decodes because the
+speaker sharpened. Ignition, not learning. (The channel scale is a constant now,
+solved from `token_max_probability`, so only the other two still move -- see
+docs/channel.md.)
 
 Two readings fit the table equally well and the metrics cannot separate them:
 
   (a) *No gradient reaches the speaker.* Something about `SenderTransformerLM`
       or the modules under it attenuates the path from the loss back to the
-      prototyper and the channel scalar, so the speaker is stationary because
-      it is being told nothing.
+      prototyper, so the speaker is stationary because it is being told nothing.
 
   (b) *Gradient reaches it and cancels.* AdamW normalises by the second moment,
-      so a lone scalar moves about `lr` per step whatever its gradient's size,
-      and its travel over a run is `lr * steps` times the *net sign consistency*
-      of that gradient. A sign that flips batch to batch produces a stationary
-      parameter out of a perfectly healthy gradient. See
-      docs/training.md on reading `logit_scale`'s direction.
+      so a parameter moves about `lr` per step whatever its gradient's size, and
+      its travel over a run is `lr * steps` times the *net sign consistency* of
+      that gradient. A sign that flips batch to batch produces a stationary
+      parameter out of a perfectly healthy gradient.
 
-The distinguishing measurement is the sign, and nothing logged per epoch
-retains it. This script keeps it: at every optimiser step it records the
-gradient on `log_logit_scale`, the fraction of steps so far on which that
-gradient was negative -- negative meaning the loss is asking for the channel to
-open -- and the distance the parameter actually travelled. Under (a) the
-gradient norms into `sender.prototyper` and `sender.language_model` are orders
-of magnitude below the rungs that ignite. Under (b) they are comparable and
-`scale_grad_negative_fraction` sits near 0.5 while the rungs that ignite sit
-near 1.0.
+Nothing logged per epoch separates them, because a per-epoch column shows where
+a parameter got to and not what it was told. This script records the per-group
+gradient norms at every optimiser step, read after `scaler.unscale_` so they are
+in loss units and comparable across configs. Under (a) the norms into
+`sender.prototyper` and `sender.language_model` are orders of magnitude below the
+rungs that ignite; under (b) they are comparable and the parameters are still
+not moving.
+
+This used to carry a third reading off `log_logit_scale`'s gradient -- its sign
+consistency step by step, which was the sharpest single number here. That
+parameter no longer exists: the channel scale is a constant, so there is no
+gradient on it to read and the `scale_grad` columns are gone. The same question
+about any remaining lone scalar -- `log_score_scale`, `contrast_gate` -- would be
+asked the same way, and this script does not currently ask it.
 
 Rung 13 is the control that makes this worth running. It has the *same speaker
 as rung 09* -- `SenderTransformerLM`, 320 wide, four layers -- and differs only
@@ -99,14 +104,13 @@ import paths  # noqa: E402
 
 
 # Logical parameter groups, in the order they appear in the CSV. A parameter is
-# assigned to the *first* prefix that matches, so the more specific
-# `log_logit_scale` entry has to precede the language model it lives on.
+# assigned to the *first* prefix that matches, so a more specific entry has to
+# precede the module it lives on.
 GROUPS = OrderedDict(
     [
         ("sender_vision", ("sender.feat_model",)),
         ("sender_prototyper", ("sender.prototyper",)),
         ("sender_contrast", ("sender.contrast",)),
-        ("sender_logit_scale", ("sender.language_model.log_logit_scale",)),
         ("sender_language_model", ("sender.language_model",)),
         ("receiver_vision", ("receiver.feature_model",)),
         ("receiver_token_embedding", ("receiver.token_embedding",)),
@@ -171,7 +175,7 @@ def diagnostics(pair):
     return {
         "realised_survival": language_model.realised_survival,
         "logit_spread": language_model.logit_spread,
-        "logit_scale": language_model.logit_scale.item(),
+        "logit_scale": language_model.logit_scale,
         "pool_effective_examples": getattr(
             prototyper, "pool_effective_examples", unmeasured
         ),
@@ -209,8 +213,6 @@ def audit(config_path, steps, seed, out_dir, device):
         pair.sender.feat_model.compile()
         pair.receiver.feature_model.compile()
 
-    log_logit_scale = pair.sender.language_model.log_logit_scale
-
     accumulator_steps = config["optimiser"]["accumulator_steps"]
     reference_game_xent = config["reference_game_xent"]
     bce = nn.BCEWithLogitsLoss()
@@ -230,14 +232,12 @@ def audit(config_path, steps, seed, out_dir, device):
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     columns = (
-        ["step", "loss", "acc", "scale_grad", "scale_grad_negative_fraction",
-         "scale_travel"]
+        ["step", "loss", "acc"]
         + [f"grad_{group}" for group in GROUPS]
         + sorted(diagnostics(pair))
     )
 
     pair.train()
-    negative_steps = 0
     taken = 0
     micro = 0
 
@@ -295,27 +295,17 @@ def audit(config_path, steps, seed, out_dir, device):
                 #     across configs.
                 scaler.unscale_(optimiser)
 
-                scale_grad = (
-                    float("nan") if log_logit_scale.grad is None
-                    else log_logit_scale.grad.item()
-                )
-                if scale_grad < 0:
-                    negative_steps += 1
-
                 norms = grad_norms(pair)
                 measured = diagnostics(pair)
 
-                before = log_logit_scale.detach().clone()
                 scaler.step(optimiser)
                 scaler.update()
                 optimiser.zero_grad(set_to_none=True)
-                travel = (log_logit_scale.detach() - before).item()
 
                 taken += 1
 
                 row = (
-                    [taken, loss.item(), accuracy, scale_grad,
-                     negative_steps / taken, travel]
+                    [taken, loss.item(), accuracy]
                     + [norms[group] for group in GROUPS]
                     + [measured[key] for key in sorted(measured)]
                 )
@@ -326,8 +316,7 @@ def audit(config_path, steps, seed, out_dir, device):
                     print(
                         f"  {stem} step {taken:>5}/{steps}  "
                         f"loss={loss.item():.4f}  "
-                        f"scale_grad<0 on {negative_steps / taken:.1%} of steps  "
-                        f"scale={measured['logit_scale']:.4f}  "
+                        f"speaker_grad={norms['sender_language_model']:.3e}  "
                         f"survival={measured['realised_survival']:.3f}",
                         flush=True,
                     )

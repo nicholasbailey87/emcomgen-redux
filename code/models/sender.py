@@ -10,8 +10,9 @@ Speaker models: a GRU language model as in "Emergent Communication of
     overwriting each slot with its symbol as it commits. See
     docs/architecture.md.
 
-The Gumbel channel -- `layer_norm_logits`, `logit_scale`, `uniform_weight`,
-    `sampling_tau` and their diagnostics -- is documented in docs/channel.md.
+The channel -- `layer_norm_logits`, `logit_scale`, `uniform_weight`, the two
+    gradient estimators and their diagnostics -- is documented in
+    docs/channel.md.
 """
 
 import math
@@ -56,14 +57,6 @@ def trim_messages(token_id_rows):
 #     as a speaker's logit scale collapses. See docs/channel.md.
 LAYER_NORM_EPS = 1e-12
 
-# The bisection in `logit_scale`, sized so the solve is deterministic and
-#     resolves to better than one part in 10^4. See docs/channel.md.
-ENERGY_SOLVE_SAMPLES = 65536
-ENERGY_SOLVE_SEED = 0
-ENERGY_SOLVE_STEPS = 48
-ENERGY_SCALE_MIN = 1e-3
-ENERGY_SCALE_MAX = 1e3
-
 
 def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
     """
@@ -95,112 +88,90 @@ def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
     )
 
 
-def initial_logit_sample(vocabulary: int) -> torch.Tensor:
+def sharpest_logit_margin(vocabulary: int) -> float:
     """
-    A fixed draw of the logits a *freshly initialised* speaker produces, which
-        after `layer_norm_logits` are i.i.d. standard normal.
+    The largest top-two gap `layer_norm_logits` permits, in units of the logits'
+        own standard deviation.
 
-    Drawn once from a fixed seed and reused across the whole bisection in
-        `logit_scale`, so the solve is deterministic and exactly monotone in the
-        scale. See docs/channel.md.
+    The normaliser pins the emittable logits to zero mean and unit variance, and
+        the most concentrated arrangement satisfying both is one token at
+        `sqrt(V - 1)` with the remaining `V - 1` at `-1/sqrt(V - 1)`: the mean is
+        `(sqrt(V-1) - (V-1)/sqrt(V-1)) / V = 0` and the variance is
+        `((V-1) + (V-1)/(V-1)) / V = 1`. Its margin is the sum of those two, which
+        simplifies to `V / sqrt(V - 1)` -- 3.883 at V = 14, 4.588 at V = 20.
+
+    This is a *hard* bound rather than a typical value, and it is what makes
+        `logit_scale` below a cap rather than a hope: the speaker can spend its
+        whole shape budget on one token and still not exceed it.
 
     Args:
         vocabulary: number of emittable tokens
 
     Returns:
-        A (samples, vocabulary) tensor of standard normal logits
+        The margin, in standard deviations
     """
-    generator = torch.Generator().manual_seed(ENERGY_SOLVE_SEED)
-    return torch.randn(
-        ENERGY_SOLVE_SAMPLES, vocabulary, generator=generator
-    )
+    return vocabulary / math.sqrt(vocabulary - 1)
 
 
-def initial_energy(
-    scale: float,
-    vocabulary: int,
-    uniform_weight: float,
-    sample: Optional[torch.Tensor] = None,
-) -> float:
+def logit_scale(token_max_probability: float, vocabulary: int) -> float:
     """
-    The fraction of the maximum possible entropy a fresh speaker's per-position
-        distribution retains, once scaled and uniform-mixed.
+    The constant the normalised logits are multiplied by before sampling, solved
+        so that no speaker can ever hold a token with probability above
+        `token_max_probability`.
 
-    `H(p) / log2(V)`, so 1.0 is a uniform speaker and 0.0 one that emits a
-        single token with certainty. This is what `init_energy` names.
+    **What this bounds, and why that is the quantity.**
+        `F.gumbel_softmax(hard=True)` differentiates the *soft* sample, whose
+        Jacobian is `diag(p) - p pT`, and `flatten_logit_distribution` is a
+        convex mixture in probability space -- so the estimator's Jacobian is
+        `(1 - w)(diag(p) - p pT)` in the winner's probability *before* the
+        uniform mixture. `uniform_weight` caps what the listener receives at
+        `1 - w + w/V` and does nothing at all to the backward pass. `p` is
+        therefore the number to bound, and `unmixed_survival` is the column that
+        reports it. See docs/channel.md and docs/measurement.md.
+
+    **Why a cap and not a starting point.** This used to be `init_energy`: an
+        entropy fraction solved by bisection, giving a scale the speaker then
+        learned from. Two things were wrong with that. The learned scale has a
+        monotone incentive -- sharper always helps the current batch and nothing
+        in the objective pushes back -- so it climbs until the estimator is shut,
+        which is what the 2026-08-29 ShapeWorld run did at a scale of 3.046.
+        And it was never needed: `layer_norm_logits` already bounds the shape, so
+        at a scale of *one* the cap is 0.789 at V = 14, above the 0.703 the old
+        default's solved 0.882 permitted. The scale's only job was to move that
+        cap, and the shipped setting moved it down.
+
+    **What it costs.** Fidelity saturates long before `p` does, so the top of the
+        range is nearly free to give up. At V = 14, w = 0.1:
+
+            p     scale   realised cap   gradient vs p = 0.70
+            0.70  0.879   0.637          1.00x
+            0.95  1.419   0.862          0.17x
+            0.99  1.844   0.898          0.033x
+            0.9999 3.033  0.907          0.0003x
+
+        Past 0.95 the speaker pays 5x in `1 - p` for 0.04 of message fidelity.
+        0.95 is the shipped default and is a design decision, not a derived
+        bound.
+
+    Closed form rather than a bisection: set `softmax(c * shape)`'s winner to
+        `p` for the sharpest shape `sharpest_logit_margin` describes and solve
+        for `c`. The runners-up are all equal there, so
+        `p = 1 / (1 + (V - 1) exp(-c * margin))`, which inverts exactly.
 
     Args:
-        scale: the multiplier applied to the normalised logits
+        token_max_probability: `sender_language_model.token_max_probability`,
+            in `(1/V, 1)` -- at or below `1/V` there is no scale that flattens
+            a distribution that far, and at 1 the scale is infinite.
+            `parse_config.validate_config` enforces both bounds.
         vocabulary: number of emittable tokens
-        uniform_weight: as in `flatten_logit_distribution`
-        sample: reuse a draw from `initial_logit_sample` rather than taking a
-            fresh one -- the bisection passes the same sample at every step
 
     Returns:
-        The retained entropy fraction, in [0, 1]
+        The multiplier, a plain float. It does not change over a run.
     """
-    if sample is None:
-        sample = initial_logit_sample(vocabulary)
-
-    probabilities = torch.softmax(scale * sample, dim=-1)
-    probabilities = (
-        (1.0 - uniform_weight) * probabilities + uniform_weight / vocabulary
+    odds = (vocabulary - 1) * token_max_probability / (
+        1.0 - token_max_probability
     )
-    entropy = -(
-        probabilities * probabilities.clamp_min(1e-30).log2()
-    ).sum(-1).mean()
-
-    return (entropy / math.log2(vocabulary)).item()
-
-
-def logit_scale(
-    init_energy: float, vocabulary: int, uniform_weight: float
-) -> float:
-    """
-    The constant the normalised logits are multiplied by before sampling,
-        resolved by bisection so that a fresh speaker retains `init_energy` of
-        its maximum entropy.
-
-    This is the exploration control. Why entropy rather than capacity or a
-        symbol error rate, why a numerical solve rather than a closed form, and
-        how the default was arrived at are all in docs/channel.md.
-
-    Args:
-        init_energy: `sender_language_model.init_energy` from the config,
-            a fraction in (0, 1] -- 0.9 means "retain 90% of maximum entropy"
-        vocabulary: number of emittable tokens
-        uniform_weight: as in `flatten_logit_distribution`
-
-    Returns:
-        The multiplier, a plain float. It is the speaker's *initial* scale: each
-            speaker stores its log in `log_logit_scale` and learns from there.
-    """
-    sample = initial_logit_sample(vocabulary)
-
-    floor = initial_energy(
-        ENERGY_SCALE_MAX, vocabulary, uniform_weight, sample
-    )
-    if init_energy < floor:
-        warnings.warn(
-            f"`init_energy` of {init_energy} is below the floor of "
-            f"{floor:.4f} imposed by `uniform_weight` of {uniform_weight} at a "
-            f"vocabulary of {vocabulary}. The scale will pin at "
-            f"{ENERGY_SCALE_MAX} and the speaker will start at the floor "
-            f"rather than at the requested entropy. Lower `uniform_weight` to "
-            f"ask for less."
-        )
-
-    low, high = ENERGY_SCALE_MIN, ENERGY_SCALE_MAX
-    for _ in range(ENERGY_SOLVE_STEPS):
-        middle = math.sqrt(low * high)
-        if initial_energy(middle, vocabulary, uniform_weight, sample) > (
-            init_energy
-        ):
-            low = middle
-        else:
-            high = middle
-
-    return math.sqrt(low * high)
+    return math.log(odds) / sharpest_logit_margin(vocabulary)
 
 
 def mask_reserved_tokens(logits: torch.Tensor) -> torch.Tensor:
@@ -273,7 +244,7 @@ def flatten_logit_distribution(
 
 def mean_winning_probability(
     logits: torch.Tensor,
-    scale: torch.Tensor,
+    scale: float,
     uniform_weight: float,
 ) -> torch.Tensor:
     """
@@ -285,12 +256,11 @@ def mean_winning_probability(
         pins the identity. Applies the real pipeline in the real order -- scale
         first, then the uniform mixture -- so the mixture's bounds hold.
 
-    Purely a measurement; pass the scale detached.
+    Purely a measurement.
 
     Args:
         logits: (..., vocabulary + 4), reserved tokens already masked to -inf
-        scale: the multiplier applied before mixing, i.e. `logit_scale`,
-            detached
+        scale: the multiplier applied before mixing, i.e. `logit_scale`
         uniform_weight: as in `flatten_logit_distribution`
 
     Returns:
@@ -321,6 +291,13 @@ def mean_logit_margin(logits: torch.Tensor) -> torch.Tensor:
         logits, taken before the normaliser divides exactly that back out, so it
         reads the head's output magnitude and would report the same for a head
         that grew uniformly as for one that grew a spike.
+
+        With `logit_scale` now constant for a whole run, this is the *only*
+        route left: a speaker sharpens by growing its margin and by nothing
+        else. `sharpest_logit_margin` is where that stops, and `logit_scale` is
+        solved against exactly that value, so `scale * margin` -- and with it
+        `unmixed_survival` -- is bounded by `token_max_probability` however hard
+        the head pushes.
 
     Taken on the emittable slice only, and *after* `layer_norm_logits`, so the
         result is already in units of the logits' own standard deviation and
@@ -362,10 +339,13 @@ def logit_prior_share(logits: torch.Tensor) -> torch.Tensor:
     **Why the shape budget is worth watching at all.** The most concentrated
         distribution the normaliser permits is one token at `sqrt(V-1)` and the
         rest at `-1/sqrt(V-1)` -- a margin of 3.883 sd at V = 14, which reaches
-        survival 0.717 against the 0.907 ceiling at a `logit_scale` of *one*.
-        The 2026-08-29 ShapeWorld run had used 86% of that budget. So fidelity
-        does not have to come from the scale, no clamp on the scale would have
-        caught it, and shape spent on confidence is shape not spent on meaning.
+        unmixed survival 0.789 at a `logit_scale` of *one*. The 2026-08-29
+        ShapeWorld run had used 86% of that budget. So fidelity does not have to
+        come from the scale, and a bound on the scale chosen against a *typical*
+        shape would not have caught that run -- which is why `logit_scale` is
+        solved against `sharpest_logit_margin` instead. Shape spent on
+        confidence is still shape not spent on meaning, and that this column is
+        what says so is unchanged.
 
     The cheapest way to buy input-independent shape is `outputs2vocab.bias`,
         which sits before the normaliser and so survives it as a fixed pattern,
@@ -798,29 +778,19 @@ class GumbelChannel:
     """
     The exploration channel both speakers send through. See docs/channel.md.
 
-    A mixin rather than a submodule: `log_logit_scale` stays registered on the
-        speaker itself, so `state_dict` keys -- and every checkpoint written
-        against them -- are unchanged.
+    A mixin rather than a submodule, and one that holds no state: the channel is
+        a constant multiplier and an estimator name, both settled at
+        construction. Nothing here appears in `state_dict`.
     """
 
-    def _init_channel(self, init_energy, vocabulary, uniform_weight):
+    def _init_channel(self, token_max_probability, vocabulary, estimator):
         """
-        Call from `__init__` where the parameter should be created: creation
-            order fixes which RNG draw every later parameter gets, so moving
-            this moves a speaker's initialisation.
+        Call from `__init__`. Holds no parameters and no buffers, so it draws no
+            RNG and adds nothing to `state_dict`; the channel is two plain
+            attributes read at the sampler.
         """
-        # Stored as its log so that `exp` keeps it strictly positive.
-        self.initial_logit_scale = logit_scale(
-            init_energy, vocabulary, uniform_weight
-        )
-        self.log_logit_scale = nn.Parameter(
-            torch.tensor(self.initial_logit_scale).log()
-        )
-
-        # Fraction of training elapsed, set once per epoch by `train.py`. A
-        #     position in a schedule, not state: recovered from the epoch counter
-        #     on resume.
-        self.training_progress = 0.0
+        self.logit_scale = logit_scale(token_max_probability, vocabulary)
+        self.estimator = estimator
 
         self.reset_channel_diagnostics()
 
@@ -837,79 +807,6 @@ class GumbelChannel:
         self.logit_spread = float("nan")
         self.polarity_separation = float("nan")
 
-    def reset_logit_scale(self):
-        """
-        Put the learned scale back to the value `init_energy` solved for, so a
-            reset does not leave a trained channel behind a fresh speaker.
-        """
-        with torch.no_grad():
-            self.log_logit_scale.fill_(math.log(self.initial_logit_scale))
-
-    @property
-    def sampling_tau(self):
-        """
-        The temperature handed to `gumbel_softmax`. Currently the configured
-            `tau` and nothing else -- the coupling to `logit_scale` below is
-            commented out, and the column is flat for the whole of any run.
-
-        **What the dead lines did**, since `0603e27` left them in deliberately
-            and reinstating them is uncommenting five lines:
-
-            ratio  = max(logit_scale / initial_logit_scale, 1)
-            weight = (1 + cos(pi * training_progress)) / 2
-            tau    = configured_tau * (1 + weight * (ratio - 1))
-
-        `tau` shapes the soft sample the straight-through estimator
-            differentiates and leaves the hard forward sample alone, since the
-            emitted symbol is `argmax(logits + g)` for any positive tau. So this
-            is a pure backward knob, and holding it fixed while the speaker
-            triples its scale is what lets the surrogate saturate: the Jacobian
-            `diag(p) - p pT` goes to zero and every speaker gradient with it.
-            `17ae9f9` added the coupling for exactly that reason, measuring the
-            effective token count holding at 9.0-9.5 across the range rather than
-            falling from 4.9 to 1.6.
-
-        **Why it is off.** Under the coupling the surrogate reduces to
-            `softmax(L + g / scale)`, and `layer_norm_logits` pins `L` to unit
-            variance, so the scale leaves the signal term entirely. The only
-            gradient `log_logit_scale` still receives is through `g / scale` --
-            "these particular Gumbel draws would have hurt less had I been
-            louder" -- which is a different answer every batch. It is a pin, not
-            a floor: rung 9 moved `log_logit_scale` by -0.008 over ten epochs,
-            0.2% of its travel bound, at chance throughout.
-
-        Reinstating it trades one failure for the other, and both have now been
-            observed. `0603e27` predicted the cost with a named tell -- the
-            speaker's stack stalling after the scale is high, `pool_score_norm`
-            and `polarity_separation` flattening while `logit_scale` and
-            `realised_survival` keep climbing -- and
-            `shapeworld-post-silhouette-update.csv` fired it exactly, from epoch
-            21. What that run also shows is that the traverse the removal was
-            meant to buy was never step-limited: the scale moved 0.05-0.09
-            log-units in epochs 1-4 and 0.010-0.014 in the stall at 5-6, against
-            a bound of at least 0.28. It was gradient-limited, and the pin was
-            not what held it.
-
-        See docs/channel.md, and `logit_margin` in docs/measurement.md for the
-            column that now measures the saturation directly.
-        """
-        # `torch.as_tensor` only so `train.py`'s `.item()` still works.
-        return torch.as_tensor(self.tau)
-        # ratio = torch.clamp(
-        #     self.logit_scale.detach() / self.initial_logit_scale, min=1.0
-        # )
-        # weight = 0.5 * (1.0 + math.cos(math.pi * min(self.training_progress, 1.0)))
-        # return self.tau * (1.0 + weight * (ratio - 1.0))
-
-    @property
-    def logit_scale(self):
-        """
-        The multiplier applied to the normalised logits before sampling, always
-            positive. Read here rather than exponentiating at the use sites, so
-            they and the survival diagnostic cannot drift apart.
-        """
-        return self.log_logit_scale.exp()
-
     def reserved_onehot(self, index, batch_size, device):
         onehot = torch.zeros(
             batch_size,
@@ -924,44 +821,84 @@ class GumbelChannel:
         """Taken *before* normalisation, which is the whole point of it."""
         return logits[..., 4:].detach().float().std(-1).mean()
 
+    def _gumbel_sample(self, normalised):
+        """
+        The forward sampler, shared by both estimators so that neither can drift
+            from the other: at the same seed a gumbel run and an identity run
+            emit *identical* messages, which is what makes an A/B between them a
+            control rather than two different runs.
+
+        The order is not interchangeable. Scaling the *masked* logits rather
+            than re-masking after the scale sends `-inf` into the arithmetic and
+            NaN out of it. See docs/channel.md.
+
+        `hard=True` emits `argmax(logits + g)` with `g ~ Gumbel(0, 1)`, so the
+            symbol is invariant to `tau`: `tau` shapes the soft surrogate the
+            gumbel estimator differentiates and nothing else, and on the identity
+            branch -- which discards that surrogate -- it does nothing at all.
+
+        Args:
+            normalised: (..., vocabulary + 4) from `layer_norm_logits`, reserved
+                tokens not yet masked
+
+        Returns:
+            A hard one-hot of the same shape
+        """
+        scaled = mask_reserved_tokens(normalised * self.logit_scale)
+
+        if self.uniform_weight > 0.0:
+            scaled = flatten_logit_distribution(scaled, self.uniform_weight)
+
+        return F.gumbel_softmax(scaled, tau=self.tau, hard=True, dim=-1)
+
     def sample_symbols(self, logits):
         """
-        Turn one step's (or one message's) logits into symbols.
+        Turn one step's (or one message's) logits into symbols, under whichever
+            gradient estimator `sender_language_model.estimator` names.
 
         Returns `(onehot, pre_gain_logits)` -- the masked, normalised, *un*scaled
             logits the survival diagnostic is measured from, or None outside
             training. Callers pool it over positions themselves.
 
-        The order is not interchangeable. Scaling the *masked* logits rather
-            than re-masking after the scale sends `-inf` into the gradient
-            w.r.t. the scale, which becomes NaN and makes `GradScaler` skip
-            every step -- silently, except for a frozen `logit_spread`. See
-            docs/channel.md.
+        **`"gumbel"`** is the estimator this model has always used: the hard
+            one-hot forward, and backward through the soft sample
+            `gumbel_softmax` builds on the way, whose Jacobian is
+            `diag(p) - p pT`.
 
-        The gain is a plain product. `7b10d47` put it through a
-            straight-through helper instead -- forward `normalised *
-            logit_scale`, backward `d/dnormalised = 1` -- so that a scale
-            sliding down would not multiply down the gradient reaching this
-            speaker's stack and vision model. Two things say that was answering
-            a coupling which never reached the optimiser:
+        **`"identity"`** keeps that forward exactly and replaces the backward
+            with `I`:
 
-            AdamW updates by `m / sqrt(v)`, and a uniform factor on a
-            parameter's gradient scales both, so it cancels. `clip_gradients`
-            then renormalises each submodule to `clip_grad_norm` whenever it
-            binds -- the ablation recorded speaker norms around 10 against a
-            ceiling of 1.0, so it binds -- which erases any remaining uniform
-            factor before the optimiser sees the gradient at all.
+                y = onehot.detach() + z - z.detach()
 
-            What the helper did cost is consistency. `dL/dlogit_scale = x` is
-            the true partial while `dL/dnormalised = J` is not, the truth being
-            `logit_scale * J`, so the pair is not the gradient of anything and
-            the stack was shaped for a channel of volume 1 whatever the forward
-            actually used. See docs/anecdotes.md.
+            The sample is unchanged and still faithful -- `argmax(z + g)` *is* a
+            categorical draw from `softmax(z)` -- so this changes what the
+            speaker learns from, not what it says.
 
-            The forward is unchanged either way, so the channel's fidelity
-            against the fixed 1.283 Gumbel noise floor -- the scale's real job
-            -- is untouched, and so is `dL/dlogit_scale` and the covariance
-            `scripts/ignition_audit.py` measures from it.
+        **Why.** The soft Jacobian's cost is its *rank*, not its size. The
+            per-token gradients are summed into one vector before they reach the
+            language model and the vision trunk, and `diag(p) - p pT` at
+            `p ~ onehot` has rank ~1, so all but one direction is destroyed
+            before any optimiser or clipper sees it and the trunk hears a single
+            token's opinion. Magnitude, by contrast, largely cancels: AdamW
+            updates by `m / sqrt(v)`, and `clip_gradients` renormalises what
+            survives. `logit_scale` bounds how far `p` can concentrate and so
+            bounds the damage, but only the identity estimator removes it. Under
+            it the speaker's gradient is `dL/dy` -- the receiver's per-token
+            embedding sensitivity -- which is full rank and the same size however
+            sharp the speaker has become.
+
+        **The surrogate is built on the emittable slice.** `masked` holds `-inf`
+            in the four reserved columns and `-inf - (-inf)` is NaN. Slicing also
+            stops those columns receiving gradient at all: they are constants
+            from the sampler's point of view, so `outputs2vocab` rows 0-3 and the
+            stack behind them are never trained toward tokens that cannot be
+            emitted.
+
+        **It taps the unscaled logits**, so `dL/dz` is exactly `dL/dy`. Tapping
+            the scaled ones would multiply the whole speaker's gradient by
+            `logit_scale`, which is uniform and therefore harmless, but it would
+            also make the estimator's gradient depend on a constant the forward
+            value does not depend on. See docs/channel.md.
         """
         normalised = layer_norm_logits(logits, self.vocabulary)
         masked = mask_reserved_tokens(normalised)
@@ -974,20 +911,27 @@ class GumbelChannel:
                 None,
             )
 
-        scaled = mask_reserved_tokens(normalised * self.logit_scale)
+        if self.estimator == "identity":
+            # No graph through the sampler at all: the surrogate below is the
+            #     only path back to the speaker.
+            with torch.no_grad():
+                onehot = self._gumbel_sample(normalised)
 
-        if self.uniform_weight > 0.0:
-            scaled = flatten_logit_distribution(scaled, self.uniform_weight)
-
-        # `argmax(logits + noise)` with a straight-through gradient. `tau`
-        #     rescales the *soft* sample only; the hard forward sample is an
-        #     argmax and so invariant to it.
-        onehot = F.gumbel_softmax(
-            scaled,
-            tau=self.sampling_tau,
-            hard=True,
-            dim=-1
-        )
+            # The bracketing is load-bearing. `onehot + z - z.detach()`
+            #     associates left, so it computes `(1 + z) - z`, which in
+            #     float32 is 1.0000001 rather than 1 -- a real perturbation of
+            #     the message, on the winning token, every step. Forming the
+            #     zero first makes the addition exact.
+            emittable = normalised[..., 4:]
+            onehot = torch.cat(
+                [
+                    onehot[..., :4],
+                    onehot[..., 4:] + (emittable - emittable.detach()),
+                ],
+                dim=-1,
+            )
+        else:
+            onehot = self._gumbel_sample(normalised)
 
         return onehot, masked.detach()
 
@@ -997,17 +941,23 @@ class GumbelChannel:
             mixture applied, the same thing without it, and the two shape
             readings that say what the fidelity was bought with.
 
-        `unmixed_survival` is the *straight-through* quantity.
-            `gumbel_softmax(hard=True)` differentiates the soft sample, whose
-            Jacobian is `diag(p) - p pT`, so `1 - p` is the factor every
-            speaker gradient is multiplied by -- and `p` there is the winner's
-            probability before `flatten_logit_distribution` mixes in the
-            uniform. The mixture hides it: `realised_survival` is capped at
+        `unmixed_survival` is the quantity `estimator = "gumbel"` differentiates
+            through. That branch takes the soft sample's Jacobian
+            `diag(p) - p pT`, and `flatten_logit_distribution` is a convex
+            mixture in probability space, so the estimator's Jacobian is
+            `(1 - w)(diag(p) - p pT)` in the winner's probability *before* the
+            mixture. The mixture hides it: `realised_survival` is capped at
             `(1 - w) + w / V`, which is 0.90714 at the ShapeWorld default, and
             a run pinned against that cap reads as 0.9067 while the probability
-            that actually sets the gradient is 0.99951. Two orders of magnitude
-            of attenuation, invisible in the mixed column. Same function, same
-            order of operations, mixture off.
+            that actually shapes the gradient is 0.99951. Two orders of
+            magnitude, invisible in the mixed column. Same function, same order
+            of operations, mixture off.
+
+            `logit_scale` now bounds it -- `token_max_probability` is exactly a
+            ceiling on this column -- and under `estimator = "identity"` it
+            leaves the backward pass altogether: that branch's Jacobian is `I`
+            whatever `p` reads. It is still worth watching there, as the
+            channel's fidelity, but it is no longer a gradient diagnostic.
 
         `logit_margin` and `logit_prior_share` are the shape pair. The first is
             how concentrated the distribution is, the second how much of that
@@ -1018,13 +968,12 @@ class GumbelChannel:
             cases.
         """
         detached = pre_gain_logits.float()
-        scale = self.logit_scale.detach()
 
         self.realised_survival = mean_winning_probability(
-            detached, scale, self.uniform_weight
+            detached, self.logit_scale, self.uniform_weight
         ).item()
         self.unmixed_survival = mean_winning_probability(
-            detached, scale, 0.0
+            detached, self.logit_scale, 0.0
         ).item()
         self.logit_margin = mean_logit_margin(detached).item()
         self.logit_prior_share = logit_prior_share(detached).item()
@@ -1042,8 +991,9 @@ class SenderGRULM(GumbelChannel, nn.Module):
         self.d_model = kwargs["d_model"]
         self.vocabulary = kwargs["vocabulary"]
         self.message_length = kwargs["message_length"]
-        # The configured tau. The tau actually passed to `gumbel_softmax` is
-        #     the `sampling_tau` property below, which tracks the learned scale.
+        # Gradient shaping only: the emitted symbol is an argmax and so is
+        #     invariant to it, and `estimator = "identity"` discards the soft
+        #     sample it shapes. See `sample_symbols`.
         self.tau = kwargs["tau"]
         self.uniform_weight = kwargs["uniform_weight"]
         self.dropout = kwargs["dropout"]
@@ -1052,7 +1002,7 @@ class SenderGRULM(GumbelChannel, nn.Module):
         self.directions = 2 if self.bidirectional else 1
 
         self._init_channel(
-            kwargs["init_energy"], self.vocabulary, self.uniform_weight
+            kwargs["token_max_probability"], self.vocabulary, kwargs["estimator"]
         )
 
         self.gru = nn.GRU(
@@ -1190,7 +1140,6 @@ class SenderGRULM(GumbelChannel, nn.Module):
         self.gru.reset_parameters()
         self.outputs2vocab.reset_parameters()
         self.token_embedding.reset_parameters()
-        self.reset_logit_scale()
         self.reset_channel_diagnostics()
 
 
@@ -1213,8 +1162,9 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
         self.d_model = kwargs["d_model"]
         self.vocabulary = kwargs["vocabulary"]
         self.message_length = kwargs["message_length"]
-        # The configured tau. The tau actually passed to `gumbel_softmax` is
-        #     the `sampling_tau` property below, which tracks the learned scale.
+        # Gradient shaping only: the emitted symbol is an argmax and so is
+        #     invariant to it, and `estimator = "identity"` discards the soft
+        #     sample it shapes. See `sample_symbols`.
         self.tau = kwargs["tau"]
         self.uniform_weight = kwargs["uniform_weight"]
         self.dropout = kwargs["dropout"]
@@ -1254,7 +1204,7 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
         )
 
         self._init_channel(
-            kwargs["init_energy"], self.vocabulary, self.uniform_weight
+            kwargs["token_max_probability"], self.vocabulary, kwargs["estimator"]
         )
 
         if self.referent_embedding_size != self.token_embedding_size:
@@ -1684,7 +1634,6 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
             self.token_embedding.reset_parameters()
 
         self.outputs2vocab.reset_parameters()
-        self.reset_logit_scale()
         self.reset_channel_diagnostics()
 
 

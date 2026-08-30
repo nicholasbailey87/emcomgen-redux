@@ -73,14 +73,16 @@ def standardise(scores):
 
 class ScoreVolume:
     """
-    The listener's one degree of freedom over how loudly it states a conclusion,
-        and the counterpart of the speaker's `GumbelChannel.logit_scale`. See
-        docs/architecture.md.
+    The listener's one degree of freedom over how loudly it states a conclusion.
+        It was once the counterpart of the speaker's `GumbelChannel.logit_scale`,
+        and is now the only learned scalar of the two: the speaker's is a
+        constant solved from `token_max_probability`. See docs/architecture.md
+        and docs/channel.md.
 
-    A mixin rather than a submodule, for the same reason `GumbelChannel` is one:
-        `log_score_scale` stays registered on the discriminator itself, so the
-        `state_dict` key is the one `split_out_parameter` matches by suffix and
-        the one earlier checkpoints were written against.
+    A mixin rather than a submodule: `log_score_scale` stays registered on the
+        discriminator itself, so the `state_dict` key is the one
+        `split_out_parameter` matches by suffix and the one earlier checkpoints
+        were written against.
 
     The readout is `score_scale * scores + score_bias`: a volume and an offset,
         in that order. The scalar still sits in front of a normalised quantity
@@ -125,7 +127,9 @@ class ScoreVolume:
         chance for ten epochs with `train_loss` at 0.6935 against `ln 2` =
         0.6931 -- the trivial optimum of scoring everything near zero, which is
         the point an offset gets you *to*. There was no headroom in it. That
-        flat start was `sampling_tau` pinning `log_logit_scale`.
+        flat start was the tau coupling pinning the speaker's then-learned
+        channel scale, which has since been removed along with the learned
+        scale itself. See docs/channel.md.
 
     **Why not standardise the score.** `7b10d47` read out
         `score_scale * standardise(scores)`, dividing each game by the spread of
@@ -1008,7 +1012,7 @@ class Receiver(nn.Module):
         Applied once here and handed to both slots, rather than inside each,
             so a configuration cannot silently regularise twice. The message
             operand is left alone: it already arrives through the Gumbel
-            channel, whose noise `sampling_tau` and `uniform_weight` calibrate,
+            channel, whose noise `logit_scale` and `uniform_weight` calibrate,
             and a mask on top is a second and uncalibrated perturbation of a
             signal that has one.
 

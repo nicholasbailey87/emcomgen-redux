@@ -131,6 +131,14 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
 # ladder, which carries every change. See the rung headers for where each number
 # comes from.
 #
+# **Every speaker language model here lost one parameter on 2026-08-30**, when
+# `log_logit_scale` stopped being learned: the channel scale is a constant solved
+# from `token_max_probability` at construction and is not in `state_dict` at all.
+# So each `sender.language_model` count below is one lower than the figure the
+# rung headers and docs quote, and the rung headers are the ones to trust for the
+# *ratio* between the arms, which is unchanged because both arms lost the same
+# one parameter. See docs/channel.md.
+#
 # **Every number here was re-measured when the ladder was rebuilt.** The counts
 # this file used to carry for rungs 11 to 14 had gone stale -- they predated the
 # removal of the absolute position tables and the `ff_inner_size` 554 -> 576
@@ -142,7 +150,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
     [
         # ShapeWorld: the CNN/GRU baseline.
         ("01_shapeworld_baseline.toml", "sender.feat_model", 11_168_832),
-        ("01_shapeworld_baseline.toml", "sender.language_model", 5_764_923),
+        ("01_shapeworld_baseline.toml", "sender.language_model", 5_764_922),
         # The listener is two modules: `receiver.language_model` encodes the
         # message and `receiver.discriminator` scores the candidates from it.
         #
@@ -168,19 +176,19 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # causal arm at six blocks -- see rung 9's `layers` for why six, and why
         # it was four until the blocks stopped cross-attending.
         ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 10_317_986),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 5_854_089),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 5_854_088),
         ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_784_566),
         ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_548_294),
         # CUB: the CNN/GRU baseline.
         ("02_birds_baseline.toml", "sender.feat_model", 11_176_512),
-        ("02_birds_baseline.toml", "sender.language_model", 5_774_073),
+        ("02_birds_baseline.toml", "sender.language_model", 5_774_072),
         ("02_birds_baseline.toml", "receiver.language_model", 4_687_872),
         ("02_birds_baseline.toml", "receiver.discriminator", 524_290),
         # CUB: the top of the ladder. Only the two vision-dependent counts differ
         # from ShapeWorld's -- the ViT's patch tokeniser scales with image size,
         # and the speaker's language model carries a longer message.
         ("16_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 11_332_626),
-        ("16_birds_receiver_cross_attention_lm.toml", "sender.language_model", 5_859_855),
+        ("16_birds_receiver_cross_attention_lm.toml", "sender.language_model", 5_859_854),
         ("16_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_784_566),
         ("16_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_548_294),
         # Rung 13's discriminator, still pinned because it is still the number

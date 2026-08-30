@@ -53,12 +53,15 @@ BIRDS_FEATS = (3, 224, 224)
 
 RUNGS = all_rungs()
 
-# `(suffix, config key)` for every group `SPLIT_LEARNING_RATES` creates. Six
-#     keys against four scalar clip groups, and the mismatch is deliberate:
+# `(suffix, config key)` for every group `SPLIT_LEARNING_RATES` creates. Five
+#     keys against three scalar clip groups, and the mismatch is deliberate:
 #     `score_bias` and `polarity_embedding` take a rate of their own but clip
 #     with the module whose output they modify. See `SCALAR_GROUPS`.
+#
+#     The speaker's channel scale used to head this list under
+#     `logit_scale_lr`. It is a constant solved from `token_max_probability`
+#     now, not a parameter, so it has neither a rate nor a clip group.
 SCALAR_OVERRIDES = (
-    ("log_logit_scale", "logit_scale_lr"),
     ("log_score_scale", "score_scale_lr"),
     ("score_bias", "score_bias_lr"),
     ("polarity_embedding", "polarity_embedding_lr"),
@@ -283,8 +286,6 @@ def test_the_resolved_rates_are_written_back_for_save_args(config_file):
 @pytest.mark.parametrize(
     "name,expected",
     [
-        ("log_logit_scale", True),
-        ("language_model.log_logit_scale", True),
         ("volume.log_score_scale", True),
         ("mix_logit", True),
         ("contrast.contrast_gate", True),
@@ -393,10 +394,9 @@ def test_the_scalar_overrides_survive_the_module_groups(config_file):
             f"{suffix} is not at {key}"
         )
 
-    # Every rung has both volumes -- `log_logit_scale` on the speaker and
-    #     `log_score_scale` on the listener -- so a rung matching fewer than two
-    #     suffixes would mean the table had gone stale rather than that the rung
-    #     was austere.
+    # Every rung has the listener's volume and its offset, so a rung matching
+    #     fewer than two suffixes would mean the table had gone stale rather
+    #     than that the rung was austere.
     assert seen >= 2
 
 

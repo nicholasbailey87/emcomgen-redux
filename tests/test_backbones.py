@@ -523,11 +523,12 @@ def test_a_lone_scalar_is_not_clipped_by_its_modules_norm():
     ceiling is derived from the pair in hand rather than hardcoded.
     """
     pair = _pair_with_gradients()
-    scale = pair.sender.language_model.log_logit_scale
+    scale = pair.receiver.discriminator.log_score_scale
     assert scale.grad is not None
 
     module = [
-        p for p in pair.sender.language_model.parameters() if p.grad is not None
+        p for p in pair.receiver.discriminator.parameters()
+        if p.grad is not None
     ]
     module_norm = torch.norm(
         torch.stack([p.grad.norm() for p in module])
@@ -547,7 +548,7 @@ def test_a_lone_scalar_is_not_clipped_by_its_modules_norm():
 
     # The module bound and was scaled; the scalar was inside the ceiling on its
     # own and so was left exactly alone.
-    assert norms["sender_language_model"] > ceiling
+    assert norms["receiver_discriminator"] > ceiling
     assert torch.equal(scale.grad, before)
     assert max(
         p.grad.norm().item() for p in module if p is not scale

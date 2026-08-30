@@ -13,7 +13,8 @@
 # 10 and 12 swap in a ViT without the birds defaults putting ResNet18 back.
 #
 # Nothing else is overridden. The optimiser and channel settings this file used
-# to restate -- `weight_decay` 0.0 and the `init_energy` / `uniform_weight` pair
+# to restate -- `weight_decay` 0.0 and the `token_max_probability` /
+# `uniform_weight` pair
 # -- are DEFAULT.toml's values, and the `[birds.*]` family overrides none of the
 # three, so birds and ShapeWorld differ in their data and their agents' vision
 # models rather than in their optimiser or their channel.

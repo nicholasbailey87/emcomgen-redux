@@ -88,6 +88,23 @@ layers = 6
 # causal arm needs because only it reads a symbol back.
 bidirectional = false
 
+# The plain straight-through estimator, rather than DEFAULT.toml's `"gumbel"`.
+#
+# The forward pass is identical -- a hard one-hot drawn as
+# `argmax(logits + Gumbel)` -- so at the same seed this rung emits exactly the
+# messages a `"gumbel"` copy of it would. What changes is the backward pass:
+# `"gumbel"` differentiates the soft sample, whose Jacobian `diag(p) - p pT` has
+# rank ~1 once the speaker is confident, so the per-token gradients that are
+# summed on their way into the language model and the vision trunk lose all but
+# one direction. `"identity"` sends the gradient straight to the logits instead.
+#
+# `tau` is inert on this branch: it shapes only the soft sample, which this
+# estimator discards. `token_max_probability` is DEFAULT.toml's 0.95, which is a
+# ceiling on `unmixed_survival` rather than a starting point, so the tell that
+# this run is healthy is survival climbing toward that ceiling *with*
+# `pool_score_norm` and `polarity_separation` still moving. See docs/channel.md.
+estimator = "identity"
+
 [scheduler]
 epochs = 30
 

@@ -96,6 +96,24 @@ layers = 6
 # causal arm needs because only it reads a symbol back.
 bidirectional = false
 
+# The plain straight-through estimator, rather than DEFAULT.toml's `"gumbel"`,
+# and the same override rung 9 takes so the pair still differ only by dataset.
+#
+# The forward pass is identical -- a hard one-hot drawn as
+# `argmax(logits + Gumbel)` -- so at the same seed this rung emits exactly the
+# messages a `"gumbel"` copy of it would. What changes is the backward pass:
+# `"gumbel"` differentiates the soft sample, whose Jacobian `diag(p) - p pT` has
+# rank ~1 once the speaker is confident, so the per-token gradients that are
+# summed on their way into the language model and the vision trunk lose all but
+# one direction. `"identity"` sends the gradient straight to the logits instead.
+#
+# `tau` is inert on this branch: it shapes only the soft sample, which this
+# estimator discards. `token_max_probability` is DEFAULT.toml's 0.95, which at
+# this rung's `vocabulary = 20` is a multiplier of 1.283 against ShapeWorld's
+# 1.419 -- the same ceiling on `unmixed_survival`, reached with less gain
+# because there are more tokens to spread over. See docs/channel.md.
+estimator = "identity"
+
 [optimiser]
 # Effective batch 32 rather than birds' default 16 (`batch_size` 16 at
 # `[birds.optimiser] accumulator_steps = 1`), against ShapeWorld's 128.
@@ -111,27 +129,29 @@ bidirectional = false
 # What it does not cost. `games_per_epoch = 3100` is set for coverage -- the
 # coupon-collector point at which an epoch first reaches all of the training
 # images -- and an epoch still draws 3,100 games, so the clock the epoch counter
-# provides for `training_progress` and the `logit_scale` traverse is unchanged.
+# provides for the learning-rate schedule is unchanged.
 #
 # What it does cost. Accumulation halves the step count at a fixed game count,
 # which is why `games_per_epoch` above moves with it -- 5,000 games at an
 # effective batch of 32 restores the 156 steps an epoch that 3,100 at 16 was
 # producing, so no `lr * steps` travel budget is given up. Without that raise
-# the cost would fall hardest on the scaling scalars, and docs/anecdotes.md
-# works out why: sign consistency less 0.5 grows as the root of the batch while
-# the step count falls as the batch, so accumulation is a net loss for a lone
-# Adam scalar even where it is a net gain for the modules above it. At 156 steps
-# and the 6e-3 those scalars now carry, `logit_scale` travels up to 0.94
-# log-units an epoch against the ~1.9 birds needs, which is not the binding
-# constraint -- but it is still the first column to check if this run stalls
-# with the scale short of where `new_10.csv` had it.
+# the cost would fall hardest on the remaining lone scalars -- the listener's
+# volume and offset, the contrast gate -- and docs/anecdotes.md works out why:
+# sign consistency less 0.5 grows as the root of the batch while the step count
+# falls as the batch, so accumulation is a net loss for a lone Adam scalar even
+# where it is a net gain for the modules above it.
+#
+# The speaker's channel scale used to be the sharpest case of that and is no
+# longer a parameter at all: it is a constant solved from
+# `token_max_probability`, so there is no traverse here to budget for. See
+# docs/channel.md.
 #
 # Note those figures are the rate after the warm-up. This rung takes
 # DEFAULT.toml's `warm_up_epochs = 10` and its `lr_schedule_shape = "flat"`, so
 # the rate ascends from zero over the first ten epochs and then holds at the
-# configured value for the remaining ninety. The traverse budget over a whole
-# run is therefore 95% of what a flat opening would give -- the ramp averages
-# half rate across ten of a hundred epochs -- which does not move any of the
+# configured value for the remaining ninety. The travel budget over a whole run
+# is therefore 95% of what a flat opening would give -- the ramp averages half
+# rate across ten of a hundred epochs -- which does not move any of the
 # arithmetic above.
 #
 # This is the first rung to run a warm-up at all: it was configured on every

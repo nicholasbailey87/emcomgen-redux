@@ -121,8 +121,11 @@ MODULE_GROUPS = (
 #     parameters the run's ignition waits on. Alone in a group, a scalar is
 #     clipped by its own magnitude or not at all.
 #
-# Why these four and not the other two. These are the scalars that *scale*
-#     something: a channel fidelity, a score volume, a mixing weight, a gate.
+# Why these three and not the other two. These are the scalars that *scale*
+#     something: a score volume, a mixing weight, a gate. The speaker's channel
+#     used to be a fourth -- `log_logit_scale` -- and is now a constant solved
+#     from `token_max_probability` at construction, so there is nothing left
+#     here to clip or to rate. See docs/channel.md.
 #     `score_bias` is an offset and `polarity_embedding` is a 2-d tag, and both
 #     belong to the norm of the module producing the output they modify. Both
 #     still take a rate of their own through `SPLIT_LEARNING_RATES` -- a clip
@@ -135,7 +138,6 @@ MODULE_GROUPS = (
 #     the group is inapplicable rather than missing, and `group_parameters`
 #     raises if an applicable one matches nothing.
 SCALAR_GROUPS = (
-    ("log_logit_scale", lambda pair: True),
     ("log_score_scale", lambda pair: True),
     (
         "mix_logit",
@@ -320,11 +322,6 @@ def split_out_module(optimiser, module, lr, config_key,
 #     gate as a verdict on the parameter.
 SPLIT_LEARNING_RATES = (
     (
-        "logit_scale_lr",
-        "log_logit_scale",
-        lambda pair: True,
-    ),
-    (
         "polarity_embedding_lr",
         "polarity_embedding",
         lambda pair: isinstance(
@@ -332,10 +329,11 @@ SPLIT_LEARNING_RATES = (
         ),
     ),
     (
-        # The listener's volume, and the counterpart of `logit_scale_lr` above:
-        #     both are a lone scalar in front of a normalised quantity, both
-        #     travel at most `lr * steps`, and both need to be able to move
-        #     within a run.
+        # The listener's volume: a lone scalar in front of a normalised
+        #     quantity, whose whole travel is bounded by `lr * steps` and which
+        #     has to be able to move within a run. The speaker's channel used to
+        #     be its counterpart here, under `logit_scale_lr`; it is now a
+        #     constant and takes no rate. See docs/channel.md.
         #
         # Elevated on purpose, and that was once the objection: at 2e-3 the
         #     listener could squash its own logits fast, which multiplied down
@@ -557,11 +555,15 @@ def build_models(dataloaders, config):
     if config['cuda']:
         pair = pair.cuda()
     
+    # `eps` is passed rather than left at `get_optimiser`'s 1e-8 default, and
+    #     `add_param_group` fills it into every group `split_out_*` adds below.
+    #     See `[optimiser] eps` in DEFAULT.toml for why it is far smaller here.
     optimiser = get_optimiser(
         pair,
         config['sender_language_model']['d_model'],
         lr=config['optimiser']['lr'],
-        weight_decay=config['optimiser']['weight_decay']
+        weight_decay=config['optimiser']['weight_decay'],
+        eps=config['optimiser']['eps'],
     )
 
     base_lr = config['optimiser']['lr']

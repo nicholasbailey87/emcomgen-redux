@@ -1459,7 +1459,6 @@ def test_an_attention_rung_asks_for_the_mix_weight_rate_and_nothing_else():
     }
 
     assert elevated == {
-        "sender.language_model.log_logit_scale",
         "sender.contrast.contrast_gate",
         "receiver.discriminator.mix_logit",
         "receiver.discriminator.log_score_scale",
@@ -1467,8 +1466,8 @@ def test_an_attention_rung_asks_for_the_mix_weight_rate_and_nothing_else():
     }
 
     # The tag keeps a group of its own, which is the whole point of it having a
-    #     separate key: turning the channel up must not retune it, because
-    #     `log_logit_scale` lives on both speakers and the tag on only one. That
+    #     separate key: turning the listener's volume up must not retune a
+    #     parameter that lives on one speaker only. That
     #     is a claim about the partition and not about the number, so it is
     #     asserted by finding the group that holds the tag rather than by
     #     collecting every group at the tag's rate. The two were the same

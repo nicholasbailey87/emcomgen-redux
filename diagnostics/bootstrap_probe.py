@@ -23,15 +23,20 @@ is what makes the loop cheap enough to run on a laptop.
 
 The measurement is the divergence itself. `metrics.csv` says a working run takes
 off in a fixed order -- the speaker's prototyper leaves uniform pooling, the
-polarity tag separates, the logit scale traverses and the channel opens, and
-only then does accuracy move -- so this prints those same columns, under the
-same names, and the question is which of them moves.
+polarity tag separates, and the channel opens, and only then does accuracy move
+-- so this prints those same columns, under the same names, and the question is
+which of them moves.
 
 The reference: rung 10 on CUB, which works. Its prototyper left uniform pooling
 at epoch 2 (`pool_effective_examples` 4.99 -> 4.43), `polarity_separation` went
-0.10 -> 0.49 in the same epoch and reached 13.2 by epoch 29, `logit_scale` rose
-0.91 -> 2.24 and `realised_survival` 0.22 -> 0.85. Rung 12's prototyper never
-departs 4.99 in thirty epochs and its logit scale falls.
+0.10 -> 0.49 in the same epoch and reached 13.2 by epoch 29, and
+`realised_survival` 0.22 -> 0.85. Rung 12's prototyper never departs 4.99 in
+thirty epochs.
+
+Note the `logit_scale` column those runs were read against was a learned
+parameter and is now a constant solved from `token_max_probability`, so it is
+printed as the run's setting and is expected to be flat. `realised_survival` is
+the column that now carries the channel's story on its own.
 
 Steps here are not epochs -- a rung 10 epoch is 3100 games -- so expect the
 order of events rather than the timings.
@@ -447,7 +452,7 @@ def main():
             f"{prototyper.pool_effective_examples:9.4f} "
             f"{prototyper.pool_score_norm:10.4f} "
             f"{language_model.polarity_separation:9.4f} "
-            f"{language_model.logit_scale.item():10.4f} "
+            f"{language_model.logit_scale:10.4f} "
             f"{language_model.realised_survival:9.4f} "
             f"{language_model.logit_spread:7.4f}"
         )

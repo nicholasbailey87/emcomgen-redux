@@ -149,117 +149,62 @@ weight_decay = 0.0
 clip_grad_norm = 1.0
 log_interval = 100
 
-# The five keys below -- `logit_scale_lr`, `score_scale_lr`, `score_bias_lr`,
-# `mix_logit_lr` and `contrast_gate_lr` -- are the scaling scalars and the one
-# offset that pairs with one of them, and they all sit at 6e-3 as of 2026-08-28.
-# Each block below carries its own arithmetic for what distance that parameter
-# has to cover, and each of those arithmetics was written against 2e-3; read
-# them as the argument for the *shape* of the setting and multiply the per-epoch
-# figures by three for the current value.
+# AdamW's epsilon, far below the 1e-8 default it replaces.
+#
+# The reason to think about it at all is that every argument in this file about
+# gradient magnitudes not mattering -- the ones that say a uniform factor on a
+# parameter's gradient cancels, because AdamW updates by `m / sqrt(v)` and scales
+# both -- holds only while `sqrt(v)` is well above `eps`. It is not a free
+# assumption. The 2026-08-29 ShapeWorld run's speaker gradient norms reached
+# ~2e-7, where 1e-8 damps the update by about 9%, and an order of magnitude below
+# that the parameter is held still by the epsilon rather than by its gradient. So
+# the optimiser stopped being scale-invariant in exactly the regime the diagnosis
+# was made in.
+#
+# 1e-12 restores it across the range these runs actually visit. What it costs is
+# the other thing `eps` does: it is also what stops a parameter whose gradient is
+# numerical noise from taking a near-full `lr` step. At 1e-12 a parameter sitting
+# at |g| ~ 1e-11 moves at close to `lr` on noise alone. The tell is a parameter
+# that ought to be inert drifting, and `scripts/ignition_audit.py` reports the
+# per-group norms to see it in.
+eps = 1e-12
+
+# The four keys below -- `score_scale_lr`, `score_bias_lr`, `mix_logit_lr` and
+# `contrast_gate_lr` -- are the listener's scaling scalars and the one offset
+# that pairs with one of them, and they all sit at 6e-3 as of 2026-08-28. Each
+# block below carries its own arithmetic for what distance that parameter has to
+# cover, and each of those arithmetics was written against 2e-3; read them as the
+# argument for the *shape* of the setting and multiply the per-epoch figures by
+# three for the current value.
 #
 # Why 6e-3 rather than the 2e-3 those arithmetics ask for. Every one of these is
 # a lone parameter whose whole travel over a run is bounded by `lr * steps`,
 # because AdamW moves a parameter by about `lr` per step whatever the gradient's
 # size. That bound is the only thing 2e-3 was chosen to clear, and clearing it is
-# not the same as clearing it early: rung 9 at 4e-3 still had not ignited, and a
-# fuse that burns a third of the epoch budget is a fact about the learning rate
-# rather than about the language. Overshoot is cheap on all five -- the
-# fidelity's gap saturates at `uniform_weight`'s 4.84, the volume's gradient
-# vanishes once the scores are calibrated, the mixing weight parks at whatever
-# mix the loss wants, and the gate parks at whatever share the branch is worth --
-# so a larger rate buys earlier arrival rather than a different endpoint.
+# not the same as clearing it early: a fuse that burns a third of the epoch
+# budget is a fact about the learning rate rather than about the language.
+# Overshoot is cheap on all four -- the volume's gradient vanishes once the
+# scores are calibrated, the mixing weight parks at whatever mix the loss wants,
+# and the gate parks at whatever share the branch is worth -- so a larger rate
+# buys earlier arrival rather than a different endpoint.
 #
-# What it costs is the bootstrapping window, and that cost is real. `init_energy`
-# opens the channel near-random on purpose so that the listener has no premature
-# structure to co-adapt to, and a channel that opens while the speaker's argmax
-# is still close to input-independent is exactly the co-adaptation
-# `logit_scale`'s docstring warns about. The brake is `uniform_weight`'s floor:
-# 10% of tokens are resampled uniformly however sharp the speaker gets, so a code
-# formed early still has to survive that corruption. Whether the brake holds at
-# this rate is what the next runs test, and the tell is `realised_survival`
-# against shape accuracy -- a channel that opens while accuracy stays at chance
-# is the failure, not a slow channel.
+# There used to be a fifth, `logit_scale_lr`, moving the speaker's channel
+# `log_logit_scale`, and most of the argument in this block was written for it:
+# the traverse from a near-random opening up to a usable channel was the run's
+# bottleneck, and it was bottlenecked on steps. That parameter is gone. The
+# channel is now a constant solved from `[sender_language_model]
+# token_max_probability`, because a learned scale has a monotone incentive --
+# sharper always helps the current batch and nothing in the objective pushes back
+# -- so it climbed until the straight-through estimator was shut, which is what
+# the 2026-08-29 ShapeWorld run did at a scale of 3.046. The traverse it was
+# raised to buy was never the binding constraint either: that run used 4% of its
+# travel bound. See docs/channel.md.
 #
 # `polarity_embedding_lr` is deliberately not in this group and sits at the
-# speaker's module rate, 2e-4. It is a 2-d tag rather than a scalar, it no
-# longer has a traverse to cover since it opens as an antipodal draw at
+# speaker's module rate, 2e-4. It is a 2-d tag rather than a scalar, it has no
+# traverse to cover since it opens as an antipodal draw at
 # `referent_layer_norm`'s own scale, and its own block below says why it wants
 # to be separable from the channel.
-
-# Learning rate for the speaker's `log_logit_scale` alone. Set to `lr` to
-# disable the override.
-#
-# This exists because that one scalar is the run's bottleneck, and it is
-# bottlenecked on *steps* rather than on gradient. AdamW normalises by the
-# gradient's own second moment, so a parameter with a consistently signed
-# gradient moves at about `lr` per step whatever that gradient's size; a lone
-# scalar therefore cannot travel further than `lr * steps` over a run, no matter
-# how badly the loss wants it to.
-#
-# The distance it has to travel is fixed by the other two knobs.
-# `layer_norm_logits` pins the emittable logits to unit variance, so the scale
-# *is* the channel's fidelity, and `init_energy` opens it at 0.839 for birds --
-# deliberately near-random, so the listener has no premature structure to
-# co-adapt to. A usable channel is somewhere around 4 to 6, which is
-# `ln(6/0.839)` = 1.9 log-units away.
-#
-# Birds could not cover that. At 62 steps an epoch and `lr` 1e-4 the ceiling
-# over 100 epochs was 0.62 log-units, reaching a scale of 1.56 at best -- and
-# the ablation measured 0.33 symbol survival at a comparable sd, which is dead
-# at ln 2. `games_per_epoch` 3,100 lifts that ceiling to 1.94 on its own.
-#
-# 2e-3 clears it with room to spare, and is set above what the arithmetic asks
-# for. At `games_per_epoch` 2,500 -- 156 steps an epoch -- the scale could travel
-# 0.31 log-units per epoch, covering 1.9 in about six epochs at full
-# sign-consistency and twelve at half. That was borne out: the predicted takeoff
-# of 6.1 epochs was observed at 6.
-#
-# `games_per_epoch` is now 3,100, so the arithmetic moves with it: 194 steps an
-# epoch, 0.39 log-units per epoch, and a traverse of 1.9 covered in 4.9 epochs at
-# full sign-consistency and 9.8 at half -- against a whole-run ceiling of 39,
-# roughly twenty times the distance. Treat 4.9 as a fresh prediction rather than
-# a restatement; the next birds run tests it the same way. The intent either way
-# is to stop the traverse being the binding constraint at all, so that what the
-# run measures is the language rather than the channel opening.
-#
-# Overshoot is cheap, and that is why this can be set high. `uniform_weight`
-# caps the effective logit gap at `log(((1-w)+w/V)/(w/V))` = 4.84, so fidelity
-# saturates and the scale's own gradient vanishes with it: the parameter parks
-# rather than running away, and a larger value buys earlier arrival rather than
-# a sharper endpoint.
-#
-# What it does cost is the bootstrapping window. `init_energy` 0.9 is there to
-# keep the speaker near-random while its embeddings become worth grounding, and
-# a takeoff around epoch five spends that window in the first twentieth of a run --
-# a reliable channel over a speaker whose argmax is still close to
-# input-independent is exactly the co-adaptation `logit_scale`'s docstring warns
-# about. The `uniform_weight` floor is the brake: 10% of tokens are resampled
-# uniformly however sharp the speaker gets, so a code formed early still has to
-# survive that corruption. Whether the brake is enough at this rate is the thing
-# the run tests. The tell is `realised_survival` against shape accuracy -- a
-# channel that opens while accuracy stays at chance is the failure, not a slow
-# channel.
-#
-# One other thing used to move with it, and no longer does. The tau coupling in
-# `sampling_tau` tracked `logit_scale / initial_logit_scale`, retiring over
-# training on `training_progress`, so a fast climb made the surrogate very soft
-# very early. `0603e27` commented it out and `tau` is now flat at its configured
-# value for the whole of any run, which means the surrogate sharpens with the
-# scale instead: nothing bounds the straight-through estimator's saturation, and
-# a run can lose its channel without `logit_scale` ever looking high. Watch
-# `unmixed_survival` and `logit_margin` rather than this rate. See
-# docs/channel.md, "Where that left it".
-#
-# If `realised_survival` climbs promptly and accuracy still does not follow,
-# the traverse was never the constraint and this knob should go rather than
-# grow.
-#
-# Only the scale gets this. `outputs2vocab.bias` is the other shape parameter
-# and must *not* be raised with it: it is a vector, it has no distance to cover,
-# and it competes with `Wh` for control of the message. LayerNorm bounds the
-# magnitude of `Wh + b` but not the ratio between them, so a bias that outruns
-# the matrix leaves an input-independent message -- the single-message collapse.
-logit_scale_lr = 6e-3
 
 # The listener's counterpart, `ScoreVolume.log_score_scale`, reported as
 # `train_score_scale`. One scalar per discriminator, in front of a score whose
@@ -329,14 +274,13 @@ score_bias_lr = 6e-3
 # The same elevated rate, for `SenderTransformerLM.polarity_embedding` -- the
 # learned tag that tells that speaker which of its two prototypes is the
 # positive concept. Deliberately a second key rather than a reuse of the one
-# above: `log_logit_scale` exists on both speakers, so turning that knob up to
-# hurry the tag along would also retune the GRU baseline's channel and move the
-# comparison the ablation is there to make. These two want to be separable, and one of them is
-# Transformer-only.
+# above: `log_score_scale` belongs to the listener and this tag to one speaker,
+# so a shared rate would tie two questions the ablation wants to ask separately.
+# One of them is also Transformer-only.
 #
-# It was originally here for the same reason as the rate above: the tag was
-# zero-initialised, so like the logit scale it had a distance to cover before it
-# did anything at all, and that traverse sat in exactly the bootstrapping window
+# It was originally here for the same reason the speaker's channel scale once
+# had a rate of its own: the tag was zero-initialised, so it had a distance to
+# cover before it did anything at all, and that traverse sat in the window
 # where the GRU speaker gets its polarities free from `init_h`. The tag now
 # opens as an antipodal draw at `referent_layer_norm`'s own scale, so there is
 # no distance to cover and that argument is retired.
@@ -349,10 +293,10 @@ score_bias_lr = 6e-3
 # whether what follows is a descent or a further climb is an open question this
 # key does not decide.
 #
-# It still wants to be a key of its own for the reason above:
-# `log_logit_scale` lives on both speakers, and retuning the tag through it
-# would move the GRU baseline's channel and with it the comparison the ablation
-# exists to make. Separable is not the same as elevated, and the two questions
+# It still wants to be a key of its own for the reason above: it is
+# Transformer-only, and hurrying it through a rate shared with the listener's
+# volume would move something the ablation is trying to hold still. Separable is
+# not the same as elevated, and the two questions
 # were being answered by one number.
 #
 # 2e-4 as of 2026-08-29, from the 2e-3 it carried while it was one of the lone
@@ -424,8 +368,8 @@ mix_logit_lr = 6e-3
 # stage and the identity. Inert unless `[sender] contrast` is true.
 #
 # It opens at exactly zero, which is what makes the stage an ablation of one
-# thing, and the same arithmetic as `logit_scale_lr` above then decides whether
-# it ever leaves: AdamW moves a parameter by about `lr` per step whatever the
+# thing, and the lone-scalar arithmetic above then decides whether it ever
+# leaves: AdamW moves a parameter by about `lr` per step whatever the
 # gradient's size, so a lone scalar cannot travel further than `lr * steps`. At
 # the base 1e-4 and birds' 62 steps an epoch that is 0.0062 an epoch, so a gate
 # reaching even 0.1 -- a tenth of the branch, at the scale `out_projection`
@@ -581,13 +525,13 @@ epochs = 100
 # Ten epochs of linear ascent to the configured rates before the schedule
 # proper, set 2026-08-28 alongside the move to 6e-3 on the scaling scalars.
 #
-# The two are one change. 6e-3 is there so that the traverses -- the channel's
-# fidelity, the listener's volume and offset, the contrast gate -- are not what
+# The two are one change. 6e-3 is there so that the traverses -- the listener's
+# volume and offset, the contrast gate -- are not what
 # a run is waiting on; the ramp is there so that arriving fast is not the same
 # as arriving first. A lone scalar at 6e-3 crosses its whole useful range in a
-# few hundred steps, and a channel that opens while the speaker's argmax is
-# still close to input-independent is exactly the co-adaptation
-# `logit_scale`'s docstring warns about. Under the ramp the scalars reach full
+# few hundred steps, and a listener that calibrates while the speaker's argmax
+# is still close to input-independent co-adapts to a degenerate code. Under the
+# ramp the scalars reach full
 # rate only at epoch 10, by which time the representations have had ten epochs
 # at their own rates.
 #
@@ -804,49 +748,96 @@ message_length = 7 # max message length. note this includes sos/eos token, i.e. 
 # the finite entries, so these divide by 14 rather than by 18.
 uniform_weight = 0.1
 #
-# `init_energy` is the *starting point*, and the range the speaker can move
-# through. It is the fraction of the maximum possible entropy that a freshly
-# initialised speaker's per-position distribution retains: 1.0 is a speaker that
-# has committed to nothing and emits uniformly at random, 0.0 one that emits a
-# single token with certainty. A fraction, not a percentage.
+# `token_max_probability` (p) is the *cap on the speaker's own confidence*: the
+# highest probability it can ever hold on a token, before `uniform_weight` mixes
+# anything in. `logit_scale` in `models/sender.py` inverts it once at
+# construction into the constant the normalised logits are multiplied by. That
+# constant does not change over a run.
 #
-# It is not the scale itself. The emittable logits are normalised to unit
-# variance, and `logit_scale` in `models/sender.py` solves once at construction
-# for the multiplier that delivers this entropy at this `vocabulary` and this
-# `uniform_weight`. At 0.9 that is a scale of 0.802 here and 0.839 for birds,
-# and an argmax the speaker holds with probability 0.22 and 0.18 respectively.
+# Why this quantity and not the fidelity the listener sees. The straight-through
+# estimator on the `"gumbel"` branch differentiates the soft sample, whose
+# Jacobian is `diag(p) - p pT`, and `flatten_logit_distribution` is a convex
+# mixture in probability space -- so the mixture contributes a constant and the
+# gradient depends on the *unmixed* p alone. `uniform_weight` caps what the
+# listener receives at 0.907 and does nothing at all to the backward pass, which
+# is how the 2026-08-29 ShapeWorld run read 0.9067 against that cap while the
+# probability shaping its gradient was 0.99951. `unmixed_survival` is the column
+# that reports p; this key is a ceiling on it.
 #
-# Why entropy rather than a symbol error rate or a channel capacity: at
-# initialisation there is no correct symbol to have an error rate against --
-# argmax is an accident of the initialisation, not an intended message -- and
-# capacity runs backwards, since a high-capacity channel is a *sharp* one with
-# less room to explore. Entropy needs no reference symbol and runs the way
-# intuition does. `logit_scale`'s docstring carries the full argument.
+# Why it is a cap rather than a starting point. This key replaces `init_energy`,
+# which named an opening entropy and left the scale to be learned from there.
+# Two things were wrong with that. A learned scale has a monotone incentive --
+# sharper always helps the current batch and nothing in the objective pushes back
+# -- so it climbs until the estimator is shut, which is what that run did at a
+# scale of 3.046. And it was never needed: `layer_norm_logits` already bounds how
+# concentrated the shape can get, so at a scale of *one* the cap is already 0.789
+# at V = 14, above the 0.703 that `init_energy = 0.9`'s solved 0.882 permitted.
+# The scale's only job was to move that cap, and the shipped setting moved it
+# down.
 #
-# The reason to start high is bootstrapping. A fresh speaker's argmax barely
-# varies with its input, so a low-entropy start means it emits near enough one
-# message for everything, confidently, from the first batch -- and the listener
-# co-adapts to that degenerate language before the speaker's embeddings are
-# worth grounding anything on. Near-random messages carry no premature structure
-# to co-adapt to.
+# The bound is solved against the sharpest shape the normaliser permits -- one
+# token at sqrt(V-1) and the rest at -1/sqrt(V-1), a margin of V/sqrt(V-1) --
+# so it holds whatever the speaker does with its shape budget. That matters
+# because shape, not the scale, is the route the dead run actually took: it had
+# spent 86% of that budget. `logit_margin` is the column that watches it.
 #
-# 0.9 is a design decision, not a derived bound, and it is set from one measured
-# run: a birds run started at 0.62 retained, flattened *itself* to ~0.94 over 35
-# epochs, and left chance accuracy on the way back up at ~0.82-0.85. That
-# descent is a cost, so start near where it chose to go. Revisit it when there
-# are more runs. `logit_scale` records the reference points to rederive from.
+# What 0.95 costs and buys. Fidelity saturates long before p does, so the top of
+# the range is nearly free to give up. At V = 14, w = 0.1:
 #
-# `realised_survival` and `logit_spread` report each epoch where a run actually
-# went. Note survival is a *mean* over slots and confidence is skewed, so it
-# hides a wide spread: exploration concentrates on the slots the speaker is
-# unsure about, which is the behaviour wanted.
-init_energy = 0.9
+#     p       scale   realised cap   gradient vs p = 0.70
+#     0.70    0.879   0.637          1.00x
+#     0.95    1.419   0.862          0.17x
+#     0.99    1.844   0.898          0.033x
+#     0.9999  3.033   0.907          0.0003x
+#
+# Past 0.95 the speaker pays 5x in `1 - p` for 0.04 of message fidelity. 0.95 is
+# a design decision, not a derived bound.
+#
+# The opening is now a consequence rather than a second knob, and it lands where
+# `init_energy` was putting it anyway: at 0.95 a fresh speaker holds its argmax
+# with probability 0.386 here and 0.294 for birds, against 0.249 and 0.206 under
+# the setting this replaces. Bootstrapping is why that number wants to stay
+# modest -- a fresh speaker's argmax barely varies with its input, so a confident
+# opening means it emits near enough one message for everything from the first
+# batch and the listener co-adapts to that before the speaker's embeddings are
+# worth grounding anything on.
+#
+# `realised_survival`, `unmixed_survival` and `logit_margin` report each epoch
+# where a run actually went. Note survival is a *mean* over slots and confidence
+# is skewed, so it hides a wide spread: exploration concentrates on the slots the
+# speaker is unsure about, which is the behaviour wanted.
+token_max_probability = 0.95
+
+# Which gradient estimator the speaker learns through. The forward pass is the
+# same either way -- a hard one-hot drawn as `argmax(logits + Gumbel)`, which is
+# a faithful categorical sample -- so this changes what the speaker learns from
+# and not what it says. At the same seed the two branches emit identical
+# messages.
+#
+# `"gumbel"` differentiates the soft sample `gumbel_softmax` builds on the way,
+# whose Jacobian is `diag(p) - p pT`. `"identity"` replaces that with I:
+#
+#     y = onehot.detach() + z - z.detach()
+#
+# The reason to want the second is *rank*, not magnitude. The per-token gradients
+# are summed into one vector before they reach the language model and the vision
+# trunk, and `diag(p) - p pT` at p near one-hot has rank ~1, so all but one
+# direction is destroyed before any optimiser or clipper sees it. Magnitude
+# largely cancels -- AdamW updates by `m / sqrt(v)`, and `clip_gradients`
+# renormalises what survives -- but no per-parameter normaliser recovers a rank.
+# `token_max_probability` bounds that collapse; only this removes it.
+#
+# `"gumbel"` is the default so that existing configs keep the behaviour they were
+# run under. Rungs 9 and 10 override it. See docs/channel.md.
+estimator = "gumbel"
+
 tau = 1.0                     # Gumbel-softmax tau. Gradient shaping only:
-                              # the hard forward sample is an argmax and so
-                              # is invariant to it. jayelm's `--tau`. With a
-                              # constant scale the ratio between the two is
-                              # fixed, so the straight-through estimator sits at
-                              # one operating point for the whole run.
+                              # the emitted symbol is an argmax and so is
+                              # invariant to it. jayelm's `--tau`. It shapes the
+                              # soft surrogate the `"gumbel"` estimator
+                              # differentiates; the `"identity"` estimator
+                              # discards that surrogate, so on that branch this
+                              # key does nothing at all.
 dropout = 0.1
 layers = 1
 
@@ -934,7 +925,7 @@ latent_message_multiplier = 2.0
 utility_tokens = 4 # Only applies to Transformer language models
 # See [sender_feature_model] for what these are and why they are here. Note the
 # vocabulary logits are always layer-normalised before sampling and there is no
-# knob for it: `init_energy` above is resolved against unit
+# knob for it: `token_max_probability` above is resolved against unit
 # variance, so the two are a pair.
 #
 # 512 rather than the 576 every other stack takes, and this is a sizing argument
@@ -969,11 +960,12 @@ ff_inner_size = 512 # Only applies to Transformer language models
 #
 # Why that might matter here. The channel opens when the listener learns the
 # speaker's *accidental* code -- the random but fixed concept -> symbol map a
-# fresh speaker has -- because only then does the gradient on `log_logit_scale`
-# acquire a consistent sign. An audit of rung 09 put that sign at 49-52% over
-# 1100 steps, against rung 07 crossing to ~79% at step 475. A code the listener
-# can learn is one that holds still, and stochastic depth is one of the few
-# things in the speaker that stops it holding still.
+# fresh speaker has. That used to be measurable as the sign consistency of the
+# gradient on the then-learned `log_logit_scale`: an audit of rung 09 put it at
+# 49-52% over 1100 steps, against rung 07 crossing to ~79% at step 475. The scale
+# is a constant now and that particular reading is gone, but the point stands --
+# a code the listener can learn is one that holds still, and stochastic depth is
+# one of the few things in the speaker that stops it holding still.
 #
 # 0.1 is small and this may well not be the cause. It is off because a
 # regulariser is a poor thing to leave running while diagnosing a bootstrap
@@ -1044,7 +1036,7 @@ discriminator = "BilinearDiscriminator"  # or AttentionDiscriminator
 # the label ordering.
 #
 # The message operand is not masked. It arrives through the Gumbel channel, whose
-# noise `sampling_tau` and `uniform_weight` already calibrate, so a mask on top is
+# noise `logit_scale` and `uniform_weight` already calibrate, so a mask on top is
 # a second and uncalibrated perturbation of a signal that has one. The referents
 # arrive clean, which is what makes that the side where a mask regularises rather
 # than compounds.
@@ -1267,8 +1259,7 @@ n_examples = 10 # number of examples seen by agents, including distractors
 # that makes an epoch 62 optimiser steps against ShapeWorld's 156 (20,000 games
 # at an effective batch of 128). The two datasets were therefore getting a
 # 2.5-fold different optimisation budget per epoch while sharing a 100-epoch
-# schedule -- and `training_progress`, which retires the tau coupling, is keyed
-# to the epoch counter.
+# schedule that is keyed to the epoch counter.
 #
 # 2,500 was chosen because it satisfied two things at once: it equalised the step
 # count with ShapeWorld, and it was roughly the coupon-collector point at which
@@ -1279,10 +1270,9 @@ n_examples = 10 # number of examples seen by agents, including distractors
 # training images, a ~7,050-image pool, whose coupon-collector point is
 # `N ln N / 20` = 3,123. Coverage is the binding reason and step parity is
 # retired deliberately: an epoch that does not reach all of its training images
-# makes the epoch counter a poor clock, and `training_progress` and the
-# `logit_scale` traverse are both keyed to it. The cost is 194 steps an epoch
-# against ShapeWorld's 156, a 24% larger optimisation budget per epoch; the
-# `logit_scale_lr` comment above carries the revised traverse arithmetic.
+# makes the epoch counter a poor clock, and the learning-rate schedule is keyed
+# to it. The cost is 194 steps an epoch against ShapeWorld's 156, a 24% larger
+# optimisation budget per epoch.
 #
 # Nothing is exhausted by raising it. `CUBDataset.__getitem__` ignores its index
 # and samples a fresh game, so an epoch is a draw rather than a pass, and the
@@ -1332,19 +1322,19 @@ feature_model = "ResNet18"
 # scale. Train accuracy is therefore depressed relative to test accuracy by
 # construction, and the two columns understate the real generalisation gap.
 #
-# No `init_energy` override either, and that is the point of solving for the
-# scale rather than stating one. Both datasets ask for the same *entropy*, and
-# `logit_scale` resolves whatever multiplier each vocabulary needs to deliver it
-# -- 0.839 here against ShapeWorld's 0.802 -- so the two start their speakers
-# equally uncommitted rather than differing in their channel because one has a
-# bigger vocabulary. A shared bare scale would not do that, and neither did the
-# `c * ln(V)` form this replaced, which over-corrected for vocabulary by roughly
-# four times.
+# No `token_max_probability` override either, and that is the point of solving
+# for the scale rather than stating one. Both datasets ask for the same *cap on
+# confidence*, and `logit_scale` resolves whatever multiplier each vocabulary
+# needs to deliver it -- 1.283 here against ShapeWorld's 1.419 -- so the two run
+# their speakers under the same channel bound rather than differing because one
+# has a bigger vocabulary. A shared bare scale would not do that.
 #
 # Note the two datasets are still not identical at the message level, and cannot
-# be: the same per-symbol entropy over 8 content tokens here versus 5 on
-# ShapeWorld makes a whole message here harder to pin down. `message_length` is
-# the knob that governs that, not these.
+# be: the same per-symbol cap over 8 content tokens here versus 5 on ShapeWorld
+# makes a whole message here harder to pin down. `message_length` is the knob
+# that governs that, not these. The opening also differs -- a fresh speaker holds
+# its argmax at 0.294 here against 0.386 on ShapeWorld -- because the same cap at
+# a larger vocabulary needs a smaller multiplier to reach it.
 vocabulary = 20
 message_length = 10 # max message length. note this includes sos/eos token, i.e. the true length is this - 2
 
