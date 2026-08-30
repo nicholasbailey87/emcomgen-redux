@@ -343,7 +343,7 @@ argmax-preserving, so it changes no eval-time message.)
     to move over a run. `logit_scale`'s docstring and [docs/channel.md] carry the
     derivation and the table of what the cap costs.
 - `[sender_language_model] estimator`: which **gradient estimator** the speaker
-    learns through — `"gumbel"` (the default) or `"identity"`. The forward pass is
+    learns through — `"identity"` (the default) or `"gumbel"`. The forward pass is
     identical on both, one shared sampler drawing `argmax(logits + Gumbel)`, so at
     the same seed the two emit *identical* messages and an A/B between them is a
     control. `"gumbel"` differentiates the soft sample, whose Jacobian
@@ -351,7 +351,12 @@ argmax-preserving, so it changes no eval-time message.)
     sends the gradient straight to the logits instead. The argument is rank, not
     magnitude: the per-token gradients are summed before they reach the language
     model and the vision trunk, and no per-parameter normaliser recovers a rank.
-    Rungs 9 and 10 take `"identity"`. See [docs/channel.md].
+    The whole ladder runs `"identity"` as of 2026-08-30: it fixed the gradient
+    collapse that was killing rungs, and a ladder whose steps are single changes
+    cannot have the estimator varying along it. The A/B is made by copying a rung
+    and flipping this key — both branches sample through the same
+    `_gumbel_sample`, so a same-seed pair emits identical messages and differs in
+    nothing else. See [docs/channel.md].
 - `[sender_language_model] uniform_weight`: the **ceiling** on fidelity, and so
     the floor under exploration. Weight of the uniform component mixed into the
     policy before sampling, train-pass only. It caps a slot's winner at

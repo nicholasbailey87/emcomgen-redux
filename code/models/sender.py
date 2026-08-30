@@ -868,7 +868,7 @@ class GumbelChannel:
         **`"identity"`** keeps that forward exactly and replaces the backward
             with `I`:
 
-                y = onehot.detach() + z - z.detach()
+                y = onehot.detach() + (z - z.detach())
 
             The sample is unchanged and still faithful -- `argmax(z + g)` *is* a
             categorical draw from `softmax(z)` -- so this changes what the

@@ -32,37 +32,6 @@
 
 name = "ablation"
 
-[data]
-# No silhouetting, against DEFAULT.toml's `silhouette_p_receiver = 0.5`.
-#
-# This is a probe, not a settled value. The 2026-08-30 run of this rung -- the
-# first under the constant channel and the identity estimator -- learned *shape*
-# better than any ShapeWorld run on record (0.758 on shape concepts, 0.829 on
-# `and_shape_shape`, against ~0.52 for every run that never escaped) and left
-# colour at exactly chance for all thirty epochs. Eval is never silhouetted, so
-# 0.50 on colour is a failure to communicate it rather than a ceiling imposed by
-# the training-time repaint.
-#
-# That is the mirror image of the failure the key exists for. The paper reports
-# ShapeWorld converging to ~83% by reading colour and ignoring shape (appendix
-# A.1), and `silhouette_p_receiver` is the answer to it; this run has traded one
-# single-feature language for the other.
-#
-# The silhouette is not the whole explanation and 0.5 is not unlearnable: the
-# 2026-08-28 run at this same setting reached colour 0.80 alongside shape 0.68,
-# on the old learned-scale channel, once its channel opened at epoch 21. So what
-# changed is the channel as well as the repaint, and this run separates them.
-# 0.0 restores the paper's own conditions.
-#
-# Read it on the concept breakdown, not the aggregate. If colour returns at 0.0
-# and shape falls back to chance, the shortcut is intact and the key is doing
-# its job -- titrate upwards from here (0.25 next) for a setting that leaves
-# both above chance. If colour stays at chance even at 0.0, the silhouette was
-# never what suppressed it and the constraint is the channel: survival sat at
-# ~0.3 for the whole of that run, against a `token_max_probability` cap of 0.95
-# it never approached.
-silhouette_p_receiver = 0.0
-
 [sender]
 feature_model = "ViT2"
 prototyper = "AttentionPrototyper"
@@ -118,23 +87,6 @@ layers = 6
 # They differ by `token_embedding` alone -- 5,760 parameters, which only the
 # causal arm needs because only it reads a symbol back.
 bidirectional = false
-
-# The plain straight-through estimator, rather than DEFAULT.toml's `"gumbel"`.
-#
-# The forward pass is identical -- a hard one-hot drawn as
-# `argmax(logits + Gumbel)` -- so at the same seed this rung emits exactly the
-# messages a `"gumbel"` copy of it would. What changes is the backward pass:
-# `"gumbel"` differentiates the soft sample, whose Jacobian `diag(p) - p pT` has
-# rank ~1 once the speaker is confident, so the per-token gradients that are
-# summed on their way into the language model and the vision trunk lose all but
-# one direction. `"identity"` sends the gradient straight to the logits instead.
-#
-# `tau` is inert on this branch: it shapes only the soft sample, which this
-# estimator discards. `token_max_probability` is DEFAULT.toml's 0.95, which is a
-# ceiling on `unmixed_survival` rather than a starting point, so the tell that
-# this run is healthy is survival climbing toward that ceiling *with*
-# `pool_score_norm` and `polarity_separation` still moving. See docs/channel.md.
-estimator = "identity"
 
 [scheduler]
 epochs = 30

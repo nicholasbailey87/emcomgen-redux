@@ -96,24 +96,6 @@ layers = 6
 # causal arm needs because only it reads a symbol back.
 bidirectional = false
 
-# The plain straight-through estimator, rather than DEFAULT.toml's `"gumbel"`,
-# and the same override rung 9 takes so the pair still differ only by dataset.
-#
-# The forward pass is identical -- a hard one-hot drawn as
-# `argmax(logits + Gumbel)` -- so at the same seed this rung emits exactly the
-# messages a `"gumbel"` copy of it would. What changes is the backward pass:
-# `"gumbel"` differentiates the soft sample, whose Jacobian `diag(p) - p pT` has
-# rank ~1 once the speaker is confident, so the per-token gradients that are
-# summed on their way into the language model and the vision trunk lose all but
-# one direction. `"identity"` sends the gradient straight to the logits instead.
-#
-# `tau` is inert on this branch: it shapes only the soft sample, which this
-# estimator discards. `token_max_probability` is DEFAULT.toml's 0.95, which at
-# this rung's `vocabulary = 20` is a multiplier of 1.283 against ShapeWorld's
-# 1.419 -- the same ceiling on `unmixed_survival`, reached with less gain
-# because there are more tokens to spread over. See docs/channel.md.
-estimator = "identity"
-
 [optimiser]
 # Effective batch 32 rather than birds' default 16 (`batch_size` 16 at
 # `[birds.optimiser] accumulator_steps = 1`), against ShapeWorld's 128.

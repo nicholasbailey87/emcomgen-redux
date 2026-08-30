@@ -181,6 +181,27 @@ polarities and, in the concept game, the disjoint half that agent sees.
 comparable to the paper's and to the `probe_shape.py` sweep, which measures the
 sender on un-augmented images.
 
+### Both rates are 0.0 as of 2026-08-30
+
+The intervention is built and tested and currently switched off. It ran at
+`silhouette_p_receiver = 0.5` from 2026-08-25, and on the constant channel that
+was too strong: rung 9 learned shape better than any ShapeWorld run on record
+(0.758 on shape concepts, 0.829 on `and_shape_shape`, against ~0.52 for every
+run that had never escaped the colour shortcut) and left colour at exactly chance
+for all thirty epochs. Since eval is never silhouetted, that 0.50 is a failure to
+communicate colour rather than a ceiling the repaint imposes — the mirror image
+of the failure the intervention exists for.
+
+At 0.0 the same rung reaches 0.661 aggregate by epoch 5 with colour at 0.747
+*and* shape at 0.646, past the silhouetted run's epoch-29 numbers on both
+features. Colour arrives first and shape follows, so on this channel colour leads
+shape rather than blocking it.
+
+The likely reason 0.5 is too strong here is that it suppresses the *channel* and
+not only the colour feature: half the receiver's games contain nothing worth
+decoding, and `unmixed_survival` sat at ~0.28 against ~0.45 at 0.0. DEFAULT.toml
+carries the full note and the titration plan if the colour-only minimum returns.
+
 In the reference game, `percent_novel = 0.0` hands back the *same* tensor for
 both agents; `silhouette` returns a new one, so an independent roll per agent is
 still safe there.

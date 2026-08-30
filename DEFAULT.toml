@@ -85,8 +85,42 @@ n_workers = 0
 # colours sitting at six distinct luma values, a grayscale conversion would
 # re-encode colour as a scalar rather than remove it, where a flat repaint
 # removes it outright.
+#
+# **Both off as of 2026-08-30**, against a receiver rate of 0.5 since 2026-08-25.
+# The mechanism works and the measurement below is worth keeping, but the rate
+# was set against the old channel and is too strong for this one.
+#
+# What 0.5 did under the constant channel and the identity estimator. Rung 9
+# learned *shape* better than any ShapeWorld run on record -- 0.758 on shape
+# concepts and 0.829 on `and_shape_shape`, against ~0.52 for every run that had
+# never escaped -- and left colour at exactly chance for all thirty epochs. Eval
+# is never silhouetted, so 0.50 there is a failure to communicate colour and not
+# a ceiling this key imposes. The aggregate 0.615 was hiding a bimodal result,
+# and it is the mirror image of the failure the key exists for: one
+# single-feature language traded for the other.
+#
+# What 0.0 does. The same rung reaches test accuracy 0.661 by **epoch 5** with
+# colour at 0.747 *and* shape at 0.646 and still climbing -- past the
+# silhouetted run's epoch-29 aggregate, on both features, in a sixth of the
+# epochs. Colour arrives first at epoch 3 and shape follows at epoch 4, so on
+# this channel colour leads shape rather than blocking it, which is not what the
+# paper's local minimum predicts.
+#
+# The likely reason it is too strong here is that it suppresses the *channel*
+# and not only the colour feature: at 0.5, half the receiver's games contain
+# nothing worth decoding, and the run's `unmixed_survival` sat at ~0.28 with
+# `logit_margin` ~0.40 against ~0.45 and ~0.68 at 0.0. A speaker whose messages
+# are useless half the time gets a correspondingly weaker gradient to sharpen
+# on, and this channel has no learned scale to compensate with.
+#
+# So: 0.0 restores the paper's own conditions, and this is the setting the whole
+# ablation is being smoke-tested at. If the colour-only minimum returns -- the
+# tell is shape falling back to ~0.52 while colour sits near 0.80 -- titrate
+# upwards from 0.25 rather than going straight back to 0.5. Read it on the
+# `test_acc_md_shape` / `test_acc_md_color` breakdown, never on the aggregate,
+# which reads the same for a language with one feature and for one with both.
 silhouette_p_sender = 0.0
-silhouette_p_receiver = 0.5
+silhouette_p_receiver = 0.0
 
 # The intensity a fully covered pixel comes back at, as a fraction of maximum,
 # in all three channels. Partly covered pixels scale down with their coverage.
@@ -817,7 +851,7 @@ token_max_probability = 0.95
 # `"gumbel"` differentiates the soft sample `gumbel_softmax` builds on the way,
 # whose Jacobian is `diag(p) - p pT`. `"identity"` replaces that with I:
 #
-#     y = onehot.detach() + z - z.detach()
+#     y = onehot.detach() + (z - z.detach())
 #
 # The reason to want the second is *rank*, not magnitude. The per-token gradients
 # are summed into one vector before they reach the language model and the vision
@@ -827,9 +861,28 @@ token_max_probability = 0.95
 # renormalises what survives -- but no per-parameter normaliser recovers a rank.
 # `token_max_probability` bounds that collapse; only this removes it.
 #
-# `"gumbel"` is the default so that existing configs keep the behaviour they were
-# run under. Rungs 9 and 10 override it. See docs/channel.md.
-estimator = "gumbel"
+# `"identity"` is the default as of 2026-08-30, having been `"gumbel"` for the
+# few hours between the switch being added and the first runs coming back. Two
+# things decided it.
+#
+# The failure it was written for is real and was killing rungs. On
+# `shapeworld-post-silhouette-update.csv` the gumbel Jacobian took the speaker's
+# four gradient norms to ~2e-7 and the run died at epoch 21; the first identity
+# runs hold them at 0.3-1.5 against `clip_grad_norm = 1.0`, and birds' six-epoch
+# flat start -- previously the `log_logit_scale` traverse -- is simply gone.
+#
+# And a ladder cannot afford to differ in two things at once. Every rung on the
+# ablation is a single change from the one below it, so an estimator set on some
+# rungs and not others would confound the backward pass with whatever
+# architecture that rung was there to move. One estimator for the whole ladder
+# is the only setting that keeps the steps readable.
+#
+# What that costs is the A/B: nothing on the ladder now runs the gumbel backward
+# pass, so the comparison has to be made deliberately by copying a rung and
+# flipping this key. It is worth doing that way round -- both branches sample
+# through the same `_gumbel_sample`, so a same-seed pair emits identical
+# messages and differs in nothing else. See docs/channel.md.
+estimator = "identity"
 
 tau = 1.0                     # Gumbel-softmax tau. Gradient shaping only:
                               # the emitted symbol is an argmax and so is
