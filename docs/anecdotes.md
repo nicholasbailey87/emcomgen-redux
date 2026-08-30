@@ -331,8 +331,10 @@ those slots is zero, and `-inf × 0` is NaN. `GradScaler` reads that as an
 overflow and skips the step — every step, so the whole pair sits frozen at
 initialisation. The loss just idles, so nothing else shows it.
 
-Fixed by scaling the *unmasked* logits and re-masking. Harmless while the scale
-was a constant, since there was no gradient path to it at all. `fccba0f` fixed
+Fixed by scaling the *unmasked* logits and re-masking. Harmless whenever the
+scale is a constant, since there is then no gradient path to it at all — which is
+true again as of 2026-08-30, though the ordering is kept because the trap returns
+the moment anything downstream of the mask becomes differentiable. `fccba0f` fixed
 the same class of failure for a differentiable `sampling_tau`, which divides the
 `-inf` logits and puts `inf` into the gradient the same way.
 
@@ -344,13 +346,67 @@ before accuracy left chance on the way back down at around 0.82–0.85.
 
 Read as a policy that is annealing rather than one that is stuck, the descent is
 a cost: the run spent 35 epochs travelling to an entropy it could have been
-started at. `init_energy` now defaults to 0.9 — near where it chose to go, short
+started at. `init_energy` was then set to 0.9 — near where it chose to go, short
 of the 0.94 extreme where messages may carry too little for the listener to learn
 from. A design decision from a single run, not a derived bound.
 
+That key is gone. The channel is set by `token_max_probability` now, a cap on the
+speaker's confidence rather than an opening entropy, and the opening falls out of
+it: 0.386 on ShapeWorld and 0.294 on birds. The finding above survives the change
+and is part of why the opening is left where it is — a speaker that has to anneal
+its way somewhere has spent epochs getting there. See the entry below.
+
+## The channel had one knob too many
+
+`shapeworld-post-silhouette-update.csv` died at epoch 21 with the speaker's
+gradient attenuated ~130,000×. The largest single term was the straight-through
+Jacobian, and chasing it produced four things worth keeping.
+
+**The Jacobian is in the *unmixed* `p`.** `flatten_logit_distribution` is a
+convex mixture in probability space, so `dy/dz = (1 − w)(diag(p) − p pᵀ)` with
+`p` taken before the mixture. `uniform_weight` caps what the listener receives at
+0.907 and does nothing whatever to the backward pass. That is why the run read
+`realised_survival` 0.9067 against a cap of 0.90714 while the probability
+shaping its gradient was 0.99951 — the mixed column could not show it.
+
+**Rank, not magnitude, is the cost.** A uniform factor on a parameter's gradient
+cancels in AdamW and is renormalised by `clip_gradients`. What does not come back
+is a rank: at `p → 1` the Jacobian is rank ≈ 1, the per-token gradients are
+summed before they reach the language model and the vision trunk, and the trunk
+hears one token's opinion. This is the argument the identity estimator rests on,
+and it is a different argument from the one `7b10d47` was making.
+
+**The normaliser was already a cap, and the scale was moving it *down*.**
+`layer_norm_logits` permits a margin of at most `V/√(V−1)`, so at a scale of one
+the unmixed winner is capped at 0.789 for `V = 14` — above the 0.703 that
+`init_energy = 0.9`'s solved 0.882 allowed. The knob whose job was to open the
+channel was closing it, and nobody had computed the free bound to notice.
+
+**A learned scale is a one-way ratchet.** Sharper always helps the current batch
+and nothing in the objective pushes back. The tell was predicted in advance:
+`0603e27` named "the speaker's stack stalling after the scale is high" as the
+cost of removing the tau coupling, and the run fired it exactly, `pool_score_norm`
+frozen at 0.2720 and `polarity_separation` at 24.0450 from epoch 21 while the
+scale went 3.018 → 3.046. The traverse that scale had been given its own learning
+rate to cover was never the constraint either: 4% of its travel bound used.
+
+So `init_energy`, `log_logit_scale` and `logit_scale_lr` were replaced by one
+key, `token_max_probability`, inverted in closed form against the sharpest shape
+the normaliser permits. The scale is a constant; what still moves is the shape,
+which `logit_margin` measures.
+
+**One float32 detail nearly went in unnoticed.** The identity surrogate is
+`onehot.detach() + (z − z.detach())`, and the brackets matter: written
+`onehot + z - z.detach()` Python associates left and computes `(1 + z) − z`,
+which lands on 1.0000001 — a perturbation of the winning token on every step, in
+the one place the change is supposed to alter nothing. It was caught by a test
+asserting the forward value bit-for-bit against the gumbel branch, which is the
+argument for pinning exactness rather than a tolerance when exactness is what is
+claimed.
+
 ## A speaker whose sharpness was normalised away
 
-With a constant `logit_scale`, the birds speaker spent 55 epochs growing
+With a *pre-norm* `logit_scale`, the birds speaker spent 55 epochs growing
 `logit_spread` from 0.41 to 1.62, saw every bit of it normalised away by
 `layer_norm_logits`, and held `realised_survival` at 0.18 with train accuracy at
 chance for the whole span. This is why sharpness had to become a *post-norm*
@@ -499,8 +555,9 @@ listener and ignites at about epoch 20; rung 10 is rung 9 on CUB, architecturall
 identical, and ignites. Every single-factor change from rung 9 rescues it, which
 is the signature of a marginal bootstrap rather than a broken component.
 
-`scripts/ignition_audit.py` measured what was marginal. It records the sign of
-`log_logit_scale`'s gradient per optimiser step, which matters because AdamW moves
+`scripts/ignition_audit.py` measured what was marginal. It recorded the sign of
+`log_logit_scale`'s gradient per optimiser step — a reading the script no longer
+takes, that parameter having been removed — which matters because AdamW moves
 a lone scalar about `lr` per step whatever the gradient's magnitude — so its
 travel over a run is `lr × steps × net sign consistency`, and *only* the sign
 consistency is free to vary. Rung 9 sat at **49–52% negative over 1,100 steps**,
@@ -547,10 +604,11 @@ listener noisier without making it better, so send less.* That is a property of
 the loss at p ≈ 0.5, not of the dataset or the architecture, which is why it
 survived both interventions. It also unifies two things that had been read
 separately — the listener shrinking `score_scale` and the speaker shrinking
-`logit_scale` are the same hedge from opposite ends. `7b10d47` acts on that
-reading directly: both scalars now apply their gain without carrying it into the
-backward pass, so the hedge is still available to each agent and no longer
-charged to the other.
+`logit_scale` are the same hedge from opposite ends. `7b10d47` acted on that
+reading directly, making both scalars apply their gain without carrying it into
+the backward pass. Only the listener's half of that survives: the speaker's
+scale is no longer a parameter, so it cannot hedge, and the freedom it was given
+turned out to be the freedom to saturate its own estimator.
 
 Ignition is therefore a race: the first-order covariance term overtaking that
 penalty, which requires the listener to have learned the speaker's **accidental

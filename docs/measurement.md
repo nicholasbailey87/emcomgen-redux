@@ -344,9 +344,11 @@ one, it is a different question.
 Logging the channel is how it stops being an invisible property of the
 architecture.
 
-**`realised_survival`** — at a fixed `logit_scale`, this reports what each
-speaker's own logit *shape* buys it, so it is a finding rather than a restatement
-of a target. Expected to climb over a run as the speaker grows confident.
+**`realised_survival`** — `logit_scale` is a constant for the whole of a run, so
+this reports what each speaker's own logit *shape* buys it and nothing else. A
+finding rather than a restatement of a target. Expected to climb over a run as
+the speaker grows confident, and bounded above both by `uniform_weight`'s mixture
+and, through the unmixed column below, by `token_max_probability`.
 
 **`unmixed_survival`** is the same measurement with `uniform_weight`'s mixture
 switched off, and it is the one to read for saturation. `realised_survival` is
@@ -354,10 +356,12 @@ bounded above by `(1 − w) + w / V`, which is **0.90714** at ShapeWorld's `w` 0
 and `vocabulary` 14, so a channel that has committed entirely still reads as 0.91
 and looks unremarkable next to a healthy 0.85.
 
-The gap matters because the straight-through gradient runs through the *soft*
-sample, whose Jacobian is `diag(p) − p pᵀ`. That vanishes as `p → 1`, so `1 − p`
-is the factor multiplying every speaker gradient — and the `p` in it is the one
-*before* the mixture. On `shapeworld-post-silhouette-update.csv`,
+The gap matters **on the `"gumbel"` branch**, where the estimator runs through
+the *soft* sample, whose Jacobian is `diag(p) − p pᵀ`. That vanishes as `p → 1`,
+so `1 − p` is the factor the estimator turns on — and the `p` in it is the one
+*before* the mixture, because `flatten_logit_distribution` mixes in probability
+space and so contributes only a constant. On
+`shapeworld-post-silhouette-update.csv`,
 `realised_survival` pinned at 0.90670, 99.95% of the way to the cap, which
 inverts to an unmixed 0.99951. Read against 0.4779 at epoch 0, `p(1 − p)` fell by
 a factor of 510, and `clip_sender_vision` went from 2.5e-2 to 1.9e-7 alongside
@@ -366,17 +370,30 @@ it. None of that was legible in the mixed column.
 Expect the two to open close together and separate as the run sharpens. Watch
 `1 − unmixed_survival` on a log scale; it is the quantity with the dynamic range.
 
+**Which estimator is running changes what this column means.** Under
+`estimator = "identity"` the Jacobian is `I`, so this reaches the gradient not at
+all: it is still the channel's fidelity — how much of the message arrives — but a
+run that saturates it is not thereby in trouble, and the saturation signature in
+[training.md](training.md) cannot fire. Under `"gumbel"` it is a gradient
+diagnostic as described, now bounded rather than unbounded:
+`sender_language_model.token_max_probability` is a ceiling on exactly this
+column, 0.95 by default. A run pinned *at* that ceiling is at the sharpest the
+channel allows; a run pinned at `realised_survival`'s 0.90714 might be anywhere.
+
 **`logit_margin`** — the winning token's lead over the runner-up, in units of the
 logits' own standard deviation, averaged over slots. Taken after
 `layer_norm_logits` and before the gain, so it is invariant to `logit_scale` by
 construction and comparable across vocabularies without rescaling.
 
-This is the *shape* parameter that decides saturation, and until it existed
-nothing measured it. The winner's probability goes roughly as
+This is the *shape* parameter that decides saturation, and with the scale now
+constant it is the **only** thing that moves the channel over a run. The winner's
+probability goes roughly as
 `1 − p ≈ (V − 1)·exp(−logit_scale × logit_margin)`, so the scale and the margin
 saturate the channel interchangeably — and `layer_norm_logits` pins the second
-moment while pinning nothing about the shape, which leaves the margin free. That
-is the route the 2026-08-29 ShapeWorld run took: `logit_scale` reached only
+moment while pinning nothing about the shape, which leaves the margin free up to
+`V/√(V−1)`. `logit_scale` is solved against exactly that bound, which is what
+makes `token_max_probability` a cap the margin cannot get around. Before it was,
+this was the route the 2026-08-29 ShapeWorld run took: `logit_scale` reached only
 3.046, well inside what looks safe, but inverting the observed 0.99951 gives a
 margin of about **3.35**, against the **0.44** that i.i.d. standard normal logits
 over 14 tokens would give (`1/√(2 ln V)`, the Gumbel top-two spacing). Seven
@@ -397,9 +414,9 @@ component and the residual that varies. It answers the question a large
 A concentrated distribution is not a failure. One whose peak *moves with the
 input* is the best channel available — confident and informative. One that peaks
 on the same token whatever the speaker saw is confidence with zero information,
-and `realised_survival`, `logit_scale` and `logit_margin` read **identically** in
-the two cases. This is the column that separates them. At 1.0 the speaker emits
-one message for every game, which is where
+and `realised_survival` and `logit_margin` read **identically** in the two cases.
+This is the column that separates them. At 1.0 the speaker emits one message for
+every game, which is where
 `shapeworld-post-silhouette-update.csv` ended: `test_unique_message_count` of 1
 across 1,000 games.
 
@@ -415,35 +432,31 @@ way it moves, not its distance from zero. Read it against that bias.
 moment, so the speaker has a bounded shape budget and the only question is what
 it spends it on. The most concentrated distribution the normaliser permits is one
 token at `sqrt(V-1)` and the other thirteen at `-1/sqrt(V-1)` — a margin of
-**3.883** sd — and that reaches survival 0.717 against the 0.907 ceiling at a
-`logit_scale` of **one**. The 2026-08-29 run had used 86% of that budget. Fidelity
-does not have to come from the scale, which is why a clamp on `logit_scale` would
-not have bounded saturation and a clamp on survival would.
+**3.883** sd at V = 14, or `V/√(V−1)` in general. The 2026-08-29 run had used 86%
+of that budget. Fidelity does not have to come from the scale, which is why a
+bound chosen against a *typical* shape would not have caught that run, and why
+`logit_scale` is solved against this extreme instead.
 
-**`logit_scale` and `logit_spread`** are read together with it, and say which of
-two things a falling survival means: a flatter policy, which is the speaker's own
-doing, or a collapsing scale. They are indistinguishable in survival alone.
+**`logit_scale`** is a constant, and reading it is a check rather than a
+measurement. It should be **1.419** on ShapeWorld and **1.283** on birds at the
+default `token_max_probability` of 0.95, dead flat for every row of the run. A
+value that is not one of those means the config set the cap somewhere else, and a
+column that *moves* means this documentation is out of date. It is kept in
+metrics.csv so the header is stable across the change and so a run records the
+channel it was run under.
 
-`logit_scale` is the one that answers it now. `logit_spread` measures the
-emittable logits *before* `layer_norm_logits`, which divides that magnitude
-straight back out, so since `87c1027` split sharpness off into its own parameter
-the spread reports the shape's size rather than the channel's. It remains the
-column that makes a scale collapse visible, and bit-identical spread across
-epochs is the tell for skipped AMP steps.
+**`logit_spread`** measures the emittable logits *before* `layer_norm_logits`,
+which divides that magnitude straight back out, so it reports the head's output
+magnitude rather than the channel's fidelity. Do not read it for saturation —
+it would read the same for a head whose output grew uniformly and for one that
+grew a spike, and both happened on the run that died. What it is still good for
+is AMP: bit-identical spread across epochs is the tell for skipped steps.
 
-`logit_scale` is also the number `logit_scale_lr` exists to move, and the
-prediction is quantitative: birds opens at 0.839 and the scale cannot travel
-faster than `lr × steps`, so at 2e-3 over 156 steps an epoch its ceiling is 0.31
-log-units per epoch. Observed travel against that ceiling reads off directly how
-sign-consistent the gradient is, which is not recoverable from when accuracy
-happens to move.
-
-**`sampling_tau`** is logged because the coupling in `17ae9f9` and its retirement
-in `3b3b857` are both untested. It is a function of the scale and of
-`training_progress` alone, so it carries no new information in principle — but it
-is the quantity that sets how much straight-through bias the run is paying, and
-reconstructing it after the fact from two other columns and a cosine is the sort
-of thing nobody does.
+**`sampling_tau`** is the configured `tau`, flat for the whole of any run: the
+coupling in `17ae9f9` was retired in `3b3b857` and the machinery for it was
+removed with the learned scale. It carries no information, and is kept so the
+metrics header is stable and so a run records what its `"gumbel"` surrogate was
+shaped by. Under `estimator = "identity"` it does nothing at all.
 
 **`pool_effective_examples`** — `1 / Σ p²` over the prototyper's attention
 weights, so it reads in examples. It opens at the number of positive examples,
@@ -532,7 +545,7 @@ They divide the way the speaker's other columns do, into volume and shape:
 | `ExampleContrast` | `contrast_gate` | `contrast_share` | `contrast_within_share` |
 
 **`contrast_gate`** is the scalar standing between the branch and the identity.
-It opens at exactly zero and takes `contrast_gate_lr`, so like `logit_scale` it
+It opens at exactly zero and takes `contrast_gate_lr`, so as a lone scalar it
 cannot travel further than `lr × steps` — 0.1 an epoch at 2e-3 and birds' 62
 steps, against 0.0062 at the base rate, which is why it has its own key. A
 parameter rather than a per-batch quantity, so it does not depend on the pass.
@@ -619,9 +632,11 @@ its entire thirty-epoch travel at 0.58 against a score opening at 0.577 spread.
 An unmeasured parameter is how the readout's collapse went unnoticed the first
 time; this is the correction.
 
-`logit_scale` says how audibly the speaker states a message; `score_scale` says
-how confidently the listener acts on one. Both dip during bootstrapping for the same
-reason — neither agent should commit while the message is still noise — and
+`score_scale` says how confidently the listener acts on a message. It used to
+have a counterpart on the speaker — a learned `logit_scale`, saying how audibly
+the speaker stated one — and the two were read together, both dipping during
+bootstrapping for the same reason: neither agent should commit while the message
+is still noise. The speaker's half is a constant now, so only this one dips.
 `29b18ea` measured the separation that tells a productive dip from a collapse: a
 healthy speaker fell ~0.2 log-units and returned within a few epochs, where the
 arm that died fell 0.94 and never did. There is deliberately no floor on either;

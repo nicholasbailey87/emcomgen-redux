@@ -276,7 +276,7 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
     features within a candidate and never a whole candidate, which would leak
     the label ordering. It used to mask
     the message operand as well; the message arrives through the Gumbel channel,
-    whose noise `sampling_tau` and `uniform_weight` already calibrate, so a mask
+    whose noise `logit_scale` and `uniform_weight` already calibrate, so a mask
     on top is a second and uncalibrated perturbation of a signal that has one.
     The referents arrive clean, which is what makes that the side where a mask
     regularises rather than compounds. There is deliberately no
@@ -301,40 +301,57 @@ position-invariant for both speakers, has no running statistics so train and
 eval agree, and does not couple to `accumulator_steps`. Without an affine it is
 argmax-preserving, so it changes no eval-time message.)
 
-- `[sender_language_model] init_energy`: the **starting point**, and the range
-    the speaker can move through. `0.9` everywhere. It is the fraction of maximum
-    entropy a *freshly initialised* speaker's per-position distribution retains —
-    `H(p) / log2(V)`, so `1.0` is a speaker that emits uniformly at random and
-    `0.0` one that emits a single token with certainty. A fraction, not a
-    percentage.
+- `[sender_language_model] token_max_probability`: the **cap on the speaker's own
+    confidence**. `0.95` everywhere. It is the highest probability the speaker can
+    ever hold on a token, taken *before* `uniform_weight` mixes anything in — so
+    it is a ceiling on the `unmixed_survival` column, and a probability rather
+    than a percentage.
 
-    It is not the scale itself. `logit_scale` in `models/sender.py` solves once
-    at construction, by bisection against a fixed sample, for the multiplier that
-    delivers this entropy at a given `vocabulary` and `uniform_weight`: `0.802` at
-    ShapeWorld's `V = 14`, `0.839` at CUB's `V = 20`. Asking for entropy rather
-    than a scale is what makes the two datasets comparable — an earlier
-    `c * ln(V)` form over-corrected for vocabulary by about four times.
+    It is not the scale itself. `logit_scale` in `models/sender.py` inverts it
+    once at construction, in closed form, into the multiplier applied to the
+    normalised logits: `1.419` at ShapeWorld's `V = 14`, `1.283` at CUB's
+    `V = 20`. That multiplier is a **constant for the whole of a run** — not a
+    parameter, not in `state_dict`, with no learning rate.
 
-    Why entropy rather than a symbol error rate or a channel capacity: at
-    initialisation there is no correct symbol to have an error rate *against*
-    (argmax is an accident of the init, not an intended message), and capacity
-    runs backwards, since a high-capacity channel is a sharp one with less room
-    to explore. The reason to start high is bootstrapping — a fresh speaker's
-    argmax barely varies with its input, so a low-entropy start means it emits
-    near enough one message for everything, confidently, from the first batch,
-    and the listener co-adapts to that before the speaker's embeddings are worth
+    The inversion is against the sharpest shape `layer_norm_logits` permits — one
+    token at `√(V−1)` and the rest at `−1/√(V−1)`, a margin of `V/√(V−1)` — which
+    is what makes it a bound rather than a typical value: no combination of shape
+    and scale can put a token above the cap.
+
+    Why a cap and not a starting point. This replaces `init_energy`, which named
+    an opening entropy and left the scale to be learned from there. A learned
+    scale has a monotone incentive — sharper always helps the current batch and
+    nothing in the objective pushes back — so it climbed until the
+    straight-through estimator was shut, which is what killed
+    `shapeworld-post-silhouette-update.csv` at a scale of 3.046. And it was never
+    needed: the normaliser already bounds the shape, so at a scale of *one* the
+    cap is 0.789 at `V = 14`, above the 0.703 that `init_energy = 0.9`'s solved
+    0.882 permitted. The scale's only job was to move that cap, and the shipped
+    default moved it down.
+
+    **The opening is now a consequence rather than a second knob**, and it lands
+    where `init_energy` was putting it: a fresh speaker holds its argmax with
+    probability `0.386` on ShapeWorld and `0.294` on CUB, against `0.249` and
+    `0.206` before. A modest opening still matters for bootstrapping — a fresh
+    speaker's argmax barely varies with its input, so a confident opening means
+    it emits near enough one message for everything from the first batch, and the
+    listener co-adapts to that before the speaker's embeddings are worth
     grounding on.
 
-    **This is a starting point, not a target**: what a speaker actually does is
-    reported as `realised_survival` and `logit_scale`, and is expected to move
-    over a run — including *downwards* in fidelity early on, which is the
-    speaker annealing itself rather than a fault, and the birds baseline makes
-    that descent every run: 0.81x of its opening by epoch 5, recovered by epoch
-    8, and it is bootstrapping from a realised survival of 0.12-0.14 while it is
-    down there. Flooring the scale at this value was tried and reverted — it
-    cost that arm fifteen epochs against a same-seed control. `logit_scale`'s
-    docstring carries the derivation and the reference points to rederive `0.9`
-    from.
+    What a speaker actually does between the two is reported by
+    `realised_survival`, `unmixed_survival` and `logit_margin`, and is expected
+    to move over a run. `logit_scale`'s docstring and [docs/channel.md] carry the
+    derivation and the table of what the cap costs.
+- `[sender_language_model] estimator`: which **gradient estimator** the speaker
+    learns through — `"gumbel"` (the default) or `"identity"`. The forward pass is
+    identical on both, one shared sampler drawing `argmax(logits + Gumbel)`, so at
+    the same seed the two emit *identical* messages and an A/B between them is a
+    control. `"gumbel"` differentiates the soft sample, whose Jacobian
+    `diag(p) − p pᵀ` has rank ≈ 1 once the speaker is confident; `"identity"`
+    sends the gradient straight to the logits instead. The argument is rank, not
+    magnitude: the per-token gradients are summed before they reach the language
+    model and the vision trunk, and no per-parameter normaliser recovers a rank.
+    Rungs 9 and 10 take `"identity"`. See [docs/channel.md].
 - `[sender_language_model] uniform_weight`: the **ceiling** on fidelity, and so
     the floor under exploration. Weight of the uniform component mixed into the
     policy before sampling, train-pass only. It caps a slot's winner at
@@ -475,33 +492,27 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     fraction of symbols surviving the noise. Train pass only, since that is the
     only pass that samples. This is the channel diagnostic. It is a finding, not
     a target — expect it to start near 0.5 and climb as the speaker sharpens,
-    bounded above by the `uniform_weight` ceiling of `1 - w + w/V`. Flat at ~0.5
-    for many epochs means the channel is not opening; pinned at the ceiling
-    early means it has nothing left to explore with. Since `87c1027` the
-    speaker owns its sharpness, so this is no longer a pure readout of logit
-    *shape* — read it with `train_logit_scale`, which separates the two.
+    bounded above both by the `uniform_weight` ceiling of `1 - w + w/V` and by
+    `token_max_probability` through the unmixed column. It opens at 0.355 on
+    ShapeWorld and 0.270 on birds. Flat at its opening for many epochs means the
+    channel is not opening; pinned at the ceiling early means it has nothing left
+    to explore with. `logit_scale` is a constant, so what moves this column over
+    a run is the logit *shape* and nothing else — read it with
+    `train_logit_margin`, which measures that directly.
 - `train_logit_scale` — the multiplier applied to the normalised logits before
-    sampling, `exp(log_logit_scale)`. This is the channel's fidelity: the Gumbel
-    noise floor is a fixed sd of 1.283 and `layer_norm_logits` pins the logits
-    to unit variance, so the scale alone says how much of the speaker's
-    distribution survives. It opens where `init_energy` puts it (0.802 for
-    ShapeWorld, 0.839 for birds) and a usable channel is somewhere around 4 to
-    6. It is the disambiguator for a falling survival: a flatter policy at a
-    steady scale is the speaker's own doing, a falling scale is the channel
-    closing. Both happen, and the distinction that matters is depth rather than
-    direction: a healthy arm dips about 0.2 log-units below its opening and
-    climbs back through it within a few epochs, while the preliminary ViT-sender
-    arm fell 0.94 log-units over a hundred and never returned.
-    Its travel is bounded by `lr * steps`, because AdamW normalises by the
-    gradient's second moment and this is a lone scalar — so it moves at about
-    `logit_scale_lr` per step whatever the gradient's size, and comparing its
-    observed climb to that ceiling reads off how sign-consistent the gradient
-    is. Expect a flat start (no gradient reaches it while the listener cannot
-    use the message), then a climb, then a plateau once the `uniform_weight`
-    cap saturates fidelity and the gradient dies with it. A scale climbing
-    while accuracy stays at chance is co-adaptation to a premature code.
-- `train_score_scale` — the listener's volume, and the counterpart of
-    `train_logit_scale`. `exp(log_score_scale)` on one lone scalar per
+    sampling. **A constant**: `1.419` on ShapeWorld and `1.283` on birds at the
+    default `token_max_probability` of `0.95`, dead flat for every row of a run.
+    Reading it is a check that the run is on the channel you meant, not a
+    measurement — a column that moves means this documentation is out of date.
+    It is kept so the metrics header is stable across the change that froze it,
+    and so a run records the channel it ran under.
+
+    It was a learned parameter until 2026-08-30, `exp(log_logit_scale)`, and most
+    of the diagnosis in [docs/training.md] was written against its direction and
+    its travel. Neither exists now; the same readings come off
+    `train_realised_survival` and `train_logit_margin`.
+- `train_score_scale` — the listener's volume. `exp(log_score_scale)` on one lone
+    scalar per
     discriminator, in front of the candidate scores standardised per game, at an
     elevated `score_scale_lr` of 2e-3. Live on every rung: the attention arm
     composes a bilinear path built with `score_scale=False` and carries the one
@@ -513,7 +524,8 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     how that used to be read. The slide is no longer a mechanism: the scale is
     absent from the backward pass into the message, the token embedding and the
     channel, so a quiet listener no longer starves the speaker. A low
-    `score_scale` beside a rising `train_logit_scale` is a coherent state.
+    `score_scale` beside a rising `train_realised_survival` is a coherent
+    state.
     It briefly did not exist. Between `a9a6a9c` and `7b10d47` the volume lived
     in the weight matrices, on the argument that a matrix has no cheap move
     downwards — true, and the problem: `train_bilinear_weight_norm` travelled
@@ -528,18 +540,18 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     and its effective learning rate decays as it grows. On the attention arm the
     branches mix at their own magnitudes before the readout, so both norms still
     set what the score is made of and `train_mix_share` is where that shows.
-- `train_sampling_tau` — the temperature actually handed to `gumbel_softmax`,
-    as against the configured `tau`. A function of `train_logit_scale` and the
-    epoch counter alone, so it carries no independent information, but it is
-    what sets how much straight-through bias the run is paying. It equals `tau`
-    at initialisation and whenever the scale sits below its opening value,
-    rises with the scale so that losing tokens keep receiving gradient, and
-    returns to `tau` by the last epoch as the coupling retires.
+- `train_sampling_tau` — the temperature handed to `gumbel_softmax`, which is the
+    configured `tau` and nothing else. Flat for the whole of any run. It shapes
+    the soft sample the `"gumbel"` estimator differentiates and is invariant in
+    the forward pass, since the emitted symbol is an argmax; under
+    `estimator = "identity"` the soft sample is discarded and this does nothing
+    at all. It was coupled to the then-learned scale on a cosine schedule until
+    `0603e27`; the column name is kept for header stability.
 - `train_logit_spread` — the standard deviation of the emittable logits
     *before* normalisation, so it reports the size of the logit *shape* rather
     than of the channel: `layer_norm_logits` divides this magnitude back out,
-    and since `87c1027` the channel's sharpness lives in `train_logit_scale`
-    instead. What it is still good for is the normaliser's floor. Below a spread
+    and the channel's sharpness lives in `train_logit_scale`, which is now a
+    constant. What it is still good for is the normaliser's floor. Below a spread
     of ~1e-6 LayerNorm can no longer rescue it (see `LAYER_NORM_EPS`); anywhere
     above that the spread is absorbed and only shape reaches the channel.
 - `train_pool_effective_examples` — `1 / sum(p^2)` over the prototyper's

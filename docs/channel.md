@@ -9,8 +9,13 @@ The pipeline, in order, is:
 ```
 outputs2vocab  →  layer_norm_logits  →  mask_reserved_tokens
                →  × logit_scale      →  flatten_logit_distribution
-               →  gumbel_softmax(hard=True, tau=sampling_tau)
+               →  gumbel_softmax(hard=True, tau=tau)
+               →  [estimator: gumbel | identity]
 ```
+
+`logit_scale` is a constant solved once at construction, and the estimator
+chooses only what the backward pass sees — the forward is the same one-hot
+either way.
 
 At eval there is no scale, no mixture and no noise: the argmax of the masked,
 normalised logits. Eval measures the learned policy rather than a deliberately
@@ -39,9 +44,10 @@ It is functional and has neither affine parameter, so the transform is
 argmax-preserving (it changes no eval-time message) and nothing is added to the
 `state_dict`.
 
-### The two learnable channel parameters sit on opposite sides of it
+### The prior and the sharpness sit on opposite sides of it
 
-That is the whole design.
+That is the whole design. One of the two is still learned; the other is not, and
+this section is partly a record of why.
 
 **The token prior** is `outputs2vocab.bias`, **pre-norm**. It is divided by the
 incoming standard deviation along with everything else, so its influence stays
@@ -54,18 +60,26 @@ bound is that the prior is weakest late and strongest at initialisation, when
 `Wh` is still small; treat it as scaffolding, since a trained `W` can carry token
 preferences in its row norms without help.
 
-**The sharpness** is `log_logit_scale`, **post-norm**, a single scalar per
-speaker. It has to be post-norm to mean anything at all, since this function pins
-the variance and would divide any pre-norm scaling straight back out. That is not
-hypothetical: with a constant scale the birds speaker spent 55 epochs growing
-`logit_spread` from 0.41 to 1.62, saw every bit of it normalised away, and held
-`realised_survival` at 0.18 with train accuracy at chance for the whole span.
+**The sharpness** is `logit_scale`, **post-norm**, a single number per speaker.
+It has to be post-norm to mean anything at all, since this function pins the
+variance and would divide any pre-norm scaling straight back out. That is not
+hypothetical: the birds speaker once spent 55 epochs growing `logit_spread` from
+0.41 to 1.62, saw every bit of it normalised away, and held `realised_survival`
+at 0.18 with train accuracy at chance for the whole span.
 
 A scalar rather than LayerNorm's gamma vector, because sharpness is one degree of
 freedom and a per-token gamma spreads it over `vocabulary` of them — which then
 also have to serve as a token prior, and the shape that suits the listener is not
 the shape that maximises sharpness. One parameter per job. It also keeps
 argmax-preservation, which a per-token gain would cost.
+
+**It is no longer learned.** It was `log_logit_scale`, an `nn.Parameter` stored
+as a log so `exp` kept it positive, with a learning rate of its own. Since
+2026-08-30 it is a constant solved from `token_max_probability` at construction:
+a learned scale has a monotone incentive and climbs until the straight-through
+estimator is shut, and `layer_norm_logits` already bounds the shape, so the cap
+can be set analytically instead. The section below carries that argument in
+full.
 
 **And it is a plain product, briefly not.** `7b10d47` put the gain through
 `model_util.scale_without_attenuating` — same forward, `∂/∂normalised` forced to
@@ -85,9 +99,14 @@ for a channel of volume 1 whatever the forward used. See
 [anecdotes.md](anecdotes.md), round seven.
 
 The forward was never in question either way, so the fidelity against the fixed
-1.283 noise floor — the scale's real job — and `∂L/∂log_logit_scale`, which is
-what `scripts/ignition_audit.py`'s covariance reads, are unaffected by the
-removal.
+1.283 noise floor — the scale's real job — is unaffected by the removal. The
+other thing that argument was measured against, `∂L/∂log_logit_scale` and the
+covariance `scripts/ignition_audit.py` read from it, no longer exists: the scale
+takes no gradient at all now, and both the helper and the parameter it wrapped
+are gone. What is left below is a record of what a *uniform* factor on the
+speaker's gradient does and does not cost, which is the same argument the
+identity estimator rests on from the other side — there the problem is rank, and
+no normaliser undoes that.
 
 **The gain sits between `layer_norm_logits` and `mask_reserved_tokens`,**
 upstream of the sampler; `gumbel_softmax(hard=True)` keeps its own
@@ -98,8 +117,11 @@ gradient into the raw logits is a product of three factors:
 dL/draw  =  J_gumbel(scaled)  ×  d(scaled)/d(normalised)  ×  d(normalised)/d(raw)
 ```
 
-and the helper changes the middle one from `logit_scale` to 1, at every scale.
-That is the whole of what it does, and it is exact.
+and the helper changed the middle one from `logit_scale` to 1, at every scale.
+That was the whole of what it did, and it was exact. (With the scale constant,
+that middle factor is now a constant too — which is why the identity estimator
+taps the *unscaled* logits instead, leaving it out of the backward pass
+altogether.)
 
 The end-to-end number is not flat, because `J_gumbel` is itself a function of
 `scaled` — the soft surrogate is `softmax((scaled + g) / tau)`, which saturates
@@ -127,9 +149,11 @@ been there.
 `F.layer_norm` divides by `sqrt(var + eps)`, so scale invariance holds only while
 the incoming variance is large against `eps`; below that the normaliser quietly
 stops normalising and the emittable logits come out *smaller* than unit variance.
-`log_logit_scale` is learned, not solved per batch, so it can only absorb that at
-whatever rate gradient descent manages — where the per-batch solve it replaced
-absorbed it immediately and silently.
+`logit_scale` is a constant, so it cannot absorb that at all — where the
+per-batch solve it replaced absorbed it immediately and silently, and the learned
+scale that came after absorbed it slowly. A collapsing speaker now simply gets a
+weaker channel, which is the honest behaviour and the reason `eps` is set where
+it is.
 
 The headroom is much smaller than raw logit scales suggest. A freshly built GRU
 speaker emits pre-norm logits with a standard deviation of ~0.24, and at the
@@ -182,7 +206,7 @@ backpropagates NaN, so they are mixed as a finite placeholder and the mask is
 restored afterwards. `torch.where` routes the gradient to the selected branch
 only, so the placeholder never reaches the speaker.
 
-## `logit_scale` — the exploration control
+## `logit_scale` — the cap on the speaker's confidence
 
 `F.gumbel_softmax(..., hard=True)` emits `argmax(logits + g)` with
 `g ~ Gumbel(0, 1)`, whose standard deviation is a fixed 1.283, so how much of the
@@ -191,240 +215,291 @@ relative to that. LayerNorm pins them to unit variance for every speaker, and th
 scale says what that unit is worth. Larger scale, sharper distribution, less
 entropy.
 
-`logit_scale(init_energy, vocabulary, uniform_weight)` resolves the *initial*
-scale by numerical bisection. Each speaker then stores its log in
-`log_logit_scale` and learns from there, so `init_energy` fixes where a run opens
-— and so still equalises the opening channel across architectures — but not where
-it settles. Where it settles is reported by `realised_survival`.
+`logit_scale(token_max_probability, vocabulary)` resolves it once, at
+construction, in closed form. It is a **constant for the whole of a run**: a
+plain float on the speaker, absent from `state_dict`, with no learning rate and
+no gradient. What it delivers is a ceiling —
 
-Stored as a log so that `exp` keeps it strictly positive: a negative scale would
-invert the speaker's preferences rather than flatten them, and only a positive
-one is argmax-preserving.
+> whatever the speaker does with its logits, it can never hold a token with
+> probability above `token_max_probability`.
 
-### Why entropy, and why at initialisation
+### Why that quantity, and not the fidelity the listener sees
 
-The point of a noisy channel here is not fidelity, it is **bootstrapping**. A
-fresh speaker's argmax is very nearly input-independent — it has learned nothing,
-so its preferred token barely varies with the referent. If that argmax is
-transmitted reliably, the speaker emits one message for every input, confidently,
-from the first batch, and the listener co-adapts to that degenerate language
-before the speaker's embeddings are worth grounding anything on. High entropy at
-the start is what prevents this: near-random messages carry no premature
-structure to co-adapt to, and the pair sharpens together as the embeddings become
-worth using.
+The two are different numbers and this is the whole reason there are two survival
+columns.
 
-So the knob is deliberately expressed as *entropy retained*, not as channel
-capacity or as a symbol error rate. Both of those were tried and both mislead:
+On the `"gumbel"` branch the estimator differentiates the soft sample, whose
+Jacobian is `diag(p) − p pᵀ`. `flatten_logit_distribution` mixes in probability
+space, so `m = (1 − w)·p + w/V` and
 
-- **Capacity** (mutual information over its maximum) runs the wrong way round.
-  High capacity means a sharp, low-entropy speaker, i.e. *less* room to
-  bootstrap — so a config asking for "80% capacity" is asking for the opposite of
-  what it sounds like.
-- **"Fraction of symbols flipped"** presupposes a correct symbol. At
-  initialisation there is no correct symbol: argmax is not an intended message,
-  it is an accident of the initialisation. Counting departures from it as errors
-  imports a notion of correctness that does not exist yet.
+```
+dy/dz = (1 − w)(diag(p) − p pᵀ)
+```
 
-Entropy has neither problem. It is a property of the distribution alone, it needs
-no reference symbol, and it runs the way intuition does: higher means flatter
-means more room to explore.
+— the mixture contributes a *constant*, and `p` in that expression is the
+winner's probability **before** it. So `uniform_weight` caps what the listener
+receives at `1 − w + w/V` = 0.907 and does nothing at all to the backward pass.
+That gap is how the 2026-08-29 ShapeWorld run read `realised_survival` 0.9067
+against a cap of 0.90714 while the probability shaping its gradient was 0.99951.
+`unmixed_survival` is the column that reports `p`; `token_max_probability` is a
+ceiling on it.
 
-`initial_energy` computes `H(p) / log2(V)`, so 1.0 is a uniform speaker that has
-committed to nothing and 0.0 is one that emits a single token with certainty.
+### Why a cap rather than a starting point
 
-### Why a numerical solve, and why no `ln(V)` term
+This key replaces `init_energy`, which named an opening entropy, solved a scale
+by bisection to deliver it, and then let `log_logit_scale` learn from there. Two
+things were wrong with that.
 
-An earlier version used a closed form, `coefficient × ln(V)`, on the argument
-that a winner must beat the largest of `V` Gumbel draws and
-`E[max_i g_i] = ln V + γ`. That is the right correction for holding a *survival
-rate* constant across vocabularies, but it badly overshoots for holding *entropy*
-constant. Measured over V = 8..256, the scale that holds entropy fixed varies
-only 1.2–1.4×, while `scale / ln(V)` varies about 2× — so dividing by `ln(V)`
-introduces roughly four times more vocabulary dependence than it removes. The
-residual really is logarithmic, but with a much smaller coefficient: at 80%
-retained, `scale ≈ 0.87 + 0.12·ln(V)` fits to about 2% over that range.
+**A learned scale has a monotone incentive.** Sharper always helps the current
+batch and nothing in the objective pushes back, so it climbs until the estimator
+is shut. That is exactly what the 2026-08-29 run did, at a scale of 3.046 — and
+it is the failure this document's **Where that left it** section had already
+named as the predicted cost of removing the tau coupling.
 
-Rather than fit that, the scale is solved for numerically. It costs one bisection
-at construction, it is exact for any `(V, w)` instead of approximate over the
-range someone happened to check, and it puts the design decision itself in the
-config rather than a coefficient that encodes it.
+**And it was never needed.** `layer_norm_logits` already bounds how concentrated
+a shape can get: the sharpest arrangement it permits is one token at `√(V−1)` and
+the rest at `−1/√(V−1)`, whose margin is `V/√(V−1)` — 3.883 sd at V = 14, 4.588
+at V = 20. At a scale of *one* that already caps the unmixed winner at 0.789 for
+ShapeWorld, above the 0.703 that `init_energy = 0.9`'s solved 0.882 permitted.
+The scale's only job was to move that cap, and the shipped default moved it
+**down**.
 
-`initial_logit_sample` makes the solve deterministic: a fixed draw of the logits
-a *freshly initialised* speaker produces, reused at every bisection step. After
-`layer_norm_logits` the emittable logits are zero mean and unit variance, and at
-initialisation they are also i.i.d. standard normal — random weights put the
-referent through a linear projection whose rows are independent, so nothing
-correlates the vocabulary dimension yet. **This is the one place in the scheme
-where the Gaussian assumption is a fact about the model rather than a proxy for
-one, which is why the operating point is defined at initialisation and not
-anywhere later.**
+The traverse the learned scale was given `logit_scale_lr` to cover was not the
+binding constraint either. That run moved `log_logit_scale` 0.05–0.09 log-units
+in epochs 1–4 against a bound of at least 0.28 — 4% of it. It was
+gradient-limited, not step-limited.
 
-Reusing one sample also makes the solve exactly monotone in the scale, which is
-what makes bisection valid. The constants: 2^16 samples put the resolved scale
-within about 0.5% of its large-sample limit; the bracket spans six orders of
-magnitude, searched geometrically, and 48 steps close it to better than one part
-in 10^4.
+### The closed form
+
+`sharpest_logit_margin(V) = V/√(V−1)` is the margin of that extreme shape; it is
+zero-mean and unit-variance by construction, which is what makes it the sharpest
+thing the normaliser can pass. At that shape all the losers are equal, so the
+winner is
+
+```
+p = 1 / (1 + (V − 1)·exp(−c · margin))
+```
+
+which inverts exactly:
+
+```
+c = ln( (V − 1)·p / (1 − p) ) / margin
+```
+
+No bisection, no seeded sample, no tolerance — and, because it is solved at the
+*worst case over shape*, it is a bound rather than a typical value. That matters:
+shape is the route the dead run actually took, having spent 86% of its shape
+budget, and a constant chosen against a typical shape would not have held.
+`logit_margin` (docs/measurement.md) is the column that watches the shape
+directly.
+
+### What the default costs and buys
+
+Fidelity saturates long before `p` does, so the top of the range is nearly free
+to give up. At V = 14, w = 0.1:
+
+| `token_max_probability` | scale | realised cap | gradient vs p = 0.70 |
+| --- | --- | --- | --- |
+| 0.70 | 0.879 | 0.637 | 1.00x |
+| 0.95 | 1.419 | 0.862 | 0.17x |
+| 0.99 | 1.844 | 0.898 | 0.033x |
+| 0.9999 (the dead run) | 3.033 | 0.907 | 0.0003x |
+
+Past 0.95 the speaker pays 5x in `1 − p` for 0.04 of message fidelity. **0.95 is
+a design decision, not a derived bound**, and the number to revisit if a run is
+bounded by the cap and still short of the accuracy it should have.
+
+### The opening is now a consequence
+
+There is no second knob for where a run starts. At initialisation the normalised
+logits are i.i.d. standard normal — random weights through a linear projection
+whose rows are independent, so nothing correlates the vocabulary dimension yet —
+and the constant fixes the opening from there:
+
+| | scale | opening (unmixed) | opening (realised) | realised cap |
+| --- | --- | --- | --- | --- |
+| ShapeWorld, V = 14 | 1.419 | 0.386 | 0.355 | 0.862 |
+| birds, V = 20 | 1.283 | 0.294 | 0.270 | 0.860 |
+
+against 0.249 and 0.206 under `init_energy = 0.9`. That it lands in the same
+region is not luck — the old default's solved scale was already near 1 — but it
+is worth stating, because the *reason* to want a modest opening is unchanged and
+is nothing to do with the cap.
+
+**Bootstrapping is that reason.** A fresh speaker's argmax is very nearly
+input-independent: it has learned nothing, so its preferred token barely varies
+with the referent. If that argmax is transmitted reliably, the speaker emits one
+message for every input, confidently, from the first batch, and the listener
+co-adapts to that degenerate language before the speaker's embeddings are worth
+grounding anything on. Near-random messages carry no premature structure to
+co-adapt to, and the pair sharpens together as the embeddings become worth using.
+
+A larger vocabulary opens *flatter* at the same cap, not sharper: `V/√(V−1)`
+grows with V, so less gain is needed to reach the same ceiling, and 0.294 against
+0.386 is that. Both datasets run under the same bound, which is what the shared
+key buys and what a shared bare scale would not.
 
 ### What the other end is
 
-`uniform_weight` (w) owns the trained end: mixing caps a slot's winner at
-`1 − w + w/V` however sharp the logits get, which at w = 0.02 is a floor of about
-0.05 on retained entropy. The two knobs barely interact. Mixing only matters when
-some token holds much more than `w/V`, so at the flat end the scale is the whole
-story and `uniform_weight` changes nothing measurable; at the sharp end the cap
-binds and the scale stops mattering.
+`uniform_weight` (w) owns the trained end from the *listener's* side: mixing caps
+a slot's winner at `1 − w + w/V` however sharp the logits get, which at w = 0.1
+is 0.907. So at least `w·(1 − 1/V)` of symbols are flipped no matter what — a
+permanent per-symbol corruption rate training cannot reduce, which is the point.
 
-Where a run actually lands between the two is a **finding**, reported by
-`realised_survival` and `logit_spread`, not a design input. Do not calibrate the
-scale against an assumed trained shape — that number is unmeasured,
-`uniform_weight` already bounds it, and letting it into the chain sets the
-operating point from a guess.
+The two ceilings do different jobs and are not substitutes. `uniform_weight`
+bounds what arrives; `token_max_probability` bounds what the gradient is written
+in. Only the second is visible to the estimator, and only the first survives into
+the message.
 
-If `init_energy` is below the floor `uniform_weight` imposes, `logit_scale` warns
-and the scale pins at `ENERGY_SCALE_MAX`; lower `uniform_weight` to ask for less.
+Where a run actually lands between the opening and the cap is a **finding**,
+reported by `realised_survival`, `unmixed_survival` and `logit_margin`, not a
+design input.
 
-### Rederiving the default
+## `tau`
 
-Reference points for birds (V = 20, w = 0.02), all computable from
-`initial_energy`:
+The temperature handed to `gumbel_softmax`, flat at its configured value for the
+whole of any run.
 
-| retained entropy | 0.94 | 0.90 | 0.85 | 0.77 | 0.62 | 0.57 |
-| --- | --- | --- | --- | --- | --- | --- |
-| scale | 0.64 | 0.84 | 1.05 | 1.37 | 1.99 | 2.23 |
-| argmax probability | 0.14 | 0.19 | 0.23 | 0.31 | 0.45 | 0.49 |
+`hard=True` emits `argmax(logits + g)`, which is invariant to any positive `tau`,
+so this shapes the *soft* sample and nothing else. On the `"gumbel"` branch that
+soft sample is what the estimator differentiates, so `tau` is a pure backward
+knob there. On the `"identity"` branch the soft sample is discarded, so `tau`
+does nothing at all.
 
-The default of 0.9 is set from the one trajectory that has been measured. A birds
-run started at 0.62 retained (the `ln V` scheme's 0.66 coefficient), then
-*flattened itself* for 35 epochs, reaching about 0.94 retained, before accuracy
-left chance on the way back up at around 0.82–0.85. Read as a policy that is
-annealing rather than one that is stuck, the descent is a cost: the run spent 35
-epochs travelling to an entropy it could have been started at. 0.9 starts it near
-where it chose to go, and short of the 0.94 extreme, where messages carry so
-little that there may be nothing for the listener to learn from.
+### It used to be coupled to the scale, and cannot be again
 
-That is a design decision taken from a single run, not a derived bound, and it
-should be revisited when there are more. What is *not* a free choice is the
-direction: lower than about 0.6 reproduces the premature-sharpening failure this
-scheme exists to avoid.
+`17ae9f9` tied it to `logit_scale / initial_logit_scale` on a cosine schedule
+over training, so that a sharpening speaker got a correspondingly softened
+surrogate and the straight-through Jacobian could not collapse. `0603e27`
+commented that out; the lines and the argument stood in this file until
+2026-08-30, when the learned scale was removed and there was no longer a ratio
+for the schedule to track. Both are gone.
 
-## `sampling_tau`
+The record of what it traded is worth keeping, because it is the reason the
+channel now looks the way it does.
 
-> **Currently off.** `0603e27` commented the coupling out as a hypothesis test on
-> rung 9's flat start, and `sampling_tau` returns the bare configured `tau`, flat
-> for the whole of any run. Everything below describes the five commented lines
-> and is right again the moment they are uncommented, which is why it was left
-> standing. What the test has since returned is in **Where that left it** at the
-> end of this section.
+**Why it was turned off.** The coupling is a *pin* on the scale, not a floor.
+Under it the surrogate reduces to `softmax(L + g/scale)`, and `layer_norm_logits`
+holds `L` at unit variance, so the scale leaves the signal term entirely: the
+only gradient `log_logit_scale` still received was through `g/scale` — "these
+particular Gumbel draws would have hurt less had I been louder" — which is a
+different answer every batch. Rung 9 moved `log_logit_scale` by −0.008 over ten
+epochs, 0.2% of its travel bound, at chance throughout.
 
-The temperature handed to `gumbel_softmax`: the configured `tau`, adjusted
-towards `tau × logit_scale / initial_logit_scale` by a cosine schedule over
-training.
+**Why turning it off cost something.** `0603e27` predicted that cost with a named
+tell: *the speaker's stack stalling after the scale is high —
+`pool_score_norm` and `polarity_separation` flattening while `logit_scale` and
+`realised_survival` keep climbing.* `shapeworld-post-silhouette-update.csv` fired
+it exactly. From epoch 21 `pool_score_norm` was frozen at 0.2720 and
+`polarity_separation` at 24.0450, while `logit_scale` went 3.018 → 3.046 and
+survival closed the last 0.0003 to its cap. The uncoupled surrogate saturated,
+and the speaker's four gradient norms fell to ~2e-7.
 
-```
-ratio  = max(logit_scale / initial_logit_scale, 1)
-weight = (1 + cos(π · training_progress)) / 2
-tau    = configured_tau · (1 + weight · (ratio − 1))
-```
+**And why neither side of that trade is the answer.** The coupling removes the
+*scale* route to saturation and leaves the shape route open, since
+`softmax((z + g/s)/c)` still saturates if `z`'s top-two gap grows — which is the
+route that run actually took, at 86% of the shape budget. So a reinstated
+coupling would not have caught it. What does catch it is bounding the product
+directly: `logit_scale` is now solved against the largest margin the normaliser
+permits, so `scale × margin` is capped whatever the speaker spends its budget on.
 
-So a run opens fully coupled and ends at exactly the configured `tau`, where the
-surrogate is an honest picture of the sharpness the listener actually receives.
-The cosine is flat early, which is what makes a single schedule work across
-datasets that take off at very different times: at 100 epochs the weight is still
-0.97 at epoch 11, where ShapeWorld leaves chance, and 0.65 at epoch 40, where
-birds does. Both take off fully coupled and the coupling retires over the last
-third.
-
-**Being open-loop is the point**, not a compromise. Driving the schedule from
-`realised_survival` or from accuracy would track the model rather than the clock,
-but it would also hand every rung of the ablation a different tau schedule — so
-arms would differ in their estimator as well as their architecture, which is the
-confound the ladder exists to avoid.
-
-### Why the coupling at all
-
-`tau` shapes the soft sample the straight-through estimator differentiates; it
-leaves the hard forward sample alone, which is an argmax and so invariant to it.
-With `tau` held constant while the speaker sharpens, the surrogate sharpens with
-it and the gradient collapses onto whichever token won the Gumbel draw: measured
-over unit-variance logits at V = 20, the effective number of tokens carrying
-gradient falls from 4.9 at the opening scale to 1.6 by a scale of 6, with the
-winner holding 0.80 of the mass. The losing tokens then receive almost nothing,
-so the speaker stops being told what the alternatives were worth exactly as its
-channel becomes good enough to use them.
-
-Scaling `tau` with the scale holds that open instead — the same measurement gives
-9.0 to 9.5 effective tokens across the range, since the surrogate reduces to
-`softmax(L + g/scale)` and `L` is pinned to unit variance by `layer_norm_logits`.
-
-### Why the ratio is floored at 1
-
-Below the opening scale the coupling runs backwards: the surrogate becomes
-`softmax(s₀·L + s₀·g/s)`, whose noise term grows as the scale shrinks. Measured
-at V = 20, scale 0.35, that takes the surrogate from 4.9 effective tokens to 2.0
-while the token it favours matches the noiseless argmax only 9% of the time — a
-confident gradient pointing at noise. `tau` is monotone and cannot change *which*
-token is favoured, only how hard the gradient commits to it, so there is nothing
-to be gained in that direction.
-
-### Why against `initial_logit_scale` rather than raw
-
-So that a fresh speaker samples at exactly the configured `tau` and the coupling
-changes nothing at initialisation. It diverges only as the speaker moves its own
-scale, which is the behaviour being added.
-
-### Why detached, and that is not optional
-
-`gumbel_softmax` divides the logits by it, and the reserved slots are `-inf` by
-then, so a differentiable tau puts `inf` into the gradient with respect to the
-scale and NaN into the step — the same failure `fccba0f` fixed for the scale
-itself. It is also the right semantics: the scale is learned through the forward
-channel, while tau only shapes the estimator, and a speaker that could tune its
-own gradient estimator would have every reason to soften it rather than to
-communicate better.
-
-The cost is straight-through bias: the surrogate stays softer than the hard
-sample the listener actually receives, so the speaker differentiates a policy
-slightly different from the one it plays. Straight-through is biased at any `tau`,
-so this is a change of degree.
-
-`training_progress` is a fraction of training elapsed, set once per epoch by
-`train.py`. It is a *position in a schedule*, not state: recovered from the epoch
-counter on resume rather than checkpointed, and 0.0 until told otherwise, so a
-speaker used outside a training loop — ACRe, the tests, an interactive session —
-samples at the configured `tau`.
-
-### Where that left it
-
-`0603e27` turned the coupling off because it is a **pin on the scale**, not a
-floor. Under it the surrogate reduces to `softmax(L + g / scale)`, and
-`layer_norm_logits` holds `L` at unit variance, so the scale leaves the signal
-term entirely: the only gradient `log_logit_scale` still receives is through
-`g / scale` — "these particular Gumbel draws would have hurt less had I been
-louder" — which is a different answer every batch. Rung 9 moved
-`log_logit_scale` by −0.008 over ten epochs, 0.2% of its travel bound, at chance
-throughout.
-
-Both halves of that trade have now been observed, and neither side is free.
-
-`0603e27` predicted the cost of removing it with a named tell: *the speaker's
-stack stalling after the scale is high — `pool_score_norm` and
-`polarity_separation` flattening while `logit_scale` and `realised_survival` keep
-climbing.* `shapeworld-post-silhouette-update.csv` fired it exactly. From epoch
-21 `pool_score_norm` is frozen at 0.2720 and `polarity_separation` at 24.0450,
-while `logit_scale` went 3.018 → 3.046 and survival closed the last 0.0003 to its
-cap. The uncoupled surrogate saturated, and the speaker's four gradient norms
-fell to ~2e-7.
-
-What the same run also says is that the traverse the removal was meant to buy was
-never step-limited. `log_logit_scale` moved 0.05–0.09 log-units in epochs 1–4 and
+The same run also says the traverse the removal was meant to buy was never
+step-limited: `log_logit_scale` moved 0.05–0.09 log-units in epochs 1–4 and
 0.010–0.014 in the stall at 5–6, against a bound of at least 0.28 — 4% of it. It
-was gradient-limited, and the pin was not what was holding it.
+was gradient-limited. That, with the monotone incentive, is why the scale is no
+longer learned at all.
 
-So this is not a straight revert. The coupling removes the *scale* route to
-saturation and leaves the shape route open, since `softmax((z + g/s)/c)` still
-saturates if `z`'s top-two gap grows — which is the route that run actually took.
-`logit_margin` (docs/measurement.md) is the column that now measures that
-directly, and it is what a reinstated coupling would have to be judged against.
+## The two estimators
+
+`sender_language_model.estimator` selects what the speaker learns through. The
+forward pass is identical on both branches — one shared `_gumbel_sample`, so at
+the same seed they emit not similar messages but *identical* ones. Any difference
+between two runs is the backward pass and nothing else, which is what makes an
+A/B between them a control rather than two experiments.
+
+```
+"gumbel"    dy/dz = (1 − w)(diag(p) − p pᵀ)      the soft sample's Jacobian
+"identity"  dy/dz = I                             y = onehot.detach() + (z − z.detach())
+```
+
+### The argument is rank, not magnitude
+
+The soft Jacobian's cost is not that it is small. It is that it is **low rank**.
+
+At `p` near one-hot, `diag(p) − p pᵀ` has rank ≈ 1: thirteen of fourteen
+directions carry 0.8% between them at `p = 0.992`. The per-token gradients are
+then *summed* into one vector before they reach the language model and the vision
+trunk, so all but one direction is destroyed before any optimiser or clipper gets
+a look, and the trunk hears a single token's opinion about what the message
+should have been.
+
+Magnitude, by contrast, largely cancels. AdamW updates by `m / sqrt(v)`, so a
+uniform factor on a parameter's gradient scales both; `clip_gradients`
+renormalises each submodule to `clip_grad_norm` whenever it binds. For
+`outputs2vocab.weight`, where each row is its own set of parameters, a
+consistently 1000x-attenuated token still takes a full `lr`-sized step. No
+per-parameter normaliser recovers a rank.
+
+That argument does have a floor, and it is `[optimiser] eps`: `m / sqrt(v)` is
+only scale-free while `sqrt(v) ≫ eps`. At the dead run's ~2e-7 speaker norms
+AdamW's 1e-8 default was already damping the update by about 9%, so the epsilon
+is set to 1e-12 — see DEFAULT.toml for the trade.
+
+### What the identity estimator is
+
+Sample faithfully, then let the backward pass go straight to the logits:
+
+```python
+with torch.no_grad():
+    onehot = self._gumbel_sample(normalised)
+
+emittable = normalised[..., 4:]
+onehot = torch.cat(
+    [onehot[..., :4], onehot[..., 4:] + (emittable - emittable.detach())],
+    dim=-1,
+)
+```
+
+The sample is unchanged and still faithful: `argmax(z + g)` *is* a categorical
+draw from `softmax(z)`. The speaker's gradient becomes `dL/dy`, which is the
+receiver's per-token embedding sensitivity `⟨dL/dm, Eᵢ⟩` — full rank, the same
+size at `p = 0.95` as at `p = 0.2`, and completely blind to how sharp the speaker
+has become.
+
+Three details in that are load-bearing.
+
+**The surrogate is built on the emittable slice, not on the masked logits.**
+`masked` holds `−inf` in the four reserved columns and `−inf − (−inf)` is NaN.
+Slicing also stops those columns receiving gradient at all: they are constants
+from the sampler's point of view, so `outputs2vocab` rows 0–3 and the stack
+behind them are never trained toward tokens that cannot be emitted.
+
+**It taps the *unscaled* logits**, so `dL/dz` is exactly `dL/dy`. Tapping the
+scaled ones would multiply the whole speaker's gradient by `logit_scale` — a
+uniform factor, so harmless — but it would also give a gradient to a quantity the
+forward value does not depend on, and there is no longer a parameter there to
+receive it.
+
+**The bracketing is not cosmetic.** `onehot + z - z.detach()` associates left, so
+it computes `(1 + z) − z`, which in float32 is 1.0000001 rather than 1 — a
+perturbation of the winning token on every step, in the one place the estimator
+is supposed to change nothing. Forming the zero first makes the addition exact.
+`test_the_identity_surrogate_forwards_exactly_the_one_hot` pins it against the
+gumbel branch bit for bit.
+
+### What to read on each branch
+
+`unmixed_survival` is a gradient diagnostic on `"gumbel"` and a fidelity reading
+on `"identity"`. On the first, `1 − p` is the factor the estimator's Jacobian
+turns on; on the second the Jacobian is `I` and the column reaches the gradient
+not at all. It is still worth watching there — it says how much of the message
+arrives — but a run that saturates it is not thereby in trouble.
+
+The saturation signature in docs/training.md — the speaker's stack flattening
+while survival climbs — therefore **cannot fire on the identity branch**. On the
+gumbel branch it is now bounded rather than impossible: `token_max_probability`
+caps how far `p` can go, so the collapse is bounded at
+`(1 − p_cap)/(1 − p_open)` rather than unbounded.
 
 ## Scale the unmasked logits, then re-mask
 
@@ -463,12 +538,13 @@ the same call with `uniform_weight` passed and with it zeroed.
 The pair is there because the mixture caps the reported number without capping
 the channel. `realised_survival` cannot exceed `(1 − w) + w / V`, 0.90714 at
 ShapeWorld's settings, so a speaker that has committed entirely still reads 0.91.
-The straight-through gradient runs through the soft sample, whose Jacobian is
-`diag(p) − p pᵀ`, and the `p` there is pre-mixture — so `1 − unmixed_survival` is
-the factor multiplying every speaker gradient, and it is the column with the
-dynamic range. On `shapeworld-post-silhouette-update.csv` a reported 0.90670
-inverted to 0.99951, a 510× attenuation against epoch 0 that the mixed column
-could not show.
+On the `"gumbel"` branch the gradient runs through the soft sample, whose
+Jacobian is `diag(p) − p pᵀ`, and the `p` there is pre-mixture — so
+`1 − unmixed_survival` is the factor the estimator turns on, and it is the column
+with the dynamic range. On `shapeworld-post-silhouette-update.csv` a reported
+0.90670 inverted to 0.99951, a 510× attenuation against epoch 0 that the mixed
+column could not show. `token_max_probability` is now a ceiling on exactly this
+column, and on the `"identity"` branch it leaves the gradient altogether.
 
 By the Gumbel-max identity, the probability that a slot's argmax is unchanged by
 the noise is exactly the winning token's softmax probability. So survival can be
@@ -479,10 +555,10 @@ It applies the real sampling pipeline in the real order — scale first, then th
 uniform mixture — so that the mixture's bounds hold.
 
 This is purely a measurement. It used to be the inner loop of a solve that chose
-the scale to hit a requested rate; now the scale is the speaker's own learned
-`logit_scale`, so what it reports is the joint result of that scale and the logit
-*shape* it is applied to. The scale is passed detached — this is a diagnostic and
-should not be on the graph.
+the scale to hit a requested rate, and later read a learned scale; the scale is a
+constant now, so what varies in this column over a run is the logit *shape*
+alone. That is worth keeping in mind when reading it against `logit_margin`,
+which reads the shape directly.
 
 Both speakers pool the measurement over positions once per batch rather than per
 position, so it reads the batch's statistics rather than each position's alone.

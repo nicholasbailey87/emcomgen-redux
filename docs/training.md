@@ -35,11 +35,18 @@ missing key rather than raising.
   rejecting the config up front fails in the same cases, but before any work is
   done.
 - Speaker and receiver `message_length` must agree.
-- `sender_language_model.init_energy` must be present and in (0, 1] — a *fraction
-  of maximum entropy, not a percentage*. Checked here rather than left to the
-  speaker's constructor, because `SafeDict` only warns on a missing key and hands
-  back `None`, which would fail confusingly deep inside the decode instead of at
-  parse time.
+- `sender_language_model.token_max_probability` must be present and in
+  `(1/vocabulary, 1)`. Both bounds are real rather than defensive: it is a
+  ceiling on the winning token's probability and `logit_scale` inverts it, so at
+  or below `1/V` there is no positive constant that flattens a distribution that
+  far, and at 1 the constant is infinite. *A probability, not a percentage.*
+- `sender_language_model.estimator` must be present and one of `"gumbel"` or
+  `"identity"`. A typo would otherwise run a whole experiment under the wrong
+  gradient estimator and look like a result.
+
+  Both are checked here rather than left to the speaker's constructor, because
+  `SafeDict` only warns on a missing key and hands back `None`, which would fail
+  confusingly deep inside the decode instead of at parse time.
 - `silhouette_p_sender` / `silhouette_p_receiver` / `silhouette_fill` in
   [0, 1]. All three are fractions, two of games and one of maximum intensity,
   which is why one loop checks them.
@@ -89,7 +96,7 @@ selected ids out of every existing group, then `add_param_group`.
 **Why after the fact rather than asking `get_optimiser` for it:** that function
 keys its groups on `(lr, weight_decay)` and takes a single `lr`. The parameters
 this is used for currently share a group with every other undecayed parameter —
-`log_logit_scale` because it is 0-dimensional, and `polarity_embedding` because
+`log_score_scale` because it is 0-dimensional, and `polarity_embedding` because
 `gradboard`'s `EXCLUDE_FROM_WEIGHT_DECAY` matches "embedding" — so both fall to
 the `weight_decay = 0.0` branch, and retagging that group would drag the biases
 and norms along with it.
@@ -104,12 +111,11 @@ New groups are appended, so group 0 remains the main one that `PASS.lr` reports.
 Calling it more than once is fine for the same reason.
 
 The new group takes `weight_decay = 0.0` to match what `get_optimiser` gave both
-of these, and for the same reason in each case. The scale is a log, so decay
-would pull `exp` towards 1, and a scale of 1 is not a meaningful anchor —
-`init_energy` solves to 0.839 for birds and 0.802 for ShapeWorld, so landing near
-1 would be an accident of vocabulary. The polarity tag opens at the scale of the
-layer-normed prototype it is added to, so decay would be a force on it that
-answers to neither the loss nor that scale.
+of these, and for the same reason in each case. The listener's volume is a log,
+so decay would pull `exp` towards 1, and a volume of 1 is not a meaningful anchor
+— it is whatever the score's opening spread happens to make it. The polarity tag
+opens at the scale of the layer-normed prototype it is added to, so decay would
+be a force on it that answers to neither the loss nor that scale.
 
 If the suffix matches nothing, `split_out_parameter` raises rather than silently
 doing nothing — the error names the config key so a rename says which knob went
@@ -127,9 +133,11 @@ attribute:
 `sender_language_model`, `receiver_vision`, `receiver_token_embedding`,
 `receiver_language_model`, `receiver_discriminator`
 
-`SCALAR_GROUPS` names the four scaling scalars — `log_logit_scale`,
-`log_score_scale`, `mix_logit`, `contrast_gate` — each of which is a group of
-one tensor. `claimed_separately` holds them out of their module's group on both
+`SCALAR_GROUPS` names the three scaling scalars — `log_score_scale`,
+`mix_logit`, `contrast_gate` — each of which is a group of one tensor. The
+speaker's channel scale used to be a fourth; it is a constant solved from
+`token_max_probability` now, not a parameter, so it has neither a group nor a
+rate. `claimed_separately` holds them out of their module's group on both
 sides, so a scalar is never clipped twice, never inflates its module's norm, and
 never inherits its module's rate.
 
@@ -149,9 +157,10 @@ thousand matrices is renormalised by *their* norm. At recorded speaker norms of
 ~10 against `clip_grad_norm = 1.0` that is a tenfold attenuation, applied on
 every step that binds, to a parameter whose whole travel is already bounded by
 `lr × steps` — and these are the parameters ignition waits on.
-`scripts/ignition_audit.py` finds `logit_scale`, `contrast_gate` and
+`scripts/ignition_audit.py` found `logit_scale`, `contrast_gate` and
 `pool_score_norm` leaving the plateau in the same epoch, so what constrains them
-constrains the run.
+constrains the run. (The scale no longer moves at all, which removes one of those
+three; the argument for the other two is unchanged.)
 
 **Why `score_bias` and `polarity_embedding` are not.** An offset is not a scale
 and a 2-d tag is not a scalar; both belong to the norm of the module producing
@@ -237,16 +246,17 @@ Note this subsection still names `BilinearGRUComparer` and
 `mix_logit_lr`. The reasoning holds; the names want a pass with the rung
 overhaul.
 
-**`logit_scale_lr`** — ungated. `log_logit_scale` exists on both speakers.
+There was a `logit_scale_lr` here until 2026-08-30, ungated, moving a
+`log_logit_scale` that existed on both speakers. The channel scale is a constant
+solved from `token_max_probability` now and takes no rate at all.
 
 **`polarity_embedding_lr`** — gated on `isinstance(language_model,
-SenderTransformerLM)`. Deliberately *not* tied to `logit_scale_lr`:
-`log_logit_scale` exists on *both* speakers, so raising it to help the polarity
-tag would also retune the GRU baseline's channel and shift the comparison the
-ablation is there to make. They opened at one number while the tag had a
-traverse to cover; since `2026-08-29` the tag takes the speaker's module rate,
-`2e-4`, and the channel scalar is at `6e-3`. Separable was always the point, and
-now the two values say so.
+SenderTransformerLM)`. Deliberately its own key rather than shared with the
+listener's `score_scale_lr`: the tag lives on one speaker and turning up a rate
+shared with the listener's volume would move something the ablation is trying to
+hold still. It was originally kept separate from `logit_scale_lr` for the same
+reason, that scalar having existed on *both* speakers. Since `2026-08-29` the tag
+takes the speaker's module rate, `2e-4`, against the remaining scalars' `6e-3`.
 
 Gated on the speaker class rather than on finding the parameter, because the two
 failures need different answers. A GRU speaker has no polarity tag by
@@ -407,14 +417,13 @@ steps, not batches.
 ### Effective batch size is a cost when takeoff is gated on a scalar
 
 Adam's update is bounded at roughly ±lr per step regardless of gradient
-magnitude, so a lone scalar cannot travel further than `lr × steps` (the ceiling
-quoted for `logit_scale` in [measurement.md](measurement.md), and the reason
+magnitude, so a lone scalar cannot travel further than `lr × steps` (the reason
 `contrast_gate_lr` exists at all). Averaging `accumulator_steps` microbatches
 into one update buys a better gradient *estimate*, which a single scalar does not
 need, and costs it the moves it would otherwise have made.
 
-So when a run's takeoff waits on one of these scalars — `log_logit_scale`,
-`log_score_scale`, `contrast_gate` — raising the effective batch delays it in
+So when a run's takeoff waits on one of these scalars — `log_score_scale`,
+`contrast_gate` — raising the effective batch delays it in
 direct proportion, at identical compute. That is a real trade against whatever
 the larger batch was for, and on ShapeWorld the reference setup's batch of 128
 (32 × `accumulator_steps` 4) is four times the traverse cost of the same compute
@@ -427,8 +436,8 @@ diagnostic columns separate them cheaply.
 
 **The deadlock signature is joint and it is exact.** Every learned quantity on the
 speaker side stationary to four decimal places across tens of epochs:
-`realised_survival` flat near chance (`1 / vocabulary`), `logit_scale` at its
-`init_energy` solve, `contrast_gate` unmoved, `pool_effective_examples` pinned at
+`realised_survival` flat near its opening, `contrast_gate` unmoved,
+`pool_effective_examples` pinned at
 the positive-example count, `polarity_separation` at its opening — `sqrt(2·d_model)`
 = 25.3 at 320 wide since `843dc81` drew the two polarity tags independently,
 where the antipodal pair it replaced opened at `2·sqrt(d_model)` = 35.8.
@@ -451,7 +460,18 @@ finding rather than a symptom when it does not. See
 **The saturation signature is the opposite failure and reads almost the same.**
 Everything on the speaker frozen to four decimals — but at a *high*
 `realised_survival` rather than a low one, and after a run that was
-communicating. `shapeworld-post-silhouette-update.csv` is the reference:
+communicating.
+
+> **Two things have changed since this was written, and both narrow it.** On
+> `estimator = "identity"` this signature **cannot fire**: that branch's Jacobian
+> is `I`, so no amount of sharpening attenuates the speaker's gradient. On
+> `estimator = "gumbel"` it is bounded rather than impossible —
+> `token_max_probability` caps `unmixed_survival` at 0.95 by default, so the
+> collapse the reference run suffered is bounded at roughly 12x rather than
+> unbounded. Read what follows as the failure being guarded against, and a
+> `logit_scale` of 3.046 as a number no config can now produce.
+
+`shapeworld-post-silhouette-update.csv` is the reference:
 `logit_scale` at 3.046, survival at 0.90670 against its 0.90714 cap,
 `pool_score_norm` frozen at 0.2720, `polarity_separation` at 24.0450, the four
 speaker gradient norms at ~2e-7, and one distinct message across the whole eval
@@ -462,13 +482,17 @@ this failure:
 
 - **`unmixed_survival`** is the one to read. `realised_survival` is capped by the
   uniform mixture, so a fully committed channel still reads 0.91 and looks
-  ordinary; the unmixed reading was 0.99951, and `1 − p` is the factor
-  multiplying every speaker gradient.
+  ordinary; the unmixed reading was 0.99951, and on the gumbel branch `1 − p` is
+  the factor the estimator turns on. This is the column
+  `token_max_probability` now bounds, and the column that means nothing to the
+  gradient on the identity branch.
 - **`logit_margin`** says whether the scale or the *shape* did it. Here the
   scale was unremarkable and the margin was ~3.35 sd against the ~0.44 a Gaussian
   gives at V = 14 — 86% of the entire budget `layer_norm_logits` permits, whose
   maximum is 3.883. The speaker grew kurtosis, which the normaliser leaves free,
-  and no clamp on `logit_scale` would have caught it.
+  so a bound on `logit_scale` chosen against a *typical* shape would not have
+  caught it. That is why the constant is now solved against this maximum: the
+  product `logit_scale × logit_margin` is capped whatever the shape does.
 - **`logit_prior_share`** says whether that concentration meant anything. A
   peaked distribution whose peak moves with the input is the best channel there
   is; one that peaks on the same token every time is confidence with no
@@ -481,15 +505,19 @@ this failure:
 
 The response differs too. A deadlock wants more epochs or a louder channel; this
 wants the channel held *quieter* — and since the pathway is the shape rather than
-the scale, that means bounding survival rather than bounding `logit_scale`.
+the scale, that means bounding survival rather than bounding the scale. Both of
+those are now settings rather than diagnoses: `token_max_probability` is the
+bound, and it is the knob to lower if a gumbel run still saturates.
 
-**Then read the direction of `logit_scale` to tell the two apart.** Rising slowly
-means undertrained and more epochs help. Falling monotonically means the run is
-drifting *away* from escape and more epochs will not reach it. In the August 2026
-ablation the dead ShapeWorld rungs fell from 0.8700 to 0.8668 and from 0.8812 to
-0.8805 over thirty epochs apiece, while the rungs that escaped did so as a sharp
-transition — `realised_survival` 0.203 → 0.260 at epoch 5 → 0.697 at epoch 10.
-Escape is visible as an event, so its absence is informative.
+**Then read the direction of `realised_survival` to tell the two apart.** Rising
+slowly means undertrained and more epochs help. Flat at its opening means the
+speaker is not sharpening at all. In the August 2026 ablation the dead ShapeWorld
+rungs read this in the then-learned `logit_scale`, which fell from 0.8700 to
+0.8668 and from 0.8812 to 0.8805 over thirty epochs apiece; that column is a
+constant now, so the same reading comes off survival and `logit_margin`. The
+rungs that escaped did so as a sharp transition — `realised_survival` 0.203 →
+0.260 at epoch 5 → 0.697 at epoch 10. Escape is visible as an event, so its
+absence is informative.
 
 **Depth is the safe axis, including on a marginal bootstrap.** The instinct that
 a deeper stack is riskier does not survive contact with what these stacks
@@ -519,8 +547,9 @@ actually do at init, and three mechanisms are behind that. See
 
 So adding blocks costs compute and parameters, and very little else. When a
 bootstrap is marginal, the thing not to spend budget on is anything that changes
-the *channel* — the vocabulary, the message length, the opening `logit_scale`, or
-the effective batch that the scalar traverses on. Depth is not in that set.
+the *channel* — the vocabulary, the message length, `token_max_probability`, or
+the effective batch the remaining scalars traverse on. Depth is not in that
+set.
 
 Note this reverses an earlier version of this section, which claimed depth was
 the axis most likely to reproduce a marginal bootstrap and cited stochastic depth

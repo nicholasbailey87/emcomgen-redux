@@ -26,10 +26,14 @@ the premise as written did not.
 ### "Because the scale is a constant, the ratio between the two is fixed"
 
 `SenderGRULM.decode` carried a comment saying `tau` and `logit_scale` sit at one
-fixed ratio for the whole run "because the scale is a constant". **The scale is
-not a constant any more** — it is `log_logit_scale`, a learned parameter — and
-`sampling_tau` is explicitly a cosine schedule over a ratio that moves with it.
-The comment predates that change and was straightforwardly wrong when removed.
+fixed ratio for the whole run "because the scale is a constant". It was wrong
+when removed: the scale was `log_logit_scale`, a learned parameter, and
+`sampling_tau` was a cosine schedule over a ratio that moved with it.
+
+It has since become right again by a different route — the scale is a constant
+solved from `token_max_probability`, and `tau` is flat — which is a good reason
+to distrust a comment that happens to match the code. It matched for six months
+while describing a mechanism that did not exist.
 
 ### `train.py`'s module docstring
 
@@ -72,9 +76,9 @@ config, which has `games_per_epoch = 3100` at `batch_size = 16` and
 
 This entry previously guessed that 156 might be ShapeWorld's number attached to
 the wrong dataset. It is not, and the reason the guess was tempting is the
-interesting part. `DEFAULT.toml`'s `logit_scale_lr` comment shows its working:
-156 is **birds at `games_per_epoch = 2500`** (2500 / 16 = 156.25), and the
-comment then supersedes it with 194 at the current 3100. It coincides with
+interesting part. `DEFAULT.toml`'s `logit_scale_lr` comment showed its working
+before that key was removed: 156 is **birds at `games_per_epoch = 2500`**
+(2500 / 16 = 156.25), superseded by 194 at the current 3100. It coincides with
 ShapeWorld's 156 *by construction* — the note beside `games_per_epoch` says 2,500
 was picked partly to equalise the two datasets' step counts. So the figure is
 right for birds and identical to ShapeWorld's for a reason, which is exactly the

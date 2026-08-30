@@ -152,10 +152,9 @@ better shaped than a matrix here: `out_projection` starts at a properly scaled
 random direction, so the branch contributes at a sensible magnitude the moment
 the gate opens rather than having to build one first.
 
-The gate is **not** log-parameterised, unlike `log_logit_scale` and
-`log_score_scale`. Those are volumes that must stay strictly
-positive and open at 1.0; this one must be able to be exactly zero, which `exp`
-cannot reach. Its sign is free because the branch's own direction is arbitrary —
+The gate is **not** log-parameterised, unlike `log_score_scale`. That is a
+volume that must stay strictly positive and open at 1.0; this one must be able to
+be exactly zero, which `exp` cannot reach. Its sign is free because the branch's own direction is arbitrary —
 a negative gate is the same branch pointing the other way. And zero is a
 starting point rather than a floor: `dL/dgate = <branch, dL/dout>` is non-zero
 there, which is the same distinction that keeps the discriminator's mix floor in
@@ -663,8 +662,9 @@ parameter that could not move never matches an elevated learning-rate group.
 `log_score_scale` opens at 0, so the readout opens at 0.577. BCE on a random map
 at that spread is 0.725 against `ln 2` = 0.693, where unit spread would give
 0.804; the gentler opening is why the scalar is left at 1.0 rather than
-calibrated to `√3`. Nothing here has a traverse to cover, unlike
-`log_logit_scale`, which opens at 0.839 against a usable channel of 4 to 6.
+calibrated to `√3`. Nothing here has a traverse to cover — the speaker's channel
+scale once did, opening at 0.839 against a usable channel of 4 to 6, and is a
+constant now.
 
 Stored as a log for the usual reasons: `exp` keeps it strictly positive so
 gradient descent cannot walk a volume through zero; halving and doubling a gain
@@ -734,7 +734,7 @@ set what the score is made of.
 the message operand too, on the argument that a dot product lets the listener
 lean on whichever side is left intact. True, but it assumed the two sides arrive
 on equal terms and they do not: the message comes through the Gumbel channel,
-whose noise is already calibrated by `sampling_tau` and `uniform_weight`, so a
+whose noise is already calibrated by `logit_scale` and `uniform_weight`, so a
 mask on top is a second perturbation of a signal that has one — and the listener
 cannot tell which of the two it is being asked to be robust to. The referents
 arrive clean.
