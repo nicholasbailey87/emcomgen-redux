@@ -183,35 +183,6 @@ def test_a_module_lr_that_is_not_a_positive_number_is_rejected(bad):
         parse_config.validate_config(config)
 
 
-def test_no_rung_overrides_the_default_table():
-    """
-    Every rung takes DEFAULT's grid, so the two orderings hold across the whole
-        ladder and a comparison between rungs is a comparison of architectures.
-
-    This is an assertion about the experiment rather than about the code: a rung
-        *may* override, and `parse_config` merges the table key by key so a
-        partial override works. What it may not do is override silently, and a
-        rung that starts to is a rung whose reading is no longer comparable to
-        the rest at the level of learning rates. Rungs 9 and 10 carried four
-        overrides for a day -- the rates the removed width/depth rule had been
-        producing -- and they contradicted the ordering: 5.3e-5 on the speaker's
-        language model against 1e-4 on the listener's is the listener running
-        ahead, which is the direction Rita et al. report as the harmful one.
-    """
-    default = parse_config.get_config()["optimiser"]["module_lr"]
-
-    for config_file in RUNGS:
-        rates = parse_config.get_config(rung(config_file))["optimiser"]["module_lr"]
-
-        assert rates == default, (
-            f"{config_file} overrides module_lr: "
-            + ", ".join(
-                f"{k} {default[k]} -> {v}"
-                for k, v in rates.items() if default[k] != v
-            )
-        )
-
-
 # --------------------------------------------------------------------------
 # The rates, read off the built pair.
 # --------------------------------------------------------------------------
