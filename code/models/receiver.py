@@ -218,11 +218,23 @@ class ScoreVolume:
         A discriminator built with `learns_score_scale=False` returns the
             comparison untouched. Its caller owns both scalars for the whole
             module and a second pair here would be degenerate with them.
+
+        **The volume goes on through `scale_without_attenuating`**, so the
+            forward value is `score_scale * scores + score_bias` as it reads,
+            but `d/dscores` is 1 rather than `score_scale`. The volume still
+            learns, still slides, and the listener is as able to go quiet as it
+            was -- what changes is only that its slide stops multiplying down
+            the gradients behind it. See that function for why this is round
+            nine of the same idea and for the one thing round seven's argument
+            does not cover.
         """
         if not self.learns_score_scale:
             return scores
 
-        return self.score_scale * scores + self.score_bias
+        return (
+            model_util.scale_without_attenuating(scores, self.score_scale)
+            + self.score_bias
+        )
 
     def reset_score_volume(self):
         """

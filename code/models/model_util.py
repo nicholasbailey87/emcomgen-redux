@@ -82,3 +82,49 @@ def resolve_residual_scaling(alpha, beta, layers, decoder=False):
         derived_alpha if alpha == DEEPNORM else float(alpha),
         derived_beta if beta == DEEPNORM else float(beta),
     )
+
+
+def scale_without_attenuating(x, scale):
+    """
+    `scale * x` in the forward pass, with `d/dx = 1` rather than `scale`.
+
+    The volume reaches the loss exactly as it always did -- every downstream
+        number is `scale * x` -- but the stack behind `x` is no longer
+        multiplied by it on the way back. `scale` keeps its true partial,
+        `dL/dscale = <dL/dy, x>`, so it learns from an unchanged signal and is
+        as free to go quiet as it ever was.
+
+    **This is round nine.** `7b10d47` did it on the speaker and `a9a6a9c` and
+        the sixth round of tests/test_score_scale.py's preamble did it here;
+        round seven took it out again on the grounds that the coupling never
+        reached the optimiser. That argument is right as far as it goes: AdamW
+        updates by `m/sqrt(v)`, so a constant factor on a parameter's gradient
+        scales numerator and denominator alike and cancels, per parameter and
+        independently of every other parameter's gradient size. Do not
+        reinstate the "it changes a ratio between modules" reasoning -- AdamW
+        normalises each parameter separately, so that ratio is exactly what it
+        removes.
+
+    **What it does not cover.** AdamW and `clip_gradients` both act after the
+        backward pass. `train.py` runs the forward under `autocast`, so under
+        `float16` a gradient the volume has divided down can underflow to zero
+        before either of them sees it, and no optimiser recovers a zero. That is
+        the failure `docs/anecdotes.md` records as skipped steps. It does not
+        arise under `bfloat16`, which has float32's exponent range -- so on a
+        GPU that reports `is_bf16_supported()` this function is inert and round
+        seven stands. Check the dtype before reading a result as evidence
+        either way.
+
+    **The bracketing is load-bearing**, for the reason `Sender.sample`'s
+        identity estimator documents: `x - x.detach()` must be formed before it
+        is added, or float32 rounds `(scale * x + x) - x` and perturbs the
+        forward value this function promises to leave alone.
+
+    Args:
+        x: the tensor to scale
+        scale: a scalar tensor, the volume
+
+    Returns:
+        `scale * x` in value, with the gradient described above
+    """
+    return scale * x.detach() + (x - x.detach())

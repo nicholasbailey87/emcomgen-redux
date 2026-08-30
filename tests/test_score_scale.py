@@ -1203,33 +1203,51 @@ def _message_gradient(listener, scale):
 
 
 @BOTH
-def test_the_gradient_reaching_the_message_tracks_the_volume(build):
+def test_the_gradient_reaching_the_message_does_not_track_the_volume(build):
     """
-    The behaviour five rounds of design tried to remove, asserted as the live
-        one because removing it was a mistake.
+    Round nine, and the reversal of what this test asserted for rounds seven and
+        eight. `ScoreVolume.readout` puts the volume through
+        `model_util.scale_without_attenuating`, so a listener turning itself
+        down no longer scales down what reaches the speaker.
 
-    A scalar at the front of the score multiplies every gradient behind it, so
-        a listener turning itself down scales down what reaches the speaker.
-        That was read as a self-sealing loop -- quiet listener, starved
-        speaker, nothing worth listening to, quieter listener -- and answered
-        twice, by deleting the scalar (`a9a6a9c`) and by hiding it from the
-        backward pass (`7b10d47`).
+    What this test used to say, and why it is not simply wrong. A scalar at the
+        front of the score multiplies every gradient behind it, and round seven
+        established that the coupling never reaches the optimiser: AdamW updates
+        by `m / sqrt(v)`, so a constant factor on a parameter's gradient cancels
+        before it becomes a step, per parameter and independently of what any
+        other parameter's gradient is doing. That still holds. It is why the
+        change this test now pins may well turn out to be inert.
 
-    Neither was necessary. AdamW updates by `m / sqrt(v)`, so a uniform factor
-        on a parameter's gradient cancels before it becomes a step, and
-        `train.py`'s per-submodule `clip_gradients` renormalises whatever
-        survives that. See the preamble.
+    What round seven's argument does not cover is that AdamW and
+        `clip_gradients` both run *after* the backward pass. `train.py` takes
+        the forward under `autocast`, so under `float16` a gradient the volume
+        has divided down can underflow to zero before either of them sees it,
+        and nothing recovers a zero. Under `bfloat16` it cannot, so on a GPU
+        that reports `is_bf16_supported()` this is expected to change nothing
+        and round seven stands unamended.
 
-    Asserted low rather than across four orders of magnitude: at large `s` the
-        loss's own saturation takes over -- `sigma(s*z) - y` flattens -- so the
-        product stops being monotone in `s`. That saturation belongs to BCE and
-        is deliberately kept.
+    So this is a probe with a live null, not a correction. It is pinned as a
+        test because the forward value is unchanged -- `score_scale * scores +
+        score_bias` either way -- and that is the part a reader needs to be able
+        to trust while the question is open. The volume is as free to slide as
+        it was; only its reach backwards is gone.
+
+    Asserted against the thresholds it replaces rather than at equality. Two
+        orders of magnitude of volume used to cost two orders of magnitude of
+        message gradient; it now costs about 6%, and the residual is real
+        rather than slop. `_message_gradient` differentiates
+        `binary_cross_entropy_with_logits` of the readout, and the readout's
+        *value* still carries `s`, so `sigma(s*u + b) - y` still moves with it.
+        That dependence is the loss's and is deliberately kept -- it is the same
+        saturation the old assertion stopped short of. What has gone is the
+        readout's own Jacobian, which is the whole factor at issue.
     """
     listener = build().eval()
     at_one = _message_gradient(listener, 1.0)
 
-    assert _message_gradient(listener, 1e-2) < 0.1 * at_one
-    assert _message_gradient(listener, 1e-1) < 0.5 * at_one
+    # Where the old readout was below 0.1 and 0.5 of `at_one`.
+    assert _message_gradient(listener, 1e-2) > 0.9 * at_one
+    assert _message_gradient(listener, 1e-1) > 0.9 * at_one
 
 
 def test_the_readout_does_not_reweight_games_by_their_own_margin():

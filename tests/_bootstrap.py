@@ -52,15 +52,41 @@ def all_rungs():
 
     Names rather than paths, so a parametrised test's id stays readable and
         stable wherever the file happens to live; pass each through `rung`.
+
+    **Variants are excluded.** A rung is `NN_name.toml`; anything whose leading
+        run of digits is followed by more than an underscore -- `03b_...` -- is
+        a variant of the rung it names and not a rung of its own. They are
+        excluded because the ladder-wide invariants are about the ladder: the
+        count in `test_there_are_sixteen_rungs`, and
+        `test_no_rung_overrides_module_lr`, which exists to keep the
+        speaker-ahead-of-listener ordering true across all sixteen. A variant
+        that deliberately halves every rate is not a violation of that ordering
+        rule, it is a thing the rule is not about, and folding it in would mean
+        weakening the rule to admit it.
+
+    The cost is that a variant gets no construction test from this list, so it
+        is exercised only by whatever names it directly. `973a68b` is the
+        warning about configs nothing reaches; keep variants few and short-lived
+        and fold anything that earns a place into the ladder properly.
     """
     found = set()
     for directory in CONFIG_DIRS:
         if os.path.isdir(directory):
             found.update(
-                f for f in os.listdir(directory) if f.endswith(".toml")
+                f for f in os.listdir(directory)
+                if f.endswith(".toml") and _is_rung(f)
             )
 
     return sorted(found)
+
+
+def _is_rung(file_name):
+    """`NN_...toml` is a rung; `NNx_...toml` is a variant of one. See `all_rungs`."""
+    digits = 0
+    while digits < len(file_name) and file_name[digits].isdigit():
+        digits += 1
+
+    return digits > 0 and file_name[digits:digits + 1] == "_"
 
 
 def config_section(section, config_file=None, **overrides):
