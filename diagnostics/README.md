@@ -163,7 +163,7 @@ its scores at a fixed gain. At 2500 steps and the config's own 1e-4:
 | rung 12, standardised readout | 0.606 | 0.826 | 3.64 |
 
 The middle row takes off at step ~1600 by the same route as the top one:
-`polarity_separation` crosses 6–8, `logit_scale` leaves 0.87,
+`polarity_separation` crosses 6–8, the speaker's channel scale traverses,
 `realised_survival` jumps 0.22 → 0.82, accuracy follows. The bottom row is the
 same module with a `BatchNorm1d(1, affine=False)` and a fixed gain on its
 readout, and nothing else changed.

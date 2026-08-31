@@ -58,6 +58,11 @@ def trim_messages(token_id_rows):
 LAYER_NORM_EPS = 1e-12
 
 
+# The speaker's channel scale is bounded above by projection rather than by a
+#     `clamp` in the forward pass. See `GumbelChannel.project_channel`.
+MAX_LOGIT_SCALE = 2.0
+
+
 def layer_norm_logits(logits: torch.Tensor, vocabulary: int) -> torch.Tensor:
     """
     Normalise the *emittable* vocabulary logits to zero mean and unit variance,
@@ -100,9 +105,12 @@ def sharpest_logit_margin(vocabulary: int) -> float:
         `((V-1) + (V-1)/(V-1)) / V = 1`. Its margin is the sum of those two, which
         simplifies to `V / sqrt(V - 1)` -- 3.883 at V = 14, 4.588 at V = 20.
 
-    This is a *hard* bound rather than a typical value, and it is what makes
-        `logit_scale` below a cap rather than a hope: the speaker can spend its
-        whole shape budget on one token and still not exceed it.
+    This is a *hard* bound rather than a typical value, and it is why fidelity
+        never depended on `logit_scale`: at a scale of *one* a speaker that
+        spends its whole shape budget on one token already reaches 0.789 unmixed
+        survival at V = 14. The scale moves that ceiling; the shape budget is
+        what sets it. `logit_margin` is read against this number -- see
+        `mean_logit_margin` and docs/measurement.md.
 
     Args:
         vocabulary: number of emittable tokens
@@ -111,67 +119,6 @@ def sharpest_logit_margin(vocabulary: int) -> float:
         The margin, in standard deviations
     """
     return vocabulary / math.sqrt(vocabulary - 1)
-
-
-def logit_scale(token_max_probability: float, vocabulary: int) -> float:
-    """
-    The constant the normalised logits are multiplied by before sampling, solved
-        so that no speaker can ever hold a token with probability above
-        `token_max_probability`.
-
-    **What this bounds, and why that is the quantity.**
-        `F.gumbel_softmax(hard=True)` differentiates the *soft* sample, whose
-        Jacobian is `diag(p) - p pT`, and `flatten_logit_distribution` is a
-        convex mixture in probability space -- so the estimator's Jacobian is
-        `(1 - w)(diag(p) - p pT)` in the winner's probability *before* the
-        uniform mixture. `uniform_weight` caps what the listener receives at
-        `1 - w + w/V` and does nothing at all to the backward pass. `p` is
-        therefore the number to bound, and `unmixed_survival` is the column that
-        reports it. See docs/channel.md and docs/measurement.md.
-
-    **Why a cap and not a starting point.** This used to be `init_energy`: an
-        entropy fraction solved by bisection, giving a scale the speaker then
-        learned from. Two things were wrong with that. The learned scale has a
-        monotone incentive -- sharper always helps the current batch and nothing
-        in the objective pushes back -- so it climbs until the estimator is shut,
-        which is what the 2026-08-29 ShapeWorld run did at a scale of 3.046.
-        And it was never needed: `layer_norm_logits` already bounds the shape, so
-        at a scale of *one* the cap is 0.789 at V = 14, above the 0.703 the old
-        default's solved 0.882 permitted. The scale's only job was to move that
-        cap, and the shipped setting moved it down.
-
-    **What it costs.** Fidelity saturates long before `p` does, so the top of the
-        range is nearly free to give up. At V = 14, w = 0.1:
-
-            p     scale   realised cap   gradient vs p = 0.70
-            0.70  0.879   0.637          1.00x
-            0.95  1.419   0.862          0.17x
-            0.99  1.844   0.898          0.033x
-            0.9999 3.033  0.907          0.0003x
-
-        Past 0.95 the speaker pays 5x in `1 - p` for 0.04 of message fidelity.
-        0.95 is the shipped default and is a design decision, not a derived
-        bound.
-
-    Closed form rather than a bisection: set `softmax(c * shape)`'s winner to
-        `p` for the sharpest shape `sharpest_logit_margin` describes and solve
-        for `c`. The runners-up are all equal there, so
-        `p = 1 / (1 + (V - 1) exp(-c * margin))`, which inverts exactly.
-
-    Args:
-        token_max_probability: `sender_language_model.token_max_probability`,
-            in `(1/V, 1)` -- at or below `1/V` there is no scale that flattens
-            a distribution that far, and at 1 the scale is infinite.
-            `parse_config.validate_config` enforces both bounds.
-        vocabulary: number of emittable tokens
-
-    Returns:
-        The multiplier, a plain float. It does not change over a run.
-    """
-    odds = (vocabulary - 1) * token_max_probability / (
-        1.0 - token_max_probability
-    )
-    return math.log(odds) / sharpest_logit_margin(vocabulary)
 
 
 def mask_reserved_tokens(logits: torch.Tensor) -> torch.Tensor:
@@ -292,12 +239,15 @@ def mean_logit_margin(logits: torch.Tensor) -> torch.Tensor:
         reads the head's output magnitude and would report the same for a head
         that grew uniformly as for one that grew a spike.
 
-        With `logit_scale` now constant for a whole run, this is the *only*
-        route left: a speaker sharpens by growing its margin and by nothing
-        else. `sharpest_logit_margin` is where that stops, and `logit_scale` is
-        solved against exactly that value, so `scale * margin` -- and with it
-        `unmixed_survival` -- is bounded by `token_max_probability` however hard
-        the head pushes.
+        `logit_scale` learns again as of 2026-08-31, so the two routes are both
+        open and this column is what separates them: a speaker sharpens by
+        growing its margin, by growing its scale, or by both, and only the
+        product is visible in `unmixed_survival`. `sharpest_logit_margin` is
+        where the first stops -- 3.883 at V = 14 -- and `MAX_LOGIT_SCALE` is
+        where the second does. Neither bound is there to protect the backward
+        pass: under `estimator = "identity"` the Jacobian is `I` however sharp
+        the speaker gets, which is why the scale no longer needs solving against
+        a saturation ceiling. See docs/channel.md.
 
     Taken on the emittable slice only, and *after* `layer_norm_logits`, so the
         result is already in units of the logits' own standard deviation and
@@ -341,11 +291,10 @@ def logit_prior_share(logits: torch.Tensor) -> torch.Tensor:
         rest at `-1/sqrt(V-1)` -- a margin of 3.883 sd at V = 14, which reaches
         unmixed survival 0.789 at a `logit_scale` of *one*. The 2026-08-29
         ShapeWorld run had used 86% of that budget. So fidelity does not have to
-        come from the scale, and a bound on the scale chosen against a *typical*
-        shape would not have caught that run -- which is why `logit_scale` is
-        solved against `sharpest_logit_margin` instead. Shape spent on
-        confidence is still shape not spent on meaning, and that this column is
-        what says so is unchanged.
+        come from the scale and never did -- which is why the scale is now free
+        to learn rather than solved against a saturation ceiling it was the only
+        assumed route to. Shape spent on confidence is still shape not spent on
+        meaning, and that this column is what says so is unchanged.
 
     The cheapest way to buy input-independent shape is `outputs2vocab.bias`,
         which sits before the normaliser and so survives it as a fixed pattern,
@@ -778,21 +727,92 @@ class GumbelChannel:
     """
     The exploration channel both speakers send through. See docs/channel.md.
 
-    A mixin rather than a submodule, and one that holds no state: the channel is
-        a constant multiplier and an estimator name, both settled at
-        construction. Nothing here appears in `state_dict`.
+    A mixin rather than a submodule, so `log_logit_scale` stays registered on
+        the speaker's language model itself: the `state_dict` key and the
+        `named_parameters` suffix are the ones `split_out_parameter` and
+        `SCALAR_GROUPS` match on. Exactly the arrangement `receiver.ScoreVolume`
+        uses for the listener's volume, which is the scalar this one is the
+        counterpart of.
+
+    The channel is that one parameter, an estimator name settled at
+        construction, and the per-batch diagnostics.
     """
 
-    def _init_channel(self, token_max_probability, vocabulary, estimator):
+    def _init_channel(self, estimator):
         """
-        Call from `__init__`. Holds no parameters and no buffers, so it draws no
-            RNG and adds nothing to `state_dict`; the channel is two plain
-            attributes read at the sampler.
+        Call from `__init__` where the parameter should be created: creation
+            order fixes which RNG draw every later parameter gets. `torch.zeros`
+            does not consume the generator, so adding this one back in 2026-08-31
+            left every other parameter's draw at a given seed exactly where
+            `44767b2` had put it. What it does change is `state_dict`:
+            checkpoints written between those two commits have no
+            `log_logit_scale` key and will not load.
+
+        Stored as its log so `exp` keeps it strictly positive, as
+            `ScoreVolume.log_score_scale` is and for the same reason: gradient
+            descent cannot walk a scale through zero and out the far side.
+            Opens at 1.0, where `layer_norm_logits`' shape budget alone already
+            reaches 0.789 unmixed survival at V = 14.
+
+        There is no floor. A speaker with nothing to say is pushed flatter --
+            docs/channel.md records the old parameter sliding 0.9094 -> 0.6547 on
+            rung 10 -- and that is self-regulation rather than a failure mode,
+            because `scale_without_attenuating` means a small scale is a noisy
+            channel and not a starved one. The ceiling is `MAX_LOGIT_SCALE`, and
+            it is applied by `project_channel` after the optimiser step rather
+            than by a `clamp` in `forward`. See that method.
         """
-        self.logit_scale = logit_scale(token_max_probability, vocabulary)
+        self.log_logit_scale = nn.Parameter(torch.zeros(()))
         self.estimator = estimator
 
         self.reset_channel_diagnostics()
+
+    @property
+    def logit_scale(self):
+        """
+        The multiplier applied to the normalised logits, always positive. Read
+            here rather than exponentiating at the use site so the sampler and
+            the metrics column cannot drift apart -- `ScoreVolume.score_scale`
+            is the same property for the same reason.
+        """
+        return self.log_logit_scale.exp()
+
+    def project_channel(self):
+        """
+        Bound the scale above at `MAX_LOGIT_SCALE`. Called from `train.py`'s
+            `optimiser_step`, after the step.
+
+        **Why projection and not a `clamp` in the forward pass.** The rule
+            `receiver.py` states about the mix floor holds here: `clamp`'s
+            gradient is zero *past* the bound and is not directional, so a
+            parameter that overshoots gets no gradient in either direction and
+            welds there permanently. `weight_decay` is 0.0, so nothing else
+            would pull it back. `2 * sigmoid(x)` avoids the weld but its
+            derivative `scale(1 - scale/2)` saturates at *both* ends, making
+            recovery from a low scale about 5x slower than the descent that got
+            there; under `exp` the rate is proportional, which is the right
+            behaviour for a scale. Projecting after the step keeps `exp`'s
+            proportional traverse and an exact 2.0, and the gradient stays live
+            right up to the bound -- sitting at the ceiling costs nothing and
+            leaving it is free.
+
+        The cost is that the constraint is applied outside `forward`. That cost
+            is paid here, as a method, so the module still owns the rule.
+
+        `scaler.step` may skip the step entirely on inf/nan; this is idempotent,
+            so that is harmless.
+        """
+        with torch.no_grad():
+            self.log_logit_scale.clamp_(max=math.log(MAX_LOGIT_SCALE))
+
+    def reset_channel_scale(self):
+        """
+        Back to the opening 1.0. Separate from `reset_channel_diagnostics` so a
+            `reset_parameters` that wants one is not forced to take the other,
+            exactly as `ScoreVolume.reset_score_volume` is separate.
+        """
+        with torch.no_grad():
+            self.log_logit_scale.zero_()
 
     def reset_channel_diagnostics(self):
         """
@@ -844,7 +864,15 @@ class GumbelChannel:
         Returns:
             A hard one-hot of the same shape
         """
-        scaled = mask_reserved_tokens(normalised * self.logit_scale)
+        # Through `scale_without_attenuating`, restoring what `7b10d47` did
+        #     before the parameter was deleted: the forward value is
+        #     `logit_scale * normalised` exactly as it reads, but
+        #     `d/dnormalised` is 1 rather than `logit_scale`, so the scale's
+        #     value never multiplies the speaker's whole stack. The scale keeps
+        #     its own true partial and so is as free to slide as it ever was.
+        scaled = mask_reserved_tokens(
+            model_util.scale_without_attenuating(normalised, self.logit_scale)
+        )
 
         if self.uniform_weight > 0.0:
             scaled = flatten_logit_distribution(scaled, self.uniform_weight)
@@ -881,11 +909,13 @@ class GumbelChannel:
             before any optimiser or clipper sees it and the trunk hears a single
             token's opinion. Magnitude, by contrast, largely cancels: AdamW
             updates by `m / sqrt(v)`, and `clip_gradients` renormalises what
-            survives. `logit_scale` bounds how far `p` can concentrate and so
-            bounds the damage, but only the identity estimator removes it. Under
-            it the speaker's gradient is `dL/dy` -- the receiver's per-token
-            embedding sensitivity -- which is full rank and the same size however
-            sharp the speaker has become.
+            survives. Only the identity estimator removes the rank collapse.
+            Under it the speaker's gradient is `dL/dy` -- the receiver's
+            per-token embedding sensitivity -- which is full rank and the same
+            size however sharp the speaker has become. That is also why
+            `logit_scale` is free to learn again: with `I` in the backward pass
+            there is no saturation for a climbing scale to shut, so bounding `p`
+            stopped being a gradient safeguard.
 
         **The surrogate is built on the emittable slice.** `masked` holds `-inf`
             in the four reserved columns and `-inf - (-inf)` is NaN. Slicing also
@@ -894,11 +924,19 @@ class GumbelChannel:
             stack behind them are never trained toward tokens that cannot be
             emitted.
 
-        **It taps the unscaled logits**, so `dL/dz` is exactly `dL/dy`. Tapping
-            the scaled ones would multiply the whole speaker's gradient by
-            `logit_scale`, which is uniform and therefore harmless, but it would
-            also make the estimator's gradient depend on a constant the forward
-            value does not depend on. See docs/channel.md.
+        **It taps the *scaled* logits**, and has to: `_gumbel_sample` runs
+            under `no_grad` on this branch, so the surrogate is the only path
+            back and an unscaled tap would leave `log_logit_scale` with no
+            gradient at all. The composition is what makes that free. With
+            `d(scaled)/d(normalised) = 1` from `scale_without_attenuating` and
+            `dy/d(scaled) = I` from the estimator:
+
+                dL/dnormalised   = dL/dy
+                dL/dlog_logit_scale = <dL/dy, normalised> * logit_scale
+
+            The first is bit-identical to what the unscaled tap gave, so the
+            speaker's stack sees exactly the gradient it saw before the scale
+            came back; the second is real and nonzero. See docs/channel.md.
         """
         normalised = layer_norm_logits(logits, self.vocabulary)
         masked = mask_reserved_tokens(normalised)
@@ -922,7 +960,9 @@ class GumbelChannel:
             #     float32 is 1.0000001 rather than 1 -- a real perturbation of
             #     the message, on the winning token, every step. Forming the
             #     zero first makes the addition exact.
-            emittable = normalised[..., 4:]
+            emittable = model_util.scale_without_attenuating(
+                normalised[..., 4:], self.logit_scale
+            )
             onehot = torch.cat(
                 [
                     onehot[..., :4],
@@ -953,11 +993,13 @@ class GumbelChannel:
             magnitude, invisible in the mixed column. Same function, same order
             of operations, mixture off.
 
-            `logit_scale` now bounds it -- `token_max_probability` is exactly a
-            ceiling on this column -- and under `estimator = "identity"` it
-            leaves the backward pass altogether: that branch's Jacobian is `I`
-            whatever `p` reads. It is still worth watching there, as the
-            channel's fidelity, but it is no longer a gradient diagnostic.
+            Under `estimator = "identity"` it leaves the backward pass
+            altogether: that branch's Jacobian is `I` whatever `p` reads. It is
+            still worth watching there, as the channel's fidelity, but it is no
+            longer a gradient diagnostic -- which is why nothing bounds it any
+            more. `MAX_LOGIT_SCALE` and `sharpest_logit_margin` bound the two
+            things it is bought with, and their product is what this column
+            reads.
 
         `logit_margin` and `logit_prior_share` are the shape pair. The first is
             how concentrated the distribution is, the second how much of that
@@ -969,11 +1011,16 @@ class GumbelChannel:
         """
         detached = pre_gain_logits.float()
 
+        # `float()` rather than the tensor: `mean_winning_probability` is typed
+        #     for a plain scale and is pure measurement, and a live parameter
+        #     here would build a graph off the detached diagnostic path.
+        scale = float(self.logit_scale)
+
         self.realised_survival = mean_winning_probability(
-            detached, self.logit_scale, self.uniform_weight
+            detached, scale, self.uniform_weight
         ).item()
         self.unmixed_survival = mean_winning_probability(
-            detached, self.logit_scale, 0.0
+            detached, scale, 0.0
         ).item()
         self.logit_margin = mean_logit_margin(detached).item()
         self.logit_prior_share = logit_prior_share(detached).item()
@@ -1001,9 +1048,7 @@ class SenderGRULM(GumbelChannel, nn.Module):
         self.bidirectional = kwargs["bidirectional"]
         self.directions = 2 if self.bidirectional else 1
 
-        self._init_channel(
-            kwargs["token_max_probability"], self.vocabulary, kwargs["estimator"]
-        )
+        self._init_channel(kwargs["estimator"])
 
         self.gru = nn.GRU(
             self.token_embedding_size,
@@ -1140,6 +1185,7 @@ class SenderGRULM(GumbelChannel, nn.Module):
         self.gru.reset_parameters()
         self.outputs2vocab.reset_parameters()
         self.token_embedding.reset_parameters()
+        self.reset_channel_scale()
         self.reset_channel_diagnostics()
 
 
@@ -1203,9 +1249,7 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
             decoder=False,
         )
 
-        self._init_channel(
-            kwargs["token_max_probability"], self.vocabulary, kwargs["estimator"]
-        )
+        self._init_channel(kwargs["estimator"])
 
         if self.referent_embedding_size != self.token_embedding_size:
             raise NotImplementedError(
@@ -1634,6 +1678,7 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
             self.token_embedding.reset_parameters()
 
         self.outputs2vocab.reset_parameters()
+        self.reset_channel_scale()
         self.reset_channel_diagnostics()
 
 

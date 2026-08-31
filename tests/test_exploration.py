@@ -19,18 +19,28 @@ magnitude whatever its architecture did. **That** is what makes exploration
 comparable across arms, and it is checked directly: two logit tensors differing
 by a factor of a hundred must reach the same rate.
 
-`logit_scale` then says what that unit is worth. It is a **cap**, solved once at
-construction from `token_max_probability`: the normaliser bounds how
-concentrated a shape can get -- one token at `sqrt(V-1)`, the rest at
-`-1/sqrt(V-1)` -- so inverting a softmax at that shape gives the constant under
-which no speaker can ever hold a token above the configured probability. It does
-not change over a run. It replaced an entropy solve whose scale was then learned
-from, which climbed until the straight-through estimator was shut.
+`logit_scale` then says what that unit is worth. It is a **parameter**, opening
+at 1.0, free to fall with no floor and bounded above at `MAX_LOGIT_SCALE` = 2.0
+by a projection applied after each optimiser step rather than by a `clamp` in
+the forward pass. It reaches the loss through
+`model_util.scale_without_attenuating`, so its value never multiplies the
+speaker's stack on the way back -- which is what makes an unfloored scale safe:
+a small scale is a noisy channel rather than a starved one.
+
+It was briefly a constant. Between 2026-08-30 and 2026-08-31 it was solved in
+closed form from a `token_max_probability` key, against the sharpest shape the
+normaliser permits, on the grounds that a learned scale climbs until the
+straight-through estimator is shut. That is a property of the *gumbel* Jacobian
+`diag(p) - p pT`, which collapses to rank ~1 as `p -> 1`; the ladder now runs
+`estimator = "identity"`, whose Jacobian is `I` at any sharpness, so there is
+nothing left for a climbing scale to shut and the bound stopped being a gradient
+safeguard. Fidelity never depended on the scale in any case: the shape budget
+alone reaches 0.789 at V = 14 with the scale at one.
 
 `estimator` chooses what the speaker learns through. Both branches emit the same
 hard one-hot, and at the same seed they emit the *same* messages; they differ in
 the backward pass, `"gumbel"` taking the soft sample's `diag(p) - p pT` and
-`"identity"` taking `I`. The cap bounds the first; only the second removes it.
+`"identity"` taking `I`. Only the second removes the rank collapse.
 
 The rest is unchanged and still has to hold. The Gumbel-max identity, that a
 slot's survival probability is exactly its winning token's softmax probability,
@@ -146,9 +156,8 @@ def _get_knob(speaker, attribute):
     """
     Read one of the sampling knobs as a plain float.
 
-    All three -- `logit_scale`, `uniform_weight`, `tau` -- are ordinary float
-    attributes now that the scale is a constant solved at construction rather
-    than a learned parameter read through a property.
+    `uniform_weight` and `tau` are ordinary float attributes; `logit_scale` is a
+    parameter read through a property, so it comes back as a 0-d tensor.
     """
     value = getattr(speaker, attribute)
     return value.item() if torch.is_tensor(value) else value
@@ -156,13 +165,23 @@ def _get_knob(speaker, attribute):
 
 def _set_knob(speaker, attribute, value):
     """
-    Set one of the sampling knobs. Plain assignment: nothing here is a
-    parameter, so there is no `no_grad` and no log to write through.
+    Set one of the sampling knobs.
+
+    `logit_scale` is written through its log under `no_grad`, because the
+    property is read-only and the parameter is what the sampler actually sees.
+    Deliberately not `project_channel`'s ceiling: several tests here need scales
+    a run could never reach, to show the channel is well behaved outside the
+    range it is bounded to.
     """
+    if attribute == "logit_scale":
+        with torch.no_grad():
+            speaker.log_logit_scale.fill_(math.log(value))
+        return
+
     setattr(speaker, attribute, value)
 
 
-# ------------------------------------ 1. the scale is a cap, not a target --
+# ----------------------------- 1. the two bounds on the channel's sharpness --
 
 def test_the_sharpest_shape_is_the_one_the_normaliser_permits():
     """
@@ -188,76 +207,52 @@ def test_the_sharpest_shape_is_the_one_the_normaliser_permits():
     assert S.sharpest_logit_margin(20) == pytest.approx(4.588, abs=0.001)
 
 
-def test_logit_scale_delivers_the_requested_cap_exactly():
+def test_the_two_bounds_on_sharpness_multiply():
     """
-    The solve is a closed-form inverse, so it is exact rather than approximate:
-    at the returned constant, the sharpest permitted shape reaches
-    `token_max_probability` and not a thousandth more.
+    Saturation is set by `logit_scale * logit_margin`, and each factor has its
+    own ceiling: `MAX_LOGIT_SCALE` bounds the first and `sharpest_logit_margin`
+    the second. Their product is the sharpest channel a speaker can present, and
+    it is a fact about the design rather than a target -- nothing in the
+    objective aims at it, and under `estimator = "identity"` reaching it costs
+    nothing in the backward pass.
 
-    The two shipped constants are pinned numerically because they are quoted in
-    DEFAULT.toml, the rung configs and the docs.
+    Pinned because the two bounds are stated in different files and it is their
+    *product* that matters: raising either alone moves this number.
     """
-    assert S.logit_scale(0.95, 14) == pytest.approx(1.419, abs=0.001)
-    assert S.logit_scale(0.95, 20) == pytest.approx(1.283, abs=0.001)
+    V = 14
 
-    for probability in (0.5, 0.7, 0.95, 0.99):
-        for vocabulary in (8, 14, 20, 64):
-            scale = S.logit_scale(probability, vocabulary)
-            shape = torch.full(
-                (vocabulary,), -1.0 / math.sqrt(vocabulary - 1)
-            )
-            shape[0] = math.sqrt(vocabulary - 1)
+    sharpest = torch.full((1, V + 4), -1.0 / math.sqrt(V - 1))
+    sharpest[..., :4] = 0.0
+    sharpest[..., 4] = math.sqrt(V - 1)
+    masked = S.mask_reserved_tokens(sharpest)
 
-            winner = torch.softmax(scale * shape, dim=-1).max().item()
-            assert winner == pytest.approx(probability, abs=1e-6), (
-                probability, vocabulary
-            )
+    ceiling = S.mean_winning_probability(masked, S.MAX_LOGIT_SCALE, 0.0).item()
+    assert ceiling == pytest.approx(0.9945, abs=1e-4)
 
-    # Monotone: a higher cap needs a bigger constant.
-    scales = [S.logit_scale(p, 20) for p in (0.5, 0.7, 0.95, 0.99)]
-    assert scales == sorted(scales), scales
-
-
-def test_the_cap_is_a_bound_over_every_shape_not_only_the_sharpest():
-    """
-    The point of solving against the *sharpest* shape. `layer_norm_logits` pins
-    the second moment and says nothing about the shape, so a speaker is free to
-    spend its whole budget on one token -- which is the route the 2026-08-29
-    ShapeWorld run actually took, at 86% of that budget. A constant chosen
-    against a typical shape would not have held.
-
-    Nothing the speaker can present may exceed the cap, so this tries the sharp
-    end deliberately as well as randomly.
-    """
-    V, cap = 14, 0.95
-    scale = S.logit_scale(cap, V)
-
+    # Nothing the speaker can present exceeds it, at the sharpest legal scale --
+    # which is the point of bounding the shape as well as the scale. The spikes
+    # are deliberately adversarial: they normalise toward the sharpest shape.
     generator = torch.Generator().manual_seed(0)
     candidates = [
         torch.randn(4096, V + 4, generator=generator) * multiplier
         for multiplier in (0.05, 1.0, 50.0)
     ]
-
-    # Deliberately adversarial: a spike of growing height on one token, which
-    # normalises toward the sharpest shape.
     for height in (1.0, 10.0, 1000.0):
         spike = torch.randn(256, V + 4, generator=generator) * 0.01
         spike[..., 4] += height
         candidates.append(spike)
 
     for logits in candidates:
-        masked = _masked(logits)
-        unmixed = S.mean_winning_probability(masked, scale, 0.0).item()
-        assert unmixed <= cap + 1e-5, unmixed
+        unmixed = S.mean_winning_probability(
+            _masked(logits), S.MAX_LOGIT_SCALE, 0.0
+        ).item()
+        assert unmixed <= ceiling + 1e-5, unmixed
 
-    # And it is reached, not merely respected: the sharpest shape attains it.
-    sharpest = torch.full((1, V + 4), -1.0 / math.sqrt(V - 1))
-    sharpest[..., :4] = 0.0
-    sharpest[..., 4] = math.sqrt(V - 1)
-    attained = S.mean_winning_probability(
-        S.mask_reserved_tokens(sharpest), scale, 0.0
-    ).item()
-    assert attained == pytest.approx(cap, abs=1e-5)
+    # At the *opening* scale the shape budget alone already reaches most of the
+    # way there, which is why fidelity never had to come from the scale.
+    assert S.mean_winning_probability(masked, 1.0, 0.0).item() == pytest.approx(
+        0.789, abs=1e-3
+    )
 
 
 def test_uniform_weight_caps_what_the_listener_sees_and_not_the_gradient():
@@ -266,11 +261,11 @@ def test_uniform_weight_caps_what_the_listener_sees_and_not_the_gradient():
     survival columns.
 
     `uniform_weight` mixes in probability space, so it caps `realised_survival`
-    at `1 - w + w/V` and contributes a constant to the backward pass.
-    `token_max_probability` caps `unmixed_survival`, which is the winner's
-    probability the straight-through Jacobian is written in. A run pinned
-    against the mixture's cap can still be saturating the estimator, which is
-    exactly what was missed on 2026-08-29.
+    at `1 - w + w/V` and contributes a constant to the backward pass. Nothing
+    caps `unmixed_survival` -- the winner's probability the straight-through
+    Jacobian is written in -- short of the two bounds on sharpness above. A run
+    pinned against the mixture's cap can still be saturating the estimator,
+    which is exactly what was missed on 2026-08-29.
     """
     V, w = 14, 0.1
 
@@ -279,77 +274,164 @@ def test_uniform_weight_caps_what_the_listener_sees_and_not_the_gradient():
     sharpest[..., 4] = math.sqrt(V - 1)
     masked = S.mask_reserved_tokens(sharpest)
 
-    # At a cap the channel could not have reached before, the mixed column
-    # still reads well below 1 while the unmixed one sits at the cap.
-    for cap in (0.95, 0.9999):
-        scale = S.logit_scale(cap, V)
+    # The mixed column reads well below 1 at every scale, while the unmixed one
+    # keeps climbing past it.
+    for scale in (1.0, S.MAX_LOGIT_SCALE, 20.0):
         realised = S.mean_winning_probability(masked, scale, w).item()
         unmixed = S.mean_winning_probability(masked, scale, 0.0).item()
 
-        assert unmixed == pytest.approx(cap, abs=1e-5)
-        assert realised == pytest.approx((1 - w) * cap + w / V, abs=1e-5)
+        assert realised == pytest.approx((1 - w) * unmixed + w / V, abs=1e-5)
+        assert realised < unmixed
 
-    # The mixture's own ceiling, which no scale can pass.
+    # At a scale no run can reach the unmixed column is essentially one and the
+    # mixed one is still pinned at the mixture's own ceiling.
+    assert unmixed > 0.9999
+    assert realised == pytest.approx((1 - w) + w / V, abs=1e-4)
     assert (1 - w) + w / V == pytest.approx(0.90714, abs=1e-5)
 
 
 @pytest.mark.parametrize(
     "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
 )
-def test_speaker_resolves_its_scale_from_its_own_vocabulary(build):
+def test_the_channel_scale_is_a_parameter_opening_at_one(build):
     """
-    The scale is solved at construction from the speaker's *own* vocabulary and
-    the configured cap, and it is a plain float: the channel is a constant for
-    the whole of a run, not a parameter that learns its way somewhere else.
+    It opens at exactly 1.0 on every arm, is stored as its log so `exp` keeps it
+    strictly positive, and is in `state_dict` -- which is what makes checkpoints
+    written while it was a constant unloadable, and is the mirror image of the
+    break `44767b2` made going the other way.
+
+    Exactly 1.0 rather than approximately: `torch.zeros` is exact and `exp(0)` is
+    exactly 1, so an opening that has drifted means something initialised it.
     """
     speaker = build()
-    solved = S.logit_scale(
-        get_config()["sender_language_model"]["token_max_probability"],
-        speaker.vocabulary,
-    )
-    assert isinstance(speaker.logit_scale, float)
-    assert speaker.logit_scale == pytest.approx(solved)
 
-    # A bigger vocabulary needs a *smaller* constant to reach the same cap:
-    # there are more losing tokens to spread the remaining probability over,
-    # and `sharpest_logit_margin` grows with V.
-    birds = build(vocabulary=20)
-    assert birds.logit_scale < speaker.logit_scale
+    assert isinstance(speaker.log_logit_scale, torch.nn.Parameter)
+    assert speaker.log_logit_scale.requires_grad
+    assert speaker.log_logit_scale.dim() == 0
+    assert speaker.log_logit_scale.item() == 0.0
+    assert speaker.logit_scale.item() == 1.0
+
+    state = speaker.state_dict()
+    assert "log_logit_scale" in state
+    assert state["log_logit_scale"].item() == 0.0
+
+    # It survives a round trip, and `reset_parameters` puts it back.
+    with torch.no_grad():
+        speaker.log_logit_scale.fill_(0.5)
+    restored = build()
+    restored.load_state_dict(speaker.state_dict())
+    assert restored.log_logit_scale.item() == pytest.approx(0.5)
+
+    restored.reset_parameters()
+    assert restored.log_logit_scale.item() == 0.0
+
+    # The vocabulary does not enter it. Both datasets open their channel at the
+    # same multiplier, and the wider vocabulary is the slightly louder channel
+    # at equal scale rather than being handed a different bound.
+    assert build(vocabulary=20).logit_scale.item() == 1.0
+
+
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
+def test_project_channel_bounds_the_scale_without_welding_it(build):
+    """
+    The whole argument for projecting rather than clamping, asserted as
+    behaviour.
+
+    A `clamp` in the forward pass has zero gradient past the bound and that
+    gradient is not directional, so a parameter that overshot would get nothing
+    in *either* direction and weld there -- `weight_decay` is 0.0, so nothing
+    else would pull it back. Projection after the step bounds the value exactly
+    while leaving the gradient live right at the ceiling, so the scale can sit
+    at 2.0 for free and leave again whenever the loss asks it to.
+
+    `receiver.py` states the same rule about the mix floor. Do not replace this
+    with a `clamp`.
+    """
+    speaker = build().train()
+    raw = _logit_shapes(speaker.vocabulary)["typical"]
+
+    # Exact, not asymptotic: `2 * sigmoid(x)` would only approach the ceiling.
+    _set_knob(speaker, "logit_scale", 5.0)
+    speaker.project_channel()
+    assert speaker.logit_scale.item() == pytest.approx(S.MAX_LOGIT_SCALE, abs=1e-6)
+
+    # Idempotent, which is what makes it safe to call after a `scaler.step` that
+    # may have skipped.
+    speaker.project_channel()
+    assert speaker.logit_scale.item() == pytest.approx(S.MAX_LOGIT_SCALE, abs=1e-6)
+
+    # Live at the bound. A `clamp` would give exactly zero here.
+    logits, onehot = _normalised_and_onehot(speaker, raw)
+    upstream = _upstream_gradient(onehot.shape)
+    (onehot * upstream).sum().backward()
+    at_ceiling = speaker.log_logit_scale.grad.item()
+    assert at_ceiling != 0.0
+
+    # And it can leave again: a step in the descending direction is not undone.
+    with torch.no_grad():
+        speaker.log_logit_scale.sub_(0.5)
+    speaker.project_channel()
+    assert speaker.logit_scale.item() < S.MAX_LOGIT_SCALE
+
+    # There is no floor. A speaker with nothing to say is pushed flatter, and
+    # that is self-regulation rather than a failure -- the scale reaches the loss
+    # through `scale_without_attenuating`, so a small scale is a noisy channel
+    # and not a starved one.
+    _set_knob(speaker, "logit_scale", 1e-3)
+    speaker.project_channel()
+    assert speaker.logit_scale.item() == pytest.approx(1e-3, rel=1e-5)
 
 
 def test_the_documented_operating_point_still_holds():
     """
-    The opening is a *consequence* of the cap rather than a second knob, and
-    DEFAULT.toml quotes where it lands. Numbers in comments rot; this recomputes
-    them.
+    Where the two ends of the scale's range leave the channel, recomputed
+    against the table DEFAULT.toml's `[sender_language_model]` block quotes.
+    Numbers in comments rot.
 
     The opening matters for bootstrapping: a fresh speaker's argmax barely
     varies with its input, so a confident opening means it emits near enough one
     message for everything from the first batch and the listener co-adapts to
-    that before the speaker's embeddings are worth grounding anything on.
+    that before the speaker's embeddings are worth grounding anything on. At a
+    scale of one it holds its argmax about 28% of the time on ShapeWorld, which
+    is deliberately modest and is the reason the ceiling is where the traverse
+    goes rather than the opening.
     """
-    cap, w = 0.95, 0.1
-    expected = {14: (1.419, 0.386, 0.862), 20: (1.283, 0.294, 0.860)}
+    # V: (opening at scale 1, opening at MAX, sharpest at 1, sharpest at MAX)
+    expected = {
+        14: (0.280, 0.511, 0.789, 0.995),
+        20: (0.226, 0.455, 0.838, 0.998),
+    }
 
-    for V, (constant, opening, realised_cap) in expected.items():
-        scale = S.logit_scale(cap, V)
-        assert scale == pytest.approx(constant, abs=0.001), V
-
+    for V, (open_one, open_max, sharp_one, sharp_max) in expected.items():
         # A freshly initialised speaker's normalised logits are i.i.d. standard
         # normal -- random weights through a linear projection whose rows are
         # independent, so nothing correlates the vocabulary dimension yet.
         generator = torch.Generator().manual_seed(0)
-        logits = _masked(torch.randn(100000, V + 4, generator=generator))
-        assert S.mean_winning_probability(logits, scale, 0.0).item() == (
-            pytest.approx(opening, abs=0.005)
-        ), V
+        fresh = _masked(torch.randn(100000, V + 4, generator=generator))
 
-        assert (1 - w) * cap + w / V == pytest.approx(realised_cap, abs=0.001), V
+        sharpest = torch.full((1, V + 4), -1.0 / math.sqrt(V - 1))
+        sharpest[..., :4] = 0.0
+        sharpest[..., 4] = math.sqrt(V - 1)
+        sharpest = S.mask_reserved_tokens(sharpest)
 
-    # Both openings sit well below the cap, which is the range the speaker has
-    # to work through, and well above chance.
-    for V, (_, opening, _) in expected.items():
-        assert 1.0 / V < opening < cap
+        for logits, at_one, at_max in (
+            (fresh, open_one, open_max),
+            (sharpest, sharp_one, sharp_max),
+        ):
+            assert S.mean_winning_probability(logits, 1.0, 0.0).item() == (
+                pytest.approx(at_one, abs=0.002)
+            ), V
+            assert S.mean_winning_probability(
+                logits, S.MAX_LOGIT_SCALE, 0.0
+            ).item() == pytest.approx(at_max, abs=0.002), V
+
+        # The opening sits well above chance and well below the ceiling, which
+        # is the range the speaker has to work through.
+        assert 1.0 / V < open_one < sharp_max
+
+    assert S.MAX_LOGIT_SCALE == 2.0
 
 
 # ------------------------------- 2. LayerNorm is what equalises the ladder --
@@ -361,11 +443,12 @@ def test_layer_norm_makes_exploration_scale_invariant():
     the actual difference between the arms of the ladder -- reach the same
     channel, because the factor is divided out before the scale is applied.
 
-    This is why the solve is redundant. There is nothing left for it to adapt
-    to except the *shape* of the logits, which is the speaker's own policy.
+    This is why the per-batch calibration was redundant. There is nothing left
+    for it to adapt to except the *shape* of the logits, which is the speaker's
+    own policy.
     """
     raw = _logit_shapes(14)["typical"]
-    scale = S.logit_scale(0.95, 14)
+    scale = 1.0   # the opening; the claim is about the raw logits, not the scale
 
     def survival(logits):
         return S.mean_winning_probability(_masked(logits), scale, 0.02).item()
@@ -391,8 +474,10 @@ def test_scale_invariance_survives_a_collapsing_logit_scale():
 
     `F.layer_norm` divides by `sqrt(var + eps)`, so a speaker whose logits
     collapse towards `eps` gets normalised by something increasingly unlike its
-    own spread and quietly receives a weaker channel -- which `logit_scale`,
-    being a constant, cannot absorb the way the per-batch solve silently did.
+    own spread and quietly receives a weaker channel -- which `logit_scale` can
+    in principle learn its way out of, but only slowly and only if the gradient
+    survives the noisier channel in the meantime, where the per-batch solve
+    absorbed it silently and instantly.
 
     At the 1e-5 default this was not academic: a birds run lost realised
     survival 0.47 -> 0.17 to it over 22 epochs, because a channel that noisy
@@ -400,7 +485,7 @@ def test_scale_invariance_survives_a_collapsing_logit_scale():
     collapse is absorbed four orders further out.
     """
     raw = _logit_shapes(14)["typical"]          # incoming sd ~1.0
-    scale = S.logit_scale(0.95, 14)
+    scale = 1.0
 
     def survival(logits):
         return S.mean_winning_probability(_masked(logits), scale, 0.02).item()
@@ -428,7 +513,7 @@ def test_shape_still_moves_the_channel():
     setting, and that is the finding `realised_survival` exists to report --
     the thing the calibration used to erase.
     """
-    scale = S.logit_scale(0.95, 14)
+    scale = 1.0
     shapes = _logit_shapes(14)
 
     typical = S.mean_winning_probability(_masked(shapes["typical"]), scale, 0.02)
@@ -437,65 +522,94 @@ def test_shape_still_moves_the_channel():
     assert peaked.item() > typical.item() + 0.1
 
 
-def test_the_gain_multiplies_the_forward_logits():
+def test_the_gain_multiplies_the_forward_logits_and_only_the_forward():
     """
-    The scaled logits are exactly `logit_scale * normalised`, so
+    The scaled logits are exactly `logit_scale * normalised` in value, so
     `realised_survival`, `unmixed_survival` and the mixture with
-    `uniform_weight` all see what they always did.
+    `uniform_weight` all see what they always did -- and `d/dnormalised` is 1
+    rather than `logit_scale`, so the scale's value never multiplies the
+    speaker's stack on the way back.
 
-    A plain product, and briefly not one. `7b10d47` put this scalar through
-    `model_util.scale_without_attenuating` -- same forward, but `d/dnormalised`
-    forced to 1 -- so that a falling scale would not multiply down the gradient
-    reaching `outputs2vocab`, the stack and the vision model behind it. The
-    helper is gone and so are the three tests that pinned its properties; what
-    it was for is in docs/anecdotes.md, with the measured gradients.
+    `model_util.scale_without_attenuating` is what buys the second half.
+    `7b10d47` first put the speaker's scale through it, `44767b2` removed the
+    parameter altogether, and it is back on both sides of the channel as of
+    2026-08-31 -- see `tests/test_score_scale.py`'s preamble for the listener's
+    eight rounds of the same argument.
 
-    The short of it: AdamW updates by `m / sqrt(v)`, so a uniform factor on a
-    parameter's gradient cancels, and `train.py`'s per-submodule
-    `clip_gradients` renormalises whatever survives that. The coupling the
-    helper removed was not reaching the optimiser. What it did reach was
-    consistency -- `dL/dscale = x` is the true partial while
-    `dL/dnormalised = J` is not -- so the stack was being shaped for a channel
-    of volume 1 whatever the forward used.
+    **This is the invariant the whole design rests on.** Without it an unfloored
+    scale would be unsafe: a speaker that slid quiet would multiply down the
+    gradients behind it and starve the very stack that would have given it
+    something to say. With it, a small scale is a noisy channel and nothing
+    more, which is why `project_channel` bounds the scale above and not below.
     """
     speaker = _transformer_speaker()
     vocabulary = speaker.vocabulary
     raw = _logit_shapes(vocabulary)["typical"]
 
-    normalised = S.layer_norm_logits(raw, vocabulary)
+    plain = S.layer_norm_logits(raw, vocabulary)
 
     for scale in (0.05, 1.0, 20.0):
         _set_knob(speaker, "logit_scale", scale)
-        assert torch.allclose(
-            normalised * speaker.logit_scale, scale * normalised, atol=1e-5
+
+        normalised = plain.clone().requires_grad_(True)
+        scaled = model_util.scale_without_attenuating(
+            normalised, speaker.logit_scale
+        )
+
+        # The forward value is the plain product, to the last bit the helper's
+        #     bracketing can promise.
+        assert torch.allclose(scaled, scale * plain, atol=1e-5)
+
+        # And the backward is the identity, at every scale.
+        upstream = _upstream_gradient(scaled.shape)
+        gradient, = torch.autograd.grad(
+            (scaled * upstream).sum(), normalised, retain_graph=True
+        )
+        assert torch.equal(gradient, upstream)
+
+        # While the scale keeps its own true partial, `<dL/dy, x> * scale`.
+        on_scale, = torch.autograd.grad(
+            (scaled * upstream).sum(), speaker.log_logit_scale
+        )
+        assert on_scale.item() == pytest.approx(
+            (upstream * plain).sum().item() * scale, rel=1e-4
         )
 
 
-def test_the_gain_carries_into_the_gradient_behind_it():
+def test_the_scale_reaches_the_gumbel_gradient_only_through_saturation():
     """
-    What the plain product does, stated so that a future round has the number
-    rather than the intuition.
+    What the helper changed, stated so that a future round has the number rather
+    than the intuition.
 
     The gradient into the raw logits is a product of three factors:
 
         dL/draw  =  J_gumbel(scaled)  x  d(scaled)/d(normalised)  x  d(normalised)/d(raw)
 
-    The middle one is `logit_scale`. Below the sampler's saturation the first is
-    roughly flat, so the whole thing tracks the scale -- which is what the
-    helper was removing and is asserted here as the live behaviour.
+    The middle one used to be `logit_scale`, so the whole thing tracked the
+    scale proportionally and a speaker that went quiet starved its own stack.
+    `scale_without_attenuating` pins it at 1. What is left is the first factor,
+    which is a function of `scaled = logit_scale * normalised` and so still sees
+    the scale -- but only through the soft surrogate's saturation, and in the
+    *opposite* direction: a sharper channel has a flatter `diag(p) - p pT` and
+    passes less back, where the old middle factor passed more.
 
-    Above roughly 1.0 the product turns over, because `J_gumbel` is a function
-    of `scaled = logit_scale * normalised` and the soft surrogate
-    `softmax((scaled + g) / tau)` saturates. That belongs to the sampler, is
-    deliberately kept, and is why the assertion below stays in the low range.
-
-    A `"gumbel"` property, pinned explicitly rather than taken from the default.
-    The whole point of `"identity"` is that its gradient does *not* do this --
+    So the direction inverts and the magnitude collapses: a 40-fold range in the
+    scale moves this by under 3x, where proportionality would have moved it 40x.
+    A `"gumbel"` property, pinned explicitly rather than taken from the default;
+    the whole point of `"identity"` is that its gradient does not do even this --
     see `test_the_identity_gradient_is_invariant_to_the_scale`.
+
+    Measured on the peaked shape rather than the typical one, because saturation
+    is a property of the logits' *shape* and a near-uniform speaker barely
+    saturates at any scale. Measured with a random upstream rather than
+    `onehot.sum()`, because a one-hot's entries sum to a constant and
+    `(diag(p) - p pT) @ 1` is exactly zero -- that objective measures the float
+    residual, not the estimator.
     """
     speaker = _transformer_speaker(estimator="gumbel")
     vocabulary = speaker.vocabulary
-    raw = _logit_shapes(vocabulary)["typical"]
+    raw = _logit_shapes(vocabulary)["peaked"]
+    upstream = _upstream_gradient(raw.shape)
 
     def gradient_into_logits(scale):
         logits = raw.clone().requires_grad_(True)
@@ -503,14 +617,22 @@ def test_the_gain_carries_into_the_gradient_behind_it():
 
         torch.manual_seed(0)
         onehot, _ = speaker.sample_symbols(logits)
-        onehot.sum().backward()
+        (onehot * upstream).sum().backward()
 
         return logits.grad.norm().item()
 
-    at_one_quarter = gradient_into_logits(0.25)
+    at_quiet = gradient_into_logits(0.05)
+    at_loud = gradient_into_logits(S.MAX_LOGIT_SCALE)
 
-    assert gradient_into_logits(0.05) < at_one_quarter
-    assert gradient_into_logits(1.0) > at_one_quarter
+    # Monotone down, which is the inversion.
+    assert at_loud < gradient_into_logits(1.0) < at_quiet
+
+    # And nothing like proportional: the scale spans 40x here.
+    assert at_quiet / at_loud < 5.0, at_quiet / at_loud
+
+    # The quiet end is the one that matters, and it is *not* attenuated -- which
+    # is the property that makes an unfloored scale safe.
+    assert at_quiet == pytest.approx(gradient_into_logits(0.001), rel=0.05)
 
 
 # ---------------------------------------------------------- 3. Gumbel-max id
@@ -633,8 +755,9 @@ def test_unmixed_survival_is_what_the_gumbel_gradient_sees():
 
     Named for the branch deliberately. Under `estimator = "identity"` the
     Jacobian is `I` and this column reaches the gradient not at all; it is still
-    the channel's fidelity there, but it is no longer a gradient diagnostic.
-    `token_max_probability` now bounds it on both branches.
+    the channel's fidelity there, but it is no longer a gradient diagnostic --
+    which is why nothing bounds it directly. `MAX_LOGIT_SCALE` and
+    `sharpest_logit_margin` bound the two things it is bought with.
 
     The two are the same function with the mixture switched off, which is what
     stops them drifting, and the mixture is affine in the model's probability,
@@ -975,18 +1098,20 @@ def test_realised_survival_reports_the_channel_in_use(build):
     baseline = speaker.realised_survival
     assert 0.0 < baseline < 1.0
 
-    _set_knob(speaker, "logit_scale", speaker.logit_scale * 20.0)
+    _set_knob(speaker, "logit_scale", _get_knob(speaker, "logit_scale") * 20.0)
     speaker.decode(prototypes)
     assert speaker.realised_survival > baseline + 0.1
 
     # A freshly initialised speaker starts genuinely uncertain, with room to
-    # earn confidence rather than beginning at its own ceiling. At the default
-    # `token_max_probability` of 0.95 that is an argmax it holds a bit over a
-    # third of the time -- see `test_the_documented_operating_point_still_holds`
-    # for where that number comes from.
+    # earn confidence rather than beginning at its own ceiling. At the opening
+    # scale of 1.0 that is an argmax it holds a bit over a quarter of the time,
+    # mixed down to about 0.26 by `uniform_weight` -- see
+    # `test_the_documented_operating_point_still_holds` for where the unmixed
+    # number comes from. The range is wide because these are tiny test speakers
+    # over a handful of slots, not the 100k-row reference the other test uses.
     fresh = build().train()
     fresh.decode(_prototypes(fresh))
-    assert 0.24 < fresh.realised_survival < 0.46, fresh.realised_survival
+    assert 0.18 < fresh.realised_survival < 0.36, fresh.realised_survival
 
 
 @pytest.mark.parametrize(
@@ -1054,9 +1179,14 @@ def test_logit_spread_reads_the_pre_norm_scale(build):
 )
 def test_no_calibration_state_reaches_the_checkpoint(build):
     """
-    The scale is a constant, so nothing about exploration is checkpointed. Also
-    guards the two normalisers that were removed on the way here: no BatchNorm
-    running statistics and no affine LayerNorm parameters on the logits.
+    The channel's only checkpointed state is `log_logit_scale`. Everything the
+    per-batch calibration used to carry is gone, and so are the two normalisers
+    removed on the way here: no BatchNorm running statistics and no affine
+    LayerNorm parameters on the logits.
+
+    The scale itself is asserted in
+    `test_the_channel_scale_is_a_parameter_opening_at_one`; what is asserted
+    here is that it is the *only* thing.
     """
     speaker = build()
     speaker.train()
@@ -1065,12 +1195,15 @@ def test_no_calibration_state_reaches_the_checkpoint(build):
     keys = list(speaker.state_dict())
     assert not any("exploration" in key for key in keys), keys
     assert not any("batch_norm" in key for key in keys), keys
+    assert [key for key in keys if "logit_scale" in key] == ["log_logit_scale"]
 
-    # And a round trip does not need it: two speakers sharing a state_dict
-    # sample through the same channel.
+    # A round trip carries the channel: two speakers sharing a state_dict sample
+    # through the same one.
+    with torch.no_grad():
+        speaker.log_logit_scale.fill_(-0.3)
     restored = build()
     restored.load_state_dict(speaker.state_dict())
-    assert restored.logit_scale == speaker.logit_scale
+    assert restored.logit_scale.item() == speaker.logit_scale.item()
 
 
 # ------------------------------------------------- 7. position invariance --
@@ -1208,6 +1341,28 @@ def test_the_identity_surrogate_forwards_exactly_the_one_hot(build):
     _logits, from_gumbel = _normalised_and_onehot(gumbel, raw)
     assert torch.equal(values, from_gumbel.detach())
 
+    # And it still holds at every scale the parameter can reach, which is not
+    #     free: the surrogate taps the *scaled* logits, so the tensor being
+    #     cancelled is `logit_scale * normalised` rather than `normalised`, and
+    #     the bracketing has to survive that. Compared against the gumbel branch
+    #     at the *same* scale, because the scale moves the sample itself --
+    #     `argmax(scale * z + g)` is not invariant to it, only to `tau`.
+    for scale in (0.05, 1.0, S.MAX_LOGIT_SCALE):
+        _set_knob(speaker, "logit_scale", scale)
+        _set_knob(gumbel, "logit_scale", scale)
+
+        _logits, scaled_onehot = _normalised_and_onehot(speaker, raw)
+        _logits, reference = _normalised_and_onehot(gumbel, raw)
+        assert torch.equal(scaled_onehot.detach(), reference.detach()), scale
+
+    # The tap has to be the scaled logits, or the parameter gets no gradient at
+    #     all: `_gumbel_sample` runs under `no_grad` on this branch, so the
+    #     surrogate is the only path back to it.
+    upstream = _upstream_gradient(onehot.shape)
+    (scaled_onehot * upstream).sum().backward()
+    assert speaker.log_logit_scale.grad is not None
+    assert speaker.log_logit_scale.grad.item() != 0.0
+
 
 @pytest.mark.parametrize("build", _ESTIMATOR_BUILDS)
 def test_the_identity_gradient_is_the_upstream_gradient(build):
@@ -1248,20 +1403,30 @@ def test_the_identity_gradient_is_the_upstream_gradient(build):
 @pytest.mark.parametrize("build", _ESTIMATOR_BUILDS)
 def test_the_identity_gradient_is_invariant_to_the_scale(build):
     """
-    The exact inverse of `test_the_gain_carries_into_the_gradient_behind_it`.
-    The surrogate taps the *unscaled* logits, so the constant leaves the
-    backward pass altogether and the same seed gives a bit-identical gradient
-    across three orders of magnitude of it.
+    **The invariant the whole design rests on, and the one most likely to be
+    broken by a later edit.** The surrogate taps the *scaled* logits, so the
+    scale does get a gradient -- but it arrives through
+    `scale_without_attenuating`, whose `d/dx` is 1, and the estimator's own
+    Jacobian is `I`, so the composition gives
 
-    The scale is a constant now, so this is not a claim about a run's
-    trajectory. It is what makes the estimator indifferent to where
-    `token_max_probability` was set.
+        dL/dnormalised      = dL/dy                        (independent of the scale)
+        dL/dlog_logit_scale = <dL/dy, normalised> * scale   (real and nonzero)
+
+    The first line is bit-identical to what an *unscaled* tap would give, which
+    is what lets the scale learn without the stack behind it ever feeling the
+    value it learned. The same seed therefore gives a bit-identical gradient
+    into the raw logits across the whole range the parameter can occupy, while
+    the scale's own gradient moves with it.
+
+    This is also why there is no floor on the scale. A speaker that slid quiet
+    under a plain product would multiply down the gradients that would have
+    given it something to say; here it does not.
     """
     raw = _logit_shapes(_gru_speaker().vocabulary)["typical"]
     upstream = None
 
-    gradients = []
-    for scale in (0.05, 1.0, 20.0):
+    gradients, on_scale = [], []
+    for scale in (0.05, 1.0, 1.9, 20.0):
         speaker = build(estimator="identity").train()
         _set_knob(speaker, "logit_scale", scale)
 
@@ -1270,9 +1435,18 @@ def test_the_identity_gradient_is_invariant_to_the_scale(build):
             upstream = _upstream_gradient(onehot.shape)
         (onehot * upstream).sum().backward()
         gradients.append(logits.grad.clone())
+        on_scale.append(speaker.log_logit_scale.grad.item())
 
+    # Bit-identical into the stack, at 0.05 and at 1.9 -- the two ends of the
+    #     range a run can actually occupy -- and beyond them.
     for other in gradients[1:]:
         assert torch.equal(gradients[0], other)
+
+    # And live on the scale itself, differing with it: `<dL/dy, x> * scale`, so
+    #     the ratio of any two is the ratio of the scales.
+    assert all(value != 0.0 for value in on_scale), on_scale
+    assert on_scale[1] / on_scale[0] == pytest.approx(1.0 / 0.05, rel=1e-3)
+    assert on_scale[2] / on_scale[1] == pytest.approx(1.9, rel=1e-3)
 
 
 @pytest.mark.parametrize("build", _ESTIMATOR_BUILDS)
@@ -1283,9 +1457,13 @@ def test_the_identity_gradient_survives_saturation(build):
     Saturation is a property of the logits' *shape*, not their magnitude --
     `layer_norm_logits` divides magnitude out -- so this interpolates toward the
     sharpest shape the normaliser permits, which is the route the 2026-08-29
-    ShapeWorld run actually took. At the far end the speaker sits at
-    `token_max_probability`, where `diag(p) - p pT` has effectively collapsed to
-    rank one.
+    ShapeWorld run actually took. Run at `MAX_LOGIT_SCALE`, so the far end is
+    the sharpest channel the design permits at all: `p` is 0.9945 there and
+    `diag(p) - p pT` has effectively collapsed to rank one.
+
+    That the far end is *reachable* is the reason the scale could be given back.
+    Under `"gumbel"` a climbing scale walks into this and shuts the estimator;
+    under `"identity"` it costs nothing, which is what the two ratios below say.
 
     The inputs are normalised *before* being handed to the speaker so that
     `layer_norm_logits`'s own Jacobian is comparable at the two ends and what is
@@ -1304,6 +1482,7 @@ def test_the_identity_gradient_survives_saturation(build):
 
     def gradient_norm(estimator, mixing):
         speaker = build(estimator=estimator).train()
+        _set_knob(speaker, "logit_scale", S.MAX_LOGIT_SCALE)
         raw = S.layer_norm_logits(
             (1.0 - mixing) * noise + mixing * spike, vocabulary
         ).detach()
@@ -1315,17 +1494,13 @@ def test_the_identity_gradient_survives_saturation(build):
     flat, saturated = 0.0, 1.0
 
     # Confirm the far end really is saturated, so the comparison is about what
-    # it claims to be.
+    # it claims to be: the sharpest legal shape at the highest legal scale.
     sharpest = _masked(
         S.layer_norm_logits(spike, vocabulary).detach()
     )
-    speaker = build(estimator="gumbel")
     assert S.mean_winning_probability(
-        sharpest, speaker.logit_scale, 0.0
-    ).item() == pytest.approx(
-        get_config()["sender_language_model"]["token_max_probability"],
-        abs=1e-4,
-    )
+        sharpest, S.MAX_LOGIT_SCALE, 0.0
+    ).item() == pytest.approx(0.9945, abs=1e-4)
 
     gumbel_ratio = gradient_norm("gumbel", saturated) / gradient_norm(
         "gumbel", flat
@@ -1334,8 +1509,7 @@ def test_the_identity_gradient_survives_saturation(build):
         "identity", flat
     )
 
-    # The gumbel branch loses most of its gradient to shape alone, and only
-    # this little because `token_max_probability` bounds how sharp it can get.
+    # The gumbel branch loses most of its gradient to shape alone.
     assert gumbel_ratio < 0.3, gumbel_ratio
 
     # The identity branch does not notice.
@@ -1410,33 +1584,6 @@ def test_eval_is_the_same_policy_under_both_estimators(build):
 
 
 # ------------------------------------------------------------ 9. the config --
-
-def test_config_rejects_a_missing_or_invalid_token_max_probability():
-    """
-    `SafeDict` only warns on a missing key and hands back None, which would fail
-    confusingly deep inside the decode, so `parse_config` checks it up front.
-
-    Both bounds are real rather than defensive. `token_max_probability` is a
-    ceiling on the winning token's probability, and `logit_scale` inverts it: at
-    or below `1/V` there is no positive constant that flattens a distribution
-    that far, and at 1 the constant is infinite. Anyone who reads the key as a
-    percentage and writes `95` must be told, not handed an unusable channel.
-    """
-    import parse_config
-
-    vocabulary = get_config()["sender_language_model"]["vocabulary"]
-
-    for bad in (None, 0.0, -1.0, 1.0, 1.5, 95, 1.0 / vocabulary):
-        config = get_config()
-        config["sender_language_model"]["token_max_probability"] = bad
-        with pytest.raises(
-            parse_config.InvalidConfig, match="token_max_probability"
-        ):
-            parse_config.validate_config(config)
-
-    # And the shipped value passes, so the bounds are not merely tight.
-    parse_config.validate_config(get_config())
-
 
 def test_config_rejects_an_unknown_estimator():
     """

@@ -74,10 +74,12 @@ def standardise(scores):
 class ScoreVolume:
     """
     The listener's one degree of freedom over how loudly it states a conclusion.
-        It was once the counterpart of the speaker's `GumbelChannel.logit_scale`,
-        and is now the only learned scalar of the two: the speaker's is a
-        constant solved from `token_max_probability`. See docs/architecture.md
-        and docs/channel.md.
+        The counterpart of the speaker's `GumbelChannel.logit_scale`: both are
+        lone learned scalars in front of a normalised quantity, both go through
+        `model_util.scale_without_attenuating`, and both take the same rate.
+        The speaker's is bounded above by projection where this one is not --
+        a volume has no natural ceiling, a channel scale does. See
+        docs/architecture.md and docs/channel.md.
 
     A mixin rather than a submodule: `log_score_scale` stays registered on the
         discriminator itself, so the `state_dict` key is the one

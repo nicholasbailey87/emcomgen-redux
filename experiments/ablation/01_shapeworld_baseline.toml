@@ -33,7 +33,7 @@
 # the change -- the whole ladder rebaselines, not just the arms that moved. The
 # settings it used to carry -- `weight_decay` 0.0, `silhouette_p_receiver` (0.1
 # when this was written, 0.5 from 2026-08-25 and 0.0 again since 2026-08-30),
-# and the `token_max_probability` / `uniform_weight` pair -- are DEFAULT.toml's
+# and the `logit_scale_lr` / `uniform_weight` pair -- are DEFAULT.toml's
 # own values,
 # so every rung inherits them rather than rung 1 alone.
 #

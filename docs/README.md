@@ -8,7 +8,7 @@ explains a choice is here.
 | File | What it covers |
 | --- | --- |
 | [architecture.md](architecture.md) | The speaker, the listener, the prototypers, and the two Transformer speaker arms |
-| [channel.md](channel.md) | The channel: logit normalisation, the constant scale, `token_max_probability`, `uniform_weight`, and the two gradient estimators |
+| [channel.md](channel.md) | The channel: logit normalisation, the learned and bounded `logit_scale`, `uniform_weight`, and the two gradient estimators |
 | [measurement.md](measurement.md) | The topsim signal-set family, concept prototypes, and every diagnostic column in `metrics.csv` |
 | [data.md](data.md) | ShapeWorld and CUB: splits, the `test_same` holdout, the silhouette intervention, game counts |
 | [training.md](training.md) | The training loop, per-module gradient clipping, AMP, resume discipline, config resolution |

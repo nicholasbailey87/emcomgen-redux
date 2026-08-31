@@ -123,9 +123,10 @@ bidirectional = false
 # falls as the batch, so accumulation is a net loss for a lone Adam scalar even
 # where it is a net gain for the modules above it.
 #
-# The speaker's channel scale used to be the sharpest case of that and is no
-# longer a parameter at all: it is a constant solved from
-# `token_max_probability`, so there is no traverse here to budget for. See
+# The speaker's channel scale is the sharpest case of that. It was briefly not a
+# parameter at all -- a constant, between 2026-08-30 and 2026-08-31 -- and is a
+# lone scalar again, so the traverse is back in the budget: `logit_scale_lr` at
+# 6e-3 over 156.25 steps an epoch covers `ln 2` in 0.74 of an epoch. See
 # docs/channel.md.
 #
 # Note those figures are the rate after the warm-up. This rung takes

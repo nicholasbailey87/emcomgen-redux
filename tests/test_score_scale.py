@@ -131,6 +131,27 @@ It opens at zero and is expected to stay near it, because the games are balanced
 and the loss-optimal global offset is therefore about zero. It is insurance
 against a systematic offset, and it cannot reach a per-game one.
 
+Round nine put the volume back through
+`model_util.scale_without_attenuating`, reversing round seven on the one ground
+round seven's argument does not cover. AdamW and `clip_gradients` both act
+*after* the backward pass, and `train.py` runs the forward under `autocast`, so
+under float16 a gradient the volume has divided down can underflow to zero
+before either of them sees it -- and no optimiser recovers a zero. That is the
+skipped-step failure docs/anecdotes.md records. Inert under bfloat16, which has
+float32's exponent range, so check the dtype before reading a result as evidence
+either way.
+
+**And on 2026-08-31 the speaker's scale came back to meet it.** `44767b2` had
+deleted `log_logit_scale` in favour of a constant, on the grounds that a learned
+scale climbs until the straight-through estimator is shut; that is a property of
+the gumbel Jacobian, and the ladder now runs `estimator = "identity"`, whose
+Jacobian is `I` at any sharpness. So both ends of the channel are learned lone
+scalars again, both go through `scale_without_attenuating`, and both take the
+same rate -- `logit_scale_lr` and `score_scale_lr`, 6e-3 apiece. They are not
+symmetric in one respect: the speaker's is bounded above at 2.0 by a projection
+after the optimiser step, because a channel scale has a natural ceiling where a
+volume does not. See docs/channel.md and tests/test_exploration.py.
+
 Consequences the tests below follow. `bilinear.weight` carries volume as well as
 direction again, so `bilinear_weight_norm` is not the drift column it briefly
 was. `decision` still has no bias, now because `score_bias` is the module's one
@@ -1420,19 +1441,22 @@ def test_the_readout_scalars_are_elevated_and_the_weight_that_turns_is_not():
 def test_an_attention_rung_asks_for_the_mix_weight_rate_and_nothing_else():
     """
     Which parameters are left in an elevated group, on the rung that has the
-        most of them. Four of the five remaining keys cannot be told apart by
-        their rate -- DEFAULT.toml opens the scaling scalars and `score_bias`
-        together at 6e-3 -- so the assertion is on membership.
+        most of them. Five of the six keys cannot be told apart by their rate --
+        DEFAULT.toml opens the scaling scalars and `score_bias` together at
+        6e-3 -- so the assertion is on membership.
 
-    `polarity_embedding` is the fifth and is deliberately *not* with them. It is
+    `polarity_embedding` is the sixth and is deliberately *not* with them. It is
         a 2-d tag rather than a scalar, and it has no traverse to cover since it
         opens as an antipodal draw at `referent_layer_norm`'s own scale, so the
         argument that put the others at 6e-3 does not reach it. Since
         `2026-08-29` it takes the speaker's module rate, so it is asserted on
         group membership below rather than by looking a group up by its rate.
 
-    This rung's `SenderTransformerLM` earns the speaker's two and its contrast
-        stage a third. The listener contributes three: its volume, its offset,
+    This rung's `SenderTransformerLM` earns the speaker's two, its contrast
+        stage a third and its channel scale a fourth -- `log_logit_scale` is a
+        parameter again as of 2026-08-31 and takes `score_scale_lr`'s rate,
+        because it is the listener's volume's counterpart at the other end of
+        the channel. The listener contributes three: its volume, its offset,
         and the mixing *weight*. They are separate keys because they are
         separate things -- `mix_logit` says what the score is made of,
         `log_score_scale` how loudly it is stated, `score_bias` where it sits
@@ -1477,6 +1501,7 @@ def test_an_attention_rung_asks_for_the_mix_weight_rate_and_nothing_else():
     }
 
     assert elevated == {
+        "sender.language_model.log_logit_scale",
         "sender.contrast.contrast_gate",
         "receiver.discriminator.mix_logit",
         "receiver.discriminator.log_score_scale",

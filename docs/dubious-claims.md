@@ -30,10 +30,11 @@ fixed ratio for the whole run "because the scale is a constant". It was wrong
 when removed: the scale was `log_logit_scale`, a learned parameter, and
 `sampling_tau` was a cosine schedule over a ratio that moved with it.
 
-It has since become right again by a different route — the scale is a constant
-solved from `token_max_probability`, and `tau` is flat — which is a good reason
-to distrust a comment that happens to match the code. It matched for six months
-while describing a mechanism that did not exist.
+It became right again by a different route for one day, when the scale was a
+constant and `tau` was flat, and is wrong once more now the scale is learned
+again. That a comment can be wrong, right and wrong again without being touched
+is a good reason to distrust one that happens to match the code. It matched for
+six months while describing a mechanism that did not exist.
 
 ### `train.py`'s module docstring
 

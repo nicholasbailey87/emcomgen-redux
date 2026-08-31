@@ -121,11 +121,12 @@ MODULE_GROUPS = (
 #     parameters the run's ignition waits on. Alone in a group, a scalar is
 #     clipped by its own magnitude or not at all.
 #
-# Why these three and not the other two. These are the scalars that *scale*
-#     something: a score volume, a mixing weight, a gate. The speaker's channel
-#     used to be a fourth -- `log_logit_scale` -- and is now a constant solved
-#     from `token_max_probability` at construction, so there is nothing left
-#     here to clip or to rate. See docs/channel.md.
+# Why these four and not the other two. These are the scalars that *scale*
+#     something: a score volume, a mixing weight, a gate, and the speaker's
+#     channel. `log_logit_scale` is the last of those and needs the group for
+#     exactly the reason above: it is one 0-d tensor that would otherwise sit
+#     inside `sender_language_model`, and be renormalised against a whole
+#     module's norm.
 #     `score_bias` is an offset and `polarity_embedding` is a 2-d tag, and both
 #     belong to the norm of the module producing the output they modify. Both
 #     still take a rate of their own through `SPLIT_LEARNING_RATES` -- a clip
@@ -139,6 +140,7 @@ MODULE_GROUPS = (
 #     raises if an applicable one matches nothing.
 SCALAR_GROUPS = (
     ("log_score_scale", lambda pair: True),
+    ("log_logit_scale", lambda pair: True),
     (
         "mix_logit",
         lambda pair: isinstance(
@@ -167,7 +169,7 @@ def claimed_separately(name, parameter=None):
     Whether `parameter` has a group of its own rather than belonging to its
         module's.
 
-    The four scaling scalars of `SCALAR_GROUPS`, and nothing else. One statement
+    The scaling scalars of `SCALAR_GROUPS`, and nothing else. One statement
         covering both mechanisms: they are clipped alone, and they keep whatever
         rate `SPLIT_LEARNING_RATES` gives them rather than inheriting their
         module's. A module group that also claimed them would clip them twice --
@@ -289,7 +291,7 @@ def split_out_module(optimiser, module, lr, config_key,
         config_key: what asked for this, for the caller's own reporting
         exclude: `(name, parameter) -> bool`, called with names relative to
             `module`. Defaults to `claimed_separately`, which holds back the
-            four scaling scalars so this and `group_parameters` take the same
+            scaling scalars so this and `group_parameters` take the same
             view of what a module group contains.
 
     Returns:
@@ -331,9 +333,10 @@ SPLIT_LEARNING_RATES = (
     (
         # The listener's volume: a lone scalar in front of a normalised
         #     quantity, whose whole travel is bounded by `lr * steps` and which
-        #     has to be able to move within a run. The speaker's channel used to
-        #     be its counterpart here, under `logit_scale_lr`; it is now a
-        #     constant and takes no rate. See docs/channel.md.
+        #     has to be able to move within a run. The speaker's channel is its
+        #     counterpart, below, under `logit_scale_lr`, and the two share a
+        #     rate because they are the same kind of parameter doing the same
+        #     job at opposite ends of the channel. See docs/channel.md.
         #
         # Elevated on purpose, and that was once the objection: at 2e-3 the
         #     listener could squash its own logits fast, which multiplied down
@@ -391,6 +394,24 @@ SPLIT_LEARNING_RATES = (
         "contrast_gate_lr",
         "contrast_gate",
         lambda pair: pair.sender.contrast is not None,
+    ),
+    (
+        # The speaker's channel scale, and the counterpart of `score_scale_lr`
+        #     above: both are lone scalars sitting in front of a normalised
+        #     quantity, both reach the loss through
+        #     `model_util.scale_without_attenuating`, and both share a rate for
+        #     that reason. It opens at 1.0 and is bounded above at
+        #     `sender.MAX_LOGIT_SCALE` by `train.py`'s projection, which is not a
+        #     reason to slow it down: the point of projecting rather than
+        #     clamping is that sitting at the bound costs nothing and leaving it
+        #     is free.
+        #
+        # On every architecture: both speakers mix in `GumbelChannel`, so unlike
+        #     `polarity_embedding_lr` and `mix_logit_lr` there is no arm that
+        #     lacks the parameter.
+        "logit_scale_lr",
+        "log_logit_scale",
+        lambda pair: True,
     ),
 )
 

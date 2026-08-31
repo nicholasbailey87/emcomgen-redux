@@ -71,6 +71,25 @@ name = "ablation"
 # 0.1 on the ladder. See the header for why 0.2 and not 0.25.
 silhouette_p_receiver = 0.2
 
+[optimiser]
+lr = 5e-5
+logit_scale_lr = 3e-3
+score_scale_lr = 3e-3
+score_bias_lr = 3e-3
+polarity_embedding_lr = 1e-4
+mix_logit_lr = 3e-3
+contrast_gate_lr = 3e-3
+
+[optimiser.module_lr]
+sender_vision = 1e-4
+sender_prototyper = 1e-4
+sender_contrast = 1e-4
+sender_language_model = 1e-4
+receiver_vision = 5e-5
+receiver_token_embedding = 5e-5
+receiver_language_model = 5e-5
+receiver_discriminator = 5e-5
+
 [sender]
 feature_model = "ViT2"
 

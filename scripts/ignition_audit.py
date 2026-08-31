@@ -19,8 +19,10 @@ because it has nowhere to go but up:
 `logit_scale`, `contrast_gate` and `pool_score_norm` used to leave the plateau
 in the same epoch, so this is one event and not three: the speaker sharpens
 because the listener started to decode, and the listener decodes because the
-speaker sharpened. Ignition, not learning. (The channel scale is a constant now,
-solved from `token_max_probability`, so only the other two still move -- see
+speaker sharpened. Ignition, not learning. (The channel scale was a constant
+between 2026-08-30 and 2026-08-31 and is a learned parameter again, so all three
+move -- but it now opens at 1.0 and is bounded at 2.0 rather than opening where
+`init_energy` put it. Do not compare its plateau against the numbers above; see
 docs/channel.md.)
 
 Two readings fit the table equally well and the metrics cannot separate them:
@@ -44,10 +46,11 @@ rungs that ignite; under (b) they are comparable and the parameters are still
 not moving.
 
 This used to carry a third reading off `log_logit_scale`'s gradient -- its sign
-consistency step by step, which was the sharpest single number here. That
-parameter no longer exists: the channel scale is a constant, so there is no
-gradient on it to read and the `scale_grad` columns are gone. The same question
-about any remaining lone scalar -- `log_score_scale`, `contrast_gate` -- would be
+consistency step by step, which was the sharpest single number here. It was
+dropped when the parameter was, and the parameter came back on 2026-08-31 while
+the reading did not; the `scale_grad` columns are still gone. Restoring them is
+the obvious next thing to do here, and the question about any other lone scalar
+-- `log_score_scale`, `contrast_gate` -- would be
 asked the same way, and this script does not currently ask it.
 
 Rung 13 is the control that makes this worth running. It has the *same speaker
@@ -175,7 +178,7 @@ def diagnostics(pair):
     return {
         "realised_survival": language_model.realised_survival,
         "logit_spread": language_model.logit_spread,
-        "logit_scale": language_model.logit_scale,
+        "logit_scale": language_model.logit_scale.item(),
         "pool_effective_examples": getattr(
             prototyper, "pool_effective_examples", unmeasured
         ),

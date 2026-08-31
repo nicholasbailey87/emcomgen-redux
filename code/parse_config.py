@@ -108,30 +108,9 @@ def validate_config(config: dict) -> bool:
         )
     
     # Checked here rather than in the speaker's constructor: `SafeDict` only
-    # warns on a missing key and hands back None.
-    #
-    # Both bounds are real rather than defensive. `token_max_probability` is a
-    # ceiling on the winning token's probability *before* the uniform mixture,
-    # and `logit_scale` inverts it: at or below `1/V` there is no positive scale
-    # that flattens a distribution that far, and at 1 the scale is infinite.
-    vocabulary = config['sender_language_model'].get('vocabulary')
-    token_max_probability = config['sender_language_model'].get(
-        'token_max_probability'
-    )
-    if (
-        token_max_probability is None
-        or vocabulary is None
-        or not 1.0 / vocabulary < token_max_probability < 1.0
-    ):
-        raise InvalidConfig(
-            "`sender_language_model.token_max_probability` must be present and "
-            f"in (1/vocabulary, 1) — that is "
-            f"({1.0 / vocabulary if vocabulary else '1/V'}, 1) at a vocabulary "
-            f"of {vocabulary} — got {token_max_probability}."
-        )
-
-    # Same reason: a typo here would silently run the other gradient estimator
-    # for a whole experiment rather than failing.
+    # warns on a missing key and hands back None. A typo would otherwise
+    # silently run the other gradient estimator for a whole experiment rather
+    # than failing.
     estimator = config['sender_language_model'].get('estimator')
     if estimator not in ("gumbel", "identity"):
         raise InvalidConfig(

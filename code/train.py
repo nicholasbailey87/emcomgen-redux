@@ -413,6 +413,14 @@ def run(
         })
 
         scaler.step(optimizer)
+
+        # The speaker's channel scale is bounded above by projection rather than
+        # by a `clamp` in the forward pass, so the constraint is reapplied here,
+        # after the step that could have broken it. `scaler.step` may skip
+        # entirely on inf/nan; projection is idempotent, so that is harmless.
+        # See `sender.GumbelChannel.project_channel`.
+        pair.sender.language_model.project_channel()
+
         scaler.update()
         scheduler.step(loss.item())
         optimizer.zero_grad()
@@ -585,7 +593,11 @@ def run(
                     logit_margin=language_model.logit_margin,
                     logit_prior_share=language_model.logit_prior_share,
                     logit_spread=language_model.logit_spread,
-                    logit_scale=language_model.logit_scale,
+                    # A parameter again as of 2026-08-31, so `.item()` -- like
+                    # `contrast_gate` below, and unlike the per-batch
+                    # diagnostics above it, which are already floats. A live
+                    # tensor here would keep a graph alive inside `Statistics`.
+                    logit_scale=language_model.logit_scale.item(),
                     sampling_tau=language_model.tau,
                     pool_effective_examples=prototyper.pool_effective_examples,
                     pool_score_norm=prototyper.pool_score_norm,

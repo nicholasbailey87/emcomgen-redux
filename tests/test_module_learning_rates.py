@@ -3,7 +3,7 @@ The per-module clip groups and the learning rates that ride on them, as
 `models/builder.py` applies them to the ladder.
 
 One table now decides both. `MODULE_GROUPS` names the modules that are clipped
-together and rateable in `[optimiser.module_lr]`; `SCALAR_GROUPS` names the four
+together and rateable in `[optimiser.module_lr]`; `SCALAR_GROUPS` names the
 scaling scalars that are clipped alone and rated through the `*_lr` keys. Before
 this there were three lists -- `train.py`'s `CLIP_GROUPS`, `builder`'s
 `MUP_MODULES`, and the scalar overrides -- none derivable from another, and the
@@ -53,15 +53,16 @@ BIRDS_FEATS = (3, 224, 224)
 
 RUNGS = all_rungs()
 
-# `(suffix, config key)` for every group `SPLIT_LEARNING_RATES` creates. Five
-#     keys against three scalar clip groups, and the mismatch is deliberate:
+# `(suffix, config key)` for every group `SPLIT_LEARNING_RATES` creates. Six
+#     keys against four scalar clip groups, and the mismatch is deliberate:
 #     `score_bias` and `polarity_embedding` take a rate of their own but clip
 #     with the module whose output they modify. See `SCALAR_GROUPS`.
 #
-#     The speaker's channel scale used to head this list under
-#     `logit_scale_lr`. It is a constant solved from `token_max_probability`
-#     now, not a parameter, so it has neither a rate nor a clip group.
+#     The speaker's channel scale heads this list again. It was briefly a
+#     constant -- between 2026-08-30 and 2026-08-31 -- and is a parameter once
+#     more, with both a rate and a clip group of its own.
 SCALAR_OVERRIDES = (
+    ("log_logit_scale", "logit_scale_lr"),
     ("log_score_scale", "score_scale_lr"),
     ("score_bias", "score_bias_lr"),
     ("polarity_embedding", "polarity_embedding_lr"),
@@ -349,6 +350,10 @@ def test_the_scalar_overrides_survive_the_module_groups(config_file):
         that are not -- `score_bias` and `polarity_embedding` -- are moved back
         out by `split_out_parameter` afterwards, so all six end at the rate
         their own key names whatever their module's rate is.
+
+    `log_logit_scale` is one of the four again, and the one whose module rate
+        differs most from its own on every rung: it sits inside
+        `sender_language_model` at 2e-4 and takes 6e-3, a factor of thirty.
     """
     config, built = _build(config_file)
     lr_of = _lr_by_id(built["optimiser"])
@@ -365,10 +370,10 @@ def test_the_scalar_overrides_survive_the_module_groups(config_file):
             f"{suffix} is not at {key}"
         )
 
-    # Every rung has the listener's volume and its offset, so a rung matching
-    #     fewer than two suffixes would mean the table had gone stale rather
-    #     than that the rung was austere.
-    assert seen >= 2
+    # Every rung has the speaker's channel scale, the listener's volume and its
+    #     offset, so a rung matching fewer than three suffixes would mean the
+    #     table had gone stale rather than that the rung was austere.
+    assert seen >= 3
 
 
 @pytest.mark.parametrize("config_file", RUNGS)

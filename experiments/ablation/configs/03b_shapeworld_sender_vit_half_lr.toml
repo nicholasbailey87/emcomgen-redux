@@ -28,8 +28,9 @@
 # on the same epoch, the rate's magnitude is not what is doing it.
 #
 # Halved uniformly, including the scalars. Halving only the module rates would
-# change the ratio between the stack and the four listener-side scalars that run
-# at 60x base, and that ratio is not what is being tested.
+# change the ratio between the stack and the five scalars that run at 60x base,
+# and that ratio is not what is being tested. `logit_scale_lr` is one of those
+# five again as of 2026-08-31 and is halved with the rest.
 
 name = "ablation"
 
@@ -38,6 +39,7 @@ feature_model = "ViT2"
 
 [optimiser]
 lr = 5e-5
+logit_scale_lr = 3e-3
 score_scale_lr = 3e-3
 score_bias_lr = 3e-3
 polarity_embedding_lr = 1e-4

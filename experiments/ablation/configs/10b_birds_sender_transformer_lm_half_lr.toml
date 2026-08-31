@@ -29,7 +29,8 @@
 # that is the answer and the batch arm is the one to give back.
 #
 # Halved uniformly, including the scalars, so the ratio between the stack and
-# the listener-side scalars at 60x base is not what is being tested.
+# the scalars at 60x base is not what is being tested. `logit_scale_lr` is one
+# of those again as of 2026-08-31 and is halved with the rest.
 #
 #
 # The speaker is an autoregressive Transformer: a learned query array
@@ -155,9 +156,10 @@ bidirectional = false
 # falls as the batch, so accumulation is a net loss for a lone Adam scalar even
 # where it is a net gain for the modules above it.
 #
-# The speaker's channel scale used to be the sharpest case of that and is no
-# longer a parameter at all: it is a constant solved from
-# `token_max_probability`, so there is no traverse here to budget for. See
+# The speaker's channel scale is the sharpest case of that. It was briefly not a
+# parameter at all -- a constant, between 2026-08-30 and 2026-08-31 -- and is a
+# lone scalar again, so the traverse is back in the budget: `logit_scale_lr` at
+# 6e-3 over 156.25 steps an epoch covers `ln 2` in 0.74 of an epoch. See
 # docs/channel.md.
 #
 # Note those figures are the rate after the warm-up. This rung takes
@@ -175,6 +177,7 @@ accumulator_steps = 2
 
 # ---- 10b: every rate halved. See the header. ----
 lr = 5e-5
+logit_scale_lr = 3e-3
 score_scale_lr = 3e-3
 score_bias_lr = 3e-3
 polarity_embedding_lr = 1e-4

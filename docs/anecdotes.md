@@ -350,11 +350,12 @@ started at. `init_energy` was then set to 0.9 — near where it chose to go, sho
 of the 0.94 extreme where messages may carry too little for the listener to learn
 from. A design decision from a single run, not a derived bound.
 
-That key is gone. The channel is set by `token_max_probability` now, a cap on the
-speaker's confidence rather than an opening entropy, and the opening falls out of
-it: 0.386 on ShapeWorld and 0.294 on birds. The finding above survives the change
-and is part of why the opening is left where it is — a speaker that has to anneal
-its way somewhere has spent epochs getting there. See the entry below.
+That key is gone. The opening is now `logit_scale`'s own opening of 1.0, which
+puts unmixed survival at 0.280 on ShapeWorld and 0.226 on birds, and the scale
+learns from there under a 2.0 ceiling. The finding above survives every one of
+these rounds and is part of why the opening is left low — a speaker that has to
+anneal its way somewhere has spent epochs getting there, and this one anneals
+*upward*, which is the direction the run wants anyway. See the entry below.
 
 ## The channel had one knob too many
 
@@ -391,9 +392,16 @@ scale went 3.018 → 3.046. The traverse that scale had been given its own learn
 rate to cover was never the constraint either: 4% of its travel bound used.
 
 So `init_energy`, `log_logit_scale` and `logit_scale_lr` were replaced by one
-key, `token_max_probability`, inverted in closed form against the sharpest shape
-the normaliser permits. The scale is a constant; what still moves is the shape,
-which `logit_margin` measures.
+key, inverted in closed form against the sharpest shape the normaliser permits.
+
+**That lasted a day.** The monotone-incentive argument above is a property of the
+*gumbel* Jacobian, which collapses to rank ~1 as `p → 1`; `681ef0b` put the whole
+ladder on `estimator = "identity"`, whose Jacobian is `I` at any sharpness, so
+there is nothing left for a climbing scale to shut. `log_logit_scale` and
+`logit_scale_lr` came back on 2026-08-31, opening at 1.0 with no floor and a 2.0
+ceiling applied by projection. What is *not* restored is the closed-form bound:
+it was bounding a quantity that is no longer a gradient hazard. See
+docs/channel.md.
 
 **One float32 detail nearly went in unnoticed.** The identity surrogate is
 `onehot.detach() + (z − z.detach())`, and the brackets matter: written
@@ -557,7 +565,9 @@ is the signature of a marginal bootstrap rather than a broken component.
 
 `scripts/ignition_audit.py` measured what was marginal. It recorded the sign of
 `log_logit_scale`'s gradient per optimiser step — a reading the script no longer
-takes, that parameter having been removed — which matters because AdamW moves
+takes, having dropped it when the parameter was deleted on 2026-08-30 and not
+restored it when the parameter came back on 2026-08-31 — which matters because
+AdamW moves
 a lone scalar about `lr` per step whatever the gradient's magnitude — so its
 travel over a run is `lr × steps × net sign consistency`, and *only* the sign
 consistency is free to vary. Rung 9 sat at **49–52% negative over 1,100 steps**,

@@ -203,9 +203,9 @@ log_interval = 100
 # per-group norms to see it in.
 eps = 1e-12
 
-# The four keys below -- `score_scale_lr`, `score_bias_lr`, `mix_logit_lr` and
-# `contrast_gate_lr` -- are the listener's scaling scalars and the one offset
-# that pairs with one of them, and they all sit at 6e-3 as of 2026-08-28. Each
+# The five keys below -- `logit_scale_lr`, `score_scale_lr`, `score_bias_lr`,
+# `mix_logit_lr` and `contrast_gate_lr` -- are the two ends' scaling scalars and
+# the one offset that pairs with one of them, and they all sit at 6e-3. Each
 # block below carries its own arithmetic for what distance that parameter has to
 # cover, and each of those arithmetics was written against 2e-3; read them as the
 # argument for the *shape* of the setting and multiply the per-epoch figures by
@@ -217,28 +217,60 @@ eps = 1e-12
 # size. That bound is the only thing 2e-3 was chosen to clear, and clearing it is
 # not the same as clearing it early: a fuse that burns a third of the epoch
 # budget is a fact about the learning rate rather than about the language.
-# Overshoot is cheap on all four -- the volume's gradient vanishes once the
+# Overshoot is cheap on all five -- the volume's gradient vanishes once the
 # scores are calibrated, the mixing weight parks at whatever mix the loss wants,
-# and the gate parks at whatever share the branch is worth -- so a larger rate
-# buys earlier arrival rather than a different endpoint.
+# the gate parks at whatever share the branch is worth, and the channel scale is
+# projected back to `MAX_LOGIT_SCALE` if it runs past it -- so a larger rate buys
+# earlier arrival rather than a different endpoint.
 #
-# There used to be a fifth, `logit_scale_lr`, moving the speaker's channel
-# `log_logit_scale`, and most of the argument in this block was written for it:
-# the traverse from a near-random opening up to a usable channel was the run's
-# bottleneck, and it was bottlenecked on steps. That parameter is gone. The
-# channel is now a constant solved from `[sender_language_model]
-# token_max_probability`, because a learned scale has a monotone incentive --
-# sharper always helps the current batch and nothing in the objective pushes back
-# -- so it climbed until the straight-through estimator was shut, which is what
-# the 2026-08-29 ShapeWorld run did at a scale of 3.046. The traverse it was
-# raised to buy was never the binding constraint either: that run used 4% of its
-# travel bound. See docs/channel.md.
+# `logit_scale_lr` was removed on 2026-08-30 and restored on 2026-08-31, and most
+# of the argument in this block was written for it in the first place: the
+# traverse from a near-random opening up to a usable channel was the run's
+# bottleneck, and it was bottlenecked on steps. The reason for removing it was
+# that a learned scale climbs until the straight-through estimator is shut. That
+# is a property of the *gumbel* Jacobian `diag(p) - p pT`, which collapses to
+# rank ~1 as p -> 1; the whole ladder now runs `estimator = "identity"`, whose
+# Jacobian is `I` at any sharpness, so saturation costs nothing in the backward
+# pass and there is nothing left for a climbing scale to shut. See
+# docs/channel.md.
 #
 # `polarity_embedding_lr` is deliberately not in this group and sits at the
 # speaker's module rate, 2e-4. It is a 2-d tag rather than a scalar, it has no
 # traverse to cover since it opens as an antipodal draw at
 # `referent_layer_norm`'s own scale, and its own block below says why it wants
 # to be separable from the channel.
+
+# The speaker's channel scale, `GumbelChannel.log_logit_scale`, reported as
+# `train_logit_scale`. Stored as a log and read through `exp`, so it is strictly
+# positive and its traverse is proportional rather than additive: at 6e-3 and
+# 156.25 optimiser steps an epoch -- true for both datasets, see rung 10's
+# `[optimiser]` comment -- that is 0.9375 log-units an epoch. 1.0 -> 2.0 is
+# `ln 2` = 0.693, so 0.74 of an epoch; 1.0 -> 0.1 is 2.5 epochs.
+#
+# It opens at 1.0, has no floor, and is bounded above at `sender.MAX_LOGIT_SCALE`
+# = 2.0 by a projection `train.py` applies after each optimiser step rather than
+# by a `clamp` in the forward pass. `clamp`'s gradient is zero past the bound and
+# is not directional, so a parameter that overshot would get no gradient in
+# either direction and weld there, and `weight_decay` is 0.0 so nothing else
+# would pull it back. Projection keeps the gradient live right at the ceiling.
+#
+# Expect the ceiling to bind, early and often. At this rate a sign-consistent
+# gradient reaches it inside the first epoch. That is the case the design is for
+# and is not a fault -- sitting at the bound costs nothing and leaving it is free
+# -- but it is what makes `train_logit_scale` worth watching in the first runs:
+# whether it pins at 2.0 immediately, and if so whether 2.0 is the wrong ceiling
+# rather than 6e-3 the wrong rate; and whether it ever comes back down, which is
+# the behaviour a `clamp` would have made impossible. The historic value was
+# 2e-3, covering the same range in 2.2 epochs rather than 0.74; that is the
+# fallback if 6e-3 proves twitchy.
+#
+# No floor, because a downward slide is no longer self-reinforcing: the scale
+# reaches the loss through `model_util.scale_without_attenuating`, so a small
+# scale is a noisy channel rather than a starved one. A speaker with nothing to
+# say being pushed flatter is self-regulation -- confidently emitting the wrong
+# symbol is worse than hedging -- and docs/channel.md records the old parameter
+# doing exactly that, 0.9094 -> 0.6547 on rung 10.
+logit_scale_lr = 6e-3
 
 # The listener's counterpart, `ScoreVolume.log_score_scale`, reported as
 # `train_score_scale`. One scalar per discriminator, in front of a score whose
@@ -781,66 +813,42 @@ message_length = 7 # max message length. note this includes sos/eos token, i.e. 
 # (PAD/SOS/EOS/UNK) are masked to -inf before the mixture, which is spread over
 # the finite entries, so these divide by 14 rather than by 18.
 uniform_weight = 0.1
+
+# There is no key for the channel's scale. `GumbelChannel.log_logit_scale` is a
+# parameter that opens at 1.0 and is bounded above at `sender.MAX_LOGIT_SCALE` =
+# 2.0; `[optimiser] logit_scale_lr` is what governs it and carries the argument
+# for the ceiling and for the rate. Recorded here is only where that leaves the
+# channel, since these are the numbers `realised_survival` and
+# `unmixed_survival` are read against.
 #
-# `token_max_probability` (p) is the *cap on the speaker's own confidence*: the
-# highest probability it can ever hold on a token, before `uniform_weight` mixes
-# anything in. `logit_scale` in `models/sender.py` inverts it once at
-# construction into the constant the normalised logits are multiplied by. That
-# constant does not change over a run.
+# The two ends of the scale's range, as unmixed survival, at V = 14 and V = 20:
 #
-# Why this quantity and not the fidelity the listener sees. The straight-through
-# estimator on the `"gumbel"` branch differentiates the soft sample, whose
-# Jacobian is `diag(p) - p pT`, and `flatten_logit_distribution` is a convex
-# mixture in probability space -- so the mixture contributes a constant and the
-# gradient depends on the *unmixed* p alone. `uniform_weight` caps what the
-# listener receives at 0.907 and does nothing at all to the backward pass, which
-# is how the 2026-08-29 ShapeWorld run read 0.9067 against that cap while the
-# probability shaping its gradient was 0.99951. `unmixed_survival` is the column
-# that reports p; this key is a ceiling on it.
+#                            scale 1.0   scale 2.0
+#     fresh speaker            0.280       0.511      (V = 14)
+#     sharpest legal shape     0.789       0.995
+#     fresh speaker            0.226       0.455      (V = 20)
+#     sharpest legal shape     0.838       0.998
 #
-# Why it is a cap rather than a starting point. This key replaces `init_energy`,
-# which named an opening entropy and left the scale to be learned from there.
-# Two things were wrong with that. A learned scale has a monotone incentive --
-# sharper always helps the current batch and nothing in the objective pushes back
-# -- so it climbs until the estimator is shut, which is what that run did at a
-# scale of 3.046. And it was never needed: `layer_norm_logits` already bounds how
-# concentrated the shape can get, so at a scale of *one* the cap is already 0.789
-# at V = 14, above the 0.703 that `init_energy = 0.9`'s solved 0.882 permitted.
-# The scale's only job was to move that cap, and the shipped setting moved it
-# down.
+# The first row of each pair is the opening: a freshly initialised speaker's
+# normalised logits are i.i.d. standard normal, so it holds its argmax about
+# 28% of the time on ShapeWorld. That is deliberately modest -- a fresh
+# speaker's argmax barely varies with its input, so a confident opening means it
+# emits near enough one message for everything from the first batch and the
+# listener co-adapts to that before the speaker's embeddings are worth grounding
+# anything on.
 #
-# The bound is solved against the sharpest shape the normaliser permits -- one
-# token at sqrt(V-1) and the rest at -1/sqrt(V-1), a margin of V/sqrt(V-1) --
-# so it holds whatever the speaker does with its shape budget. That matters
-# because shape, not the scale, is the route the dead run actually took: it had
-# spent 86% of that budget. `logit_margin` is the column that watches it.
+# The second row is the ceiling `layer_norm_logits` imposes on *shape*: one token
+# at sqrt(V-1) and the rest at -1/sqrt(V-1), a margin of V/sqrt(V-1). It is
+# reached at a scale of one, which is the point -- fidelity has never had to come
+# from the scale, and `logit_margin` is the column that says which route a run
+# took. Multiply the two bounds and 0.995 is the most confident a ShapeWorld
+# speaker can ever be before `uniform_weight` mixes anything in.
 #
-# What 0.95 costs and buys. Fidelity saturates long before p does, so the top of
-# the range is nearly free to give up. At V = 14, w = 0.1:
-#
-#     p       scale   realised cap   gradient vs p = 0.70
-#     0.70    0.879   0.637          1.00x
-#     0.95    1.419   0.862          0.17x
-#     0.99    1.844   0.898          0.033x
-#     0.9999  3.033   0.907          0.0003x
-#
-# Past 0.95 the speaker pays 5x in `1 - p` for 0.04 of message fidelity. 0.95 is
-# a design decision, not a derived bound.
-#
-# The opening is now a consequence rather than a second knob, and it lands where
-# `init_energy` was putting it anyway: at 0.95 a fresh speaker holds its argmax
-# with probability 0.386 here and 0.294 for birds, against 0.249 and 0.206 under
-# the setting this replaces. Bootstrapping is why that number wants to stay
-# modest -- a fresh speaker's argmax barely varies with its input, so a confident
-# opening means it emits near enough one message for everything from the first
-# batch and the listener co-adapts to that before the speaker's embeddings are
-# worth grounding anything on.
-#
-# `realised_survival`, `unmixed_survival` and `logit_margin` report each epoch
-# where a run actually went. Note survival is a *mean* over slots and confidence
-# is skewed, so it hides a wide spread: exploration concentrates on the slots the
-# speaker is unsure about, which is the behaviour wanted.
-token_max_probability = 0.95
+# `realised_survival`, `unmixed_survival`, `logit_margin` and `logit_scale`
+# report each epoch where a run actually went. Note survival is a *mean* over
+# slots and confidence is skewed, so it hides a wide spread: exploration
+# concentrates on the slots the speaker is unsure about, which is the behaviour
+# wanted.
 
 # Which gradient estimator the speaker learns through. The forward pass is the
 # same either way -- a hard one-hot drawn as `argmax(logits + Gumbel)`, which is
@@ -859,7 +867,8 @@ token_max_probability = 0.95
 # direction is destroyed before any optimiser or clipper sees it. Magnitude
 # largely cancels -- AdamW updates by `m / sqrt(v)`, and `clip_gradients`
 # renormalises what survives -- but no per-parameter normaliser recovers a rank.
-# `token_max_probability` bounds that collapse; only this removes it.
+# Bounding the speaker's sharpness bounds that collapse; only this removes it,
+# which is why `logit_scale_lr` could be given back on 2026-08-31.
 #
 # `"identity"` is the default as of 2026-08-30, having been `"gumbel"` for the
 # few hours between the switch being added and the first runs coming back. Two
@@ -978,8 +987,8 @@ latent_message_multiplier = 2.0
 utility_tokens = 4 # Only applies to Transformer language models
 # See [sender_feature_model] for what these are and why they are here. Note the
 # vocabulary logits are always layer-normalised before sampling and there is no
-# knob for it: `token_max_probability` above is resolved against unit
-# variance, so the two are a pair.
+# knob for it: `logit_scale` multiplies logits of unit variance, and
+# `MAX_LOGIT_SCALE` bounds it against that, so the two are a pair.
 #
 # 512 rather than the 576 every other stack takes, and this is a sizing argument
 # rather than a taste one. When the speaker's blocks stopped cross-attending into
@@ -1375,17 +1384,17 @@ feature_model = "ResNet18"
 # scale. Train accuracy is therefore depressed relative to test accuracy by
 # construction, and the two columns understate the real generalisation gap.
 #
-# No `token_max_probability` override either, and that is the point of solving
-# for the scale rather than stating one. Both datasets ask for the same *cap on
-# confidence*, and `logit_scale` resolves whatever multiplier each vocabulary
-# needs to deliver it -- 1.283 here against ShapeWorld's 1.419 -- so the two run
-# their speakers under the same channel bound rather than differing because one
-# has a bigger vocabulary. A shared bare scale would not do that.
+# No channel-scale override either. `logit_scale` opens at 1.0 and is bounded at
+# `MAX_LOGIT_SCALE` on both datasets, so the two speakers start and end their
+# channel at the same multiplier and the vocabulary difference shows up where it
+# belongs -- in what that multiplier buys. At a scale of one the sharpest shape
+# `layer_norm_logits` permits reaches 0.789 unmixed survival at ShapeWorld's
+# V = 14 and 0.838 at the 20 here, so the wider vocabulary is slightly the
+# louder channel at equal scale rather than being handed a different bound.
 #
 # Note the two datasets are still not identical at the message level, and cannot
-# be: the same per-symbol cap over 8 content tokens here versus 5 on ShapeWorld
-# makes a whole message here harder to pin down. `message_length` is the knob
-# that governs that, not these. The opening also differs -- a fresh speaker holds
+# be: 8 content tokens here versus 5 on ShapeWorld makes a whole message here
+# harder to pin down. `message_length` is the knob that governs that, not these. The opening also differs -- a fresh speaker holds
 # its argmax at 0.294 here against 0.386 on ShapeWorld -- because the same cap at
 # a larger vocabulary needs a smaller multiplier to reach it.
 vocabulary = 20

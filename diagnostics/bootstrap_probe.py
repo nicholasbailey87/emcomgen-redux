@@ -34,9 +34,10 @@ at epoch 2 (`pool_effective_examples` 4.99 -> 4.43), `polarity_separation` went
 thirty epochs.
 
 Note the `logit_scale` column those runs were read against was a learned
-parameter and is now a constant solved from `token_max_probability`, so it is
-printed as the run's setting and is expected to be flat. `realised_survival` is
-the column that now carries the channel's story on its own.
+parameter, was briefly a constant, and is a learned parameter again -- but one
+that opens at 1.0 and is bounded at 2.0 rather than opening where `init_energy`
+put it, so the values above are not comparable with what this prints now. Read
+it beside `realised_survival` rather than against the reference numbers.
 
 Steps here are not epochs -- a rung 10 epoch is 3100 games -- so expect the
 order of events rather than the timings.
@@ -452,7 +453,7 @@ def main():
             f"{prototyper.pool_effective_examples:9.4f} "
             f"{prototyper.pool_score_norm:10.4f} "
             f"{language_model.polarity_separation:9.4f} "
-            f"{language_model.logit_scale:10.4f} "
+            f"{language_model.logit_scale.item():10.4f} "
             f"{language_model.realised_survival:9.4f} "
             f"{language_model.logit_spread:7.4f}"
         )

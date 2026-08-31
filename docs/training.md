@@ -35,11 +35,6 @@ missing key rather than raising.
   rejecting the config up front fails in the same cases, but before any work is
   done.
 - Speaker and receiver `message_length` must agree.
-- `sender_language_model.token_max_probability` must be present and in
-  `(1/vocabulary, 1)`. Both bounds are real rather than defensive: it is a
-  ceiling on the winning token's probability and `logit_scale` inverts it, so at
-  or below `1/V` there is no positive constant that flattens a distribution that
-  far, and at 1 the constant is infinite. *A probability, not a percentage.*
 - `sender_language_model.estimator` must be present and one of `"gumbel"` or
   `"identity"`. A typo would otherwise run a whole experiment under the wrong
   gradient estimator and look like a result.
@@ -133,11 +128,12 @@ attribute:
 `sender_language_model`, `receiver_vision`, `receiver_token_embedding`,
 `receiver_language_model`, `receiver_discriminator`
 
-`SCALAR_GROUPS` names the three scaling scalars — `log_score_scale`,
-`mix_logit`, `contrast_gate` — each of which is a group of one tensor. The
-speaker's channel scale used to be a fourth; it is a constant solved from
-`token_max_probability` now, not a parameter, so it has neither a group nor a
-rate. `claimed_separately` holds them out of their module's group on both
+`SCALAR_GROUPS` names the four scaling scalars — `log_score_scale`,
+`log_logit_scale`, `mix_logit`, `contrast_gate` — each of which is a group of one
+tensor. The speaker's channel scale is the second of those: a lone 0-d tensor
+inside `sender_language_model`, which would otherwise be renormalised against a
+whole module's norm. `claimed_separately` holds them out of their module's group
+on both
 sides, so a scalar is never clipped twice, never inflates its module's norm, and
 never inherits its module's rate.
 
@@ -246,17 +242,27 @@ Note this subsection still names `BilinearGRUComparer` and
 `mix_logit_lr`. The reasoning holds; the names want a pass with the rung
 overhaul.
 
-There was a `logit_scale_lr` here until 2026-08-30, ungated, moving a
-`log_logit_scale` that existed on both speakers. The channel scale is a constant
-solved from `token_max_probability` now and takes no rate at all.
+**`logit_scale_lr`** — ungated, moving the `log_logit_scale` both speakers
+carry. The counterpart of `score_scale_lr` at the other end of the channel, and
+on the same rate for that reason: both are lone scalars in front of a normalised
+quantity, and both reach the loss through
+`model_util.scale_without_attenuating`. It was deleted on 2026-08-30 with the
+parameter and restored on 2026-08-31 — see [channel.md](channel.md) for why the
+argument for deleting it does not survive `estimator = "identity"`.
+
+At 6e-3 and 156.25 optimiser steps an epoch that is 0.9375 log-units an epoch:
+1.0 → the 2.0 ceiling in 0.74 of an epoch, 1.0 → 0.1 in 2.5. **Expect the ceiling
+to bind early**, and read that as the design working rather than as a fault. The
+historic value was 2e-3, covering the same range in 2.2 epochs, and it is the
+fallback if 6e-3 proves twitchy.
 
 **`polarity_embedding_lr`** — gated on `isinstance(language_model,
 SenderTransformerLM)`. Deliberately its own key rather than shared with the
 listener's `score_scale_lr`: the tag lives on one speaker and turning up a rate
 shared with the listener's volume would move something the ablation is trying to
 hold still. It was originally kept separate from `logit_scale_lr` for the same
-reason, that scalar having existed on *both* speakers. Since `2026-08-29` the tag
-takes the speaker's module rate, `2e-4`, against the remaining scalars' `6e-3`.
+reason, that scalar existing on *both* speakers. Since `2026-08-29` the tag
+takes the speaker's module rate, `2e-4`, against the other scalars' `6e-3`.
 
 Gated on the speaker class rather than on finding the parameter, because the two
 failures need different answers. A GRU speaker has no polarity tag by
@@ -465,11 +471,11 @@ communicating.
 > **Two things have changed since this was written, and both narrow it.** On
 > `estimator = "identity"` this signature **cannot fire**: that branch's Jacobian
 > is `I`, so no amount of sharpening attenuates the speaker's gradient. On
-> `estimator = "gumbel"` it is bounded rather than impossible —
-> `token_max_probability` caps `unmixed_survival` at 0.95 by default, so the
-> collapse the reference run suffered is bounded at roughly 12x rather than
+> `estimator = "gumbel"` it is bounded rather than impossible — `MAX_LOGIT_SCALE`
+> and `sharpest_logit_margin` cap `unmixed_survival` at 0.9945 at V = 14, so the
+> collapse the reference run suffered is bounded at roughly 100x rather than
 > unbounded. Read what follows as the failure being guarded against, and a
-> `logit_scale` of 3.046 as a number no config can now produce.
+> `logit_scale` of 3.046 as a number the projection no longer permits.
 
 `shapeworld-post-silhouette-update.csv` is the reference:
 `logit_scale` at 3.046, survival at 0.90670 against its 0.90714 cap,
@@ -483,9 +489,9 @@ this failure:
 - **`unmixed_survival`** is the one to read. `realised_survival` is capped by the
   uniform mixture, so a fully committed channel still reads 0.91 and looks
   ordinary; the unmixed reading was 0.99951, and on the gumbel branch `1 − p` is
-  the factor the estimator turns on. This is the column
-  `token_max_probability` now bounds, and the column that means nothing to the
-  gradient on the identity branch.
+  the factor the estimator turns on. Nothing bounds this column directly — the
+  two bounds on sharpness bound what it is bought with — and it means nothing to
+  the gradient on the identity branch.
 - **`logit_margin`** says whether the scale or the *shape* did it. Here the
   scale was unremarkable and the margin was ~3.35 sd against the ~0.44 a Gaussian
   gives at V = 14 — 86% of the entire budget `layer_norm_logits` permits, whose
@@ -504,17 +510,20 @@ this failure:
   image-only route.
 
 The response differs too. A deadlock wants more epochs or a louder channel; this
-wants the channel held *quieter* — and since the pathway is the shape rather than
-the scale, that means bounding survival rather than bounding the scale. Both of
-those are now settings rather than diagnoses: `token_max_probability` is the
-bound, and it is the knob to lower if a gumbel run still saturates.
+wants the channel held *quieter* — and since the pathway can be the shape rather
+than the scale, bounding the scale alone does not bound survival. On the identity
+branch there is nothing to hold quieter, which is the point of running it. On the
+gumbel branch the levers are `MAX_LOGIT_SCALE` and `uniform_weight`, and lowering
+the first bounds only one of the two factors.
 
 **Then read the direction of `realised_survival` to tell the two apart.** Rising
 slowly means undertrained and more epochs help. Flat at its opening means the
 speaker is not sharpening at all. In the August 2026 ablation the dead ShapeWorld
-rungs read this in the then-learned `logit_scale`, which fell from 0.8700 to
-0.8668 and from 0.8812 to 0.8805 over thirty epochs apiece; that column is a
-constant now, so the same reading comes off survival and `logit_margin`. The
+rungs read this in `logit_scale`, which fell from 0.8700 to 0.8668 and from
+0.8812 to 0.8805 over thirty epochs apiece. That column is live again, so the
+reading is available there as well as off survival and `logit_margin` — and a
+scale that falls and *returns* is a speaker declining to commit rather than a
+collapse. The
 rungs that escaped did so as a sharp transition — `realised_survival` 0.203 →
 0.260 at epoch 5 → 0.697 at epoch 10. Escape is visible as an event, so its
 absence is informative.
@@ -547,7 +556,7 @@ actually do at init, and three mechanisms are behind that. See
 
 So adding blocks costs compute and parameters, and very little else. When a
 bootstrap is marginal, the thing not to spend budget on is anything that changes
-the *channel* — the vocabulary, the message length, `token_max_probability`, or
+the *channel* — the vocabulary, the message length, `logit_scale_lr`, or
 the effective batch the remaining scalars traverse on. Depth is not in that
 set.
 
