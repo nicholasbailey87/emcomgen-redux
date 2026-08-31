@@ -173,7 +173,33 @@ silhouette_fill = 0.5
 [optimiser]
 class = "AdamW"
 accumulator_steps = 4
-lr = 1e-4
+
+# Halved from 1e-4 on 2026-08-31, and `[optimiser.module_lr]` below halves with
+# it. This is rung 3b's setting promoted to the default; 3b was retired into
+# this line, which is why there is no longer a half-rate variant of any rung.
+#
+# What it was testing. On the 2026-08-30 ablation rung 3 collapsed at epoch 10:
+# `logit_prior_share` 0.891 -> 0.9992 and `referent_spread` 0.221 -> 0.0040 in a
+# single epoch, then flat to four decimal places for the remaining twenty, with
+# `clip_sender_vision` decaying to 4e-4. The speaker's vision trunk stopped
+# varying with its input and never restarted.
+#
+# Epoch 10 is `warm_up_epochs`, but it is not a discontinuity.
+# `train.py:build_lr_schedule` puts an `ascent` from zero to base over the
+# warm-up and then a `flat` stage that opens at base, so the two meet and the
+# rate is continuous through the join -- at epoch 9 it is already near base.
+# What epoch 10 actually is, is the first point at which the rate reaches its
+# maximum and stays there. A smooth ramp producing a one-epoch collapse is what
+# crossing a stability threshold looks like, not what a shock looks like, and
+# halving every rate is the direct test of that reading.
+#
+# The cost, and why it is affordable. Every traverse in this file doubles in
+# epochs, and escape speed is what separates the arms that live from the ones
+# that die -- rung 9 got out at epoch 3 and rode through epoch 10 untouched,
+# rung 3 never did. But rung 9 escaped at roughly 30% of base rate, so escape
+# does not need the full one; halved, it should land near epoch 6 and still be
+# clear of the join.
+lr = 5e-5
 # 0.0 for both datasets -- `[birds.optimiser]` does not override it. jayelm uses
 # plain Adam with no decay, and bs6, the only run so far to reach the paper's
 # ShapeWorld numbers, set this to 0.0 explicitly. At 0.0 AdamW and Adam are the
@@ -205,23 +231,30 @@ eps = 1e-12
 
 # The five keys below -- `logit_scale_lr`, `score_scale_lr`, `score_bias_lr`,
 # `mix_logit_lr` and `contrast_gate_lr` -- are the two ends' scaling scalars and
-# the one offset that pairs with one of them, and they all sit at 6e-3. Each
+# the one offset that pairs with one of them, and they all sit at 2e-3. Each
 # block below carries its own arithmetic for what distance that parameter has to
-# cover, and each of those arithmetics was written against 2e-3; read them as the
-# argument for the *shape* of the setting and multiply the per-epoch figures by
-# three for the current value.
+# cover, and 2e-3 is the value those arithmetics were written against, so they
+# read straight rather than needing a factor applied to them.
 #
-# Why 6e-3 rather than the 2e-3 those arithmetics ask for. Every one of these is
-# a lone parameter whose whole travel over a run is bounded by `lr * steps`,
-# because AdamW moves a parameter by about `lr` per step whatever the gradient's
-# size. That bound is the only thing 2e-3 was chosen to clear, and clearing it is
-# not the same as clearing it early: a fuse that burns a third of the epoch
-# budget is a fact about the learning rate rather than about the language.
-# Overshoot is cheap on all five -- the volume's gradient vanishes once the
-# scores are calibrated, the mixing weight parks at whatever mix the loss wants,
-# the gate parks at whatever share the branch is worth, and the channel scale is
-# projected back to `MAX_LOGIT_SCALE` if it runs past it -- so a larger rate buys
-# earlier arrival rather than a different endpoint.
+# Why they are elevated at all. Every one is a lone parameter whose whole travel
+# over a run is bounded by `lr * steps`, because AdamW moves a parameter by about
+# `lr` per step whatever the gradient's size. At the base rate a traverse that
+# ought to take a few hundred steps takes a few hundred epochs, and the answer to
+# "did the listener use the attention path" would be a fact about the learning
+# rate rather than about the run. Overshoot is cheap on all five -- the volume's
+# gradient vanishes once the scores are calibrated, the mixing weight parks at
+# whatever mix the loss wants, the gate parks at whatever share the branch is
+# worth, and the channel scale is projected back to `MAX_LOGIT_SCALE` if it runs
+# past it -- so a larger rate buys earlier arrival rather than a different
+# endpoint.
+#
+# 2e-3 rather than the 6e-3 they carried from 2026-08-28 to 2026-08-31, and
+# rather than the 3e-3 that halving them with `lr` above would have given. The
+# five sit at 40x base now where they sat at 60x, so this is the one place the
+# 2026-08-31 halving is not uniform: it is a round number picked against the
+# arithmetic in the blocks below rather than derived from the base rate. If a
+# traverse turns out to be what a run is waiting on, this is the first knob to
+# move, and 6e-3 is on the record as having been survivable.
 #
 # `logit_scale_lr` was removed on 2026-08-30 and restored on 2026-08-31, and most
 # of the argument in this block was written for it in the first place: the
@@ -235,17 +268,17 @@ eps = 1e-12
 # docs/channel.md.
 #
 # `polarity_embedding_lr` is deliberately not in this group and sits at the
-# speaker's module rate, 2e-4. It is a 2-d tag rather than a scalar, it has no
+# speaker's module rate, 1e-4. It is a 2-d tag rather than a scalar, it has no
 # traverse to cover since it opens as an antipodal draw at
 # `referent_layer_norm`'s own scale, and its own block below says why it wants
 # to be separable from the channel.
 
 # The speaker's channel scale, `GumbelChannel.log_logit_scale`, reported as
 # `train_logit_scale`. Stored as a log and read through `exp`, so it is strictly
-# positive and its traverse is proportional rather than additive: at 6e-3 and
-# 156.25 optimiser steps an epoch -- true for both datasets, see rung 10's
-# `[optimiser]` comment -- that is 0.9375 log-units an epoch. 1.0 -> 2.0 is
-# `ln 2` = 0.693, so 0.74 of an epoch; 1.0 -> 0.1 is 2.5 epochs.
+# positive and its traverse is proportional rather than additive: at 2e-3 and
+# 156.25 optimiser steps an epoch -- true for both datasets, see
+# `[birds.optimiser] accumulator_steps` -- that is 0.3125 log-units an epoch.
+# 1.0 -> 2.0 is `ln 2` = 0.693, so 2.2 epochs; 1.0 -> 0.1 is 7.4 epochs.
 #
 # It opens at 1.0, has no floor, and is bounded above at `sender.MAX_LOGIT_SCALE`
 # = 2.0 by a projection `train.py` applies after each optimiser step rather than
@@ -254,15 +287,16 @@ eps = 1e-12
 # either direction and weld there, and `weight_decay` is 0.0 so nothing else
 # would pull it back. Projection keeps the gradient live right at the ceiling.
 #
-# Expect the ceiling to bind, early and often. At this rate a sign-consistent
-# gradient reaches it inside the first epoch. That is the case the design is for
-# and is not a fault -- sitting at the bound costs nothing and leaving it is free
-# -- but it is what makes `train_logit_scale` worth watching in the first runs:
-# whether it pins at 2.0 immediately, and if so whether 2.0 is the wrong ceiling
-# rather than 6e-3 the wrong rate; and whether it ever comes back down, which is
-# the behaviour a `clamp` would have made impossible. The historic value was
-# 2e-3, covering the same range in 2.2 epochs rather than 0.74; that is the
-# fallback if 6e-3 proves twitchy.
+# Expect the ceiling to bind, though no longer inside the first epoch. At this
+# rate a sign-consistent gradient reaches it in a little over two, which under
+# the ten-epoch warm-up means it cannot bind before the rate is at full value.
+# Sitting at the bound costs nothing and leaving it is free, so binding is the
+# design working; what makes `train_logit_scale` worth watching is whether it
+# pins at 2.0 at all, and if so whether 2.0 is the wrong ceiling rather than
+# 2e-3 the wrong rate; and whether it ever comes back down, which is the
+# behaviour a `clamp` would have made impossible. 6e-3 covered the same range in
+# 0.74 of an epoch and was the setting from 2026-08-28 to 2026-08-31; that is
+# the fallback if 2e-3 proves slow.
 #
 # No floor, because a downward slide is no longer self-reinforcing: the scale
 # reaches the loss through `model_util.scale_without_attenuating`, so a small
@@ -270,7 +304,7 @@ eps = 1e-12
 # say being pushed flatter is self-regulation -- confidently emitting the wrong
 # symbol is worse than hedging -- and docs/channel.md records the old parameter
 # doing exactly that, 0.9094 -> 0.6547 on rung 10.
-logit_scale_lr = 6e-3
+logit_scale_lr = 2e-3
 
 # The listener's counterpart, `ScoreVolume.log_score_scale`, reported as
 # `train_score_scale`. One scalar per discriminator, in front of a score whose
@@ -306,7 +340,7 @@ logit_scale_lr = 6e-3
 # correct on a message carrying nothing, since BCE's minimiser is `p = 0.5`
 # everywhere. Read `train_score_scale` as before: a dip and a return is a
 # listener declining to commit, a monotone slide is a collapse.
-score_scale_lr = 6e-3
+score_scale_lr = 2e-3
 
 # The offset half of the same readout: `ScoreVolume.score_bias`, added after
 # the volume, on both discriminators.
@@ -320,11 +354,11 @@ score_scale_lr = 6e-3
 #
 # Elevated for the reason every lone scalar here is. A 0-d parameter moves about
 # `lr` per step whatever its gradient, so its whole travel is bounded by
-# `lr * steps`. At birds' 194 steps an epoch, 2e-3 gives 0.39 an epoch against a
-# score whose opening spread is 0.577 -- a threshold it can actually place
-# within a run. `mix_bias` had no key and so sat at the base 1e-4, which bounded
-# its entire thirty-epoch travel at 0.58; that looks like an oversight rather
-# than a decision.
+# `lr * steps`. At the 156.25 steps an epoch both datasets now run, 2e-3 gives
+# 0.31 an epoch against a score whose opening spread is 0.577 -- a threshold it
+# can actually place within a run. `mix_bias` had no key and so sat at the base
+# rate, which at today's 5e-5 would bound its entire thirty-epoch travel at
+# 0.23; that looks like an oversight rather than a decision.
 #
 # What to expect in `train_score_bias`, and this is not the usual "bigger is
 # better". Games are balanced 10 positive / 10 negative, so the loss-optimal
@@ -335,7 +369,7 @@ score_scale_lr = 6e-3
 # per-game offset, and the bilinear score's per-game mean is
 # `mean_j(LN(r_j)) . proj`, which varies by game. If this moves and accuracy
 # does not, the offset was per-game and the answer is a different readout.
-score_bias_lr = 6e-3
+score_bias_lr = 2e-3
 
 # The same elevated rate, for `SenderTransformerLM.polarity_embedding` -- the
 # learned tag that tells that speaker which of its two prototypes is the
@@ -365,14 +399,15 @@ score_bias_lr = 6e-3
 # not the same as elevated, and the two questions
 # were being answered by one number.
 #
-# 2e-4 as of 2026-08-29, from the 2e-3 it carried while it was one of the lone
-# scalars. The elevation was the retired traverse's, and nothing replaced the
-# argument when the traverse went: 2e-3 was 20x the base rate and 10x the group
-# the parameter physically sits in, held there by inheritance rather than by a
-# claim. 2e-4 is `[optimiser.module_lr] sender_language_model`, which is the
-# clip group `polarity_embedding` belongs to and the rate every other speaker
-# tensor takes. A tag that wants to be separable from the
-# channel does not thereby want to be separable from the module it lives in.
+# Demoted to the speaker's module rate on 2026-08-29, from the 2e-3 it carried
+# while it was one of the lone scalars, and halved with the rest of the table on
+# 2026-08-31. The elevation was the retired traverse's, and nothing replaced the
+# argument when the traverse went: 2e-3 was 20x the base rate of the day and 10x
+# the group the parameter physically sits in, held there by inheritance rather
+# than by a claim. 1e-4 is `[optimiser.module_lr] sender_language_model`, which
+# is the clip group `polarity_embedding` belongs to and the rate every other
+# speaker tensor takes. A tag that wants to be separable from the channel does
+# not thereby want to be separable from the module it lives in.
 #
 # The two arguments for elevating an embedding both fail here. muP's rule is
 # that embedding-like tensors take a Theta(1) rate rather than 1/fan_in -- do
@@ -399,7 +434,7 @@ score_bias_lr = 6e-3
 #
 # Applies only to `SenderTransformerLM`; `build_models` skips it for a GRU
 # speaker, which is told its polarities apart by `init_h`.
-polarity_embedding_lr = 2e-4
+polarity_embedding_lr = 1e-4
 
 # `AttentionDiscriminator.mix_logit`, the weight on the attention path,
 # reported as `train_mix_alpha`. Named `mix_*` and not `alpha_*` because this
@@ -418,17 +453,17 @@ polarity_embedding_lr = 2e-4
 # What it has to cover is larger than either of theirs. The mixing weight opens
 # at 0.116 -- `mix_floor` 0.1 plus a sigmoid at logit -4.0 -- and a listener
 # that decided attention was worth half its score would need the logit to reach
-# -0.85, a traverse of 3.15 log-units. At the base 1e-4 and 194 steps an epoch
-# that is 0.019 an epoch, so the crossing alone would take 162 epochs of a
-# 100-epoch run and the answer to "did attention get used" would be a fact about
-# the learning rate. At 2e-3 the ceiling is 0.388 an epoch and the traverse is
-# affordable inside eight, which is what makes `train_mix_alpha` readable as
+# -0.85, a traverse of 3.15 log-units. At the base 5e-5 and 156.25 steps an
+# epoch that is 0.0078 an epoch, so the crossing alone would take 403 epochs of
+# a 100-epoch run and the answer to "did attention get used" would be a fact
+# about the learning rate. At 2e-3 the ceiling is 0.31 an epoch and the traverse
+# is affordable inside eleven, which is what makes `train_mix_alpha` readable as
 # evidence rather than as a floor effect.
 #
 # Note the ceiling is not a prediction. Only a sign-consistent gradient spends
 # it, and the probe's free-alpha arms climbed to 0.33-0.44 over 2,000 steps,
 # well inside it.
-mix_logit_lr = 6e-3
+mix_logit_lr = 2e-3
 
 # `ExampleContrast.contrast_gate`, the one scalar between the speaker's contrast
 # stage and the identity. Inert unless `[sender] contrast` is true.
@@ -437,10 +472,10 @@ mix_logit_lr = 6e-3
 # thing, and the lone-scalar arithmetic above then decides whether it ever
 # leaves: AdamW moves a parameter by about `lr` per step whatever the
 # gradient's size, so a lone scalar cannot travel further than `lr * steps`. At
-# the base 1e-4 and birds' 62 steps an epoch that is 0.0062 an epoch, so a gate
-# reaching even 0.1 -- a tenth of the branch, at the scale `out_projection`
-# emits -- would take sixteen epochs of perfectly sign-consistent gradient. At
-# 2e-3 it takes fifty steps.
+# the base 5e-5 and the 156.25 steps an epoch both datasets now run, that is
+# 0.0078 an epoch, so a gate reaching even 0.1 -- a tenth of the branch, at the
+# scale `out_projection` emits -- would take thirteen epochs of perfectly
+# sign-consistent gradient. At 2e-3 it takes fifty steps.
 #
 # This is also why the gate is a scalar rather than a zero-initialised
 # projection matrix. The matrix opens at the identity too, but it would have to
@@ -448,7 +483,7 @@ mix_logit_lr = 6e-3
 # contributed anything at all, and `out_projection` starting at a properly
 # scaled random direction means the branch is at a sensible magnitude the moment
 # the gate opens. See `ExampleContrast`'s docstring.
-contrast_gate_lr = 6e-3
+contrast_gate_lr = 2e-3
 
 # One learning rate per module clip group, and the only mechanism in the
 # codebase giving different modules different rates.
@@ -494,16 +529,19 @@ contrast_gate_lr = 6e-3
 # ordering was adopted.
 #
 # The opening rates are not flat, and they are not eight independent numbers
-# either. Every one of them is `1e-4` times one factor of two:
+# either. Every one of them is `5e-5` times one factor of two:
 #
 #                        every module
-#     speaker            2e-4
-#     listener           1e-4
+#     speaker            1e-4
+#     listener           5e-5
 #
 # **The whole listener runs at half the whole speaker, and nothing is split
 # within an agent.** One claim, one factor, and the ratio is the setting --
-# `1e-4` is only where the grid is pinned, at the listener's language model,
-# because that is the module jayelm tuned it on.
+# `5e-5` is only where the grid is pinned, at the listener's language model,
+# because that is the module jayelm tuned `lr` on. He tuned it at 1e-4, which is
+# where this grid was pinned until 2026-08-31; the whole table then halved with
+# the base rate, so the shape below is unchanged and only its scale moved. See
+# `[optimiser] lr` above for what that halving was testing.
 #
 # *The listener slower than the speaker* is Rita et al., "On the role of
 # population heterogeneity in emergent communication" (arXiv:2204.12982). They
@@ -529,7 +567,8 @@ contrast_gate_lr = 6e-3
 #
 # *Vision slower than the rest of its agent* was the second claim, and it is
 # withdrawn as of 2026-08-29. The backbones now take their own agent's rate:
-# `sender_vision` 1e-4 -> 2e-4, `receiver_vision` 5e-5 -> 1e-4.
+# `sender_vision` 1e-4 -> 2e-4, `receiver_vision` 5e-5 -> 1e-4, both since
+# halved to 1e-4 and 5e-5 with the rest of the table.
 #
 # It was taken from the VLM fine-tuning literature, where the ordering is about
 # not wrecking a representation you already have. Nothing here is pretrained --
@@ -570,31 +609,34 @@ contrast_gate_lr = 6e-3
 # offers for width, and no run yet separates the ordering from the magnitude.
 #
 # Note also what it does to the baselines. Rungs 1 and 2 are jayelm's
-# architecture at jayelm's `lr = 1e-4`, and this leaves only their listener
-# language model there. The ablation stays internally consistent, since every
-# rung takes the same table; what is given up is the claim that the bottom of
-# the ladder reproduces jayelm exactly. If a baseline reading has to be
-# comparable to theirs, flatten the table in that rung rather than everywhere.
+# architecture, and since the 2026-08-31 halving no module on them sits at
+# jayelm's own `lr = 1e-4` except the four speaker groups, which arrive there
+# from the other side -- the listener, the half he actually tuned, now runs at
+# 5e-5. The ablation stays internally consistent, since every rung takes the
+# same table; what is given up is the claim that the bottom of the ladder
+# reproduces jayelm exactly. If a baseline reading has to be comparable to
+# theirs, flatten the table in that rung rather than everywhere.
 [optimiser.module_lr]
-sender_vision = 2e-4
-sender_prototyper = 2e-4
-sender_contrast = 2e-4
-sender_language_model = 2e-4
-receiver_vision = 1e-4
-receiver_token_embedding = 1e-4
-receiver_language_model = 1e-4
-receiver_discriminator = 1e-4
+sender_vision = 1e-4
+sender_prototyper = 1e-4
+sender_contrast = 1e-4
+sender_language_model = 1e-4
+receiver_vision = 5e-5
+receiver_token_embedding = 5e-5
+receiver_language_model = 5e-5
+receiver_discriminator = 5e-5
 
 [scheduler]
 epochs = 100
 
 # Ten epochs of linear ascent to the configured rates before the schedule
-# proper, set 2026-08-28 alongside the move to 6e-3 on the scaling scalars.
+# proper, set 2026-08-28 alongside the elevation of the scaling scalars -- 6e-3
+# then, 2e-3 since 2026-08-31.
 #
-# The two are one change. 6e-3 is there so that the traverses -- the listener's
-# volume and offset, the contrast gate -- are not what
+# The two are one change. The elevation is there so that the traverses -- the
+# listener's volume and offset, the contrast gate -- are not what
 # a run is waiting on; the ramp is there so that arriving fast is not the same
-# as arriving first. A lone scalar at 6e-3 crosses its whole useful range in a
+# as arriving first. A lone scalar at 2e-3 crosses its whole useful range in a
 # few hundred steps, and a listener that calibrates while the speaker's argmax
 # is still close to input-independent co-adapts to a degenerate code. Under the
 # ramp the scalars reach full
@@ -1328,18 +1370,30 @@ n_examples = 10 # number of examples seen by agents, including distractors
 # an epoch first covers the training images (100 species at ~59 images is a
 # ~5,900-image pool, 20 images a game, `N ln N / 20` = 2,566).
 #
-# Those two no longer agree. The `test_same` holdout leaves 150 species at ~47
-# training images, a ~7,050-image pool, whose coupon-collector point is
-# `N ln N / 20` = 3,123. Coverage is the binding reason and step parity is
-# retired deliberately: an epoch that does not reach all of its training images
-# makes the epoch counter a poor clock, and the learning-rate schedule is keyed
-# to it. The cost is 194 steps an epoch against ShapeWorld's 156, a 24% larger
-# optimisation budget per epoch.
+# Those two came apart when the `test_same` holdout landed: it leaves 150 species
+# at ~47 training images, a ~7,050-image pool, whose coupon-collector point is
+# `N ln N / 20` = 3,123. 3,100 was set against coverage alone and gave up step
+# parity, at 194 steps an epoch against ShapeWorld's 156.
+#
+# **5,000 as of 2026-08-31, and both constraints are satisfied again.** With
+# `[birds.optimiser] accumulator_steps` now 2, 5,000 / (16 x 2) = 156.25 steps
+# an epoch, and ShapeWorld's 20,000 / (32 x 4) = 156.25 -- the same number and
+# the same remainder, so the odd trailing batch is left unstepped on both. That
+# matters because the learning-rate schedule is keyed to the epoch counter and
+# every `lr * steps` traverse in `[optimiser]` above is quoted per epoch: one
+# steps-per-epoch figure now describes both datasets, and the arithmetic in
+# those blocks is written against it.
+#
+# Coverage is not traded away to get there -- 5,000 clears the 3,123 point by
+# 60%. What is still not equalised is gradient quality: birds sees 5,000 games
+# an epoch at an effective batch of 32 against ShapeWorld's 20,000 at 128. The
+# steps are matched; what goes into each of them is not.
 #
 # Nothing is exhausted by raising it. `CUBDataset.__getitem__` ignores its index
 # and samples a fresh game, so an epoch is a draw rather than a pass, and the
-# space is combinatorially large.
-games_per_epoch = 3100
+# space is combinatorially large. The cost is wall-clock: an epoch is 61% longer
+# than at 3,100.
+games_per_epoch = 5000
 
 # Eval games per species, for `test` and `test_same` alike: 50 x 16 = 800 games
 # and 150 x 16 = 2,400. Read only by `cub.py`; ShapeWorld's eval splits are
@@ -1360,7 +1414,30 @@ games_per_epoch = 3100
 eval_games_per_species = 16
 
 [birds.optimiser]
-accumulator_steps = 1
+# Effective batch 32 -- `[birds.data] batch_size` 16 twice over -- against
+# ShapeWorld's 128. Was 1 until 2026-08-31.
+#
+# This is the batch-side arm of the observation that the birds arm wants either
+# half the rate or twice the batch. That the two are interchangeable at all is
+# the diagnosis: they only buy the same thing in a noise-dominated regime, since
+# a step that were simply too large for the curvature would not be rescued by
+# averaging more samples into it. The target is therefore the variance of the
+# speaker's gradient rather than the size of the step, and this arm attacks it
+# where halving `lr` only makes the run less sensitive to it. The rate was
+# halved as well, in `[optimiser] lr`, so the birds arm now carries both.
+#
+# What it costs, and what pays for it. Accumulation halves the step count at a
+# fixed game count, and a halved step count is a halved `lr * steps` travel
+# budget. The cost falls hardest on the lone scalars -- the speaker's channel
+# scale, the listener's volume and offset, the contrast gate -- and
+# docs/anecdotes.md works out why: sign consistency less 0.5 grows as the root
+# of the batch while the step count falls as the batch, so accumulation is a net
+# loss for a lone Adam scalar even where it is a net gain for the modules above
+# it. `[birds.data] games_per_epoch` moves with it for exactly that reason:
+# 5,000 games at an effective batch of 32 restores the 156 steps an epoch that
+# 3,100 at 16 was producing, so no travel budget is given up and the epoch stays
+# a comparable clock across the two datasets.
+accumulator_steps = 2
 
 [birds.sender]
 feature_model = "ResNet18"

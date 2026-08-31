@@ -32,10 +32,22 @@
 # This rung is therefore not comparable to any ShapeWorld run recorded before
 # the change -- the whole ladder rebaselines, not just the arms that moved. The
 # settings it used to carry -- `weight_decay` 0.0, `silhouette_p_receiver` (0.1
-# when this was written, 0.5 from 2026-08-25 and 0.0 again since 2026-08-30),
-# and the `logit_scale_lr` / `uniform_weight` pair -- are DEFAULT.toml's
-# own values,
+# when this was written, 0.5 from 2026-08-25, 0.0 from 2026-08-30 and 0.1 again
+# since 2026-08-31), and the `logit_scale_lr` / `uniform_weight` pair -- are
+# DEFAULT.toml's own values,
 # so every rung inherits them rather than rung 1 alone.
+#
+# The rate that key is set at is not settled, and the `silhouette_titration`
+# experiment is what settles it: five copies of this rung at 0.1 through 0.5,
+# read on the `md_shape` / `md_color` breakdown. Until it reports, a ladder
+# result at 0.1 is a result at a provisional setting.
+#
+# **Sixteen configs, one per rung, and no variants.** Half-rate and
+# silhouette-rate forks of rungs 3 and 10 lived here through August 2026; the
+# half-rate one is now DEFAULT.toml's `[optimiser] lr` and the silhouette ones
+# are the `silhouette_titration` experiment, so the ladder is back to one file
+# per rung and every file differs from the one two below it by exactly one
+# architectural change.
 #
 # `epochs` and `repeats` below are not overrides: scripts/job_utils.py reads
 # both straight out of this file rather than out of the merged config, so every

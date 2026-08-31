@@ -1,0 +1,43 @@
+# silhouette_titration 2 of 5: the CNN/GRU baseline at
+# `silhouette_p_receiver = 0.2`.
+#
+# One of five copies of the ablation's rung 1 differing in that key alone --
+# 0.1, 0.2, 0.3, 0.4, 0.5 across the folder, and nothing else different at all.
+# The argument for the experiment, and the only correct way to read it, are in
+# `experiments/silhouette_titration/README.md`; read that before reading a
+# trajectory out of this run.
+#
+# The short version: find the largest rate at which `test_acc_md_shape` rises
+# without `test_acc_md_color` falling. Read the two separately. The aggregate
+# reads the same for a language with one feature as for one with both.
+#
+# `epochs` and `repeats` below are not overrides: scripts/job_utils.py reads both
+# straight out of this file rather than out of the merged config, so every config
+# in an experiment must carry them even when they restate the default. `[slurm]`
+# is read from the *first* config in the folder only (sorted by filename), so the
+# block in `01_silhouette_0.1.toml` governs the whole array; all five jobs are
+# the same size, so there is nothing to size it for beyond the baseline.
+
+name = "silhouette_titration"
+
+[data]
+silhouette_p_receiver = 0.2
+
+[scheduler]
+# The ablation's smoke-run length, so a titration arm is readable against a rung
+# 1 trajectory without a schedule difference between them. DEFAULT.toml's 100 is
+# the notional full run and nothing takes it.
+#
+# Note ten of these are warm-up. `warm_up_epochs = 10` is a third of a 30-epoch
+# run rather than the tenth DEFAULT.toml sized it as, which is the same position
+# every rung on the ladder is in.
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

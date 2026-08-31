@@ -178,12 +178,22 @@ every rung runs:
 
 | group | rate |
 |---|---|
-| `sender_vision`, `sender_prototyper`, `sender_contrast`, `sender_language_model` | 2e-4 |
-| `receiver_vision`, `receiver_token_embedding`, `receiver_language_model`, `receiver_discriminator` | 1e-4 |
+| `sender_vision`, `sender_prototyper`, `sender_contrast`, `sender_language_model` | 1e-4 |
+| `receiver_vision`, `receiver_token_embedding`, `receiver_language_model`, `receiver_discriminator` | 5e-5 |
 
 One factor of two — the whole listener at half the whole speaker — pinned at
-`1e-4` on `receiver_language_model`, the module jayelm tuned `lr` on. Nothing is
-split *within* an agent. The vision backbones took half their agent's rate until
+`5e-5` on `receiver_language_model`, the module jayelm tuned `lr` on. Nothing is
+split *within* an agent.
+
+**The whole table halved on 2026-08-31, along with the base `lr`.** The shape is
+unchanged; only its scale moved. jayelm tuned at 1e-4, which is where the grid
+was pinned until then, so the speaker now sits at his rate and the listener — the
+half he actually tuned — at half of it. The change came out of rung 3b, a
+half-rate copy of rung 3 run against rung 3's epoch-10 collapse: the collapse
+arrived exactly where `warm_up_epochs` hands the rate over at full value, and
+`build_lr_schedule` makes that join continuous, so a smooth ramp producing a
+one-epoch collapse reads as a stability threshold rather than as a shock. See
+`DEFAULT.toml`'s `[optimiser] lr` block. The vision backbones took half their agent's rate until
 2026-08-29, on an ordering borrowed from the VLM fine-tuning literature; that
 argument is about preserving a pretrained representation, and nothing here is
 pretrained. See DEFAULT.toml's `[optimiser.module_lr]` block.
@@ -250,11 +260,13 @@ quantity, and both reach the loss through
 parameter and restored on 2026-08-31 — see [channel.md](channel.md) for why the
 argument for deleting it does not survive `estimator = "identity"`.
 
-At 6e-3 and 156.25 optimiser steps an epoch that is 0.9375 log-units an epoch:
-1.0 → the 2.0 ceiling in 0.74 of an epoch, 1.0 → 0.1 in 2.5. **Expect the ceiling
-to bind early**, and read that as the design working rather than as a fault. The
-historic value was 2e-3, covering the same range in 2.2 epochs, and it is the
-fallback if 6e-3 proves twitchy.
+At 2e-3 and 156.25 optimiser steps an epoch — the figure both datasets run since
+`[birds.optimiser] accumulator_steps` went to 2 — that is 0.3125 log-units an
+epoch: 1.0 → the 2.0 ceiling in 2.2 epochs, 1.0 → 0.1 in 7.4. **Expect the
+ceiling to bind**, though no longer before the warm-up is over, and read that as
+the design working rather than as a fault. 6e-3 covered the same range in 0.74 of
+an epoch and was the setting from 2026-08-28 to 2026-08-31; it is the fallback if
+2e-3 proves slow.
 
 **`polarity_embedding_lr`** — gated on `isinstance(language_model,
 SenderTransformerLM)`. Deliberately its own key rather than shared with the
@@ -262,7 +274,7 @@ listener's `score_scale_lr`: the tag lives on one speaker and turning up a rate
 shared with the listener's volume would move something the ablation is trying to
 hold still. It was originally kept separate from `logit_scale_lr` for the same
 reason, that scalar existing on *both* speakers. Since `2026-08-29` the tag
-takes the speaker's module rate, `2e-4`, against the other scalars' `6e-3`.
+takes the speaker's module rate, `1e-4`, against the other scalars' `2e-3`.
 
 Gated on the speaker class rather than on finding the parameter, because the two
 failures need different answers. A GRU speaker has no polarity tag by
@@ -284,8 +296,9 @@ discriminator, so one key and one suffix reach both, and
 `AttentionDiscriminator.mix_bias` — which had no key at all — has no successor
 either. Elevated to 2e-3 like every other lone scalar here: a 0-d parameter moves
 about `lr` per step whatever its gradient, so its whole travel is bounded by
-`lr × steps`, and at the base 1e-4 `mix_bias` could cover 0.58 in thirty birds
-epochs against a score opening at 0.577 spread.
+`lr × steps`, and at the base rate `mix_bias` could cover only 0.23 in thirty
+birds epochs — at today's 5e-5 and 156.25 steps — against a score opening at
+0.577 spread.
 
 Elevated, and that was once the accusation: at 2e-3 the listener could squash its
 own logits fast, which multiplied down the gradient reaching the speaker. The
@@ -313,10 +326,10 @@ absence of the module rather than a different one.
 This is the override the arm depends on rather than merely benefits from.
 `contrast_gate` opens at exactly zero — that is what makes the contrast arm an
 ablation of one thing — and a lone scalar cannot travel further than `lr × steps`.
-At the base 1e-4 and birds' 62 steps an epoch it would take sixteen epochs of
-perfectly sign-consistent gradient to reach 0.1, so a run at the base rate would
-report "contrast does nothing" and be measuring the learning rate. At 2e-3 it is
-fifty steps. See [architecture.md](architecture.md) for why the gate is a scalar
+At the base 5e-5 and the 156.25 steps an epoch both datasets now run, it would
+take thirteen epochs of perfectly sign-consistent gradient to reach 0.1, so a run
+at the base rate would report "contrast does nothing" and be measuring the
+learning rate. At 2e-3 it is fifty steps. See [architecture.md](architecture.md) for why the gate is a scalar
 rather than a zero-initialised projection, which has the same problem and no way
 out of it.
 
@@ -433,7 +446,11 @@ So when a run's takeoff waits on one of these scalars — `log_score_scale`,
 direct proportion, at identical compute. That is a real trade against whatever
 the larger batch was for, and on ShapeWorld the reference setup's batch of 128
 (32 × `accumulator_steps` 4) is four times the traverse cost of the same compute
-at an accumulator of 1.
+at an accumulator of 1. Birds joined it at half the depth on 2026-08-31 —
+`[birds.optimiser] accumulator_steps` 1 → 2, with `games_per_epoch` 3,100 → 5,000
+so the step count per epoch is unchanged at 156.25 and matches ShapeWorld's
+exactly. The traverse budget per epoch is therefore held, and what the larger
+batch buys is a lower-variance speaker gradient.
 
 ## Reading a run: deadlock, or undertrained?
 

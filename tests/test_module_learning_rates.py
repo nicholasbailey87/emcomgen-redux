@@ -137,7 +137,7 @@ def test_the_default_rates_are_one_factor_of_two():
     base_lr = config["optimiser"]["lr"]
     rates = config["optimiser"]["module_lr"]
 
-    assert base_lr == 1e-4
+    assert base_lr == 5e-5
 
     # The grid is pinned at the listener's language model, the module jayelm
     #     tuned `lr` on. One factor, and no split within an agent: the `vision`
@@ -353,7 +353,7 @@ def test_the_scalar_overrides_survive_the_module_groups(config_file):
 
     `log_logit_scale` is one of the four again, and the one whose module rate
         differs most from its own on every rung: it sits inside
-        `sender_language_model` at 2e-4 and takes 6e-3, a factor of thirty.
+        `sender_language_model` at 1e-4 and takes 2e-3, a factor of twenty.
     """
     config, built = _build(config_file)
     lr_of = _lr_by_id(built["optimiser"])

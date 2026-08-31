@@ -447,11 +447,11 @@ there is no floor.
 
 Three things to look for, in order:
 
-- **Does it pin at 2.0, and how fast?** At `logit_scale_lr` = 6e-3 a
-  sign-consistent gradient covers `ln 2` in 0.74 of an epoch, so the ceiling
-  binding early is expected and is not a fault. If it pins immediately and stays,
-  the question is whether 2.0 is the wrong ceiling rather than 6e-3 the wrong
-  rate — check `logit_margin` first, because a speaker already spending its shape
+- **Does it pin at 2.0, and how fast?** At `logit_scale_lr` = 2e-3 a
+  sign-consistent gradient covers `ln 2` in 2.2 epochs, so the ceiling binding is
+  expected and is not a fault — but it should not now happen before the warm-up
+  is over. If it pins early and stays, the question is whether 2.0 is the wrong
+  ceiling rather than 2e-3 the wrong rate — check `logit_margin` first, because a speaker already spending its shape
   budget does not need the scale as well.
 - **Does it ever come back down?** A dip and a return is a speaker declining to
   commit while it has nothing to say, and it is the behaviour the projection
@@ -647,8 +647,9 @@ being `mean_j(LN(r_j)) · proj`, so a bias that moves while accuracy does not
 means the offset was per-game and the readout is what needs changing.
 
 It replaced `AttentionDiscriminator.mix_bias`, which had neither a column nor a
-config key — it sat at the base `lr`, which at birds' 194 steps an epoch bounded
-its entire thirty-epoch travel at 0.58 against a score opening at 0.577 spread.
+config key — it sat at the base `lr`, which at today's 5e-5 and 156.25 steps an
+epoch would bound its entire thirty-epoch travel at 0.23 against a score opening
+at 0.577 spread.
 An unmeasured parameter is how the readout's collapse went unnoticed the first
 time; this is the correction.
 

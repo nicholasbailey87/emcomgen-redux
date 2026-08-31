@@ -67,30 +67,37 @@ quoted in `1510a55` suggest ... a margin of roughly 24×, not the three orders o
 magnitude previously claimed here."* Both numbers appeared in the same comment at
 different times.
 
-### "156 steps an epoch" and "62 steps an epoch" are stale, not misattributed
+### "156 steps an epoch" and "62 steps an epoch" were stale, and one of them came back
 
-`measurement.md` derives `logit_scale`'s per-epoch ceiling as *"at 2e-3 over 156
-steps an epoch"* for birds, and `builder.py`'s `contrast_gate_lr` comment gives
-"62 steps an epoch on birds" for the same quantity. Neither matches the current
-config, which has `games_per_epoch = 3100` at `batch_size = 16` and
+`measurement.md` derived `logit_scale`'s per-epoch ceiling as *"at 2e-3 over 156
+steps an epoch"* for birds, and `builder.py`'s `contrast_gate_lr` comment gave
+"62 steps an epoch on birds" for the same quantity. Neither matched the config of
+the day, which had `games_per_epoch = 3100` at `batch_size = 16` and
 `accumulator_steps = 1` — ~194 optimiser steps an epoch.
 
 This entry previously guessed that 156 might be ShapeWorld's number attached to
 the wrong dataset. It is not, and the reason the guess was tempting is the
 interesting part. `DEFAULT.toml`'s `logit_scale_lr` comment showed its working
-before that key was removed: 156 is **birds at `games_per_epoch = 2500`**
-(2500 / 16 = 156.25), superseded by 194 at the current 3100. It coincides with
-ShapeWorld's 156 *by construction* — the note beside `games_per_epoch` says 2,500
-was picked partly to equalise the two datasets' step counts. So the figure is
-right for birds and identical to ShapeWorld's for a reason, which is exactly the
-shape of coincidence that invites a misattribution reading. `builder.py`'s 62 is
-the same quantity at an older `games_per_epoch` again — 62 × 16 ≈ jayelm's 1,000.
+before that key was removed: 156 was **birds at `games_per_epoch = 2500`**
+(2500 / 16 = 156.25), superseded by 194 at 3100. It coincided with ShapeWorld's
+156 *by construction* — the note beside `games_per_epoch` says 2,500 was picked
+partly to equalise the two datasets' step counts. So the figure was right for
+birds and identical to ShapeWorld's for a reason, which is exactly the shape of
+coincidence that invites a misattribution reading. `builder.py`'s 62 is the same
+quantity at an older `games_per_epoch` again — 62 × 16 ≈ jayelm's 1,000.
 
-Both figures are therefore the right dataset at a superseded config: a duller
-failure than misattribution, and a likelier one to recur, since the arithmetic in
-these comments is pinned to a key that has now moved twice. The *form* of the
-argument — a scalar cannot travel further than `lr × steps` — is unaffected. The
-entry stays because the stale numbers are still in the source.
+**156 is correct again as of 2026-08-31, for the third time and by the third
+route.** `[birds.optimiser] accumulator_steps` went to 2 and
+`[birds.data] games_per_epoch` to 5,000, which is 5000 / (16 × 2) = 156.25 — step
+parity with ShapeWorld deliberately retaken. So a comment quoting 156 for birds is
+right today, was wrong yesterday, and was right the day before that.
+
+Which is the entry's actual point, and it survives the number coming good. The
+arithmetic in these comments is pinned to keys that have now moved three times,
+and "the figure matches" is not evidence that anyone checked. The *form* of the
+argument — a scalar cannot travel further than `lr × steps` — is what is stable.
+Read a steps-per-epoch figure in a comment as a claim about a config, and go and
+look at the config.
 
 Note also that the 20,000 figure is itself read from a profiling log for a
 different run (`13_shapeworld_sender_transformer_lm_latent`), not from the loader.

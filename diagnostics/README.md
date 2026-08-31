@@ -146,8 +146,9 @@ python diagnostics/bootstrap_probe.py --config experiments/ablation/configs/12_b
 It prints `metrics.csv`'s own columns under their own names, because a working
 run takes off in a fixed order — the polarity tag separates, the speaker's logit
 scale traverses, the channel opens, and only then does accuracy move — and the
-question is which of them moves. Steps are not epochs: a rung 10 epoch is 3100
-games, so read the order of events rather than the timings. About twenty minutes
+question is which of them moves. Steps are not epochs: a rung 10 epoch is 5,000
+games at an effective batch of 32 — 3,100 at 16 before 2026-08-31 — so read the
+order of events rather than the timings. About twenty minutes
 for 2500 steps.
 
 ### What it settled

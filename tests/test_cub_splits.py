@@ -370,9 +370,9 @@ def test_eval_length_is_sized_per_species():
 
     assert config['data']['n_examples'] == N_EXAMPLES
     assert config['data']['eval_games_per_species'] == 16
-    assert config['data']['games_per_epoch'] == 3100
+    assert config['data']['games_per_epoch'] == 5000
 
-    assert cub.n_games("train", 150, config) == 3100
+    assert cub.n_games("train", 150, config) == 5000
     assert cub.n_games("test", 50, config) == 800
     assert cub.n_games("test_same", 150, config) == 2400
 
@@ -382,7 +382,7 @@ def test_debug_shrinks_every_split_but_never_to_zero():
     config = _cub_config()
     config['debug'] = True
 
-    assert cub.n_games("train", 4, config) == 310
+    assert cub.n_games("train", 4, config) == 500
     assert cub.n_games("test", 4, config) == 6
     assert cub.n_games("test", 1, config) == 1
 

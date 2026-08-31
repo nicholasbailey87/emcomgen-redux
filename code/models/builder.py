@@ -367,9 +367,10 @@ SPLIT_LEARNING_RATES = (
         # One key covers both discriminators, exactly as `score_scale_lr` does
         #     and for the same reason: `ScoreVolume` puts the same `score_bias`
         #     on each. It replaces `AttentionDiscriminator.mix_bias`, which had
-        #     no key at all and so sat at the base 1e-4 -- at birds' 194 steps an
-        #     epoch that bounded its whole travel at 0.58 over thirty epochs,
-        #     against a score whose own opening spread is 0.577.
+        #     no key at all and so sat at the base rate -- at today's 5e-5 and
+        #     the 156.25 steps an epoch both datasets run, that would bound its
+        #     whole travel at 0.23 over thirty epochs, against a score whose own
+        #     opening spread is 0.577.
         "score_bias_lr",
         "score_bias",
         lambda pair: True,
@@ -388,9 +389,9 @@ SPLIT_LEARNING_RATES = (
     (
         # The one scalar standing between the contrast stage and the identity.
         #     It opens at exactly zero, and at the base rate a lone scalar
-        #     cannot travel further than `lr * steps` -- 62 steps an epoch on
-        #     birds -- so without this the stage would stay shut for most of a
-        #     run. See `sender.ExampleContrast`.
+        #     cannot travel further than `lr * steps` -- 156.25 steps an epoch
+        #     on both datasets since 2026-08-31 -- so without this the stage
+        #     would stay shut for most of a run. See `sender.ExampleContrast`.
         "contrast_gate_lr",
         "contrast_gate",
         lambda pair: pair.sender.contrast is not None,

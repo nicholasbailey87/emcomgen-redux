@@ -271,14 +271,16 @@ the constraint being applied outside the forward pass. That cost is paid by
 giving the mixin a method, so the module still owns the rule.
 `scaler.step` may skip on inf/nan; projection is idempotent, so that is harmless.
 
-**Expect the ceiling to bind, early and often.** At `logit_scale_lr` = 6e-3 and
-156.25 optimiser steps an epoch, a sign-consistent gradient covers `ln 2` in 0.74
-of an epoch. That is the case the design is for and is *not* a fault — sitting at
-the bound costs nothing and leaving it is free. But it is what makes
-`train_logit_scale` worth watching in the first runs: whether it pins at 2.0
-immediately, and if so whether 2.0 is the wrong ceiling rather than 6e-3 the
-wrong rate; and whether it ever comes back **down**, which is the behaviour a
-`clamp` would have made impossible.
+**Expect the ceiling to bind.** At `logit_scale_lr` = 2e-3 and 156.25 optimiser
+steps an epoch, a sign-consistent gradient covers `ln 2` in 2.2 epochs — so no
+longer inside the first epoch, and not before the ten-epoch warm-up has the rate
+at full value. That is the case the design is for and is *not* a fault — sitting
+at the bound costs nothing and leaving it is free. But it is what makes
+`train_logit_scale` worth watching in the first runs: whether it pins at 2.0 at
+all, and if so whether 2.0 is the wrong ceiling rather than 2e-3 the wrong rate;
+and whether it ever comes back **down**, which is the behaviour a `clamp` would
+have made impossible. The rate was 6e-3, covering the same range in 0.74 of an
+epoch, from 2026-08-28 until the 2026-08-31 halving.
 
 ### There is no floor, and that is deliberate
 
