@@ -10,6 +10,35 @@ in `docs/` is somebody's earlier reading, not a fresh one.
 
 ## Claims that contradict the code as it now stands
 
+### `docs/data.md` said the silhouette leaves zero mutual information with colour
+
+The claim, load-bearing and now removed, was that after repainting *"the mutual
+information between colour and pixels is zero **by construction** rather than by
+hoping two distributions overlap"*. It was never measured, and it is false. The
+"by construction" is exactly why nobody looked.
+
+Measured on the real `generic.silhouette`: a random forest given only
+geometry-invariant summary statistics of silhouetted images recovers the
+original colour well above chance, and the count of partially covered edge
+pixels alone orders the six palette colours with a mean Kendall τ of **+0.90**
+across 600 randomised geometries. The interior is genuinely colour-free; the
+anti-aliased boundary is not, and the boundary is every object's outline.
+
+Two mechanisms. Under the old `silhouette_fill = 0.5`, a stored edge pixel was
+`round(coverage × 127.5)` and a bright colour's coverage is exactly `n/255`, so
+every odd `n` landed on an exact rounding tie broken on the low bits of a
+colour-dependent float32 — **43 of 256 stored levels made red, blue, green,
+yellow and white disagree**. That one is fixed as of 2026-09-01 by a fill whose
+product with 255 is an integer. The second is structural and is *not* fixed: see
+**Every palette colour is assumed to have HSV Value 1** below.
+
+Two smaller claims went with it. "One palette colour is always the transform's
+fixed point, and the fill decides which" — no longer true; a chromatic fill is
+no palette colour, so none is exempt, where `0.5 × 255 = 128` was exactly `gray`
+and grey objects passed through bit-identical. And the fill was described as
+"achromatic" throughout `docs/`, `DEFAULT.toml`, both READMEs and the docstring;
+it is not.
+
 ### `Receiver`'s docstring said the comparer masks both operands
 
 The removed docstring read: *"The listener's regularisation lives entirely in the
@@ -143,6 +172,46 @@ These were true of some version of a dependency and have no guard in the code.
   relying on nothing reading `messages` afterwards.
 
 ## Live assumptions with no enforcement
+
+### `silhouette` assumes exactly one object per image
+
+`generic.silhouette` normalises by a per-*image* peak luma, so with two objects
+in one image only the brighter one reaches the fill and the other comes back
+scaled by the ratio of their lumas — colour re-encoded as intensity, which is
+precisely what the transform exists to prevent. Measured on a two-object image:
+yellow at 128 and blue at 16. The docstring names the assumption; nothing
+enforces it.
+
+The guard that would catch it exists but does not run on the data that matters.
+`shapeworld.extract_shapes` raises *"More than one shape in this world"*, but
+`load()` passes `need_shapes=config['reference_game']`, which is **false for
+every rung on the ladder** — so the check is skipped on exactly the concept-game
+data the ablation uses. Nothing is known to violate the assumption today; that
+is a statement about the dataset, not about the code.
+
+### Every palette colour is assumed to have HSV Value 1
+
+An anti-aliased edge pixel is stored as `round(k · C)` per channel, so the ramp
+runs `0 → max(C)` and the number of representable coverage levels is
+`255 · V + 1`, for `V = max(R, G, B) / 255`. A colour with `V < 1` therefore
+resolves coverage more coarsely than the rest and its silhouettes skip specific
+intensity values — a structural gap in the value histogram, identical on every
+shape at every size, and a classifier finds it.
+
+`gray` (128, 128, 128) is the only violator today, at V = 0.502, and it stays
+identifiable at ~0.97 recall against a chance of 0.167 even after the 2026-09-01
+fill change. That is documented in `docs/data.md` and pinned by
+`test_grey_resolves_coverage_more_coarsely`; it is not fixable post hoc, because
+for a given bright-colour stored level the window of true coverages is 128/255
+of a grey level wide and 128 of 256 levels are ambiguous. The map is not a
+function.
+
+The exposure is that this is a property of *the rendered dataset*, checked
+nowhere. Regenerate ShapeWorld with a maroon, a navy or a mid-green and that
+colour leaks the same way, at the same magnitude, and nobody would think to
+look. Note also that HSL is the wrong coordinate to check in: red, blue, green
+and yellow all sit at L = 0.500 and grey at 0.502, so L does not separate grey
+at all.
 
 ### `BilinearGRUComparer` reads timestep `-1`
 

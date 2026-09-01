@@ -20,10 +20,18 @@ transform scales each pixel by `luma / peak`, so an anti-aliased edge survives
 with its partial coverage intact; the threshold it replaced promoted every
 partly-lit edge pixel to fully lit and grew the repainted region.
 
-The intensity is `silhouette_fill` of maximum in all three channels, half by
-default. That is a claim about the receiver's input BatchNorm rather than about
-the language -- see DEFAULT.toml -- so the tests here pin that the fill is
-honoured and configurable, and leave the argument where it is stated.
+The colour is `silhouette_fill`, a per-channel fraction of maximum, defaulting
+to the palette's own mean object colour (149, 149, 106). Which colour it is is a
+claim about the receiver's input BatchNorm rather than about the language -- see
+DEFAULT.toml -- so the tests here pin that the fill is honoured and configurable
+and leave that argument where it is stated. What the tests do own is the two
+properties the *value* has to have, both of which the old flat 0.5 lacked and
+neither of which was checked until 2026-09-01: `fill * 255` must be an integer
+in every channel, which is what makes the anti-aliased edges colour-invariant,
+and the fill must collide with no palette colour, or that colour is silently
+exempt from the transform. `test_partial_coverage_is_colour_invariant_at_every_level`
+is the one that would have caught the leak; the old version of it tested a
+single stored level, and picked one of the 213 that already agreed.
 
 Third, that the roll is per *game* and per *agent*. Per-game matters because
 rolling per image would leave roughly (1-p) x 10 of a set's targets coloured and
@@ -34,20 +42,27 @@ requires, so `silhouette_p_sender = 0` has to leave the sender's view untouched.
 """
 
 
+from fractions import Fraction
+
 import numpy as np
 import torch
 
 import _bootstrap  # noqa: F401
 
+import parse_config
 from data.generic import (
     DEFAULT_SILHOUETTE_FILL,
     ConceptDataset,
     silhouette,
 )
 
-# What a fully covered pixel comes back at, per dtype.
-FILL_U8 = round(DEFAULT_SILHOUETTE_FILL * 255)
-FILL_F32 = DEFAULT_SILHOUETTE_FILL
+# What a fully covered pixel comes back at, per dtype and per channel.
+FILL_U8 = tuple(round(f * 255) for f in DEFAULT_SILHOUETTE_FILL)
+# Through float32, so the equality assertions below are exact: the transform
+#     multiplies a coverage of exactly 1.0 by the float32 cast of this literal.
+FILL_F32 = tuple(
+    torch.tensor(DEFAULT_SILHOUETTE_FILL, dtype=torch.float32).tolist()
+)
 
 # The six ShapeWorld colours, as rendered.
 COLOURS = np.array(
@@ -56,21 +71,36 @@ COLOURS = np.array(
 )
 LUMA = torch.tensor([0.299, 0.587, 0.114]).view(3, 1, 1)
 
-# `_is_silhouetted` calls a view silhouetted when every lit pixel sits at the
-# fill, so a genuinely *gray* object is indistinguishable from a repaint of one:
-# `gray` is 128 and the default fill is 0.5 of 255. That is harmless for the
-# transform tests, which know what they fed in, but it would make the
-# dataset-level tests below read gray squares as silhouettes. Those build their
-# games from the other five colours instead.
-#
-# White held this slot until 2026-08-29, for exactly the same reason against the
-# old white fill. One palette colour is always the transform's fixed point; the
-# fill decides which.
+# Every palette colour that is not itself the fill, which since 2026-09-01 is
+# all six. `_is_silhouetted` calls a view silhouetted when every lit pixel sits
+# at the fill, so a palette colour *equal* to the fill would be read as a
+# repaint of itself and the dataset-level tests below would score it wrong. Two
+# colours held this slot in turn: `white` under the white fill until 2026-08-29,
+# then `gray` under the flat 0.5, which is exactly 128. A chromatic fill has no
+# fixed point at all, so nothing is excluded and the dataset tests get their
+# grey coverage back. `test_the_fill_collides_with_no_palette_colour` pins that;
+# the name stays as it is because the exclusion is what it exists to express.
 CHROMATIC = np.array(
-    [c for c in COLOURS if not (c == FILL_U8).all()], dtype=np.uint8
+    [c for c in COLOURS if not (c == np.array(FILL_U8)).all()], dtype=np.uint8
 )
 
+# The five colours whose maximum channel is 255, i.e. everything but `gray`.
+#     Only these resolve coverage in 256 steps and only these are required to
+#     agree with each other. See `test_grey_resolves_coverage_more_coarsely`.
+BRIGHT = np.array([c for c in COLOURS if c.max() == 255], dtype=np.uint8)
+
 N_GAMES, N_IMG, SIZE = 120, 40, 64
+
+
+def _levels(out):
+    """
+    The distinct values present, per channel.
+
+    Per channel rather than pooled: `sorted(out.unique())` reads the same for
+        (149, 149, 106) and for a fill whose channels have been swapped, and
+        the whole point of the chromatic fill is that the channels differ.
+    """
+    return [sorted(out[:, c].unique().tolist()) for c in range(3)]
 
 
 def _square(colour, lo=20, hi=44):
@@ -101,7 +131,7 @@ def test_silhouette_erases_colour():
     out = silhouette(batch)
     for i in range(1, len(out)):
         assert torch.equal(out[0], out[i]), f"colour {i} survived silhouetting"
-    assert sorted(out.unique().tolist()) == [0, FILL_U8]
+    assert _levels(out) == [[0, f] for f in FILL_U8]
 
 
 def test_silhouette_keeps_shape():
@@ -113,11 +143,11 @@ def test_silhouette_keeps_shape():
 def test_silhouette_preserves_dtype_and_range():
     u8 = torch.from_numpy(np.stack([_square(c) for c in COLOURS]))
     assert silhouette(u8).dtype == torch.uint8
-    assert sorted(silhouette(u8).unique().tolist()) == [0, FILL_U8]
+    assert _levels(silhouette(u8)) == [[0, f] for f in FILL_U8]
 
     f32 = u8.float() / 255.0
     assert silhouette(f32).dtype == torch.float32
-    assert sorted(silhouette(f32).unique().tolist()) == [0.0, FILL_F32]
+    assert _levels(silhouette(f32)) == [[0.0, f] for f in FILL_F32]
 
 
 def test_silhouette_leaves_input_untouched():
@@ -146,9 +176,9 @@ def test_coverage_is_preserved():
 
     out = silhouette(torch.from_numpy(img))
 
-    assert int(out[0, 0, 30, 30]) == FILL_U8
-    assert int(out[0, 0, 40, 30]) == round(FILL_U8 * 128 / 255)
-    assert int(out[0, 0, 50, 30]) == 0
+    assert out[0, :, 30, 30].tolist() == list(FILL_U8)
+    assert out[0, :, 40, 30].tolist() == [round(f * 128 / 255) for f in FILL_U8]
+    assert int(out[0, :, 50, 30].max()) == 0
 
 
 def test_partial_coverage_is_colour_invariant():
@@ -168,9 +198,134 @@ def test_partial_coverage_is_colour_invariant():
         img[0, :, 40, 20:44] = (c // 2).reshape(3, 1)
         return silhouette(torch.from_numpy(img))
 
-    first = half_covered(CHROMATIC[0])
-    for colour in CHROMATIC[1:]:
+    first = half_covered(BRIGHT[0])
+    for colour in BRIGHT[1:]:
         assert torch.equal(first, half_covered(colour))
+
+
+def _edge_pixel(colour, n):
+    """
+    One pixel stored at level `n` of an object of `colour`, silhouetted.
+
+    The image also carries a fully covered pixel, because the transform
+        normalises by the image's peak luma and would otherwise read the edge
+        pixel itself as the whole object.
+    """
+    img = np.zeros((1, 3, 8, 8), dtype=np.uint8)
+    c = np.asarray(colour, dtype=np.float64)
+    img[0, :, 0, 0] = colour
+    img[0, :, 1, 1] = np.round(c * n / 255)
+    return tuple(silhouette(torch.from_numpy(img))[0, :, 1, 1].tolist())
+
+
+def test_partial_coverage_is_colour_invariant_at_every_level():
+    """
+    The sweep. This is the test whose absence hid the leak for a fortnight.
+
+    `test_partial_coverage_is_colour_invariant` above does exercise a partial
+        pixel, but at exactly one stored level -- `c // 2`, i.e. 127 -- and 127
+        is one of the 213 levels where all five bright colours agreed even
+        under the old fill. The 43 that disagreed were never touched. Under
+        `fill = 0.5` this fails first at `n = 11`, where red, green, yellow and
+        white give 6 and blue gives 5.
+
+    Five colours, not six: `gray` has half the edge bit-depth and cannot agree
+        with them. See `test_grey_resolves_coverage_more_coarsely`.
+    """
+    for n in range(256):
+        got = {tuple(colour): _edge_pixel(colour, n) for colour in BRIGHT}
+        assert len(set(got.values())) == 1, f"level {n} disagreed: {got}"
+
+
+def test_the_fill_is_an_integer_number_of_levels():
+    """
+    `fill * 255` is a whole number of stored levels in every channel.
+
+    This is *the* invariant. A bright colour's coverage is exactly `n/255`, so
+        a stored edge pixel is `round(n * F / 255)`; with `F` an integer that
+        can never be a half-integer, because 255 is odd and `2nF` is even, so
+        no rounding tie exists to break differently per colour. With
+        `F = 127.5` every odd `n` is a tie, and ties resolve on the last bits
+        of a float32 that depends on the colour's luma weights.
+
+    Asserted here as well as swept above because the sweep is a consequence and
+        this is the cause: an edit back to 0.5, or to a sloppy literal like
+        0.58, fails here with the reason attached rather than at 43 anonymous
+        levels. The tolerance is tight but not exact -- the TOML literal is
+        0.584313725, whose product is 149.000000875.
+    """
+    for f in DEFAULT_SILHOUETTE_FILL:
+        assert abs(f * 255 - round(f * 255)) < 1e-4, f
+
+    # And therefore, for every stored level a bright colour can take:
+    for n in range(256):
+        for f in FILL_U8:
+            assert Fraction(n * f, 255).denominator != 2, (n, f)
+
+
+def test_the_fill_collides_with_no_palette_colour():
+    """
+    No palette colour is the transform's fixed point.
+
+    Under the flat 0.5 the fill was exactly 128, which is `gray`, so a grey
+        object came back bit-identical -- one colour in six silently exempt
+        from an intervention whose entire purpose is to remove colour. Under
+        the white fill before it, `white` held the same slot.
+    """
+    assert len(CHROMATIC) == len(COLOURS)
+
+    grey = torch.from_numpy(_square(np.array([128, 128, 128], dtype=np.uint8))[None])
+    assert not torch.equal(silhouette(grey), grey)
+
+
+def test_the_fill_is_actually_written_to_three_channels():
+    """
+    The interior of a covered object reads the fill, per channel.
+
+    The output line used to end `.expand_as(imgs)`, which broadcast a single
+        coverage channel across three. That was correct while the fill was
+        achromatic and is silently wrong now: it would write one channel three
+        times, degrading the chromatic fill back to a grey and restoring the
+        `gray` collision, and nothing else here would fail. Only an interior
+        value catches it.
+    """
+    out = silhouette(torch.from_numpy(_square(COLOURS[0])[None]))
+    assert out[0, :, 32, 32].tolist() == [149, 149, 106]
+    assert out[0, :, 32, 32].tolist() == list(FILL_U8)
+    assert int(out[0, :, 0, 0].max()) == 0
+
+
+def test_grey_resolves_coverage_more_coarsely():
+    """
+    Grey is a known, documented divergence, and is not expected to be fixed.
+
+    An edge pixel is stored as `round(k * C)` per channel, so the number of
+        representable coverage levels is `255 * V + 1` for `V = max(R, G, B) /
+        255`, i.e. HSV Value. Every palette colour has V = 1.0 except `gray`,
+        at V = 0.502, so grey resolves coverage in 129 steps where the rest use
+        256 and its output skips specific intensity values -- a structural gap
+        in the value histogram, identical on every shape at every size, which a
+        classifier recovers at ~0.97 recall against a chance of 0.167.
+
+    Note HSV Value and not HSL Lightness: red, blue, green, yellow and white
+        all sit at HSL L = 0.500 and grey at 0.502, so L does not separate grey
+        at all. V does, and V *is* the edge bit-depth.
+
+    This is pinned rather than fixed. Every repair prototyped -- stochastic
+        rounding, dithering, lattice equalisation, per-game jitter -- works by
+        destroying edge resolution, which is where shape lives, and none has a
+        run behind it. Asserting grey *matched* would be a test that has to be
+        deleted the first time somebody renders an anti-aliased grey square.
+        Asserting it diverges means the day that changes, somebody notices.
+    """
+    grey = {_edge_pixel([128, 128, 128], n)[0] for n in range(256)}
+    bright = {_edge_pixel(BRIGHT[0], n)[0] for n in range(256)}
+    assert len(bright) == 150 and len(grey) == 129
+    assert grey < bright
+    assert sorted(bright - grey) == [
+        4, 11, 18, 25, 32, 39, 46, 53, 60, 67, 75,
+        82, 89, 96, 103, 110, 117, 124, 131, 138, 145,
+    ]
 
 
 def test_the_fill_is_honoured():
@@ -181,10 +336,17 @@ def test_the_fill_is_honoured():
         other test here already pins.
     """
     out = silhouette(torch.from_numpy(_square(CHROMATIC[0])[None]), fill=0.25)
-    assert sorted(out.unique().tolist()) == [0, round(0.25 * 255)]
+    assert _levels(out) == [[0, round(0.25 * 255)]] * 3
 
     f32 = torch.from_numpy(_square(CHROMATIC[0])[None]).float() / 255.0
-    assert sorted(silhouette(f32, fill=0.25).unique().tolist()) == [0.0, 0.25]
+    assert _levels(silhouette(f32, fill=0.25)) == [[0.0, 0.25]] * 3
+
+    # A triple, which is what the config now sends and what `expand_as` used to
+    #     flatten back to one channel without failing anything.
+    out = silhouette(
+        torch.from_numpy(_square(CHROMATIC[0])[None]), fill=(0.2, 0.4, 0.6)
+    )
+    assert _levels(out) == [[0, 51], [0, 102], [0, 153]]
 
 
 def test_the_fill_reaches_the_dataset():
@@ -196,7 +358,46 @@ def test_the_fill_reaches_the_dataset():
     """
     np.random.seed(0)
     view = _dataset(0.0, 1.0, fill=0.25)[0][2]
-    assert sorted(view.unique().tolist()) == [0, round(0.25 * 255)]
+    assert _levels(view) == [[0, round(0.25 * 255)]] * 3
+
+    np.random.seed(0)
+    view = _dataset(0.0, 1.0, fill=(0.2, 0.4, 0.6))[0][2]
+    assert _levels(view) == [[0, 51], [0, 102], [0, 153]]
+
+
+def _rejected_by_the_config(fill):
+    """`validate_config` over the defaults with `silhouette_fill` overridden."""
+    config = parse_config.get_config()
+    config['data']['silhouette_fill'] = fill
+    try:
+        parse_config.validate_config(config)
+    except parse_config.InvalidConfig:
+        return True
+    return False
+
+
+def test_the_config_rejects_a_fill_that_is_not_a_colour():
+    """
+    Rejected at parse time, with the key named, rather than at the first batch.
+
+    `silhouette_fill` stopped being a scalar on 2026-09-01, and the check it
+        used to share with `silhouette_p_*` would have raised `TypeError` on
+        the list -- an unreadable traceback out of a comparison, from every run
+        and most of the suite at once.
+    """
+    assert _rejected_by_the_config([0.5, 0.5])
+    assert _rejected_by_the_config([0.5, 0.5, 0.5, 0.5])
+    assert _rejected_by_the_config([-0.1, 0.5, 0.5])
+    assert _rejected_by_the_config([0.5, 0.5, 1.1])
+    assert _rejected_by_the_config(1.5)
+    assert _rejected_by_the_config("0.5")
+    assert _rejected_by_the_config(True)
+
+
+def test_the_config_accepts_both_a_scalar_and_a_triple():
+    assert not _rejected_by_the_config(0.5)
+    assert not _rejected_by_the_config([0.584313725, 0.584313725, 0.415686275])
+    assert not _rejected_by_the_config(list(DEFAULT_SILHOUETTE_FILL))
 
 
 def test_all_black_image_stays_black():
@@ -236,20 +437,28 @@ def _dataset(p_sender, p_receiver, seed=0, fill=DEFAULT_SILHOUETTE_FILL):
     )
 
 
-def _is_silhouetted(view):
+def _is_silhouetted(view, fill=FILL_U8):
     """
-    A view is silhouetted iff every lit pixel is achromatic and at the fill.
+    A view is silhouetted iff every lit pixel sits at exactly `fill`.
+
+    Not "achromatic and at the fill" any more -- the fill is a colour, so the
+        criterion is a per-channel match against the triple. This is what
+        `test_rates_are_*` measure, so a wrong answer here makes those tests
+        lie rather than fail, which is worth the caution.
+
+    `fill` is a parameter because `_dataset` takes one: hardcoding the default
+        here while the dataset was built at some other fill would have read
+        every game as un-silhouetted and passed `test_rates_are_off_when_zero`
+        for the wrong reason.
 
     The games these read are built from `_square` and `_disc`, both of which
-        mask hard, so a repainted view is exactly {0, FILL_U8} and there are no
-        partial-coverage pixels to allow for.
+        mask hard, so a repainted view holds only the fill and zero and there
+        are no partial-coverage pixels to allow for.
     """
     vals = view.reshape(view.shape[0], 3, -1)
+    target = torch.tensor(fill, dtype=vals.dtype).reshape(1, 3, 1)
     lit = vals.amax(1) > 0
-    return bool(
-        ((vals == FILL_U8) | (vals == 0)).all()
-        and (vals.amin(1)[lit] == FILL_U8).all()
-    )
+    return bool((vals == target).all(1)[lit].all())
 
 
 def _rates(p_sender, p_receiver, seed=0):

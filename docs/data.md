@@ -111,16 +111,27 @@ the nominal class range.
 
 ## The silhouette intervention
 
-`generic.silhouette` repaints each image's object in a flat achromatic fill,
+`generic.silhouette` repaints each image's object in a flat chromatic fill,
 keeping its shape.
 
 ShapeWorld's six colours (red, blue, green, yellow, white, gray) sit at six
 distinct luma values — roughly 29, 76, 128, 150, 226, 255 — so a plain grayscale
 conversion does not remove colour, it re-encodes it as a single scalar that one
-conv filter can threshold. A flat repaint does remove it: with a single object on
-a black ground every colour renders identically, so the mutual information
-between colour and pixels is zero *by construction* rather than by hoping two
-distributions overlap.
+conv filter can threshold. A flat repaint removes it from the *interior*: with a
+single object on a black ground, every colour's fully covered pixels render
+identically.
+
+**It does not remove it from the edges, and this document claimed otherwise
+until 2026-09-01.** The claim was that the mutual information between colour and
+pixels is zero *by construction*. It is not, and it was never measured. A random
+forest given only geometry-invariant summary statistics of silhouetted images
+recovers the original colour well above chance, and the count of partially
+covered edge pixels alone orders the six palette colours with a mean Kendall τ
+of **+0.90** across 600 randomised geometries. Two defects caused it, one of
+which is now fixed and one of which is structural — both are set out under
+**the fill** below. Read that section before quoting any invariance claim from
+this one; the load-bearing sentence in it was false for a fortnight because
+nobody looked.
 
 **Shape is carried by coverage, not by a threshold.** Every pixel is scaled by
 `luma / peak`, its object coverage. For a flat object on black a fully covered
@@ -137,8 +148,10 @@ colour-invariant too, but it promoted every partly-lit edge pixel to fully lit,
 so the repainted region came back larger than the object it replaced.
 `test_coverage_is_preserved` pins the difference.
 
-**The fill is `[data] silhouette_fill` of maximum in all three channels, half by
-default.** That is a claim about the receiver's input BatchNorm. `ViT2` passes
+**The fill is `[data] silhouette_fill`, a per-channel fraction of maximum,
+defaulting to the palette's own mean object colour (149, 149, 106).** Which
+colour it is is a claim about the receiver's input BatchNorm; *that it is
+chromatic and lands on integer levels* is a claim about the edges, below. `ViT2` passes
 `initial_batch_norm=True`, so broccoli puts an `nn.BatchNorm2d(3)` over raw RGB
 at `preprocess[0]`, and ShapeWorld gets no other input normalisation — whatever
 this function emits lands directly on that layer's statistics. Since eval is
@@ -150,16 +163,82 @@ cannot absorb it, because at train the offset is zero.
 White was the worst available answer: the brightest image the model ever sees.
 Against the palette as `tests/test_silhouette.py` states it — mean object
 channels (148.8, 148.8, 106.3) — a rate of 0.5 put the running means at 1.36×,
-1.36× and 1.70× the eval distribution, worst on blue. Half of maximum is the
-maximum-entropy answer for a palette the code does not know, and is robust to
-how that ignorance is formalised: uniform over the RGB cube, uniform over the
-six saturated primaries and secondaries, and uniform over hue at full saturation
-and value all give 0.5 per channel. DEFAULT.toml carries what that costs against
-a measured constant, and why a per-image random colour was rejected despite
-matching the distribution better.
+1.36× and 1.70× the eval distribution, worst on blue.
 
-One palette colour is always the transform's fixed point, and the fill decides
-which: at 0.5 it is `gray`, where under the white fill it was `white`.
+Half replaced it, on the argument that 0.5 is the maximum-entropy answer for a
+palette the code does not know, and is robust to how that ignorance is
+formalised: uniform over the RGB cube, uniform over the six saturated primaries
+and secondaries, and uniform over hue at full saturation and value all give 0.5
+per channel. **That argument has been abandoned, deliberately, and the fill is
+now a constant fitted to this dataset.** It is worth being explicit that
+something real was given up: the new value is wrong the day ShapeWorld's palette
+changes, and the old one was not. Two measurements forced it.
+
+*A rounding-tie lattice.* A stored edge pixel is `round(coverage × fill × 255)`.
+At `fill = 0.5` that is `coverage × 127.5`, and any colour whose maximum channel
+is 255 has coverage exactly `n/255`, so the product is exactly `n/2` and every
+odd `n` is an exact `.5` tie. Ties resolve by round-half-to-even on a float32
+whose last bits differ per colour, because each colour's luma is a different
+weighted sum of the same integer. **43 of the 256 stored levels made red, blue,
+green, yellow and white disagree** — colour re-encoded in the anti-aliasing, by
+the transform that exists to remove it. The fix is that `fill × 255` is an
+*integer* per channel: `n·F/255` cannot be a half-integer when `F` is an integer,
+since 255 is odd and `2nF` is even, so no **cross-colour** tie can exist. (Grey
+keeps ties of its own — its coverage is `m/128`, so `m = 64` gives 74.5 — but
+grey is alone on that ramp, so a tie there makes nothing disagree with anything.)
+
+*A palette collision.* `0.5 × 255 = 128` is exactly `gray`, so silhouetting a
+grey object was bit-identical in and out: max delta 0 over 0 pixels. One colour
+in six was silently exempt.
+
+Any integer `F` fixes both. The fill is *chromatic* because of the BatchNorm:
+the palette is blue-deficient — blue appears in two of six colours where red and
+green appear in three — so the mean object colour is (148.83, 148.83, 106.33)
+and no achromatic constant can match all three channels. Raising one only trades
+R and G against B: 128 runs −14.3% / −14.3% / +19.9% against eval, 135 runs
+−9.3% / −9.3% / **+27.0%**, 144 runs −3.2% / −3.2% / **+35.4%**, and
+(149, 149, 106) runs **+0.1% / +0.1% / −0.3%**. Those means weight the six
+colours uniformly; ShapeWorld's empirical colour frequencies have not been
+checked, so the match is approximate rather than exact if they are not.
+DEFAULT.toml carries the full argument, including why a per-image random colour
+was rejected despite matching the distribution better.
+
+A chromatic fill has **no fixed point**: it is not any palette colour, so no
+colour is exempt. Under both previous fills exactly one was — `white` until
+2026-08-29, then `gray`.
+
+### The leak that remains
+
+Grey stays identifiable at ~0.97 recall (chance 0.167) after all of the above,
+and that is expected rather than a failure to implement the fix. An anti-aliased
+edge pixel is stored as `round(k · C)` per channel, so the ramp runs `0 → max(C)`
+and the number of representable coverage levels is
+
+```
+levels = 255 · V + 1        where V = max(R, G, B) / 255 is HSV Value
+```
+
+Every palette colour has V = 1.0 except `gray`, at V = 0.502. Grey therefore
+resolves coverage in 129 steps where everything else uses 256, and its output
+**skips specific intensity values** — at the current fill, channel 0 can never
+read 4, 11, 18, 25, … 145. That is a structural gap in the value histogram,
+identical on every shape at every size, and it is what a classifier finds.
+
+No post-hoc processing repairs it. For a given bright-colour stored level the
+window of true coverages is `128/255 = 0.502` grey-levels wide, so it straddles
+a grey bin boundary and **128 of 256 levels are ambiguous**: the map is not a
+function. No colour space helps either — an invertible transform preserves the
+information and a non-invertible one is quantisation under another name.
+Stochastic rounding, dithering, lattice equalisation and per-game jitter were
+prototyped and do reduce it, the best combination to chance, but each works by
+destroying edge resolution, which is where shape lives, and none has a run
+behind it.
+
+Note that HSL is the wrong coordinate here and should not be used for this: red,
+blue, green and yellow all sit at HSL L = 0.500 and grey at 0.502, so L does not
+separate grey at all. V does, and V *is* the edge bit-depth.
+`test_grey_resolves_coverage_more_coarsely` pins the divergence so that the day
+it changes, somebody notices.
 
 dtype and range are preserved — the fill is read against 255 for integer images
 and against 1.0 for floating-point ones, and integer output is rounded rather

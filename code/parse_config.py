@@ -206,14 +206,34 @@ def validate_config(config: dict) -> bool:
             f"{warm_up_epochs!r}."
         )
 
-    # `silhouette_fill` shares the check because it shares the units: all three
-    #     are fractions, two of games and one of maximum intensity.
-    for key in (
-        'silhouette_p_sender', 'silhouette_p_receiver', 'silhouette_fill'
-    ):
+    # Both rates are a fraction of games, so they share a check.
+    #     `silhouette_fill` used to share it too, back when it was a scalar
+    #     fraction of maximum intensity; it is a per-channel colour now and a
+    #     list here would raise `TypeError` rather than `InvalidConfig`.
+    for key in ('silhouette_p_sender', 'silhouette_p_receiver'):
         p = config['data'][key]
         if not 0.0 <= p <= 1.0:
             raise InvalidConfig(f"`{key}` must be in [0, 1], got {p}.")
+
+    # A scalar is broadcast to three channels by `silhouette`, so both forms
+    #     are accepted; anything else is a config that will not paint a colour.
+    fill = config['data']['silhouette_fill']
+    channels = fill if isinstance(fill, (list, tuple)) else [fill]
+    if len(channels) not in (1, 3):
+        raise InvalidConfig(
+            "`silhouette_fill` must be a scalar or a length-3 [R, G, B] "
+            f"sequence, got {len(channels)} elements: {fill!r}."
+        )
+    for c in channels:
+        if isinstance(c, bool) or not isinstance(c, (int, float)):
+            raise InvalidConfig(
+                f"`silhouette_fill` must be numeric, got {fill!r}."
+            )
+        if not 0.0 <= c <= 1.0:
+            raise InvalidConfig(
+                f"every channel of `silhouette_fill` must be in [0, 1], got "
+                f"{fill!r}."
+            )
 
     if 'dataset' not in config['data']:
         raise InvalidConfig(

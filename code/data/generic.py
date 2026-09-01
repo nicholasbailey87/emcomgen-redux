@@ -25,14 +25,37 @@ def vis_image(inp, overwrite=True, **kwargs):
 _LUMA = torch.tensor([0.299, 0.587, 0.114])
 
 
-# Half of maximum intensity, in every channel. See `silhouette` and docs/data.md
-#     for why half and not something measured off the palette.
-DEFAULT_SILHOUETTE_FILL = 0.5
+# ShapeWorld's own mean object colour, (149, 149, 106) of 255. Chromatic, and
+#     an integer number of levels in every channel -- both load-bearing, and
+#     both explained under `silhouette` and in docs/data.md. This was a flat 0.5
+#     until 2026-09-01, which collided with the palette's `gray` and left a
+#     measurable colour leak in the anti-aliased edges.
+DEFAULT_SILHOUETTE_FILL = (149 / 255, 149 / 255, 106 / 255)
+
+
+def _as_fill(fill, device):
+    """
+    `fill` as a (1, 3, 1, 1) float tensor, from a scalar or a length-3 sequence.
+
+    A scalar is broadcast to all three channels. It is not the default any more
+        but it stays supported: it is the natural thing to write in a one-off
+        probe, and the tests use it to check the key is honoured at a value the
+        default is not.
+    """
+    out = torch.as_tensor(fill, dtype=torch.float32, device=device).reshape(-1)
+    if out.numel() == 1:
+        out = out.expand(3)
+    elif out.numel() != 3:
+        raise ValueError(
+            f"`fill` must be a scalar or a length-3 sequence, got {fill!r}"
+        )
+    # `reshape` rather than `view`: `expand` above leaves a stride-0 tensor.
+    return out.reshape(1, 3, 1, 1)
 
 
 def silhouette(imgs, fill=DEFAULT_SILHOUETTE_FILL):
     """
-    Repaint each image's object in a flat achromatic `fill`, keeping its shape.
+    Repaint each image's object in a flat `fill` colour, keeping its shape.
 
     `imgs` is (n, C, H, W) with a black background. Every pixel is scaled by the
     object's coverage there, so a fully covered pixel comes back at `fill` of
@@ -40,6 +63,8 @@ def silhouette(imgs, fill=DEFAULT_SILHOUETTE_FILL):
     keeps the coverage it had. dtype and range are preserved -- `fill` is read
     against 255 for integer images and against 1.0 for floating-point ones.
     Returns a new tensor; the input is left untouched.
+
+    `fill` is a length-3 per-channel fraction, or a scalar broadcast to three.
 
     Coverage rather than a threshold. For a flat object on black, a fully
     covered pixel has `luma == peak` and a pixel at coverage `k` has
@@ -49,16 +74,46 @@ def silhouette(imgs, fill=DEFAULT_SILHOUETTE_FILL):
     through. The threshold promoted every partly-lit edge pixel to fully lit,
     which made the repainted region larger than the object it replaced.
 
-    `fill` rather than white. The receiver's `ViT2` opens with
-    `nn.BatchNorm2d(3)` over raw RGB and ShapeWorld gets no other input
-    normalisation, so what this function emits lands directly on that layer's
-    statistics -- and eval is never silhouetted, so the running stats are
-    gathered on a mixture and then used on clean images. A white object is the
-    brightest image the model ever sees and drags those stats well above the
-    distribution they are applied to. Half of maximum is the maximum-entropy
-    answer for a palette you do not know: colours uniform over the RGB cube give
-    0.5 per channel, as do colours uniform over the six saturated primaries and
-    secondaries, and as does hue uniform at full saturation and value.
+    Chromatic, and an integer number of levels. The default is the palette's own
+    mean object colour, (149, 149, 106). Two things follow, and both are the
+    reason it is not a flat half.
+
+    First, `fill * 255` is an integer per channel, and that is what makes the
+    edges colour-invariant. A stored edge pixel is `round(coverage * fill *
+    255)`; at `fill = 0.5` that is `coverage * 127.5`, and a bright colour's
+    coverage is exactly `n/255`, so the product is exactly `n/2` and every odd
+    `n` lands on a rounding tie. Ties break on the last bits of a float32 whose
+    value depends on the colour's luma weights, so 43 of the 256 stored levels
+    made red, blue, green, yellow and white disagree -- a colour signal in the
+    anti-aliasing. With `fill * 255` an integer `F`, `n * F / 255` cannot be a
+    half-integer (255 is odd, `2nF` is even), so no *cross-colour* tie exists.
+    Grey still has ties of its own -- its coverage is `m/128`, so `m = 64` gives
+    74.5 -- but grey is alone on that ramp and a tie there makes nothing
+    disagree with anything.
+
+    Second, no palette colour is a fixed point any more. `0.5 * 255 = 128` is
+    exactly ShapeWorld's `gray`, so a grey object came back bit-identical and
+    one colour in six was silently exempt from the intervention.
+
+    The receiver's `ViT2` opens with `nn.BatchNorm2d(3)` over raw RGB and
+    ShapeWorld gets no other input normalisation, so what this function emits
+    lands directly on that layer's statistics -- and eval is never silhouetted,
+    so the running stats are gathered on a mixture and then used on clean
+    images. The palette is blue-deficient (blue appears in two of six colours
+    where red and green appear in three), so its mean is (148.83, 148.83,
+    106.33) and no achromatic constant can match all three channels: 0.5 ran
+    -14.3% / -14.3% / +19.9% against eval, where this fill runs +0.1% / +0.1% /
+    -0.3%. That is a constant fitted to this dataset rather than the
+    maximum-entropy answer for a palette the code does not know, which is what
+    0.5 was; the trade is deliberate. See DEFAULT.toml.
+
+    A leak remains, and it is not fixable here. An edge pixel is stored as
+    `round(k * C)` per channel, so the number of representable coverage levels
+    is `255 * V + 1` for `V = max(R, G, B) / 255`. Every palette colour has
+    V = 1 except grey, at V = 0.502, so grey resolves coverage in 129 steps
+    where the rest use 256 and its output skips specific intensity values --
+    a structural gap in the value histogram that a classifier finds at ~0.97
+    recall against a chance of 0.167. See docs/data.md and docs/dubious-claims.md.
 
     Assumes one object on a black ground, as the old threshold did. Two objects
     of different colours would come back at different intensities, which leaks
@@ -80,13 +135,17 @@ def silhouette(imgs, fill=DEFAULT_SILHOUETTE_FILL):
     coverage = torch.where(lit, luma / safe_peak, torch.zeros_like(luma))
 
     max_value = 255 if not imgs.dtype.is_floating_point else 1.0
-    out = coverage.unsqueeze(1) * (fill * max_value)
+    # A tensor before any arithmetic touches it: `(0.5, 0.5, 0.4) * 255` is
+    #     tuple repetition, not a scaled colour.
+    out = coverage.unsqueeze(1) * (_as_fill(fill, imgs.device) * max_value)
 
     # Integer dtypes truncate on cast, so `0.999 * 128` would land at 127.
     if not imgs.dtype.is_floating_point:
         out = out.round()
 
-    return out.to(imgs.dtype).expand_as(imgs).contiguous()
+    # No `expand_as`: the (1, 3, 1, 1) fill above already broadcast the single
+    #     coverage channel to three, and with a chromatic fill they differ.
+    return out.to(imgs.dtype).contiguous()
 
 
 class ConceptDataset:

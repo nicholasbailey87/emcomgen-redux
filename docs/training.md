@@ -42,9 +42,12 @@ missing key rather than raising.
   Both are checked here rather than left to the speaker's constructor, because
   `SafeDict` only warns on a missing key and hands back `None`, which would fail
   confusingly deep inside the decode instead of at parse time.
-- `silhouette_p_sender` / `silhouette_p_receiver` / `silhouette_fill` in
-  [0, 1]. All three are fractions, two of games and one of maximum intensity,
-  which is why one loop checks them.
+- `silhouette_p_sender` / `silhouette_p_receiver` in [0, 1]. Both are fractions
+  of games, which is why one loop checks them.
+- `silhouette_fill` a scalar or a length-3 `[R, G, B]` sequence, every element
+  in [0, 1]. Checked separately since 2026-09-01, when it stopped being a
+  scalar: sharing the loop above would raise `TypeError` on the list rather
+  than `InvalidConfig`, from every run at once. See docs/data.md.
 - `data.dataset` present.
 
 `builder.build_models` additionally asserts `receiver_only`, `copy_receiver`,

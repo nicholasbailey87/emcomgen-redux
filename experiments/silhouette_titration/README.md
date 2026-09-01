@@ -15,13 +15,19 @@ scripts/run_experiment.sh silhouette_titration 5
 
 ## Why the rate is not already known
 
-`silhouette_p_receiver` repaints the listener's whole view as flat achromatic
+`silhouette_p_receiver` repaints the listener's whole view as flat single-colour
 silhouettes with this probability, per game, at training time only. It exists to
 break the colour-only local minimum Mu & Goodman report (~83% accuracy, appendix
 A.1): with the six colours sitting at six distinct luma values a grayscale
 conversion would re-encode colour as a scalar rather than remove it, where a flat
 repaint removes it outright. See `DEFAULT.toml`'s block on the key for the
-mechanism and for why `silhouette_fill` is 0.5.
+mechanism and for why `silhouette_fill` is (149, 149, 106) of 255.
+
+**All five completed runs below predate the 2026-09-01 fill change and were run
+under the leaky transform** — a flat 0.5 fill, which collided with `gray` so
+grey objects passed through untouched, and whose rounding lattice left colour
+recoverable from the anti-aliased edges at Kendall tau +0.90. Do not pool them
+with anything run after. See docs/data.md.
 
 Three settings are on the record, and no two of them share an architecture:
 

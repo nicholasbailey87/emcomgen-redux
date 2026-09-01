@@ -65,11 +65,15 @@ only the shape conjunct, i.e. they are colour-matched to the target, and a
 colour-only policy therefore scores 10 targets plus 2/3 of 10 distractors =
 16.67/20 = 83.3%. One third hard negatives does not close the shortcut off.
 
-`data.silhouette_p_receiver` (default `0.5`) renders an agent's whole view as
-white-on-black silhouettes with that probability, per game, at training time
-only. Thresholding is what removes colour — a plain grayscale conversion does
+`data.silhouette_p_receiver` (default `0.1`) repaints an agent's whole view as
+flat single-colour silhouettes with that probability, per game, at training time
+only. The repaint is what removes colour — a plain grayscale conversion does
 not, since the six colours sit at six distinct luma values (blue 29 through
-white 255) that a single conv filter can separate.
+white 255) that a single conv filter can separate. Shape survives as coverage
+rather than as a threshold, and the fill is `data.silhouette_fill`, the
+palette's own mean object colour. It removes colour from an object's interior
+but not entirely from its anti-aliased edge; docs/data.md sets out what leaks
+and why one part of it is not fixable.
 
 The receiver is the side to constrain. Silhouetting the *sender* would teach it
 shape-from-silhouette, which is not the shape-from-colour-image competence that
