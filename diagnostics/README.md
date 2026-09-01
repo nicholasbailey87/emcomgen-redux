@@ -17,6 +17,11 @@ What these scripts do is build the real modules from a real rung config and then
 run them on a synthetic task where the answer is known, so that a failure has
 one possible cause instead of five. They need no dataset, no GPU and no cluster.
 
+`silhouette_shape_probe.py` is the exception on both counts. It builds no rung
+and asks nothing about the loop: it measures what the *data* makes available
+after the ShapeWorld silhouette, so it needs the real dataset and a GPU, and it
+runs on the cluster.
+
 Nothing here is part of training. They are read when a run is not working.
 
 ---
@@ -181,3 +186,42 @@ Choosing a learning rate. At 1e-3 *both* listeners saturate their logits inside
 a hundred steps and freeze, rung 10 included — accuracy 0.59 against 1.000 at
 1e-4. Frozen vision and linearly separable concepts make this a poor model of
 where the real run's optimum sits, and two points are not a sweep.
+
+---
+
+## `silhouette_shape_probe.py`
+
+Not a probe of a run. It trains a fresh `Conv4` — the sender's own vision model,
+at its own input size — to classify the concept attribute of ShapeWorld
+positives under each silhouette fill, and asks the two questions the
+intervention's training-time-only design separates:
+
+1. is shape readable off a repainted object at all, and
+2. does that reading carry across to the un-repainted images eval uses?
+
+So every arm is scored twice on the same held-out games: `in_domain`, repainted
+the same way it was trained, and `clean`, left alone. Games are split before
+anything is rendered, so no game contributes to both halves — the 20 positives
+of one game are near-duplicates of each other.
+
+```
+python diagnostics/silhouette_shape_probe.py                 # ~600 games, 15 epochs
+sbatch scripts/silhouette_shape_probe.sbatch                 # the same, on preemptgpu
+```
+
+Four arms, in the order the fill actually changed: `clean` (the ceiling),
+`white_threshold` (`luma > peak/2` repainted flat white — the original, live
+from 536c59e to e884662, and what rung 9 ran under when it reached 0.758 on
+shape concepts), `white_coverage` and `fill_coverage` (the current default at
+the palette's mean object colour). `e884662` changed hard edges to anti-aliased
+ones *and* full intensity to 58% in one commit, so the middle arm is what says
+which of the two a difference belongs to.
+
+Colour is the control, on the same games and the same split: a silhouette is
+meant to erase it, so an arm whose colour accuracy sits above chance is leaking.
+`fill_coverage` is expected to leak grey specifically — see docs/data.md, "The
+leak that remains".
+
+It answers what is available to be learned, not what a given run did learn. For
+that, see `probe_shape.py` in the parent checkout, which sweeps a trained
+sender across its checkpoints on un-augmented images.
