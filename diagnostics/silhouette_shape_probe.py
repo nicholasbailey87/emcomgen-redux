@@ -45,11 +45,16 @@ atomics. Three single-fit runs across two transforms and three fills all landed
 between 0.40 and 0.56 with no arm separable from any other.
 
 Hence `--seeds`, which defaults to 5, and the determinism flags at the top of
-this file. Each arm is fit that many times and reported as a mean, an sd and a
-range; the split and the games are drawn once from `--seed` and shared by every
-arm and every fit, so the only thing varying within a row is the fit itself. Do
-not read a difference between two arms that is smaller than their ranges
-overlap.
+this file. Each arm is fit that many times and reported as a mean, a median and
+an sd, with every individual fit printed underneath so a reader can take a rank
+test or look at the shape of five numbers without re-running the job. The split
+and the games are drawn once from `--seed` and shared by every arm and every fit,
+so the only thing varying within a row is the fit itself.
+
+The `sd` is the spread over those five fits, not a standard error: divide it by
+sqrt(n) before comparing two arms, and treat anything under about two of those
+as nothing. Read the median beside the mean -- five is few enough that one bad
+fit moves the mean and the median says so.
 
 Colour is the control, on the same games and the same split. A silhouette is
 supposed to erase it, so colour under any repainting arm should sit at chance;
@@ -221,10 +226,16 @@ def main(args):
         print(f"  {len(tr_i)} train images, {len(te_i)} test, chance {chance:.3f}")
 
         clean_te = render(flat[te_i], "clean")
-        head_row = (f"  {'arm':<12}{'in_domain':>11}{'sd':>7}"
-                    f"{'clean':>9}{'sd':>7}{'clean range':>16}")
+        # Mean *and* median, because five fits are few enough that one bad one
+        #     moves the mean and the median says so. `sd` is over those same
+        #     five, so it is a spread and not a standard error -- divide by
+        #     sqrt(n) before comparing two arms.
+        head_row = (f"  {'arm':<10}"
+                    f"{'in_dom':>8}{'med':>7}{'sd':>7}"
+                    f"{'clean':>9}{'med':>7}{'sd':>7}")
         print(head_row)
         print("  " + "-" * (len(head_row) - 2))
+        per_fit = {}
         for arm in ARMS:
             # The split and the rendering are shared across seeds; only the fit
             #     is re-drawn, which is the variance the seeds are here for.
@@ -236,10 +247,18 @@ def main(args):
                     for seed in range(args.seeds)]
             ind = np.array([r["in_domain"] for r in runs])
             cln = np.array([r["clean"] for r in runs])
-            print(f"  {arm:<12}{ind.mean():>11.3f}{ind.std():>7.3f}"
-                  f"{cln.mean():>9.3f}{cln.std():>7.3f}"
-                  f"{cln.min():>10.3f}-{cln.max():<5.3f}", flush=True)
-        print(f"  {'chance':<12}{chance:>11.3f}{'':>7}{chance:>9.3f}")
+            per_fit[arm] = cln
+            print(f"  {arm:<10}"
+                  f"{ind.mean():>8.3f}{np.median(ind):>7.3f}{ind.std():>7.3f}"
+                  f"{cln.mean():>9.3f}{np.median(cln):>7.3f}{cln.std():>7.3f}",
+                  flush=True)
+        print(f"  {'chance':<10}{chance:>8.3f}{'':>14}{chance:>9.3f}")
+
+        # Every fit, so that a reader can take a median, a rank test or a look
+        #     at the shape of five numbers without re-running the job.
+        print(f"\n  clean, per fit (seeds 0..{args.seeds - 1}):")
+        for arm, cln in per_fit.items():
+            print(f"    {arm:<10}" + " ".join(f"{v:.3f}" for v in cln))
 
 
 if __name__ == "__main__":

@@ -213,10 +213,11 @@ sbatch scripts/silhouette_shape_probe.sbatch                 # the same, on pree
 atomics, so the first three runs of this script were not reproducible: the same
 arm at the same seed on the same GPU read 0.560 and then 0.403 (jobs 123354 and
 123583), a swing wider than the difference it was being read for. `--seeds`
-defaults to 5 and each arm reports a mean, an sd and a range; the games and the
-split come from `--seed` once and are shared by every arm and every fit, so the
-only thing varying within a row is the fit. Do not read a difference between two
-arms whose ranges overlap. The determinism flags at the top of the file
+defaults to 5 and each arm reports a mean, a median and an sd, with every
+individual fit printed underneath; the games and the split come from `--seed`
+once and are shared by every arm and every fit, so the only thing varying within
+a row is the fit. That `sd` is a spread over five fits and not a standard error
+— divide by sqrt(n) before comparing two arms. The determinism flags at the top of the file
 (`cudnn.deterministic`, `use_deterministic_algorithms`) cost some throughput and
 are what make a repeat run mean anything.
 
