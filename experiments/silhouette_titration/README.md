@@ -23,11 +23,19 @@ conversion would re-encode colour as a scalar rather than remove it, where a fla
 repaint removes it outright. See `DEFAULT.toml`'s block on the key for the
 mechanism and for why `silhouette_fill` is (149, 149, 106) of 255.
 
-**All five completed runs below predate the 2026-09-01 fill change and were run
-under the leaky transform** — a flat 0.5 fill, which collided with `gray` so
-grey objects passed through untouched, and whose rounding lattice left colour
+**All five completed runs below predate the 2026-09-01 changes and were run under
+the leaky transform** — a flat 0.5 fill, which collided with `gray` so grey
+objects passed through untouched, and whose rounding lattice left colour
 recoverable from the anti-aliased edges at Kendall tau +0.90. Do not pool them
-with anything run after. See docs/data.md.
+with anything run after.
+
+Two things moved on 2026-09-01 and neither is the rate. The fill became
+(149, 149, 106), and the transform went back to a threshold at half the image's
+peak luma rather than blending by coverage — the second on the strength of
+`diagnostics/silhouette_shape_probe.py`, which measured that shape learned off a
+coverage edge does not transfer to the clean images eval uses. Both change what a
+given rate *does*, so this titration wants re-running from scratch under the new
+transform rather than extending. See docs/data.md.
 
 Three settings are on the record, and no two of them share an architecture:
 

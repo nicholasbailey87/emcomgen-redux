@@ -24,13 +24,20 @@ pixels alone orders the six palette colours with a mean Kendall τ of **+0.90**
 across 600 randomised geometries. The interior is genuinely colour-free; the
 anti-aliased boundary is not, and the boundary is every object's outline.
 
-Two mechanisms. Under the old `silhouette_fill = 0.5`, a stored edge pixel was
-`round(coverage × 127.5)` and a bright colour's coverage is exactly `n/255`, so
-every odd `n` landed on an exact rounding tie broken on the low bits of a
-colour-dependent float32 — **43 of 256 stored levels made red, blue, green,
-yellow and white disagree**. That one is fixed as of 2026-09-01 by a fill whose
-product with 255 is an integer. The second is structural and is *not* fixed: see
-**Every palette colour is assumed to have HSV Value 1** below.
+Two mechanisms, both of which lived in the anti-aliased edge, and the edge is
+gone as of 2026-09-01 — the transform thresholds again rather than blending by
+coverage, so its output is two-valued per channel for every palette colour. Under
+the old `silhouette_fill = 0.5`, a stored edge pixel was `round(coverage × 127.5)`
+and a bright colour's coverage is exactly `n/255`, so every odd `n` landed on an
+exact rounding tie broken on the low bits of a colour-dependent float32 — **43 of
+256 stored levels made red, blue, green, yellow and white disagree**. The second
+was structural, and is set out under **Every palette colour was assumed to have
+HSV Value 1** below.
+
+What is left is one stored level out of 256 at which grey falls on the other side
+of the threshold from everything else, which moves a boundary by up to a pixel.
+The τ = +0.90 reading above was taken on the coverage version and has not been
+re-run; there is no reason to expect it to survive, and nobody has measured it.
 
 Two smaller claims went with it. "One palette colour is always the transform's
 fixed point, and the fill decides which" — no longer true; a chromatic fill is
@@ -175,12 +182,15 @@ These were true of some version of a dependency and have no guard in the code.
 
 ### `silhouette` assumes exactly one object per image
 
-`generic.silhouette` normalises by a per-*image* peak luma, so with two objects
-in one image only the brighter one reaches the fill and the other comes back
-scaled by the ratio of their lumas — colour re-encoded as intensity, which is
-precisely what the transform exists to prevent. Measured on a two-object image:
-yellow at 128 and blue at 16. The docstring names the assumption; nothing
-enforces it.
+`generic.silhouette` thresholds against a per-*image* peak luma, so with two
+objects in one image the peak is set by the brighter and the darker is judged
+against it. Under the coverage blend that ran to 2026-09-01 the darker came back
+scaled by the ratio of their lumas — colour re-encoded as intensity, measured at
+yellow 128 and blue 16 on a two-object image. Under the threshold it is worse in
+kind rather than better: any object whose luma is under half the brighter one's
+is erased outright, which is what this did before 2026-08-29 as well. Blue
+against white, yellow or grey all qualify. The docstring names the assumption;
+nothing enforces it.
 
 The guard that would catch it exists but does not run on the data that matters.
 `shapeworld.extract_shapes` raises *"More than one shape in this world"*, but
@@ -189,29 +199,34 @@ every rung on the ladder** — so the check is skipped on exactly the concept-ga
 data the ablation uses. Nothing is known to violate the assumption today; that
 is a statement about the dataset, not about the code.
 
-### Every palette colour is assumed to have HSV Value 1
+### Every palette colour was assumed to have HSV Value 1
+
+**Resolved on 2026-09-01, by removing the surface it acted on.** Kept here
+because the reasoning is what would identify the same leak if the transform ever
+blends again.
 
 An anti-aliased edge pixel is stored as `round(k · C)` per channel, so the ramp
 runs `0 → max(C)` and the number of representable coverage levels is
 `255 · V + 1`, for `V = max(R, G, B) / 255`. A colour with `V < 1` therefore
-resolves coverage more coarsely than the rest and its silhouettes skip specific
-intensity values — a structural gap in the value histogram, identical on every
-shape at every size, and a classifier finds it.
-
-`gray` (128, 128, 128) is the only violator today, at V = 0.502, and it stays
-identifiable at ~0.97 recall against a chance of 0.167 even after the 2026-09-01
-fill change. That is documented in `docs/data.md` and pinned by
-`test_grey_resolves_coverage_more_coarsely`; it is not fixable post hoc, because
-for a given bright-colour stored level the window of true coverages is 128/255
-of a grey level wide and 128 of 256 levels are ambiguous. The map is not a
+resolved coverage more coarsely than the rest and its silhouettes skipped
+specific intensity values — a structural gap in the value histogram, identical on
+every shape at every size, and a classifier found it. `gray` (128, 128, 128) was
+the only violator, at V = 0.502, and stayed identifiable at ~0.97 recall against
+a chance of 0.167 through both fill changes. It was not fixable post hoc: for a
+given bright-colour stored level the window of true coverages was 128/255 of a
+grey level wide and 128 of 256 levels were ambiguous, so the map was not a
 function.
 
-The exposure is that this is a property of *the rendered dataset*, checked
-nowhere. Regenerate ShapeWorld with a maroon, a navy or a mid-green and that
-colour leaks the same way, at the same magnitude, and nobody would think to
-look. Note also that HSL is the wrong coordinate to check in: red, blue, green
-and yellow all sit at L = 0.500 and grey at 0.502, so L does not separate grey
-at all.
+The threshold ends it, since there is no ramp to quantise. What remains is that
+grey turns on at coverage `k > 0.5039` where the rest turn on at `k ≥ 0.502` —
+one stored level in 256, pinned by `test_the_threshold_is_colour_invariant`.
+
+The exposure that has *not* changed is that this was a property of *the rendered
+dataset*, checked nowhere. Regenerate ShapeWorld with a maroon, a navy or a
+mid-green and that colour sits further from the threshold than grey does, so the
+boundary moves further; nobody would think to look. Note also that HSL is the
+wrong coordinate to check in: red, blue, green and yellow all sit at L = 0.500
+and grey at 0.502, so L does not separate grey at all.
 
 ### `BilinearGRUComparer` reads timestep `-1`
 

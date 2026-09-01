@@ -17,37 +17,47 @@ fill, and then tests it twice: once on held-out images repainted the same way
 (`clean`, question 2). Games are split before anything is rendered, so no game
 contributes to both halves.
 
-Four arms, in the order the fill actually changed:
+Four arms. `clean` is the ceiling -- what this probe reads when nothing has been
+taken away -- and the other three are the live `silhouette` at three fills:
 
-  clean             no silhouette. The ceiling: what this probe can read when
-                    nothing has been taken away.
-  white_threshold   `luma > peak/2`, repainted flat white. The original, live
-                    from 536c59e (2026-08-25) to e884662, and the one rung 9
-                    ran under when it reached 0.758 on shape concepts.
-  white_coverage    coverage blending, still white. Isolates the first of the
-                    two changes e884662 made.
-  fill_coverage     coverage blending at the palette's mean object colour,
-                    (149, 149, 106). The current default, and the second change.
+  white       (1.0, 1.0, 1.0), the fill in force from 536c59e to e884662
+  fill        the current default, ShapeWorld's mean object colour
+  half        a flat 0.5, the fill in force from e884662 to 2026-09-01
 
-`white_threshold` differs from `fill_coverage` in two ways at once — hard edges
-against anti-aliased ones, and full intensity against 58% — so the middle arm is
-what says which of them a difference belongs to.
+All three repaint by threshold, because that is what the live code does. The
+coverage blend this script was written to indict is gone as of 2026-09-01 and
+lives at `f7dc0de`; what it read, and what decided that change:
+
+  arm                in_domain    clean
+  clean                  0.999    0.999
+  white_threshold        0.794    0.560
+  white_coverage         1.000    0.483
+  fill_coverage          1.000    0.486     (chance 0.306, job 123354)
+
+The coverage arms were perfectly readable under their own repainting and lost
+almost all of it at eval. Note what that leaves open, and what this script now
+exists to close: `white_threshold` was measured at full white, and the fill
+adopted is the chromatic one, so no arm has ever read the transform as it now
+stands. `white` and `fill` here are the two halves of that question.
 
 Colour is the control, on the same games and the same split. A silhouette is
 supposed to erase it, so colour under any repainting arm should sit at chance;
-where it does not, the arm is leaking. `fill_coverage` is expected to leak grey
-specifically (docs/data.md, "The leak that remains"), which shows up here as a
-colour accuracy meaningfully above 1/n_colours rather than as anything shaped.
+where it does not, the arm is leaking. Under a threshold the output is
+two-valued, so there is no anti-aliased ramp left to carry colour and the coverage
+leak documented in docs/data.md is gone -- but `half` is expected to leak anyway,
+and for a different reason: `0.5 * 255 = 128` is exactly ShapeWorld's `gray`, so
+a grey object under that arm comes back bit-identical to itself and one colour in
+six is not repainted at all.
 
 Reading the table:
 
-  * white_threshold in_domain high, clean high     -> shape survives and transfers
-  * white_threshold in_domain high, clean at chance-> readable, but the eval gap
-                                                      eats it; the augmentation
-                                                      teaches a different problem
-  * white_threshold in_domain at chance            -> the repainting destroyed
-                                                      shape, and no run under it
-                                                      could have learned shape
+  * an arm's in_domain high, clean high      -> shape survives and transfers
+  * in_domain high, clean at chance          -> readable, but the eval gap eats
+                                                it; the augmentation teaches a
+                                                different problem
+  * in_domain at chance                      -> the repainting destroyed shape,
+                                                and no run under that fill could
+                                                have learned shape
 
 This measures the *data*, not any run: nothing here is loaded from a checkpoint,
 and every arm gets the same architecture, the same optimiser and the same games.
@@ -65,7 +75,7 @@ import torch.nn as nn
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "code"))
 
-from data.generic import DEFAULT_SILHOUETTE_FILL, _LUMA, silhouette  # noqa: E402
+from data.generic import DEFAULT_SILHOUETTE_FILL, silhouette  # noqa: E402
 from models.backbone import vision  # noqa: E402
 
 SHAPES = ["circle", "cross", "ellipse", "pentagon",
@@ -76,30 +86,13 @@ COLOURS = ["red", "green", "blue", "yellow",
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def white_threshold(imgs):
-    """
-    The pre-`e884662` silhouette: white on black, thresholded at half peak luma.
-
-    Copied out of history rather than imported, because the point of this script
-    is to compare it with the version that replaced it. `git show
-    e884662^:code/data/generic.py` is the original.
-    """
-    if imgs.shape[1] != 3:
-        raise ValueError(f"expected 3 channels, got shape {tuple(imgs.shape)}")
-
-    luma = (imgs.float() * _LUMA.to(imgs.device).view(1, 3, 1, 1)).sum(1)
-    peak = luma.amax(dim=(1, 2), keepdim=True)
-    on = (luma > peak / 2) & (peak > 0)
-
-    on_value = 255 if not imgs.dtype.is_floating_point else 1.0
-    return (on.unsqueeze(1) * on_value).to(imgs.dtype).expand_as(imgs).contiguous()
-
-
+# Every repainting arm goes through the live `silhouette`, so this script says
+#     what training does rather than what it did when the script was written.
 ARMS = {
     "clean": lambda x: x,
-    "white_threshold": white_threshold,
-    "white_coverage": lambda x: silhouette(x, 1.0),
-    "fill_coverage": lambda x: silhouette(x, DEFAULT_SILHOUETTE_FILL),
+    "white": lambda x: silhouette(x, 1.0),
+    "fill": lambda x: silhouette(x, DEFAULT_SILHOUETTE_FILL),
+    "half": lambda x: silhouette(x, 0.5),
 }
 
 

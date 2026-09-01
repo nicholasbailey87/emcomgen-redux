@@ -121,37 +121,61 @@ conv filter can threshold. A flat repaint removes it from the *interior*: with a
 single object on a black ground, every colour's fully covered pixels render
 identically.
 
-**It does not remove it from the edges, and this document claimed otherwise
-until 2026-09-01.** The claim was that the mutual information between colour and
-pixels is zero *by construction*. It is not, and it was never measured. A random
-forest given only geometry-invariant summary statistics of silhouetted images
-recovers the original colour well above chance, and the count of partially
-covered edge pixels alone orders the six palette colours with a mean Kendall τ
-of **+0.90** across 600 randomised geometries. Two defects caused it, one of
-which is now fixed and one of which is structural — both are set out under
-**the fill** below. Read that section before quoting any invariance claim from
-this one; the load-bearing sentence in it was false for a fortnight because
-nobody looked.
+**It did not remove it from the edges, and this document claimed otherwise for a
+fortnight.** The claim was that the mutual information between colour and pixels
+is zero *by construction*. Under the coverage blend that ran from 2026-08-29 to
+2026-09-01 it was false and had never been measured: a random forest given only
+geometry-invariant summary statistics of silhouetted images recovered the
+original colour well above chance, and the count of partially covered edge pixels
+alone ordered the six palette colours with a mean Kendall τ of **+0.90** across
+600 randomised geometries. There are no partially covered edge pixels now — see
+the next paragraph — so that particular mechanism is gone, and what is left of it
+is set out under **the leak the edges took with them** below. The history stays
+here because the load-bearing sentence was false for a fortnight and nobody
+looked.
 
-**Shape is carried by coverage, not by a threshold.** Every pixel is scaled by
-`luma / peak`, its object coverage. For a flat object on black a fully covered
-pixel has `luma == peak` and a pixel at coverage `k` has `luma == k * peak`, so
-that ratio recovers the coverage exactly and does so independently of colour.
-The peak is per image, which is what makes it colour-invariant: blue peaks at
-0.114 where white peaks at 1.0, and a fixed divisor would render one far dimmer
-than the other. An all-black image has peak 0 and must stay black, so the
-`peak > 0` guard is load-bearing — without it the ratio is a NaN rather than a
-zero.
+**Shape is carried by a threshold, not by coverage.** Every pixel above
+`peak / 2` is repainted to the fill and every other pixel to zero, where `peak`
+is the image's own maximum luma. Per image is what makes it colour-invariant:
+blue peaks at 0.114 where white peaks at 1.0, and a fixed threshold would erase
+one and keep the other. A pixel at coverage `k` has `luma == k · peak` whatever
+the colour, so the threshold falls at `k = 0.5` for all six. An all-black image
+has peak 0 and must stay black, so the `peak > 0` guard is load-bearing.
 
-This replaced a `luma > peak / 2` threshold on 2026-08-29. The threshold was
-colour-invariant too, but it promoted every partly-lit edge pixel to fully lit,
-so the repainted region came back larger than the object it replaced.
-`test_coverage_is_preserved` pins the difference.
+**Why a threshold, when coverage describes the object better.** It does describe
+it better, and that is not the criterion. The intervention is training-time only
+and eval is never silhouetted, so what a fill is worth is how much of what a
+model learns under it survives the trip back to clean images.
+`diagnostics/silhouette_shape_probe.py` measures exactly that — a fresh `Conv4`
+trained on silhouetted positives, tested both on the same repainting and on the
+clean originals (cluster job 123354, 600 games, one seed):
+
+| arm | in_domain | clean |
+|---|---|---|
+| clean | 0.999 | 0.999 |
+| white_threshold | 0.794 | **0.560** |
+| white_coverage | 1.000 | 0.483 |
+| fill_coverage | 1.000 | 0.486 |
+
+Chance is 0.306 over four bare shape concepts. The coverage arms are perfectly
+readable under their own repainting and lose almost all of it at eval; the
+threshold is the only arm that gives up in-domain accuracy and keeps more of it
+on clean images. Whatever a network reads off an anti-aliased edge, it does not
+carry across — so the threshold went back in on 2026-09-01, after three days of
+coverage blending.
+
+Two costs come with it, and both are real. The repainted region is **larger**
+than the object it replaces, since every partly lit edge pixel is promoted to
+fully lit; `test_the_edge_is_promoted_to_the_fill` pins that, and the per-channel
+means quoted below run slightly high against it. And a threshold at half the peak
+erases the darker of two objects outright rather than merely dimming it — see
+docs/dubious-claims.md, which is where the one-object assumption lives.
 
 **The fill is `[data] silhouette_fill`, a per-channel fraction of maximum,
 defaulting to the palette's own mean object colour (149, 149, 106).** Which
 colour it is is a claim about the receiver's input BatchNorm; *that it is
-chromatic and lands on integer levels* is a claim about the edges, below. `ViT2` passes
+chromatic* is a claim about the palette, below. The value did not change when
+the edge treatment did. `ViT2` passes
 `initial_batch_norm=True`, so broccoli puts an `nn.BatchNorm2d(3)` over raw RGB
 at `preprocess[0]`, and ShapeWorld gets no other input normalisation — whatever
 this function emits lands directly on that layer's statistics. Since eval is
@@ -160,10 +184,16 @@ and then applied to clean images, and any gap between the two is a fixed offset
 of `(μ_clean − μ_running) / σ` on every eval activation. The learned affine
 cannot absorb it, because at train the offset is zero.
 
-White was the worst available answer: the brightest image the model ever sees.
-Against the palette as `tests/test_silhouette.py` states it — mean object
-channels (148.8, 148.8, 106.3) — a rate of 0.5 put the running means at 1.36×,
-1.36× and 1.70× the eval distribution, worst on blue.
+White was the worst available answer by this measure: the brightest image the
+model ever sees. Against the palette as `tests/test_silhouette.py` states it —
+mean object channels (148.8, 148.8, 106.3) — a rate of 0.5 put the running means
+at 1.36×, 1.36× and 1.70× the eval distribution, worst on blue. Note that the
+probe above read its best transfer at exactly that fill, and by a clear margin.
+The two changes are confounded in that arm — `white_threshold` differs from
+`fill_coverage` in edges *and* intensity — so either the BatchNorm gap is not
+what governs transfer, or the threshold buys more than the gap costs. Re-running
+the probe on the fill as it now stands is what separates them, and it has not
+been run.
 
 Half replaced it, on the argument that 0.5 is the maximum-entropy answer for a
 palette the code does not know, and is robust to how that ignorance is
@@ -174,7 +204,8 @@ now a constant fitted to this dataset.** It is worth being explicit that
 something real was given up: the new value is wrong the day ShapeWorld's palette
 changes, and the old one was not. Two measurements forced it.
 
-*A rounding-tie lattice.* A stored edge pixel is `round(coverage × fill × 255)`.
+*A rounding-tie lattice.* Under coverage blending, a stored edge pixel was
+`round(coverage × fill × 255)`.
 At `fill = 0.5` that is `coverage × 127.5`, and any colour whose maximum channel
 is 255 has coverage exactly `n/255`, so the product is exactly `n/2` and every
 odd `n` is an exact `.5` tie. Ties resolve by round-half-to-even on a float32
@@ -186,6 +217,9 @@ the transform that exists to remove it. The fix is that `fill × 255` is an
 since 255 is odd and `2nF` is even, so no **cross-colour** tie can exist. (Grey
 keeps ties of its own — its coverage is `m/128`, so `m = 64` gives 74.5 — but
 grey is alone on that ramp, so a tie there makes nothing disagree with anything.)
+The threshold has since made the whole lattice moot — there are no anti-aliased
+edges left to round — but the integer property is kept, on the weaker ground that
+it also means the fill is a colour the store can represent exactly.
 
 *A palette collision.* `0.5 × 255 = 128` is exactly `gray`, so silhouetting a
 grey object was bit-identical in and out: max delta 0 over 0 pixels. One colour
@@ -207,38 +241,45 @@ A chromatic fill has **no fixed point**: it is not any palette colour, so no
 colour is exempt. Under both previous fills exactly one was — `white` until
 2026-08-29, then `gray`.
 
-### The leak that remains
+### The leak the edges took with them
 
-Grey stays identifiable at ~0.97 recall (chance 0.167) after all of the above,
-and that is expected rather than a failure to implement the fix. An anti-aliased
-edge pixel is stored as `round(k · C)` per channel, so the ramp runs `0 → max(C)`
-and the number of representable coverage levels is
+Under coverage blending grey stayed identifiable at ~0.97 recall (chance 0.167)
+after every fix above, and it was not repairable at this layer. An anti-aliased
+edge pixel is stored as `round(k · C)` per channel, so the ramp ran `0 → max(C)`
+and the number of representable coverage levels was
 
 ```
 levels = 255 · V + 1        where V = max(R, G, B) / 255 is HSV Value
 ```
 
 Every palette colour has V = 1.0 except `gray`, at V = 0.502. Grey therefore
-resolves coverage in 129 steps where everything else uses 256, and its output
-**skips specific intensity values** — at the current fill, channel 0 can never
-read 4, 11, 18, 25, … 145. That is a structural gap in the value histogram,
-identical on every shape at every size, and it is what a classifier finds.
+resolved coverage in 129 steps where everything else used 256, and its output
+**skipped specific intensity values** — a structural gap in the value histogram,
+identical on every shape at every size, and that is what a classifier found. No
+post-hoc processing repaired it: for a given bright-colour stored level the
+window of true coverages was `128/255` grey-levels wide, so 128 of 256 levels
+were ambiguous and the map was not a function. Stochastic rounding, dithering,
+lattice equalisation and per-game jitter were prototyped and did reduce it, the
+best combination to chance, but each worked by destroying edge resolution — which
+is where shape lives, and which the threshold destroys outright.
 
-No post-hoc processing repairs it. For a given bright-colour stored level the
-window of true coverages is `128/255 = 0.502` grey-levels wide, so it straddles
-a grey bin boundary and **128 of 256 levels are ambiguous**: the map is not a
-function. No colour space helps either — an invertible transform preserves the
-information and a non-invertible one is quantisation under another name.
-Stochastic rounding, dithering, lattice equalisation and per-game jitter were
-prototyped and do reduce it, the best combination to chance, but each works by
-destroying edge resolution, which is where shape lives, and none has a run
-behind it.
+**The threshold closes it, by removing the ramp.** The output is two-valued per
+channel, `{0, fill}`, for every palette colour, so there is no histogram left for
+the bit-depth to shape.
 
-Note that HSL is the wrong coordinate here and should not be used for this: red,
-blue, green and yellow all sit at HSL L = 0.500 and grey at 0.502, so L does not
-separate grey at all. V does, and V *is* the edge bit-depth.
-`test_grey_resolves_coverage_more_coarsely` pins the divergence so that the day
-it changes, somebody notices.
+What survives is a different kind of thing and a much smaller one. The threshold
+is taken on the *stored* image, and grey stores coverage `k` as `round(128k)`
+where every other colour stores `round(255k)`, so grey turns on at `k > 0.5039`
+and the rest at `k ≥ 0.502`. Swept over all 256 stored levels, the six colours
+repaint identically at 255 of them and differ at exactly one, `n = 128`, where
+grey is off and the other five are on. That moves an object's boundary by up to a
+pixel; it does not put a colour-dependent gap in every image's histogram.
+`test_the_threshold_is_colour_invariant` pins both halves — the agreement and the
+exception — so the day the gap widens, somebody notices.
+
+Note that HSL is the wrong coordinate for any of this and should not be used:
+red, blue, green and yellow all sit at HSL L = 0.500 and grey at 0.502, so L does
+not separate grey at all. V does, and V *was* the edge bit-depth.
 
 dtype and range are preserved — the fill is read against 255 for integer images
 and against 1.0 for floating-point ones, and integer output is rounded rather
@@ -260,11 +301,11 @@ polarities and, in the concept game, the disjoint half that agent sees.
 comparable to the paper's and to the `probe_shape.py` sweep, which measures the
 sender on un-augmented images.
 
-### Both rates are 0.0 as of 2026-08-30
+### The rates are 0.0 sender, 0.1 receiver
 
-The intervention is built and tested and currently switched off. It ran at
-`silhouette_p_receiver = 0.5` from 2026-08-25, and on the constant channel that
-was too strong: rung 9 learned shape better than any ShapeWorld run on record
+Both were 0.0 for a few hours on 2026-08-30 and the receiver has been at 0.1
+since. It ran at `silhouette_p_receiver = 0.5` from 2026-08-25, and on the
+constant channel that was too strong: rung 9 learned shape better than any ShapeWorld run on record
 (0.758 on shape concepts, 0.829 on `and_shape_shape`, against ~0.52 for every
 run that had never escaped the colour shortcut) and left colour at exactly chance
 for all thirty epochs. Since eval is never silhouetted, that 0.50 is a failure to
@@ -279,7 +320,12 @@ shape rather than blocking it.
 The likely reason 0.5 is too strong here is that it suppresses the *channel* and
 not only the colour feature: half the receiver's games contain nothing worth
 decoding, and `unmixed_survival` sat at ~0.28 against ~0.45 at 0.0. DEFAULT.toml
-carries the full note and the titration plan if the colour-only minimum returns.
+carries the full note, and `experiments/silhouette_titration/` is the sweep.
+
+The rate did not move when the fill went back to a threshold on 2026-09-01, so
+that is the only change between the next ShapeWorld run and the last. The
+titration's earlier rungs ran under the coverage fill and are not comparable
+across it.
 
 In the reference game, `percent_novel = 0.0` hands back the *same* tensor for
 both agents; `silhouette` returns a new one, so an independent roll per agent is

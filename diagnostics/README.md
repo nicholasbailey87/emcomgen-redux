@@ -209,18 +209,37 @@ python diagnostics/silhouette_shape_probe.py                 # ~600 games, 15 ep
 sbatch scripts/silhouette_shape_probe.sbatch                 # the same, on preemptgpu
 ```
 
-Four arms, in the order the fill actually changed: `clean` (the ceiling),
-`white_threshold` (`luma > peak/2` repainted flat white — the original, live
-from 536c59e to e884662, and what rung 9 ran under when it reached 0.758 on
-shape concepts), `white_coverage` and `fill_coverage` (the current default at
-the palette's mean object colour). `e884662` changed hard edges to anti-aliased
-ones *and* full intensity to 58% in one commit, so the middle arm is what says
-which of the two a difference belongs to.
+Four arms: `clean` (the ceiling), and the live `silhouette` at three fills —
+`white` (1.0), `fill` (the current default, the palette's mean object colour) and
+`half` (0.5). All three repaint by threshold, because that is what the live code
+does.
+
+**What it has settled.** Run against the coverage blend on 2026-09-01 (job
+123354, 600 games, one seed), with the pre-`e884662` threshold carried locally as
+a fourth arm:
+
+| arm | in_domain | clean |
+|---|---|---|
+| clean | 0.999 | 0.999 |
+| white_threshold | 0.794 | **0.560** |
+| white_coverage | 1.000 | 0.483 |
+| fill_coverage | 1.000 | 0.486 |
+
+Chance 0.306. The coverage arms are perfectly readable under their own repainting
+and lose almost all of it at eval; the threshold is the only arm that gives up
+in-domain accuracy and keeps more of it on clean images. That is what put the
+threshold back into `generic.silhouette`, and the local copy went with it.
+
+What it left open, and what the arms above now exist for: `white_threshold` was
+measured at full white and the fill adopted is the chromatic one, so no arm has
+ever read the transform as it now stands.
 
 Colour is the control, on the same games and the same split: a silhouette is
 meant to erase it, so an arm whose colour accuracy sits above chance is leaking.
-`fill_coverage` is expected to leak grey specifically — see docs/data.md, "The
-leak that remains".
+The threshold leaves no anti-aliased ramp to carry colour, so the leak
+docs/data.md documents under "The leak the edges took with them" is gone — but
+`half` should leak anyway, for an unrelated reason: `0.5 × 255 = 128` is exactly
+ShapeWorld's `gray`, so a grey object under that arm is not repainted at all.
 
 It answers what is available to be learned, not what a given run did learn. For
 that, see `probe_shape.py` in the parent checkout, which sweeps a trained

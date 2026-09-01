@@ -15,23 +15,29 @@ lumas are distinct, which is why grayscale alone would fail, and that after
 repainting all six colours render to the identical tensor.
 
 Second, that it keeps shape, which is the entire point of removing colour, and
-that it keeps it at the *coverage* the object had rather than binarised. The
-transform scales each pixel by `luma / peak`, so an anti-aliased edge survives
-with its partial coverage intact; the threshold it replaced promoted every
-partly-lit edge pixel to fully lit and grew the repainted region.
+that it keeps it as a *binary* region. Every pixel above half the image's peak
+luma is promoted to the fill and every other pixel to zero, so the output is
+two-valued and an anti-aliased edge does not survive as a ramp. That is a worse
+description of the object than the coverage blend it replaced on 2026-09-01, and
+a better one to hand a receiver: the intervention is training-time only, and
+`diagnostics/silhouette_shape_probe.py` measured that shape learned off coverage
+edges does not transfer to the clean images eval uses (0.483 against the
+threshold's 0.560, chance 0.306). See `silhouette`'s docstring for the table.
 
 The colour is `silhouette_fill`, a per-channel fraction of maximum, defaulting
 to the palette's own mean object colour (149, 149, 106). Which colour it is is a
 claim about the receiver's input BatchNorm rather than about the language -- see
 DEFAULT.toml -- so the tests here pin that the fill is honoured and configurable
-and leave that argument where it is stated. What the tests do own is the two
-properties the *value* has to have, both of which the old flat 0.5 lacked and
-neither of which was checked until 2026-09-01: `fill * 255` must be an integer
-in every channel, which is what makes the anti-aliased edges colour-invariant,
-and the fill must collide with no palette colour, or that colour is silently
-exempt from the transform. `test_partial_coverage_is_colour_invariant_at_every_level`
-is the one that would have caught the leak; the old version of it tested a
-single stored level, and picked one of the 213 that already agreed.
+and leave that argument where it is stated. What the tests do own is that no
+palette colour is the fill, or that colour is silently exempt from the transform,
+and that `fill * 255` is a whole number of stored levels, which under the
+threshold means only that the fill is a colour the store can represent exactly.
+
+The threshold makes the erasure sharper than the blend could: a pixel at
+coverage `k` has `luma == k * peak` whatever the object's colour, so the
+threshold falls at the same coverage for all six and the output histogram is
+`{0, fill}` for every one of them. `test_the_threshold_is_colour_invariant` sweeps all 256 stored levels and finds
+the single level where grey's coarser quantisation puts it on the other side.
 
 Third, that the roll is per *game* and per *agent*. Per-game matters because
 rolling per image would leave roughly (1-p) x 10 of a set's targets coloured and
@@ -41,8 +47,6 @@ shape-from-silhouette rather than the shape-from-colour-image competence eval
 requires, so `silhouette_p_sender = 0` has to leave the sender's view untouched.
 """
 
-
-from fractions import Fraction
 
 import numpy as np
 import torch
@@ -59,7 +63,7 @@ from data.generic import (
 # What a fully covered pixel comes back at, per dtype and per channel.
 FILL_U8 = tuple(round(f * 255) for f in DEFAULT_SILHOUETTE_FILL)
 # Through float32, so the equality assertions below are exact: the transform
-#     multiplies a coverage of exactly 1.0 by the float32 cast of this literal.
+#     multiplies a mask of exactly 1.0 by the float32 cast of this literal.
 FILL_F32 = tuple(
     torch.tensor(DEFAULT_SILHOUETTE_FILL, dtype=torch.float32).tolist()
 )
@@ -85,8 +89,9 @@ CHROMATIC = np.array(
 )
 
 # The five colours whose maximum channel is 255, i.e. everything but `gray`.
-#     Only these resolve coverage in 256 steps and only these are required to
-#     agree with each other. See `test_grey_resolves_coverage_more_coarsely`.
+#     Grey stores an edge in 129 levels where these use 256, which under the
+#     coverage blend made it disagree with them everywhere and now makes it
+#     disagree at exactly one. See `test_the_threshold_is_colour_invariant`.
 BRIGHT = np.array([c for c in COLOURS if c.max() == 255], dtype=np.uint8)
 
 N_GAMES, N_IMG, SIZE = 120, 40, 64
@@ -158,49 +163,36 @@ def test_silhouette_leaves_input_untouched():
     assert torch.equal(batch, before)
 
 
-def test_coverage_is_preserved():
+def test_the_edge_is_promoted_to_the_fill():
     """
-    A half-covered pixel comes back at half the fill, not at the fill.
+    A partly lit pixel above the threshold comes back at the full fill.
 
-    This is the property the `luma > peak / 2` threshold destroyed: it promoted
-        every partly-lit edge pixel to fully lit, so the repainted region was
-        larger than the object it replaced and the per-channel image mean
-        overshot by the difference. ShapeWorld renders anti-aliased edges, so
-        this is every object's boundary rather than a corner case.
+    This is the property that came back on 2026-09-01, and it is the exact
+        inverse of `test_coverage_is_preserved`, which pinned the blend that
+        held this slot from e884662. The repainted region is therefore larger
+        than the object it replaces and the per-channel image mean overshoots
+        with it -- a real cost, accepted because shape read off a coverage edge
+        does not survive the trip to the clean images eval uses.
+
+    The threshold falls between stored levels 127 and 128, i.e. at a coverage
+        of one half, and it falls there for every bright colour. See
+        `test_the_threshold_is_colour_invariant`.
     """
     img = np.zeros((1, 3, SIZE, SIZE), dtype=np.uint8)
-    # A solid blue block, with one row at half intensity standing in for a row
-    #     of pixels the renderer covered halfway.
+    # A solid blue block, with one row just over half intensity and one just
+    #     under, standing in for rows the renderer covered either side of half.
     img[0, :, 20:40, 20:44] = np.array([0, 0, 255], dtype=np.uint8).reshape(3, 1, 1)
     img[0, :, 40, 20:44] = np.array([0, 0, 128], dtype=np.uint8).reshape(3, 1)
+    img[0, :, 41, 20:44] = np.array([0, 0, 127], dtype=np.uint8).reshape(3, 1)
 
     out = silhouette(torch.from_numpy(img))
 
     assert out[0, :, 30, 30].tolist() == list(FILL_U8)
-    assert out[0, :, 40, 30].tolist() == [round(f * 128 / 255) for f in FILL_U8]
+    assert out[0, :, 40, 30].tolist() == list(FILL_U8)
+    assert int(out[0, :, 41, 30].max()) == 0
     assert int(out[0, :, 50, 30].max()) == 0
-
-
-def test_partial_coverage_is_colour_invariant():
-    """
-    Two colours at the same coverage repaint identically.
-
-    The whole-object case is `test_silhouette_erases_colour`; this is the edge
-        case, and it is the one that makes the coverage blend safe to swap in
-        for the threshold. It holds because a pixel at coverage `k` on a black
-        ground has `luma == k * peak` whatever the object's colour, so
-        `luma / peak` is the coverage and nothing else.
-    """
-    def half_covered(colour):
-        img = np.zeros((1, 3, SIZE, SIZE), dtype=np.uint8)
-        c = np.asarray(colour, dtype=np.int64).reshape(3, 1, 1)
-        img[0, :, 20:40, 20:44] = c
-        img[0, :, 40, 20:44] = (c // 2).reshape(3, 1)
-        return silhouette(torch.from_numpy(img))
-
-    first = half_covered(BRIGHT[0])
-    for colour in BRIGHT[1:]:
-        assert torch.equal(first, half_covered(colour))
+    # Two-valued, which is the whole of what an edge carries now.
+    assert _levels(out) == [[0, f] for f in FILL_U8]
 
 
 def _edge_pixel(colour, n):
@@ -218,20 +210,44 @@ def _edge_pixel(colour, n):
     return tuple(silhouette(torch.from_numpy(img))[0, :, 1, 1].tolist())
 
 
-def test_partial_coverage_is_colour_invariant_at_every_level():
+def test_the_threshold_is_colour_invariant():
     """
-    The sweep. This is the test whose absence hid the leak for a fortnight.
+    All six colours cross the threshold at the same coverage, bar one level.
 
-    `test_partial_coverage_is_colour_invariant` above does exercise a partial
-        pixel, but at exactly one stored level -- `c // 2`, i.e. 127 -- and 127
-        is one of the 213 levels where all five bright colours agreed even
-        under the old fill. The 43 that disagreed were never touched. Under
-        `fill = 0.5` this fails first at `n = 11`, where red, green, yellow and
-        white give 6 and blue gives 5.
+    A pixel at coverage `k` on a black ground has `luma == k * peak` whatever
+        the object's colour, so `luma > peak / 2` is a statement about `k` and
+        nothing else, and the output is `{0, fill}` for every colour. That is
+        the erasure the coverage blend could not make: under it, grey resolved
+        an edge in 129 levels where the rest used 256 and its output skipped
+        specific intensity values -- a structural gap a classifier found at
+        ~0.97 recall against a chance of 0.167 (docs/dubious-claims.md).
 
-    Five colours, not six: `gray` has half the edge bit-depth and cannot agree
-        with them. See `test_grey_resolves_coverage_more_coarsely`.
+    The exception, and it is the whole residual. The threshold is taken on the
+        *stored* image, and grey stores coverage `k` as `round(128k)` where a
+        bright colour stores `round(255k)`. Grey therefore turns on at
+        `round(128k) >= 65`, i.e. `k > 0.5039`, and the rest at `k >= 0.502`.
+        Exactly one of the 256 sampled levels falls in that gap, `n = 128`, and
+        there grey is off while the other five are on.
+
+    So: a boundary that can differ by a pixel, against a value histogram that
+        differed everywhere. Asserting the divergence rather than fixing it, as
+        `test_grey_resolves_coverage_more_coarsely` did before it, because the
+        day the gap widens somebody should notice.
     """
+    disagreed = []
+    for n in range(256):
+        got = {tuple(colour): _edge_pixel(colour, n) for colour in COLOURS}
+        if len(set(got.values())) != 1:
+            disagreed.append((n, got))
+
+    assert [n for n, _ in disagreed] == [128], disagreed
+
+    n, got = disagreed[0]
+    assert got[(128, 128, 128)] == (0, 0, 0)
+    for colour in BRIGHT:
+        assert got[tuple(colour)] == FILL_U8
+
+    # And the five that quantise alike agree at every level, including 128.
     for n in range(256):
         got = {tuple(colour): _edge_pixel(colour, n) for colour in BRIGHT}
         assert len(set(got.values())) == 1, f"level {n} disagreed: {got}"
@@ -241,26 +257,22 @@ def test_the_fill_is_an_integer_number_of_levels():
     """
     `fill * 255` is a whole number of stored levels in every channel.
 
-    This is *the* invariant. A bright colour's coverage is exactly `n/255`, so
-        a stored edge pixel is `round(n * F / 255)`; with `F` an integer that
-        can never be a half-integer, because 255 is odd and `2nF` is even, so
-        no rounding tie exists to break differently per colour. With
-        `F = 127.5` every odd `n` is a tie, and ties resolve on the last bits
-        of a float32 that depends on the colour's luma weights.
+    This carried more weight under the coverage blend, where it was what kept
+        anti-aliased edges off colour-dependent rounding ties: a stored edge
+        pixel was `round(n * F / 255)`, and with `F = 127.5` every odd `n` was
+        a tie broken on the last bits of a colour-dependent float32, which is
+        how 43 of 256 levels came to leak. There are no anti-aliased edges to
+        round now.
 
-    Asserted here as well as swept above because the sweep is a consequence and
-        this is the cause: an edit back to 0.5, or to a sloppy literal like
-        0.58, fails here with the reason attached rather than at 43 anonymous
-        levels. The tolerance is tight but not exact -- the TOML literal is
+    What it still means is that the fill is a colour the store can represent
+        exactly rather than one that lands between two levels, so an edit to a
+        sloppy literal like 0.58 -- whose product is 147.9, i.e. neither 148
+        nor anything with a reason behind it -- fails here with the reason
+        attached. The tolerance is tight but not exact: the TOML literal is
         0.584313725, whose product is 149.000000875.
     """
     for f in DEFAULT_SILHOUETTE_FILL:
         assert abs(f * 255 - round(f * 255)) < 1e-4, f
-
-    # And therefore, for every stored level a bright colour can take:
-    for n in range(256):
-        for f in FILL_U8:
-            assert Fraction(n * f, 255).denominator != 2, (n, f)
 
 
 def test_the_fill_collides_with_no_palette_colour():
@@ -283,7 +295,7 @@ def test_the_fill_is_actually_written_to_three_channels():
     The interior of a covered object reads the fill, per channel.
 
     The output line used to end `.expand_as(imgs)`, which broadcast a single
-        coverage channel across three. That was correct while the fill was
+        mask channel across three. That was correct while the fill was
         achromatic and is silently wrong now: it would write one channel three
         times, degrading the chromatic fill back to a grey and restoring the
         `gray` collision, and nothing else here would fail. Only an interior
@@ -293,39 +305,6 @@ def test_the_fill_is_actually_written_to_three_channels():
     assert out[0, :, 32, 32].tolist() == [149, 149, 106]
     assert out[0, :, 32, 32].tolist() == list(FILL_U8)
     assert int(out[0, :, 0, 0].max()) == 0
-
-
-def test_grey_resolves_coverage_more_coarsely():
-    """
-    Grey is a known, documented divergence, and is not expected to be fixed.
-
-    An edge pixel is stored as `round(k * C)` per channel, so the number of
-        representable coverage levels is `255 * V + 1` for `V = max(R, G, B) /
-        255`, i.e. HSV Value. Every palette colour has V = 1.0 except `gray`,
-        at V = 0.502, so grey resolves coverage in 129 steps where the rest use
-        256 and its output skips specific intensity values -- a structural gap
-        in the value histogram, identical on every shape at every size, which a
-        classifier recovers at ~0.97 recall against a chance of 0.167.
-
-    Note HSV Value and not HSL Lightness: red, blue, green, yellow and white
-        all sit at HSL L = 0.500 and grey at 0.502, so L does not separate grey
-        at all. V does, and V *is* the edge bit-depth.
-
-    This is pinned rather than fixed. Every repair prototyped -- stochastic
-        rounding, dithering, lattice equalisation, per-game jitter -- works by
-        destroying edge resolution, which is where shape lives, and none has a
-        run behind it. Asserting grey *matched* would be a test that has to be
-        deleted the first time somebody renders an anti-aliased grey square.
-        Asserting it diverges means the day that changes, somebody notices.
-    """
-    grey = {_edge_pixel([128, 128, 128], n)[0] for n in range(256)}
-    bright = {_edge_pixel(BRIGHT[0], n)[0] for n in range(256)}
-    assert len(bright) == 150 and len(grey) == 129
-    assert grey < bright
-    assert sorted(bright - grey) == [
-        4, 11, 18, 25, 32, 39, 46, 53, 60, 67, 75,
-        82, 89, 96, 103, 110, 117, 124, 131, 138, 145,
-    ]
 
 
 def test_the_fill_is_honoured():
@@ -452,8 +431,10 @@ def _is_silhouetted(view, fill=FILL_U8):
         for the wrong reason.
 
     The games these read are built from `_square` and `_disc`, both of which
-        mask hard, so a repainted view holds only the fill and zero and there
-        are no partial-coverage pixels to allow for.
+        mask hard. Under the threshold every repainted view holds only the fill
+        and zero anyway, whatever it was rendered from -- but this was written
+        against the coverage blend, where a soft edge would have read as a view
+        that was not silhouetted, and the geometry is the reason it did not.
     """
     vals = view.reshape(view.shape[0], 3, -1)
     target = torch.tensor(fill, dtype=vals.dtype).reshape(1, 3, 1)

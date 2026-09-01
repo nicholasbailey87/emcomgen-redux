@@ -86,9 +86,15 @@ n_workers = 0
 # re-encode colour as a scalar rather than remove it, where a flat repaint
 # removes it outright.
 #
-# **Both off as of 2026-08-30**, against a receiver rate of 0.5 since 2026-08-25.
-# The mechanism works and the measurement below is worth keeping, but the rate
-# was set against the old channel and is too strong for this one.
+# **Sender 0.0, receiver 0.1**, the latter since 2026-08-30. Both were off for
+# the few hours before that, against a receiver rate of 0.5 since 2026-08-25.
+# The mechanism works and the measurement below is worth keeping, but 0.5 was
+# set against the old channel and is too strong for this one.
+#
+# The rate did not move when the fill went back to a threshold on 2026-09-01, so
+# that one change stands alone between this run and the last. `silhouette_fill`
+# below is where that is argued; `experiments/silhouette_titration/` is where
+# the rate gets swept under it.
 #
 # What 0.5 did under the constant channel and the identity estimator. Rung 9
 # learned *shape* better than any ShapeWorld run on record -- 0.758 on shape
@@ -122,52 +128,79 @@ n_workers = 0
 silhouette_p_sender = 0.0
 silhouette_p_receiver = 0.1
 
-# The colour a fully covered pixel comes back at, as a per-channel fraction of
-# maximum. Partly covered pixels scale down with their coverage.
+# The colour a lit pixel comes back at, as a per-channel fraction of maximum.
+# Every pixel above half the image's peak luma is repainted to it and every
+# other pixel to zero, so a silhouette is two-valued.
 #
-# **ShapeWorld's own mean object colour, (149, 149, 106) of 255.** This was a
-# flat 0.5 until 2026-09-01, on an argument that is being deliberately
-# abandoned rather than quietly dropped, so it is worth stating what is being
-# given up. Half was the maximum-entropy answer for a palette this key does not
-# know, and it was robust to how the ignorance was written down: colours uniform
-# over the RGB cube give 0.5 per channel; uniform over the six saturated
-# primaries and secondaries gives 0.5; uniform over hue at full saturation and
-# value gives 0.5, since the trapezoidal hue-to-RGB curve is 1 for a third of
-# the circle, 0 for a third, and averages 0.5 across the ramps. That is a real
-# property and this key no longer has it. What replaces it is a constant fitted
-# to this dataset, which fails the day ShapeWorld's palette changes -- and the
-# palette changing is exactly the scenario the last section here warns about.
-# The trade is made because half was not merely suboptimal, it was leaking.
+# **A threshold again, since 2026-09-01.** From e884662 (2026-08-29) to that
+# date the transform blended by coverage instead -- a pixel at coverage `k` came
+# back at `k * fill` -- so an anti-aliased edge survived as a ramp rather than
+# being promoted to fully lit. That is the better description of the object. It
+# is the worse thing to hand a receiver, and the difference is not small.
+# `diagnostics/silhouette_shape_probe.py` (cluster job 123354) trains a fresh
+# `Conv4` on silhouetted ShapeWorld positives under each fill and tests it on
+# both the same repainting and on clean images, which is what eval actually
+# shows the model:
 #
-# **Leak 1: a rounding-tie lattice.** A stored edge pixel is
-# `round(coverage * fill * 255)`. At `fill = 0.5` that is `coverage * 127.5`,
-# and any colour whose maximum channel is 255 has coverage exactly `n/255`, so
-# the product is exactly `n/2` and every odd `n` lands on an exact `.5` tie.
-# Ties resolve by round-half-to-even on a float32 whose last bits differ per
-# colour, because each colour's luma is a different weighted sum of the same
-# integer. Measured over all 256 stored levels: 43 of them made red, blue,
-# green, yellow and white disagree -- colour, re-encoded in the anti-aliasing,
-# in a transform whose entire job is to remove it. The first is `n = 11`, where
-# red, green, yellow and white give 6 and blue gives 5.
+#     arm                in_domain    clean
+#     clean                  0.999    0.999
+#     white_threshold        0.794    0.560
+#     white_coverage         1.000    0.483
+#     fill_coverage          1.000    0.486     (chance 0.306)
 #
-# **Leak 2: a palette collision.** `0.5 * 255 = 128` is exactly ShapeWorld's
-# `gray`, so silhouetting a grey object was bit-identical in and out -- max
-# delta 0 over 0 pixels. One colour in six was silently exempt.
+# The coverage arms are perfectly readable under their own repainting and lose
+# almost all of it at eval; the threshold is the only arm that gives up
+# in-domain accuracy and keeps more of it on clean images. One seed, one
+# architecture, four bare shape concepts, 600 games -- read the direction, not
+# the third decimal place. What it says is that shape read off an anti-aliased
+# edge is not the shape that transfers, and the intervention only ever pays off
+# through the transfer.
 #
-# **One change fixes both.** The tie fix is that `fill * 255` is an *integer*
-# per channel: `n * F / 255` cannot be a half-integer when `F` is an integer,
-# since 255 is odd and `2nF` is even. So there are no *cross-colour* ties. (Grey
-# still has ties of its own: its coverage is `m/128`, not `m/255`, so at F = 149
-# `m = 64` gives 74.5 exactly. Harmless -- grey is alone on that ramp, so a tie
-# there makes nothing disagree with anything.) Any integer `F` would do for
-# that; 149/149/106 is chosen for the BatchNorm, below. Note how fragile this
-# is: the property is carried by a float literal in this file. Write the
-# channels to at least nine decimal places. `0.584313725 * 255` is
-# 149.000000875, which rounds to 149; `0.58 * 255` is 147.9, which rounds to
-# 148 and means nothing in particular; and a value whose product is a
-# half-integer brings the tie leak straight back with no error anywhere.
-# `tests/test_silhouette.py::test_the_fill_is_an_integer_number_of_levels`
-# exists to make that fail loudly.
+# Two things follow for the rest of this comment. The repainted region is now
+# **larger** than the object it replaces, since every partly lit edge pixel is
+# promoted, and the per-channel means below therefore run slightly high against
+# what the table says. And the leak that used to close this comment -- grey's
+# coarser edge quantisation, ~0.97 recall for a classifier -- is **gone**, since
+# there is no ramp left to quantise.
+#
+# **ShapeWorld's own mean object colour, (149, 149, 106) of 255.** The value did
+# not change on 2026-09-01 and neither did most of the argument for it. It was a
+# flat 0.5 until then, on an argument that is being deliberately abandoned rather
+# than quietly dropped, so it is worth stating what is being given up. Half was
+# the maximum-entropy answer for a palette this key does not know, and it was
+# robust to how the ignorance was written down: colours uniform over the RGB cube
+# give 0.5 per channel; uniform over the six saturated primaries and secondaries
+# gives 0.5; uniform over hue at full saturation and value gives 0.5, since the
+# trapezoidal hue-to-RGB curve is 1 for a third of the circle, 0 for a third, and
+# averages 0.5 across the ramps. That is a real property and this key no longer
+# has it. What replaces it is a constant fitted to this dataset, which fails the
+# day ShapeWorld's palette changes. The trade is made because half was not merely
+# suboptimal, it was colliding.
+#
+# **The collision.** `0.5 * 255 = 128` is exactly ShapeWorld's `gray`, so
+# silhouetting a grey object was bit-identical in and out -- max delta 0 over 0
+# pixels. One colour in six was silently exempt from an intervention whose entire
+# job is to remove colour. This is the reason the value moved and it is unaffected
+# by the edge treatment: a chromatic fill has no fixed point in the palette at
+# all. `tests/test_silhouette.py::test_the_fill_collides_with_no_palette_colour`
+# pins it.
+#
+# **The tie lattice, which the threshold has made moot.** Under coverage blending
+# a stored edge pixel was `round(coverage * fill * 255)`; at `fill = 0.5` that is
+# `coverage * 127.5`, and any colour whose maximum channel is 255 has coverage
+# exactly `n/255`, so the product was exactly `n/2` and every odd `n` landed on a
+# `.5` tie. Ties resolve by round-half-to-even on a float32 whose last bits differ
+# per colour, and 43 of the 256 stored levels made red, blue, green, yellow and
+# white disagree -- colour re-encoded in the anti-aliasing. Making `fill * 255` an
+# integer per channel removed that, since `n * F / 255` cannot be a half-integer
+# when `F` is an integer (255 is odd, `2nF` is even). There are no anti-aliased
+# edges left to round, so the property is no longer load-bearing; keep it anyway,
+# because it also means the fill is a colour the store can represent exactly.
+# Write the channels to at least nine decimal places: `0.584313725 * 255` is
+# 149.000000875, which rounds to 149, where `0.58 * 255` is 147.9, which rounds to
+# 148 and means nothing in particular.
+# `tests/test_silhouette.py::test_the_fill_is_an_integer_number_of_levels` exists
+# to make a sloppy literal fail loudly.
 #
 # **Why chromatic and not simply another integer grey.** The receiver's `ViT2`
 # opens with `nn.BatchNorm2d(3)` over raw RGB (`initial_batch_norm=True`, and
@@ -190,10 +223,17 @@ silhouette_p_receiver = 0.1
 #
 # Those means weight the six colours **uniformly**. Nobody has checked
 # ShapeWorld's empirical colour frequencies, so if they are not uniform the
-# match is approximate rather than exact.
+# match is approximate rather than exact. They also assume the repainted region
+# is the object's, which the threshold no longer quite honours.
 #
-# White was worse still: the brightest image the model ever sees, putting the
-# running means at 1.36x, 1.36x and 1.70x the eval distribution.
+# White was worse still by this measure -- the brightest image the model ever
+# sees, putting the running means at 1.36x, 1.36x and 1.70x the eval
+# distribution. Note that the probe above measured its best transfer at exactly
+# that fill, `white_threshold`. Either the BatchNorm gap is not what governs
+# transfer, or the threshold is worth more than the gap costs; the two changes
+# are confounded in that arm and nothing here separates them. The first re-run
+# of the probe under this fill is what settles it, and until then the BatchNorm
+# argument is being kept on its own merits rather than on a measurement.
 #
 # A constant cannot match the second moment at all: a repainted object has zero
 # colour variance, so `running_var` still sits below the eval distribution.
@@ -204,20 +244,15 @@ silhouette_p_receiver = 0.1
 # unreliable, degrading the games where colour is genuine. A constant stays
 # detectable, and that detectability is the point.
 #
-# **A leak remains, and this key cannot close it.** An edge pixel is stored as
-# `round(k * C)` per channel, so the ramp runs `0 -> max(C)` and the number of
-# representable coverage levels is `255 * V + 1`, for `V = max(R, G, B) / 255`,
-# i.e. HSV Value. Every palette colour has V = 1.0 except grey, at V = 0.502, so
-# grey resolves coverage in 129 steps where everything else uses 256; its output
-# therefore skips specific intensity values, identically on every shape at every
-# size, and a classifier finds that gap at ~0.97 recall against a chance of
-# 0.167. No post-hoc processing repairs it -- for a given bright-colour stored
-# level the window of true coverages is 128/255 of a grey level wide, so it
-# straddles a bin boundary and 128 of 256 levels are ambiguous. The map is not a
-# function. Stochastic rounding, dithering and per-game jitter were prototyped
-# and do reduce it, the best combination to chance, but every one works by
-# destroying edge resolution, which is where shape lives. See
-# docs/dubious-claims.md.
+# **What is left of the grey leak.** The threshold is taken on the *stored*
+# image, and grey stores coverage `k` as `round(128k)` where every other palette
+# colour stores `round(255k)`, so grey turns on at `k > 0.5039` and the rest at
+# `k >= 0.502`. That moves an object's boundary by up to a pixel; it is not the
+# colour-dependent gap in every image's value histogram that the coverage
+# version could not close. Swept over all 256 stored levels, the six colours
+# repaint identically at 255 of them and differ at exactly one.
+# `test_the_threshold_is_colour_invariant` pins that, including the exception.
+# See docs/data.md and docs/dubious-claims.md.
 silhouette_fill = [0.584313725, 0.584313725, 0.415686275]
 
 [optimiser]

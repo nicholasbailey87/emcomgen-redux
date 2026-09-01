@@ -69,11 +69,19 @@ colour-only policy therefore scores 10 targets plus 2/3 of 10 distractors =
 flat single-colour silhouettes with that probability, per game, at training time
 only. The repaint is what removes colour — a plain grayscale conversion does
 not, since the six colours sit at six distinct luma values (blue 29 through
-white 255) that a single conv filter can separate. Shape survives as coverage
-rather than as a threshold, and the fill is `data.silhouette_fill`, the
-palette's own mean object colour. It removes colour from an object's interior
-but not entirely from its anti-aliased edge; docs/data.md sets out what leaks
-and why one part of it is not fixable.
+white 255) that a single conv filter can separate. Shape survives as a threshold
+at half the image's peak luma rather than as coverage, and the fill is
+`data.silhouette_fill`, the palette's own mean object colour. The output is
+two-valued, so every colour repaints identically and the anti-aliased edge that
+used to leak is gone with the ramp.
+
+The threshold went back in on 2026-09-01, after three days of coverage
+blending, because coverage described the object better and transferred worse: a
+`Conv4` trained on silhouettes and tested on the clean images eval actually uses
+reads 0.560 under the threshold against 0.483–0.486 under the blend, at a chance
+of 0.306 (`diagnostics/silhouette_shape_probe.py`). The cost is that the
+repainted region comes back larger than the object it replaces. docs/data.md
+carries the table and what is left of the grey leak.
 
 The receiver is the side to constrain. Silhouetting the *sender* would teach it
 shape-from-silhouette, which is not the shape-from-colour-image competence that
