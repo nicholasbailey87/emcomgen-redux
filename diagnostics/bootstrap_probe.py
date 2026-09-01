@@ -439,6 +439,22 @@ def main():
         loss.backward()
         train.clip_gradients(pair, config["optimiser"]["clip_grad_norm"])
         optimiser.step()
+        # `train.py` bounds the speaker's channel scale here rather than in the
+        #     forward pass, and this probe has to do the same or it is not
+        #     running the ladder's channel. It did not until 2026-09-01: with
+        #     `log_logit_scale` learnable again since `9409d40`, an unprojected
+        #     probe let the scale climb to 6.8 over 3,000 steps against the 2.0
+        #     every real run is held at, so the loop being probed was sharper
+        #     than any loop training can produce. Every reading this script gave
+        #     between that commit and this line is suspect for that reason.
+        #
+        # The fix does not change the verdict it was giving -- rung 1 on frozen
+        #     prototypes reaches 0.94 projected against 0.85 unprojected at
+        #     3,000 steps -- but it changes it for the better, which is its own
+        #     result: the unprojected run peaked at 0.969 by step 1,600 and then
+        #     slid as the scale ran past 6, and the projected one did not slide.
+        #     See `sender.GumbelChannel.project_channel` and docs/channel.md.
+        pair.sender.language_model.project_channel()
 
         if step % args.every:
             continue
