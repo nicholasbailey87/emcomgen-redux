@@ -35,10 +35,21 @@ lives at `f7dc0de`; what it read, and what decided that change:
   fill_coverage          1.000    0.486     (chance 0.306, job 123354)
 
 The coverage arms were perfectly readable under their own repainting and lost
-almost all of it at eval. Note what that leaves open, and what this script now
-exists to close: `white_threshold` was measured at full white, and the fill
-adopted is the chromatic one, so no arm has ever read the transform as it now
-stands. `white` and `fill` here are the two halves of that question.
+almost all of it at eval.
+
+**Read that table as a cautionary tale, not as a result.** Re-running it
+unchanged, at the same seed and on the same GPU, put `white_threshold` at 0.403
+where it had read 0.560 (jobs 123583 and 123354) -- a swing wider than the gap it
+was being read for, because convolution backward on cuDNN accumulates with
+atomics. Three single-fit runs across two transforms and three fills all landed
+between 0.40 and 0.56 with no arm separable from any other.
+
+Hence `--seeds`, which defaults to 5, and the determinism flags at the top of
+this file. Each arm is fit that many times and reported as a mean, an sd and a
+range; the split and the games are drawn once from `--seed` and shared by every
+arm and every fit, so the only thing varying within a row is the fit itself. Do
+not read a difference between two arms that is smaller than their ranges
+overlap.
 
 Colour is the control, on the same games and the same split. A silhouette is
 supposed to erase it, so colour under any repainting arm should sit at chance;
@@ -70,8 +81,22 @@ import sys
 
 import h5py
 import numpy as np
-import torch
-import torch.nn as nn
+
+# Before `torch`, and before any CUDA context exists: cuBLAS reads this at
+#     initialisation and `use_deterministic_algorithms` raises without it.
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+import torch  # noqa: E402
+import torch.nn as nn  # noqa: E402
+
+# Convolution backward on cuDNN accumulates with atomics by default, so two
+#     runs of this script at the same seed did not agree: on 2026-09-01 the
+#     same arm read 0.560 and 0.403 on the clean column across jobs 123354 and
+#     123583, a swing wider than the effect the script was being read for. The
+#     flags cost some throughput and buy a number that means something.
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+torch.use_deterministic_algorithms(True, warn_only=True)
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "code"))
 
@@ -166,7 +191,8 @@ def main(args):
     langs = [l.decode() if isinstance(l, (bytes, np.bytes_)) else str(l)
              for l in f["langs"][:]]
     print("data     ", path, "|", args.split, f"({len(langs)} games)")
-    print("device   ", DEV, "| epochs", args.epochs, "| games", args.games)
+    print("device   ", DEV, "| epochs", args.epochs, "| games", args.games,
+          "|", args.seeds, "fits per arm | split seed", args.seed)
 
     for attribute, words in (("shape", SHAPES), ("colour", COLOURS)):
         games, y_game, classes = bare_concept_games(langs, words, args.games, rng)
@@ -195,17 +221,25 @@ def main(args):
         print(f"  {len(tr_i)} train images, {len(te_i)} test, chance {chance:.3f}")
 
         clean_te = render(flat[te_i], "clean")
-        head_row = f"  {'arm':<18}{'in_domain':>11}{'clean':>9}"
+        head_row = (f"  {'arm':<12}{'in_domain':>11}{'sd':>7}"
+                    f"{'clean':>9}{'sd':>7}{'clean range':>16}")
         print(head_row)
         print("  " + "-" * (len(head_row) - 2))
         for arm in ARMS:
+            # The split and the rendering are shared across seeds; only the fit
+            #     is re-drawn, which is the variance the seeds are here for.
             X_tr = render(flat[tr_i], arm)
             X_te = render(flat[te_i], arm)
             evals = [("in_domain", X_te, y_img[te_i]), ("clean", clean_te, y_img[te_i])]
-            s = train_probe(X_tr, y_img[tr_i], evals, args.epochs, args.batch,
-                            args.lr, args.seed)
-            print(f"  {arm:<18}{s['in_domain']:>11.3f}{s['clean']:>9.3f}", flush=True)
-        print(f"  {'chance':<18}{chance:>11.3f}{chance:>9.3f}")
+            runs = [train_probe(X_tr, y_img[tr_i], evals, args.epochs, args.batch,
+                                args.lr, seed)
+                    for seed in range(args.seeds)]
+            ind = np.array([r["in_domain"] for r in runs])
+            cln = np.array([r["clean"] for r in runs])
+            print(f"  {arm:<12}{ind.mean():>11.3f}{ind.std():>7.3f}"
+                  f"{cln.mean():>9.3f}{cln.std():>7.3f}"
+                  f"{cln.min():>10.3f}-{cln.max():<5.3f}", flush=True)
+        print(f"  {'chance':<12}{chance:>11.3f}{'':>7}{chance:>9.3f}")
 
 
 if __name__ == "__main__":
@@ -217,5 +251,10 @@ if __name__ == "__main__":
     p.add_argument("--epochs", type=int, default=15)
     p.add_argument("--batch", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=0,
+                   help="picks the games and the train/test split, once, for "
+                        "every arm and every fit")
+    p.add_argument("--seeds", type=int, default=5,
+                   help="fits per arm, at seeds 0..n-1. One fit is not a "
+                        "reading: see the module docstring")
     main(p.parse_args())

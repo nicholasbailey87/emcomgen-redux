@@ -160,9 +160,23 @@ clean originals (cluster job 123354, 600 games, one seed):
 Chance is 0.306 over four bare shape concepts. The coverage arms are perfectly
 readable under their own repainting and lose almost all of it at eval; the
 threshold is the only arm that gives up in-domain accuracy and keeps more of it
-on clean images. Whatever a network reads off an anti-aliased edge, it does not
-carry across — so the threshold went back in on 2026-09-01, after three days of
-coverage blending.
+on clean images. That is what put the threshold back in on 2026-09-01, after
+three days of coverage blending.
+
+**That table is one fit per arm and it does not survive its own repeat.**
+Re-running it unchanged, at the same seed on the same GPU, put `white_threshold`
+at 0.403 where it had read 0.560 (jobs 123583 and 123354) — convolution backward
+on cuDNN accumulates with atomics — and a third run read the three live fills at
+0.412, 0.553 and 0.506. That is six single-fit readings across two transforms and
+three fills, every one between 0.40 and 0.56, none separable from another.
+
+Two things survive the repeat, and they are what the section above should be read
+as resting on. Every repainting arm sits well above chance and far below `clean`,
+so shape does transfer and most of it is lost on the way. And the threshold
+reliably costs in-domain readability — 0.79–0.97 against the blend's 1.000, on
+every run. **Which fill transfers best is open.** The probe now fits each arm
+five times and reports a mean, an sd and a range; run it before quoting a number
+from here, and do not read a gap smaller than the ranges overlap.
 
 Two costs come with it, and both are real. The repainted region is **larger**
 than the object it replaces, since every partly lit edge pixel is promoted to

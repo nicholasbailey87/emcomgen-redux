@@ -85,8 +85,20 @@ def silhouette(imgs, fill=DEFAULT_SILHOUETTE_FILL):
 
     The coverage arms are perfectly readable under their own repainting and lose
     almost all of it at eval. The threshold is the only arm that gives up
-    in-domain accuracy and keeps more of it on clean images. Whatever a network
-    learns to read off an anti-aliased edge, it does not carry across.
+    in-domain accuracy and keeps more of it on clean images.
+
+    That table is one fit per arm, and it does not survive its own repeat.
+    Re-run unchanged at the same seed on the same GPU, `white_threshold` read
+    0.403 where it had read 0.560 (jobs 123583, 123354), because convolution
+    backward on cuDNN accumulates with atomics; a third run read the three live
+    fills at 0.412, 0.553 and 0.506. Six single-fit readings, all between 0.40
+    and 0.56, none separable from another. What survives it: every repainting
+    arm sits well above chance and far below `clean`, and the threshold costs
+    in-domain readability on every run (0.79-0.97 against the blend's 1.000).
+    Which fill transfers best is open. `diagnostics/silhouette_shape_probe.py`
+    now fits each arm five times and reports a range; run it before quoting a
+    number from here.
+
 
     Colour invariance, now exact. For a flat object on black a pixel at coverage
     `k` has `luma == k * peak` whatever the object's colour, so the threshold

@@ -7,14 +7,14 @@
 #
 # and override any of the probe's settings through the environment:
 #
-#     sbatch --export=ALL,GAMES=1200,EPOCHS=25 scripts/silhouette_shape_probe.sbatch
+#     sbatch --export=ALL,GAMES=1200,EPOCHS=25,SEEDS=10 scripts/silhouette_shape_probe.sbatch
 #
 # The table lands in results/silhouette_shape_probe/probe_<jobid>.txt, which is
 # also the job's stdout -- there is nothing else to collect.
 #
-# `--requeue` on a preemptible partition, and no checkpointing: eight fresh
-# Conv4 fits take a few minutes, so a preempted job simply starts again and
-# overwrites its own file. Half a table is not a table.
+# `--requeue` on a preemptible partition, and no checkpointing: forty fresh Conv4
+# fits take about a quarter of an hour, so a preempted job simply starts again
+# and overwrites its own file. Half a table is not a table.
 
 #SBATCH --job-name=silhouette_probe
 #SBATCH --partition=preemptgpu
@@ -22,7 +22,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=24GB
-#SBATCH --time=00:30:00
+#SBATCH --time=01:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --requeue
 
@@ -43,6 +43,7 @@ SPLIT="${SPLIT:-train}"
 GAMES="${GAMES:-600}"
 EPOCHS="${EPOCHS:-15}"
 SEED="${SEED:-0}"
+SEEDS="${SEEDS:-5}"
 
 OUT_DIR="${OUT:-$PROJECT_DIR/results/silhouette_shape_probe}"
 mkdir -p "$OUT_DIR"
@@ -53,7 +54,7 @@ echo "Job ID:       $SLURM_JOB_ID"
 echo "Node:         $(hostname)"
 echo "Date:         $(date)"
 echo "Data:         $DATA ($SPLIT)"
-echo "Games:        $GAMES  | epochs $EPOCHS | seed $SEED"
+echo "Games:        $GAMES  | epochs $EPOCHS | split seed $SEED | $SEEDS fits"
 echo "=============================================="
 
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv \
@@ -65,7 +66,8 @@ $PYTHON "$PROJECT_DIR/diagnostics/silhouette_shape_probe.py" \
     --split "$SPLIT" \
     --games "$GAMES" \
     --epochs "$EPOCHS" \
-    --seed "$SEED" || EXIT_CODE=$?
+    --seed "$SEED" \
+    --seeds "$SEEDS" || EXIT_CODE=$?
 
 EXIT_CODE="${EXIT_CODE:-0}"
 

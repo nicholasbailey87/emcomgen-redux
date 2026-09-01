@@ -76,12 +76,16 @@ two-valued, so every colour repaints identically and the anti-aliased edge that
 used to leak is gone with the ramp.
 
 The threshold went back in on 2026-09-01, after three days of coverage
-blending, because coverage described the object better and transferred worse: a
-`Conv4` trained on silhouettes and tested on the clean images eval actually uses
-reads 0.560 under the threshold against 0.483–0.486 under the blend, at a chance
-of 0.306 (`diagnostics/silhouette_shape_probe.py`). The cost is that the
-repainted region comes back larger than the object it replaces. docs/data.md
-carries the table and what is left of the grey leak.
+blending, on a reading from `diagnostics/silhouette_shape_probe.py`: a `Conv4`
+trained on silhouettes and tested on the clean images eval actually uses read
+0.560 under the threshold against 0.483–0.486 under the blend, at a chance of
+0.306. That reading did not reproduce — the same arm at the same seed came back
+at 0.403 on the next run — so what the probe supports is narrower: shape
+transfers under every fill, most of it is lost, and the threshold reliably costs
+in-domain readability. Which fill transfers best is open, and the probe now fits
+each arm five times to settle it. The other known cost is that the repainted
+region comes back larger than the object it replaces. docs/data.md carries the
+tables and what is left of the grey leak.
 
 The receiver is the side to constrain. Silhouetting the *sender* would teach it
 shape-from-silhouette, which is not the shape-from-colour-image competence that

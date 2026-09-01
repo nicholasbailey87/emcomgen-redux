@@ -205,18 +205,29 @@ anything is rendered, so no game contributes to both halves — the 20 positives
 of one game are near-duplicates of each other.
 
 ```
-python diagnostics/silhouette_shape_probe.py                 # ~600 games, 15 epochs
-sbatch scripts/silhouette_shape_probe.sbatch                 # the same, on preemptgpu
+python diagnostics/silhouette_shape_probe.py                 # 600 games, 15 epochs, 5 fits
+sbatch scripts/silhouette_shape_probe.sbatch                 # the same, on preemptgpu, ~15 min
 ```
+
+**One fit is not a reading.** Convolution backward on cuDNN accumulates with
+atomics, so the first three runs of this script were not reproducible: the same
+arm at the same seed on the same GPU read 0.560 and then 0.403 (jobs 123354 and
+123583), a swing wider than the difference it was being read for. `--seeds`
+defaults to 5 and each arm reports a mean, an sd and a range; the games and the
+split come from `--seed` once and are shared by every arm and every fit, so the
+only thing varying within a row is the fit. Do not read a difference between two
+arms whose ranges overlap. The determinism flags at the top of the file
+(`cudnn.deterministic`, `use_deterministic_algorithms`) cost some throughput and
+are what make a repeat run mean anything.
 
 Four arms: `clean` (the ceiling), and the live `silhouette` at three fills —
 `white` (1.0), `fill` (the current default, the palette's mean object colour) and
 `half` (0.5). All three repaint by threshold, because that is what the live code
 does.
 
-**What it has settled.** Run against the coverage blend on 2026-09-01 (job
-123354, 600 games, one seed), with the pre-`e884662` threshold carried locally as
-a fourth arm:
+**What it has settled, and what it has not.** Run against the coverage blend on
+2026-09-01 (job 123354, 600 games, **one fit**), with the pre-`e884662` threshold
+carried locally as a fourth arm:
 
 | arm | in_domain | clean |
 |---|---|---|
@@ -225,14 +236,18 @@ a fourth arm:
 | white_coverage | 1.000 | 0.483 |
 | fill_coverage | 1.000 | 0.486 |
 
-Chance 0.306. The coverage arms are perfectly readable under their own repainting
-and lose almost all of it at eval; the threshold is the only arm that gives up
-in-domain accuracy and keeps more of it on clean images. That is what put the
-threshold back into `generic.silhouette`, and the local copy went with it.
+Chance 0.306. That reading is what put the threshold back into
+`generic.silhouette`, and the local copy went with it — and it does not survive
+its own repeat. Job 123583 re-ran it unchanged and put `white_threshold` at
+0.403, and job 123584 read the three live fills at 0.412, 0.553 and 0.506. Six
+single-fit readings across two transforms and three fills, all between 0.40 and
+0.56, none separable from another.
 
-What it left open, and what the arms above now exist for: `white_threshold` was
-measured at full white and the fill adopted is the chromatic one, so no arm has
-ever read the transform as it now stands.
+So what stands is narrower than the commit that cites it. Every repainting arm
+sits well above chance and far below `clean`, so shape does transfer and most of
+it is lost; and the threshold reliably costs in-domain readability, 0.79–0.97
+against the coverage arms' 1.000, on every run. Which fill transfers best is
+open, and the seeded version of this script is what would close it.
 
 Colour is the control, on the same games and the same split: a silhouette is
 meant to erase it, so an arm whose colour accuracy sits above chance is leaking.

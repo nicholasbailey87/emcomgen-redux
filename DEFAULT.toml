@@ -149,12 +149,20 @@ silhouette_p_receiver = 0.1
 #     fill_coverage          1.000    0.486     (chance 0.306)
 #
 # The coverage arms are perfectly readable under their own repainting and lose
-# almost all of it at eval; the threshold is the only arm that gives up
-# in-domain accuracy and keeps more of it on clean images. One seed, one
-# architecture, four bare shape concepts, 600 games -- read the direction, not
-# the third decimal place. What it says is that shape read off an anti-aliased
-# edge is not the shape that transfers, and the intervention only ever pays off
-# through the transfer.
+# almost all of it at eval; the threshold is the only arm that gives up in-domain
+# accuracy and keeps more of it on clean images.
+#
+# **And that table does not survive its own repeat.** Re-run unchanged at the
+# same seed on the same GPU, `white_threshold` read 0.403 where it had read 0.560
+# (jobs 123583, 123354) -- convolution backward on cuDNN accumulates with atomics
+# -- and a third run read the three live fills at 0.412, 0.553 and 0.506. Six
+# single-fit readings across two transforms and three fills, all between 0.40 and
+# 0.56, none separable from another. Two things survive it: every repainting arm
+# sits well above chance and far below `clean`, so shape does transfer and most of
+# it is lost; and the threshold costs in-domain readability on every run, 0.79-0.97
+# against the blend's 1.000. Which fill transfers best is **open**. The probe now
+# fits each arm five times and reports a range -- run it before quoting a number
+# from here, and do not read a gap smaller than the ranges overlap.
 #
 # Two things follow for the rest of this comment. The repainted region is now
 # **larger** than the object it replaces, since every partly lit edge pixel is
