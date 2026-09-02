@@ -1,0 +1,35 @@
+# silhouette_titration_conv4 2 of 5: the rate at 0.2 with `Conv4` on both
+# agents.
+#
+# `silhouette_titration/` swept this key at 0.1-0.5 with `ResNet18SmallInput`
+# and no arm escaped the colour shortcut -- shape sat at chance in nine of ten
+# runs across two fills. This folder is that sweep again with the backbone the
+# paper actually used on ShapeWorld: `f^T_theta` and `f^S_phi` are 4-layer,
+# 64-filter CNNs (appendix A.1), which is 113,088 parameters against
+# `ResNet18SmallInput`'s 11,168,832.
+#
+# Everything else is rung 1 as `DEFAULT.toml` leaves it, and the arms differ in
+# `silhouette_p_receiver` alone.
+#
+# Note `Conv4.final_feat_dim` is 1024 -- a 64x4x4 map flattened, so the width
+# downstream goes up rather than down. The prototyper, the language model and
+# the discriminator all size off it.
+#
+# No `[slurm]` block: that is read from `01_silhouette_0.1.toml` alone.
+
+name = "silhouette_titration_conv4"
+
+[sender]
+feature_model = "Conv4"
+
+[receiver]
+feature_model = "Conv4"
+
+[data]
+silhouette_p_receiver = 0.2
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
