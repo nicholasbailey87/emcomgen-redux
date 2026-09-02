@@ -1,0 +1,61 @@
+# silhouette_titration_resnet18 5 of 5: the rate at 0.5 with
+# `ResNet18SmallInput` on both agents.
+#
+# `silhouette_titration_conv4/` sweeps this key with `Conv4` on both agents.
+# This folder is that sweep's control: the same five rates, the same thirty
+# epochs, the same rung 1 otherwise, on the backbone ShapeWorld actually runs
+# -- `ResNet18SmallInput`, 11,168,832 parameters against `Conv4`'s 113,088.
+# The two folders differ in the backbone alone, so the pair is the 99x
+# comparison and neither half is readable without the other.
+#
+# **Why this is not `silhouette_titration/` or `silhouette_titration_2/`
+# again.** Both of those swept this key on this backbone and neither escaped,
+# so the temptation is to reuse one as the control. Neither can be:
+#
+#   - `silhouette_titration/` (8faab4f) ran the coverage silhouette that
+#     f7dc0de later found leaking colour through anti-aliased edges, with grey
+#     objects exempt entirely.
+#   - `silhouette_titration_2/` (da934a4) ran the fixed threshold, but predates
+#     6c46a57.
+#
+# 6c46a57 is the one that matters here. Before it, `builder.build_models`
+# threaded `feature_model.final_feat_dim` into the prototyper, the language
+# model and the discriminator, so the backbone set the width of the whole
+# agent. `ReferentAdapter` now sizes each agent from its own language model's
+# `d_model` instead. A Conv4 arm run under the adapter is therefore compared
+# against a ResNet arm that was not, and the widths downstream would differ
+# between them for a reason that has nothing to do with vision:
+# `Conv4.final_feat_dim` is 1024 against `ResNet18SmallInput`'s 512, so
+# pre-adapter the *smaller* backbone made everything downstream *wider*. The
+# adapter is exactly what removes that confound, and a control from before it
+# reinstates the confound it removes.
+#
+# So the backbone is stated here rather than inherited, even though it is
+# `DEFAULT.toml`'s own value. An arm of a two-arm comparison that reads its
+# treatment from a default is an arm that moves silently the next time the
+# default does, and this pair has already been broken once by a change landing
+# between two sweeps.
+#
+# Thirty epochs because that is what `silhouette_titration_conv4/` sets, not
+# because thirty is enough. Of the four Conv4 runs that ever learned shape the
+# durable onsets were epochs 7, 20, 28 and 82, so a flat arm at thirty is
+# weak evidence and both folders should move to 100 together if either does.
+#
+# No `[slurm]` block: that is read from `01_silhouette_0.1.toml` alone.
+
+name = "silhouette_titration_resnet18"
+
+[sender]
+feature_model = "ResNet18SmallInput"
+
+[receiver]
+feature_model = "ResNet18SmallInput"
+
+[data]
+silhouette_p_receiver = 0.5
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
