@@ -440,8 +440,19 @@ of one this shape alone reaches 0.789 at V = 14 — which is why a run can trave
 the whole channel with `logit_scale` flat, and why a bound on the scale is not by
 itself a bound on saturation.
 
+**None of the four columns above survive `normalise_logits = false` as
+comparable quantities.** They are all measured on post-norm logits — "in units
+of the logits' own standard deviation" — and `sharpest_logit_margin`'s bound of
+3.883 at V = 14 is a property of `layer_norm_logits` that does not exist without
+it. They stay computable, read against a raw spread instead, and must not be
+pooled across the key. `logit_spread` is taken *before* the norm and is
+unaffected. See [channel.md](channel.md).
+
 **`logit_scale`** is a live parameter again as of 2026-08-31, and it is the
-primary read on whether the channel is earning anything. It opens at exactly
+primary read on whether the channel is earning anything. Under
+`normalise_logits = false` it does not exist and this column reads NaN, as does
+`train_clip_log_logit_scale`; the header keeps its shape either way, which is
+the same convention the contrast columns follow. It opens at exactly
 **1.0** on both datasets and is bounded above at **2.0** by `MAX_LOGIT_SCALE`;
 there is no floor.
 
@@ -626,6 +637,13 @@ layer-normed — and differ only in what else they have to report:
 `score_scale=False`, because that branch is multiplied by `1 − mix_weight` and
 read out through the module's own scalar, so a scale on it would say what
 `mix_logit` already says and the two would drift against each other.
+
+Under `[receiver_discriminator] normalise_score = false` there is no readout at
+all, and `score_scale`, `score_bias` and `train_clip_log_score_scale` read NaN.
+The operand norms and the `1/√d` go with it, so on that arm the paragraph below
+about a score calibrated to open at 0.577 does not apply and
+`bilinear_weight_norm` is the only volume column left. See
+[architecture.md](architecture.md).
 
 On the bilinear arm it multiplies a score calibrated to open at `1/√3` = 0.577
 at every width and under every backbone, so the column is comparable across

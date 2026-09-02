@@ -140,6 +140,27 @@ on both
 sides, so a scalar is never clipped twice, never inflates its module's norm, and
 never inherits its module's rate.
 
+**Every entry is gated, and two of the gates are now config rather than
+architecture.** `mix_logit` needs an `AttentionDiscriminator` and
+`contrast_gate` needs the contrast stage; `log_score_scale` needs
+`[receiver_discriminator] normalise_score` and `log_logit_scale` needs
+`[sender_language_model] normalise_logits`, both read off the module that owns
+the parameter rather than off the config so the gate and the parameter cannot
+disagree. On an arm where a gate is false the group is *inapplicable*, not
+missing, and the same three keys — `score_scale_lr`, `score_bias_lr`,
+`logit_scale_lr` — stay live in `[optimiser]` and simply have no effect.
+`score_bias_lr` shares `score_scale_lr`'s condition rather than having one of
+its own: `learns_score_scale` is a misnomer and gates the offset too, by design.
+
+`group_parameters` and `split_out_parameter` both raise when an *applicable*
+group matches no parameter, at `build_models` time and so before a step runs.
+That is the whole point of the gates: without them a flag that removed a
+parameter would take down every rung using it, and a gate that stayed `True`
+would leave a group that exists and never receives gradient. `GROUP_NAMES` is
+not gated, so `train_clip_log_score_scale` and `train_clip_log_logit_scale` keep
+their places in the header and read NaN — the convention that keeps the metrics
+header stable across a resume.
+
 **Why one table.** There used to be three lists and none was derivable from
 another. `train.py` had its own `CLIP_GROUPS`, which omitted `sender.contrast`,
 so on every rung with the stage on the `other` catch-all *was* the contrast

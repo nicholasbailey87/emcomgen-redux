@@ -730,6 +730,60 @@ matrix is not competing for the job. Inside `AttentionDiscriminator` the
 branches also mix at their own magnitudes, so there both weights additionally
 set what the score is made of.
 
+#### Turning the whole readout off: `normalise_score`
+
+`[receiver_discriminator] normalise_score = false` removes, together: both
+operand layer norms, the `1/√d` calibration that follows them, and the whole
+`ScoreVolume` readout — `log_score_scale` *and* `score_bias`, on either
+discriminator. What is left is the bare bilinear form `r_j · W m`. It defaults
+`true`, which is bit-identical to this section as written.
+
+The four go together because they are one decision rather than four. The norms
+are what make the calibration exact and what make a volume in front of the score
+mean the same thing under every backbone; a readout over unnormalised operands
+would be neither today's design nor the old one.
+
+**Why the switch exists.** No ShapeWorld run has learned shape since 17 August.
+`4248fca` added all of this on the 19th, its stated purpose to take the score's
+volume "out of the backbone's hands", and `60f9094` moved the backbone to
+`ResNet18SmallInput` the day before. The two are perfectly confounded — and
+since the coupling `4248fca` removed is exactly the one that differed between
+Conv4 and ResNet18, they are two descriptions of one intervention rather than
+two independent suspects. `score_scale` also decreases on **100% of steps** in
+every arm of both silhouette titrations, 0.996 → 0.21–0.28, never once
+reversing. The backbone half is under test in
+`experiments/silhouette_titration_conv4/` against
+`experiments/silhouette_titration_resnet18/`;
+`experiments/silhouette_titration_norms/` is the other half.
+
+**This one is a revert**, unlike its speaker-side counterpart
+`[sender_language_model] normalise_logits`: `false` returns the listener to
+`ce7d6a5`'s arithmetic exactly, which is the last state a ShapeWorld run
+demonstrably learned shape from, and is also what jayelm's
+`CopyListener.compare` has always computed. See [channel.md](channel.md) for why
+the speaker's key is not.
+
+The gradient argument above is also weaker than it was. `4248fca` reasoned about
+the straight-through Gumbel Jacobian, and the ladder has run
+`estimator = "identity"` since `681ef0b`; Hyperion's GPUs report
+`is_bf16_supported()`, so `model_util.scale_without_attenuating` is inert by its
+own docstring and where a volume scalar sits relative to the backward pass no
+longer changes what the optimiser sees.
+
+**What it does not touch.** `AttentionDiscriminator`'s own `referent_layer_norm`
+and `memory_layer_norm` stay under both settings — they are that stack's input
+and memory norms, and a post-norm stack normalises its own stream but never its
+memory, which is why they exist. `mix_floor`, `mix_logit` and `mix_logit_init`
+are untouched, so that module returns `(1 − a)·bilinear + a·attention` unaltered
+with the key off.
+
+`score_scale_lr` and `score_bias_lr` stay live and simply have no effect;
+`train_score_scale`, `train_score_bias` and `train_clip_log_score_scale` read
+NaN. `bilinear_weight_norm` is the only volume column left, and with nothing
+downstream of the matrix it reads as the listener's whole volume rather than as
+the fast scalar's slow partner. Checkpoints do not cross the key: with it off,
+`log_score_scale` and `score_bias` are absent from the `state_dict`.
+
 **Dropout masks the referents only,** and lives on `Receiver`. It used to mask
 the message operand too, on the argument that a dot product lets the listener
 lean on whichever side is left intact. True, but it assumed the two sides arrive

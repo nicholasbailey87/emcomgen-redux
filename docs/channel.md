@@ -17,6 +17,14 @@ outputs2vocab  →  layer_norm_logits  →  mask_reserved_tokens
 `MAX_LOGIT_SCALE` = 2.0 by projection; the estimator chooses only what the
 backward pass sees — the forward is the same one-hot either way.
 
+The first two stages are optional as of 2026-09-02.
+`[sender_language_model] normalise_logits = false` removes `layer_norm_logits`
+and `logit_scale` together, leaving `outputs2vocab → mask_reserved_tokens →
+flatten_logit_distribution → …`. It defaults `true`, which is bit-identical to
+the pipeline as it stood before the key existed. See
+[Turning the norm off](#turning-the-norm-off) below, and read nothing else in
+this file as applying to a run with it off.
+
 At eval there is no scale, no mixture and no noise: the argmax of the masked,
 normalised logits. Eval measures the learned policy rather than a deliberately
 noised one. This mirrors jayelm's emergent-generalization, which zeroes
@@ -43,6 +51,52 @@ statistics so train and eval agree, and does not couple to `accumulator_steps`.
 It is functional and has neither affine parameter, so the transform is
 argmax-preserving (it changes no eval-time message) and nothing is added to the
 `state_dict`.
+
+### Turning the norm off
+
+`[sender_language_model] normalise_logits = false` removes this function and
+`log_logit_scale` together, so the speaker's raw logits go to the sampler. The
+two go together because the scale has no meaning without the normaliser: it
+multiplies a quantity pinned to unit variance, which is what makes
+`MAX_LOGIT_SCALE` = 2.0 a statement about survival probability rather than about
+whatever magnitude `outputs2vocab` happens to emit. Raw logits carry a scale of
+their own already, and a second one in front of them would be degenerate with
+the projection that produced them.
+
+**Why the switch exists.** `logit_scale` climbs monotonically from 1.001 and
+pins at the ceiling by epoch 14 of 29 in all ten arms of both silhouette
+titrations, while `logit_margin` sits at 0.44–0.88 against a budget of 3.883.
+The speaker is asking for fidelity it cannot have, through the only route this
+norm leaves open, and a one-way traverse that runs until something stops it is
+not a control finding an optimum. Its listener-side counterpart is
+`[receiver_discriminator] normalise_score`; see
+[architecture.md](architecture.md).
+
+**It is not a revert**, unlike that counterpart. `layer_norm_logits` was already
+present at `ce7d6a5`, having arrived at `1510a55`/`df95063` on 10–12 August, so
+every ShapeWorld run that has ever learned shape ran with it on, and the
+successful configs also carry `logit_scale_lr` = 2e-3 and `init_energy` = 0.9.
+Turning it off goes back past that point, to a channel no successful run has
+used. Read a null there as weak evidence and a positive as a surprise. That is
+why the speaker and the listener are two keys rather than one.
+
+**Four columns change meaning and stay computable.** `logit_margin`,
+`logit_prior_share`, `unmixed_survival` and `realised_survival` are all measured
+on post-norm logits, "in units of the logits' own standard deviation", and
+`sharpest_logit_margin`'s hard bound of `V/√(V−1)` = 3.883 at V = 14 is a
+property of this function that does not exist without it. They are read against
+a raw spread instead, so do not compare them across the key.
+`logit_spread` is taken *before* normalisation and is unaffected;
+`train_logit_scale` and `train_clip_log_logit_scale` read NaN. The prior and the
+sharpness no longer sit on opposite sides of anything: `outputs2vocab.bias` is
+just a bias, with nothing dividing it down.
+
+**Checkpoints do not cross the key.** With it off, `log_logit_scale` is absent
+from the `state_dict`, so nothing written under one setting loads under the
+other whatever `resume` says.
+
+`experiments/silhouette_titration_norms/` is the sweep this key was added for,
+against `experiments/silhouette_titration_resnet18/` as its control.
 
 ### The prior and the sharpness sit on opposite sides of it
 
@@ -241,6 +295,12 @@ It is `exp(log_logit_scale)`, a 0-d `nn.Parameter` on the speaker's language
 model, in `state_dict`, with a clip group and a learning rate of its own. It
 opens at **1.0**, has **no floor**, and is bounded above at **2.0**
 (`sender.MAX_LOGIT_SCALE`).
+
+It does not exist at all under `normalise_logits = false`, and everything in
+this section is about a run with the norm on. The clip group and the rate are
+gated on the same attribute, so on that arm `logit_scale_lr` is live and inert
+rather than broken — the same arrangement `mix_logit_lr` has on a bilinear
+listener.
 
 ### The ceiling, and why projection and not a `clamp`
 
