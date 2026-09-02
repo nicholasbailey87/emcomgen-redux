@@ -3,6 +3,9 @@
 #
 # One of five copies of the ablation's rung 1 differing in that key alone --
 # 0.1, 0.2, 0.3, 0.4, 0.5 across the folder, and nothing else different at all.
+# `06_silhouette_0.5_white.toml` is in the folder and is *not* one of the five:
+# it holds the rate at 0.5 and moves `silhouette_fill` instead, so it is read
+# against `05_silhouette_0.5` alone and leaves the rate sweep a clean one.
 # The argument for the experiment, and the only correct way to read it, are in
 # `experiments/silhouette_titration/README.md`; read that before reading a
 # trajectory out of this run.
@@ -20,7 +23,7 @@
 # straight out of this file rather than out of the merged config, so every config
 # in an experiment must carry them even when they restate the default. `[slurm]`
 # is read from the *first* config in the folder only (sorted by filename), so the
-# block in `01_silhouette_0.1.toml` governs the whole array; all five jobs are
+# block in `01_silhouette_0.1.toml` governs the whole array; all six jobs are
 # the same size, so there is nothing to size it for beyond the baseline.
 
 name = "silhouette_titration"

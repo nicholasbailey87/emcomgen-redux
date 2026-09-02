@@ -7,11 +7,19 @@ Five copies of the ablation's rung 1 — ShapeWorld, `ResNet18SmallInput` on bot
 agents, `AveragePrototyper`, `SenderGRULM`, `ReceiverGRULM`,
 `BilinearDiscriminator` — differing in `[data] silhouette_p_receiver` alone, at
 0.1, 0.2, 0.3, 0.4 and 0.5. Everything else comes from `DEFAULT.toml`. Thirty
-epochs, one seed each, five SLURM jobs.
+epochs, one seed each.
+
+A sixth config, `06_silhouette_0.5_white.toml`, sits in the folder and is **not**
+part of that sweep: it holds the rate at 0.5 and moves `silhouette_fill` to white
+instead. It is read against `05_silhouette_0.5` and against nothing else here.
+See **The white-fill arm** below.
 
 ```
-scripts/run_experiment.sh silhouette_titration 5
+scripts/run_experiment.sh silhouette_titration 6
 ```
+
+Without `--rerun` that submits only the incomplete jobs, so with the five rate
+arms already on disk at thirty rows each it submits the white arm alone.
 
 ## Why the rate is not already known
 
@@ -101,3 +109,50 @@ communicate colour, not a ceiling this key imposes.
 
 Expect all five arms to sit at chance for the first few epochs: `DEFAULT.toml`
 sets `warm_up_epochs = 10`, which is a third of a thirty-epoch run.
+
+## The white-fill arm
+
+`06_silhouette_0.5_white.toml` holds `silhouette_p_receiver` at 0.5 and sets
+`silhouette_fill = 1.0`. It is one key away from `05_silhouette_0.5` and is to be
+read against that arm only; putting it on the rate ladder would make the ladder
+measure two things.
+
+**What it settles.** `diagnostics/silhouette_shape_probe.py` read
+`white_threshold` transferring to clean images at 0.560 against 0.486 for the
+fill now in `DEFAULT.toml` (job 123354) — the one measurement that pointed away
+from the fill that was then chosen. It did not survive its own repeat: the same
+arm, same seed, same GPU read 0.403 (job 123583), and six single-fit readings
+across three fills all landed between 0.40 and 0.56 with none separable from
+another, because cuDNN's convolution backward accumulates with atomics. The
+probe cannot order these fills, so this arm asks the question at the level the
+answer is wanted at — a full run, read on the shape/colour breakdown.
+
+**What it is read against.** `05_silhouette_0.5` under the chromatic fill ended
+its last five epochs at shape 0.606 and colour 0.528, having crossed over around
+epoch 26 from shape ~0.55 and colour ~0.65. By the rules above that is the
+mirror-image failure, not the result the key exists for. The white arm asks
+whether the fill put it there or whether 0.5 is too strong a rate whatever the
+objects are repainted to:
+
+- **Shape high, colour recovering off 0.53** — the fill was the problem, and
+  white is the better repainting at this rate.
+- **The same crossover** — the rate is the problem, the fill is incidental, and
+  the titration's answer stays at or below 0.4.
+- **Both nearer chance than 05** — white cost more than it bought, which is what
+  the BatchNorm argument predicts.
+
+**What white costs.** Both costs are argued in full in `DEFAULT.toml`'s
+`silhouette_fill` block and in `docs/data.md`; neither is a reason not to run the
+arm, and both are reasons not to move the default on one good result here.
+`white` is one of ShapeWorld's six colours and is exactly this fill, so a
+repainted white object comes back a white object. Its shape is still treated —
+the threshold binarises the anti-aliased edges as it does for every colour — but
+no colour is removed, so one colour in six keeps a readable colour label in
+silhouetted games and the receiver gets no signal there that colour was taken
+away. (The stronger *bit-identical* version of this defect was grey's, under
+coverage blending and the old flat 0.5; there are no blended edges left for it to
+be true of.) And white is the brightest image the model ever sees: against mean object channels
+(148.8, 148.8, 106.3) a rate of 0.5 puts a `BatchNorm2d(3)` over raw RGB at
+1.36×, 1.36× and 1.70× the eval distribution, where the chromatic fill runs
++0.1% / +0.1% / −0.3%. That layer is the ViT receiver's, not this rung's, so it
+bites here only insofar as the answer is meant to transfer up the ladder.

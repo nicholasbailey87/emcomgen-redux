@@ -1,0 +1,111 @@
+# silhouette_titration, sixth arm: `silhouette_p_receiver = 0.5` with a **white**
+# fill.
+#
+# **This is not one of the five rate arms.** 01-05 sweep
+# `silhouette_p_receiver` at DEFAULT.toml's fill and differ in that key alone.
+# This arm holds the rate at 0.5 -- the top of that sweep -- and moves the fill
+# instead, so it is read against `05_silhouette_0.5` and against nothing else in
+# the folder. Two arms, one key apart; the rate ladder stays a clean sweep
+# because this arm is off it rather than on the end of it.
+#
+# ## What it is for
+#
+# `diagnostics/silhouette_shape_probe.py` (job 123354) read `white_threshold`
+# transferring to clean images at 0.560 against 0.486 for the fill now in
+# DEFAULT.toml, and that is the single measurement the current fill was chosen
+# *against* rather than with. It did not survive its own repeat: the same arm at
+# the same seed on the same GPU read 0.403 (job 123583), and six single-fit
+# readings across three fills all landed between 0.40 and 0.56 with none
+# separable from another. cuDNN's convolution backward accumulates with atomics,
+# so a one-fit probe cannot order these fills. See `docs/data.md`, "Why a
+# threshold, when coverage describes the object better".
+#
+# So the probe is not going to settle it. This arm settles it at the level the
+# answer is actually wanted at -- a full run, read on
+# `test_acc_md_shape` / `test_acc_md_color` -- and skips the probe's variance
+# entirely.
+#
+# ## What the run has to beat
+#
+# `05_silhouette_0.5` under the chromatic fill, whose last five epochs read shape
+# 0.606 against colour 0.528, having crossed over around epoch 26 from shape
+# 0.55 / colour 0.65. On the README's rules that is the *mirror-image failure*:
+# one single-feature language traded for the other, not both carried. The
+# question this arm asks is whether the fill is what put it there, or whether
+# 0.5 is simply too strong a rate whatever the objects are repainted to.
+#
+# - **Shape high and colour recovering off 0.53** -- the fill was the problem and
+#   white is the better repainting at this rate.
+# - **The same crossover** -- the rate is the problem, the fill is incidental,
+#   and the titration's answer stays somewhere at or below 0.4.
+# - **Both nearer chance than 05** -- white has cost more than it bought; see the
+#   BatchNorm note below, which predicts exactly this.
+#
+# ## What white costs, stated up front
+#
+# Two known costs, both argued at length in DEFAULT.toml's `silhouette_fill` and
+# in `docs/data.md`. Neither is a reason not to run this; both are reasons not to
+# read a good result here as a reason to move the default.
+#
+# **A palette collision.** `white` is one of ShapeWorld's six colours and is
+# exactly this fill, so a repainted white object comes back a white object: the
+# transform removes no colour from it. Not *untouched* -- the threshold still
+# binarises its anti-aliased edges, promoting every pixel above half the image's
+# peak luma to fully lit and zeroing the rest, so the shape treatment lands as it
+# does on every other colour. What is exempt is the colour, which is the half of
+# the intervention this experiment exists for: one colour in six keeps a readable
+# colour label in silhouetted games, and the receiver gets no signal there that
+# colour was taken away.
+#
+# (The stronger claim -- bit-identical in and out, max delta 0 over 0 pixels --
+# belongs to the *coverage* transform and to `gray` under the old flat 0.5 fill,
+# where the stored value matched at every coverage level. There are no blended
+# edges left for that to be true of. It is why the current fill is chromatic:
+# `silhouette`'s docstring puts it as "no palette colour is a fixed point".)
+#
+# **A BatchNorm gap.** The receiver's `ViT2` opens with `nn.BatchNorm2d(3)` over
+# raw RGB and ShapeWorld gets no other input normalisation, so the fill lands
+# directly on that layer's running statistics -- gathered on a silhouetted
+# mixture, then applied to clean images at eval, where the learned affine cannot
+# absorb the offset because at train it is zero. White is the brightest image the
+# model ever sees: against mean object channels (148.8, 148.8, 106.3), a rate of
+# 0.5 puts the running means at 1.36x, 1.36x and 1.70x the eval distribution.
+# The chromatic fill runs +0.1% / +0.1% / -0.3% on the same measure. If that gap
+# is what governs transfer, this arm is the worst of the two and will read so.
+# The probe says it might not be. Nothing separates the two claims yet, which is
+# the whole reason for the arm.
+#
+# Note this rung's arm is the CNN/GRU baseline, whose receiver is not `ViT2` --
+# the BatchNorm argument is inherited from the ladder's ViT rungs and bites here
+# only insofar as the answer is meant to transfer up.
+
+name = "silhouette_titration"
+
+[data]
+silhouette_p_receiver = 0.5
+
+# Pure white, every channel fully lit. `1.0 * 255 = 255` exactly, so this
+# satisfies the integer-levels property DEFAULT.toml argues for -- `n * F / 255`
+# cannot be a half-integer for integer `F`, so no cross-colour rounding tie can
+# exist. That property is moot under the threshold, which leaves no anti-aliased
+# edges to round, but it also means the fill is a colour the store represents
+# exactly, and that is worth keeping.
+#
+# A scalar rather than DEFAULT.toml's length-3 list: `silhouette` broadcasts a
+# scalar to three channels, and 1.0 needs no per-channel precision argument. The
+# nine-decimal-places rule exists because 0.584313725 has to round to 149 rather
+# than to whatever 0.58 lands on; there is no such trap at 1.0.
+silhouette_fill = 1.0
+
+[scheduler]
+# Thirty as everywhere else in this folder, so this arm is readable against
+# `05_silhouette_0.5` with no schedule difference between them. Ten of them are
+# warm-up.
+epochs = 30
+
+[experiment]
+repeats = 1
+
+# No `[slurm]` block: scripts/run_experiment.sh reads that from the *first*
+# config in the folder by filename, which is `01_silhouette_0.1.toml`. This job
+# is the same size as the other five, so there is nothing to size for.
