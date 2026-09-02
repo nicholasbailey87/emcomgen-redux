@@ -1,0 +1,99 @@
+# silhouette_titration_norms 2 of 15: the listener's score readout off at silhouette 0.2.
+#
+# Fifteen arms: a 3x5 over the two normalisation flags and
+# `data.silhouette_p_receiver`, with `ResNet18SmallInput` on both agents, thirty
+# epochs, one seed, one repeat and rung 1 otherwise. Every arm differs from
+# every other in the flags and the rate alone.
+#
+#     files          normalise_logits  normalise_score
+#     01-05          true              false            (the listener revert)
+#     06-10          false             true             (the speaker)
+#     11-15          false             false            (both)
+#
+# The fourth cell of the 2x2 -- both flags true, which is today's behaviour --
+# is not repeated here. It is `experiments/silhouette_titration_resnet18/`,
+# already run over the same five rates on the same thirty epochs at the same
+# rung, and that folder is this experiment's control. Read every arm here
+# against its rate-matched arm there.
+#
+# **Why these flags.** No ShapeWorld run has learned shape since 17 August. Two
+# commits landed in the 36 hours after the last one that did: `60f9094` moved
+# the backbone to `ResNet18SmallInput`, and `4248fca` gave the bilinear comparer
+# its operand norms, its `/sqrt(d)` calibration and `log_score_scale`. They are
+# perfectly confounded, and since `4248fca`'s stated purpose was to take the
+# score's volume "out of the backbone's hands" -- exactly the coupling that
+# differed between Conv4 and ResNet18 -- they are two descriptions of one
+# intervention rather than two independent suspects. The backbone half is under
+# test in `silhouette_titration_conv4/` against `silhouette_titration_resnet18/`;
+# this folder is the other half.
+#
+# Two measurements motivated including the speaker. `logit_scale` climbs
+# monotonically from 1.001 and pins at `MAX_LOGIT_SCALE` by epoch 14 of 29 in
+# all ten arms of both silhouette titrations, while `logit_margin` sits at
+# 0.44-0.88 against a budget of 3.883. `score_scale` decreases on 100% of steps
+# in every arm, 0.996 -> 0.21-0.28, never once reversing. Neither scalar is a
+# control finding an optimum; both are one-way traverses that run until
+# something stops them.
+#
+# **This cell: `normalise_score = false`, the listener revert.** It removes
+# `BilinearDiscriminator`'s two operand layer norms, the `/sqrt(d)`
+# calibration that follows them, and the whole `ScoreVolume` readout -- both
+# `log_score_scale` and `score_bias` -- so the listener scores the bare
+# bilinear form `r_j . W m`. That is an exact return to `ce7d6a5`'s
+# arithmetic on the listener, which is the last state a ShapeWorld run
+# demonstrably learned shape from. Of the four cells this is the one with a
+# prior.
+#
+# **Why the rate is swept rather than pinned.** It interacts with exactly what
+# these flags touch. The 17 August pair that learned shape and kept colour ran
+# 0.1; the 9 August pair at 0.5 got shape faster -- onset epoch 7 against 20 --
+# but the baseline lost colour to 0.616. If changing the score's normalisation
+# changes which side of that trade a run lands on, the sweep is what shows it
+# and a single rate would not.
+#
+# The backbone is stated rather than inherited, as it is in
+# `silhouette_titration_resnet18/`, and for the same reason: an arm of a
+# controlled comparison that reads its treatment or its control from a default
+# is an arm that moves silently the next time the default does, and this pairing
+# has already been broken once by a change landing between two sweeps. The flags
+# are stated on every arm for the same reason, including where the value is the
+# default.
+#
+# Thirty epochs is inherited from the other titration folders, not argued. Of
+# the four Conv4 runs that ever learned shape the durable onsets were epochs 7,
+# 20, 28 and 82, so a flat arm at thirty is weak evidence and all of these
+# folders should move to 100 together if any does.
+#
+# One seed and one repeat, so an arm is a single run. The comparison is across
+# flags and against the control at matched rates, not within a cell.
+#
+# Checkpoints do not cross the flags: with a flag off, `log_logit_scale`,
+# `log_score_scale` and `score_bias` are absent from the `state_dict`, so
+# nothing written under one setting loads under another whatever `resume` says.
+# These are new runs, not resumed ones.
+#
+# No `[slurm]` block: that is read from `01_no_score_norm_0.1.toml`
+# alone.
+
+name = "silhouette_titration_norms"
+
+[sender]
+feature_model = "ResNet18SmallInput"
+
+[sender_language_model]
+normalise_logits = true
+
+[receiver]
+feature_model = "ResNet18SmallInput"
+
+[receiver_discriminator]
+normalise_score = false
+
+[data]
+silhouette_p_receiver = 0.2
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1

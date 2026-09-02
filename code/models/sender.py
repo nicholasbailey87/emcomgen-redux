@@ -738,7 +738,7 @@ class GumbelChannel:
         construction, and the per-batch diagnostics.
     """
 
-    def _init_channel(self, estimator):
+    def _init_channel(self, estimator, normalise_logits=True):
         """
         Call from `__init__` where the parameter should be created: creation
             order fixes which RNG draw every later parameter gets. `torch.zeros`
@@ -761,8 +761,30 @@ class GumbelChannel:
             channel and not a starved one. The ceiling is `MAX_LOGIT_SCALE`, and
             it is applied by `project_channel` after the optimiser step rather
             than by a `clamp` in `forward`. See that method.
+
+        `normalise_logits=False` removes the channel norm and the scale
+            together, from `[sender_language_model] normalise_logits`. They go
+            together because the scale has no meaning without the normaliser:
+            it multiplies a quantity pinned to unit variance, which is what
+            makes `MAX_LOGIT_SCALE` a statement about survival probability
+            rather than about whatever magnitude `outputs2vocab` happens to
+            emit. Raw logits carry their own scale already. The parameter is
+            then absent rather than frozen, so `split_out_parameter`'s suffix
+            match and `SCALAR_GROUPS` see the truth -- the same arrangement
+            `receiver.ScoreVolume` uses.
+
+        Note this is *not* a revert. `layer_norm_logits` was already present at
+            `ce7d6a5`, having arrived at `1510a55`/`df95063` on 10-12 August, so
+            every ShapeWorld run that has ever learned shape ran with it on.
+            Turning it off goes back past that point, to a channel no successful
+            run has used, which is why it is a separate flag from the
+            listener's.
         """
-        self.log_logit_scale = nn.Parameter(torch.zeros(()))
+        self.normalises_logits = normalise_logits
+
+        if self.normalises_logits:
+            self.log_logit_scale = nn.Parameter(torch.zeros(()))
+
         self.estimator = estimator
 
         self.reset_channel_diagnostics()
@@ -801,7 +823,14 @@ class GumbelChannel:
 
         `scaler.step` may skip the step entirely on inf/nan; this is idempotent,
             so that is harmless.
+
+        A no-op when `normalise_logits` is off and there is no scale to bound,
+            so `train.py`'s `optimiser_step` and `diagnostics/bootstrap_probe.py`
+            keep calling it unconditionally.
         """
+        if not self.normalises_logits:
+            return
+
         with torch.no_grad():
             self.log_logit_scale.clamp_(max=math.log(MAX_LOGIT_SCALE))
 
@@ -810,7 +839,12 @@ class GumbelChannel:
         Back to the opening 1.0. Separate from `reset_channel_diagnostics` so a
             `reset_parameters` that wants one is not forced to take the other,
             exactly as `ScoreVolume.reset_score_volume` is separate.
+
+        A no-op when there is no scale, so a `reset_parameters` need not branch.
         """
+        if not self.normalises_logits:
+            return
+
         with torch.no_grad():
             self.log_logit_scale.zero_()
 
@@ -870,8 +904,11 @@ class GumbelChannel:
         #     `d/dnormalised` is 1 rather than `logit_scale`, so the scale's
         #     value never multiplies the speaker's whole stack. The scale keeps
         #     its own true partial and so is as free to slide as it ever was.
+        # Unscaled when `normalise_logits` is off: the scale does not exist
+        #     there, and raw logits already carry a magnitude of their own.
         scaled = mask_reserved_tokens(
             model_util.scale_without_attenuating(normalised, self.logit_scale)
+            if self.normalises_logits else normalised
         )
 
         if self.uniform_weight > 0.0:
@@ -938,7 +975,17 @@ class GumbelChannel:
             speaker's stack sees exactly the gradient it saw before the scale
             came back; the second is real and nonzero. See docs/channel.md.
         """
-        normalised = layer_norm_logits(logits, self.vocabulary)
+        # `normalised` is the raw logits when `normalise_logits` is off. The
+        #     name is kept because everything downstream of here -- the sampler,
+        #     the surrogate, the survival tap -- reads the same tensor either
+        #     way; what changes is only whether it has been pinned to unit
+        #     variance first. The four channel columns measured off it stay
+        #     computable and stop being comparable across the flag; see
+        #     DEFAULT.toml beside the key.
+        normalised = (
+            layer_norm_logits(logits, self.vocabulary)
+            if self.normalises_logits else logits
+        )
         masked = mask_reserved_tokens(normalised)
 
         if not self.training:
@@ -960,8 +1007,11 @@ class GumbelChannel:
             #     float32 is 1.0000001 rather than 1 -- a real perturbation of
             #     the message, on the winning token, every step. Forming the
             #     zero first makes the addition exact.
-            emittable = model_util.scale_without_attenuating(
-                normalised[..., 4:], self.logit_scale
+            emittable = (
+                model_util.scale_without_attenuating(
+                    normalised[..., 4:], self.logit_scale
+                )
+                if self.normalises_logits else normalised[..., 4:]
             )
             onehot = torch.cat(
                 [
@@ -1014,7 +1064,9 @@ class GumbelChannel:
         # `float()` rather than the tensor: `mean_winning_probability` is typed
         #     for a plain scale and is pure measurement, and a live parameter
         #     here would build a graph off the detached diagnostic path.
-        scale = float(self.logit_scale)
+        # 1.0 when there is no scale to read: the sampler applied none, so the
+        #     survival these columns report is the one it actually drew from.
+        scale = float(self.logit_scale) if self.normalises_logits else 1.0
 
         self.realised_survival = mean_winning_probability(
             detached, scale, self.uniform_weight
@@ -1048,7 +1100,9 @@ class SenderGRULM(GumbelChannel, nn.Module):
         self.bidirectional = kwargs["bidirectional"]
         self.directions = 2 if self.bidirectional else 1
 
-        self._init_channel(kwargs["estimator"])
+        self._init_channel(
+            kwargs["estimator"], kwargs.get("normalise_logits", True)
+        )
 
         self.gru = nn.GRU(
             self.token_embedding_size,
@@ -1249,7 +1303,9 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
             decoder=False,
         )
 
-        self._init_channel(kwargs["estimator"])
+        self._init_channel(
+            kwargs["estimator"], kwargs.get("normalise_logits", True)
+        )
 
         if self.referent_embedding_size != self.token_embedding_size:
             raise NotImplementedError(

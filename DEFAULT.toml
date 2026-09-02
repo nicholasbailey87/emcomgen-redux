@@ -397,6 +397,10 @@ eps = 1e-12
 # say being pushed flatter is self-regulation -- confidently emitting the wrong
 # symbol is worse than hedging -- and docs/channel.md records the old parameter
 # doing exactly that, 0.9094 -> 0.6547 on rung 10.
+#
+# No effect under `[sender_language_model] normalise_logits = false`, which
+# removes the parameter this rate moves. The key stays live and stays stated
+# rather than being conditional on another table.
 logit_scale_lr = 2e-3
 
 # The listener's counterpart, `ScoreVolume.log_score_scale`, reported as
@@ -433,6 +437,9 @@ logit_scale_lr = 2e-3
 # correct on a message carrying nothing, since BCE's minimiser is `p = 0.5`
 # everywhere. Read `train_score_scale` as before: a dip and a return is a
 # listener declining to commit, a monotone slide is a collapse.
+#
+# No effect under `[receiver_discriminator] normalise_score = false`, which
+# removes the readout this rate moves.
 score_scale_lr = 2e-3
 
 # The offset half of the same readout: `ScoreVolume.score_bias`, added after
@@ -462,6 +469,10 @@ score_scale_lr = 2e-3
 # per-game offset, and the bilinear score's per-game mean is
 # `mean_j(LN(r_j)) . proj`, which varies by game. If this moves and accuracy
 # does not, the offset was per-game and the answer is a different readout.
+#
+# No effect under `[receiver_discriminator] normalise_score = false`. That key
+# gates the offset as well as the volume, by design: an inner constant is
+# annihilated by nothing and would simply be degenerate with the outer one.
 score_bias_lr = 2e-3
 
 # The same elevated rate, for `SenderTransformerLM.polarity_embedding` -- the
@@ -1035,6 +1046,46 @@ uniform_weight = 0.1
 # messages and differs in nothing else. See docs/channel.md.
 estimator = "identity"
 
+# Whether the channel is normalised at all: `layer_norm_logits` on the emittable
+# logits, and the learned `log_logit_scale` in front of it. `true` is today's
+# behaviour and is bit-identical to the code before the key existed. `false`
+# removes both.
+#
+# The two go together because the scale has no meaning without the normaliser.
+# It multiplies a quantity pinned to unit variance, which is what makes
+# `MAX_LOGIT_SCALE = 2.0` a statement about survival probability rather than
+# about whatever magnitude `outputs2vocab` happens to emit; raw logits carry a
+# scale of their own already, and a second one in front of them would be
+# degenerate with the projection that produced them.
+#
+# **Why the switch exists.** `logit_scale` climbs monotonically from 1.001 and
+# pins at `MAX_LOGIT_SCALE` by epoch 14 of 29 in all ten arms of both silhouette
+# titrations, while `logit_margin` sits at 0.44-0.88 against a budget of 3.883.
+# The speaker is asking for fidelity it cannot have, through the only route the
+# normaliser leaves open, and a one-way traverse that runs until something stops
+# it is not a control finding an optimum. Its counterpart is
+# `[receiver_discriminator] normalise_score`.
+#
+# **This is not a revert, unlike its counterpart.** `layer_norm_logits` was
+# already present at `ce7d6a5`, having arrived at `1510a55`/`df95063` on 10-12
+# August, so every ShapeWorld run that has ever learned shape ran with it on.
+# `false` goes back past that point, to a channel no successful run has used.
+# That is why these are two keys and not one.
+#
+# **Four columns change meaning when this is off, and stay computable.**
+# `logit_margin`, `logit_prior_share`, `unmixed_survival` and
+# `realised_survival` are all measured on post-norm logits, "in units of the
+# logits' own standard deviation", and `sharpest_logit_margin`'s fixed budget of
+# 3.883 at V = 14 is a property of the normaliser and does not exist without it.
+# They are read against a raw spread here instead, so do not compare them across
+# this key. `logit_spread` is taken *before* normalisation and is unaffected;
+# `train_logit_scale` and `train_clip_log_logit_scale` read NaN.
+#
+# Checkpoints do not cross this key: with it off, `log_logit_scale` is absent
+# from the `state_dict`, so nothing written under one setting loads under the
+# other whatever `resume` says.
+normalise_logits = true
+
 tau = 1.0                     # Gumbel-softmax tau. Gradient shaping only:
                               # the emitted symbol is an argmax and so is
                               # invariant to it. jayelm's `--tau`. It shapes the
@@ -1375,10 +1426,54 @@ alpha = "deepnorm"
 beta = "deepnorm"
 
 [receiver_discriminator]
-# `BilinearDiscriminator` reads nothing from this table. It is sized entirely by
-# the referent width and by the language model's `output_size`, which
-# `build_models` passes in rather than restating as a key that could be wrong.
-# Everything here is `AttentionDiscriminator`'s.
+# Whether the score is normalised at all. `true` is today's behaviour and is
+# bit-identical to the code before the key existed. `false` removes, together:
+# `BilinearDiscriminator`'s two operand layer norms, the `/sqrt(d)` calibration
+# that follows them, and the whole `ScoreVolume` readout -- both
+# `log_score_scale` and `score_bias`, on either discriminator. What is left on
+# the bilinear arm is the bare form `r_j . W m`, which is exactly what `ce7d6a5`
+# scored with and what jayelm's `CopyListener.compare` has always computed.
+#
+# The four go together because they are one decision rather than four. The norms
+# are what make the calibration exact and what make a volume in front of the
+# score mean the same thing under every backbone; a readout over unnormalised
+# operands would be neither today's design nor the old one.
+#
+# **Why the switch exists.** `4248fca` added all of this on 19 August, its
+# stated purpose to take the score's volume "out of the backbone's hands", and
+# no ShapeWorld run has learned shape since. `60f9094` landed the day before and
+# moved the backbone to `ResNet18SmallInput`, so the two are perfectly
+# confounded -- and since the coupling `4248fca` removed is exactly the one that
+# differed between Conv4 and ResNet18, they are two descriptions of one
+# intervention. The backbone half is under test in
+# `experiments/silhouette_titration_conv4/` against its `_resnet18` control;
+# this key is the other half, and `false` is an exact return to `ce7d6a5`'s
+# arithmetic on the listener.
+#
+# The gradient argument for the norms is also weaker than it was. `4248fca`
+# reasoned about the straight-through Gumbel Jacobian, and the ladder has run
+# `estimator = "identity"` since `681ef0b`; Hyperion's GPUs report
+# `is_bf16_supported()`, so `model_util.scale_without_attenuating` is inert by
+# its own docstring and where a volume scalar sits relative to the backward pass
+# no longer changes what the optimiser sees.
+#
+# `[optimiser] score_scale_lr` and `score_bias_lr` stay live and simply have no
+# effect when this is off; `train_score_scale`, `train_score_bias` and
+# `train_clip_log_score_scale` read NaN. `AttentionDiscriminator`'s own
+# `referent_layer_norm` and `memory_layer_norm` are *not* touched by this key:
+# they are its decoder stack's input and memory norms, and a post-norm stack
+# never normalises its own memory, which is why they exist. `mix_floor`,
+# `mix_logit` and `mix_logit_init` are untouched too.
+#
+# Checkpoints do not cross this key, for the same reason as its counterpart:
+# `log_score_scale` and `score_bias` are absent from the `state_dict` when it is
+# off.
+normalise_score = true
+
+# `BilinearDiscriminator` reads nothing else from this table. It is sized
+# entirely by the referent width and by the language model's `output_size`,
+# which `build_models` passes in rather than restating as a key that could be
+# wrong. Everything below is `AttentionDiscriminator`'s.
 #
 # 320 at 5 heads for the head dimension of 64 that every attention module in the
 # repo has. A default should be the smallest thing that runs, not a guess at a

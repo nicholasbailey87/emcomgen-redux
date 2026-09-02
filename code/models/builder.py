@@ -148,8 +148,22 @@ MODULE_GROUPS = (
 #     the group is inapplicable rather than missing, and `group_parameters`
 #     raises if an applicable one matches nothing.
 SCALAR_GROUPS = (
-    ("log_score_scale", lambda pair: True),
-    ("log_logit_scale", lambda pair: True),
+    # Both of these are now gated on a config flag as well as on the
+    #     architecture. `[receiver_discriminator] normalise_score = false`
+    #     leaves the listener with no volume and `[sender_language_model]
+    #     normalise_logits = false` leaves the speaker with no channel scale,
+    #     so on those rungs the group is inapplicable rather than missing --
+    #     the same distinction `mix_logit` and `contrast_gate` already make,
+    #     read off the module that owns the parameter rather than off the
+    #     config, so the gate and the parameter cannot disagree.
+    (
+        "log_score_scale",
+        lambda pair: pair.receiver.discriminator.learns_score_scale,
+    ),
+    (
+        "log_logit_scale",
+        lambda pair: pair.sender.language_model.normalises_logits,
+    ),
     (
         "mix_logit",
         lambda pair: isinstance(
@@ -363,9 +377,13 @@ SPLIT_LEARNING_RATES = (
         # One key covers both discriminators: `ScoreVolume` puts the same
         #     `log_score_scale` on each, so the `mix_scale_lr` that used to
         #     move `AttentionDiscriminator`'s own scalar has no successor.
+        #
+        # Inapplicable, not broken, under `normalise_score = false`: there is no
+        #     volume for it to move. The key stays live and simply has no
+        #     effect, exactly as `mix_logit_lr` does on a bilinear listener.
         "score_scale_lr",
         "log_score_scale",
-        lambda pair: True,
+        lambda pair: pair.receiver.discriminator.learns_score_scale,
     ),
     (
         # The listener's threshold, and the offset half of the same readout.
@@ -380,9 +398,17 @@ SPLIT_LEARNING_RATES = (
         #     the 156.25 steps an epoch both datasets run, that would bound its
         #     whole travel at 0.23 over thirty epochs, against a score whose own
         #     opening spread is 0.577.
+        #
+        # The *same* condition as `score_scale_lr` above rather than one of its
+        #     own: `learns_score_scale` is a misnomer and gates the offset too,
+        #     by design -- an inner constant is annihilated by nothing and would
+        #     simply be degenerate with the outer one -- so the one attribute
+        #     governs both parameters' existence. Note `score_bias` is not a
+        #     `SCALAR_GROUPS` entry: it belongs to its module's clip norm and
+        #     takes only a separate rate, so this is the one gate it needs.
         "score_bias_lr",
         "score_bias",
-        lambda pair: True,
+        lambda pair: pair.receiver.discriminator.learns_score_scale,
     ),
     (
         # Moves the parameter reported as `train_mix_alpha`. Named for the
@@ -417,11 +443,17 @@ SPLIT_LEARNING_RATES = (
         #     is free.
         #
         # On every architecture: both speakers mix in `GumbelChannel`, so unlike
-        #     `polarity_embedding_lr` and `mix_logit_lr` there is no arm that
-        #     lacks the parameter.
+        #     `polarity_embedding_lr` and `mix_logit_lr` no *speaker* lacks the
+        #     parameter.
+        #
+        # There is one arm that lacks it, and it is a config setting rather
+        #     than an architecture: `normalise_logits = false` removes the
+        #     normaliser and the scale together, since a multiplier on a
+        #     quantity that is not pinned to unit variance says nothing
+        #     `outputs2vocab` was not already free to say.
         "logit_scale_lr",
         "log_logit_scale",
-        lambda pair: True,
+        lambda pair: pair.sender.language_model.normalises_logits,
     ),
 )
 

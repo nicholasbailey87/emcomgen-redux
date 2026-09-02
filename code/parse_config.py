@@ -118,6 +118,23 @@ def validate_config(config: dict) -> bool:
             f'"gumbel" or "identity" — got {estimator!r}.'
         )
 
+    # The two normalisation flags, checked here for the same reason and in the
+    # same style. Both default to today's behaviour in the modules that read
+    # them, so a missing key would run the normalised arm silently rather than
+    # failing -- which is precisely the confusion an experiment folder whose
+    # whole treatment is one of these keys cannot survive. Required and
+    # boolean, so a `"false"` string cannot read as true either.
+    for table, key in (
+        ('sender_language_model', 'normalise_logits'),
+        ('receiver_discriminator', 'normalise_score'),
+    ):
+        value = config[table].get(key)
+        if not isinstance(value, bool):
+            raise InvalidConfig(
+                f"`{table}.{key}` must be present and a boolean — got "
+                f"{value!r}."
+            )
+
     # `[optimiser.module_lr]`, one rate per module clip group. Checked here
     # rather than in `build_models` because the whole point of the check is that
     # a key naming no group must *raise*: an unknown key would otherwise sit in

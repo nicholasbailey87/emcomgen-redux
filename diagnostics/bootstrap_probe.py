@@ -464,12 +464,21 @@ def main():
 
         language_model = pair.sender.language_model
         prototyper = pair.sender.prototyper
+
+        # NaN rather than a crash under `normalise_logits = false`, where the
+        #     channel has no scale to read. The column stays in the header so a
+        #     probe run under either setting prints the same shape.
+        logit_scale = (
+            language_model.logit_scale.item()
+            if language_model.normalises_logits else float("nan")
+        )
+
         line = (
             f"{step:6d} {loss.item():7.4f} {acc:7.4f} "
             f"{prototyper.pool_effective_examples:9.4f} "
             f"{prototyper.pool_score_norm:10.4f} "
             f"{language_model.polarity_separation:9.4f} "
-            f"{language_model.logit_scale.item():10.4f} "
+            f"{logit_scale:10.4f} "
             f"{language_model.realised_survival:9.4f} "
             f"{language_model.logit_spread:7.4f}"
         )

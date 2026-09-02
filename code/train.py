@@ -597,7 +597,10 @@ def run(
                     # `contrast_gate` below, and unlike the per-batch
                     # diagnostics above it, which are already floats. A live
                     # tensor here would keep a graph alive inside `Statistics`.
-                    logit_scale=language_model.logit_scale.item(),
+                    logit_scale=(
+                        language_model.logit_scale.item()
+                        if language_model.normalises_logits else unmeasured
+                    ),
                     sampling_tau=language_model.tau,
                     pool_effective_examples=prototyper.pool_effective_examples,
                     pool_score_norm=prototyper.pool_score_norm,
@@ -661,12 +664,30 @@ def run(
             if training:
                 discriminator = pair.receiver.discriminator
 
+                # NaN rather than an absent column when `normalise_score` is
+                # off and neither parameter exists, so the metrics header keeps
+                # its shape across the flag -- the same convention the contrast
+                # columns and the per-group gradient norms follow.
+                #
+                # The `isinstance` guard is what keeps the `else` below
+                # reachable: an unknown discriminator class must still reach its
+                # `TypeError` rather than dying on a missing attribute here.
+                if (
+                    isinstance(discriminator, models.receiver.ScoreVolume)
+                    and discriminator.learns_score_scale
+                ):
+                    score_scale = discriminator.score_scale.item()
+                    score_bias = discriminator.score_bias.item()
+                else:
+                    score_scale = float("nan")
+                    score_bias = float("nan")
+
                 if isinstance(
                     discriminator, models.receiver.BilinearDiscriminator
                 ):
                     stats.update(
-                        score_scale=discriminator.score_scale.item(),
-                        score_bias=discriminator.score_bias.item(),
+                        score_scale=score_scale,
+                        score_bias=score_bias,
                         bilinear_weight_norm=(
                             discriminator.bilinear.weight.norm().item()
                         ),
@@ -676,8 +697,8 @@ def run(
                     discriminator, models.receiver.AttentionDiscriminator
                 ):
                     stats.update(
-                        score_scale=discriminator.score_scale.item(),
-                        score_bias=discriminator.score_bias.item(),
+                        score_scale=score_scale,
+                        score_bias=score_bias,
                         mix_alpha=discriminator.mix_alpha,
                         mix_share=discriminator.mix_share,
                         bilinear_weight_norm=(

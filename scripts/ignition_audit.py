@@ -178,7 +178,10 @@ def diagnostics(pair):
     return {
         "realised_survival": language_model.realised_survival,
         "logit_spread": language_model.logit_spread,
-        "logit_scale": language_model.logit_scale.item(),
+        "logit_scale": (
+            language_model.logit_scale.item()
+            if language_model.normalises_logits else unmeasured
+        ),
         "pool_effective_examples": getattr(
             prototyper, "pool_effective_examples", unmeasured
         ),

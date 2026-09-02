@@ -173,7 +173,12 @@ class ScoreVolume:
         Call from `__init__` where the parameter should be created: creation
             order fixes which RNG draw every later parameter gets.
 
-        `learns_score_scale=False` is passed only from inside
+        `learns_score_scale=False` reaches here two ways. The config's
+            `[receiver_discriminator] normalise_score = false` turns the whole
+            readout off on either discriminator, which is what makes the
+            listener's arithmetic a switchable ladder rung rather than a fork.
+
+        The other is from inside
             `AttentionDiscriminator`, to the bilinear path it composes, because
             a volume there is degenerate with the one that module already has:
             the composed path is one of two branches multiplied by
@@ -531,12 +536,27 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
             message_width: the language model's `output_size`
             score_scale: build the learnable volume. False only from inside
                 `AttentionDiscriminator`; see `ScoreVolume._init_score_volume`.
+
+        `normalise_score` arrives in `kwargs` from `[receiver_discriminator]`
+            and defaults true, which is today's arithmetic exactly. False
+            removes the whole score-shaping apparatus at once -- both operand
+            norms, the `/sqrt(d)` calibration and the `ScoreVolume` readout --
+            leaving the bare bilinear form `r_j . W m` that `ce7d6a5` scored
+            with. The three go together because they are one decision: the
+            norms are what make the calibration exact and what make a volume in
+            front of the score mean the same thing under every backbone, so
+            keeping the readout over unnormalised operands would be neither
+            today's design nor the old one. See docs/channel.md.
         """
         super().__init__()
         self.referent_embedding_size = referent_embedding_size
         self.message_width = message_width
+        self.normalises_score = kwargs.get("normalise_score", True)
 
-        self._init_score_volume(score_scale)
+        # `score_scale` is the composition gate -- `AttentionDiscriminator`
+        #     passes False for the path it owns -- and the flag is the config's.
+        #     Either one alone is enough to leave the volume unbuilt.
+        self._init_score_volume(score_scale and self.normalises_score)
 
         self.bilinear = nn.Linear(
             self.message_width,
@@ -550,16 +570,23 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
         #     spaces: the message is normalised before `bilinear` reads it, so
         #     that norm is `message_width` wide, and the referent one is in
         #     referent space. See docs/architecture.md.
-        self.referent_layer_norm = nn.LayerNorm(
-            self.referent_embedding_size,
-            elementwise_affine=False,
-            eps=LAYER_NORM_EPS,
-        )
-        self.message_layer_norm = nn.LayerNorm(
-            self.message_width,
-            elementwise_affine=False,
-            eps=LAYER_NORM_EPS,
-        )
+        #
+        # Unbuilt rather than bypassed when the flag is off, so the module has
+        #     no attribute a later reader could apply by accident. Neither norm
+        #     holds a parameter either way, so the `state_dict` is unchanged by
+        #     their absence and nothing here consumes the generator -- which is
+        #     what lets the default path stay bit-identical.
+        if self.normalises_score:
+            self.referent_layer_norm = nn.LayerNorm(
+                self.referent_embedding_size,
+                elementwise_affine=False,
+                eps=LAYER_NORM_EPS,
+            )
+            self.message_layer_norm = nn.LayerNorm(
+                self.message_width,
+                elementwise_affine=False,
+                eps=LAYER_NORM_EPS,
+            )
 
     def forward(
         self,
@@ -580,6 +607,24 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
         Robust to prepended utility tokens, which do not move the last position.
         """
         message_embeddings = message_repr[:, -1, :]
+
+        if not self.normalises_score:
+            # The bare bilinear form, which is what `ce7d6a5` scored with and
+            #     what jayelm's `CopyListener.compare` has always computed: no
+            #     norm on either operand, no calibration, and -- because
+            #     `_init_score_volume` was told not to build them -- no volume
+            #     and no offset either. `readout` is still called and still
+            #     returns its argument untouched on that path, so the off-path
+            #     needs no branch of its own here.
+            #
+            # The score's magnitude therefore comes from the backbone again,
+            #     which is the coupling under test rather than an oversight.
+            return self.readout(
+                torch.einsum(
+                    "ijh,ih->ij",
+                    (referents, self.bilinear(message_embeddings)),
+                )
+            )
 
         # Both operands normalised, and both halves of each norm load-bearing
         #     now that nothing downstream normalises the score. The message norm
@@ -613,9 +658,11 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
         self.reset_score_volume()
         # No-ops while the two norms are parameter-free, and listed anyway so
         #     that turning `elementwise_affine` back on cannot leave a reset
-        #     listener holding trained gains.
-        self.referent_layer_norm.reset_parameters()
-        self.message_layer_norm.reset_parameters()
+        #     listener holding trained gains. Guarded because
+        #     `normalise_score = false` does not build them.
+        if self.normalises_score:
+            self.referent_layer_norm.reset_parameters()
+            self.message_layer_norm.reset_parameters()
 
 
 class AttentionDiscriminator(ScoreVolume, nn.Module):
@@ -656,6 +703,15 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
             two. The composed bilinear path is built with `score_scale=False`
             because it now feeds this readout instead of being one.
 
+        Under `normalise_score = false` there is no volume and no offset on
+            either, and the composed path scores the bare bilinear form, so this
+            module returns `(1 - a) * bilinear + a * attention` unaltered.
+            `referent_layer_norm` and `memory_layer_norm` below are *not*
+            touched by the flag: they are this stack's input and memory norms,
+            and a post-norm decoder normalises its own stream but never its
+            memory, so removing them would break the stack rather than change
+            how loudly it speaks.
+
         Neither branch is standardised, so `a` is a weight and not a share:
             a loud branch can dominate a heavily-weighted quiet one. That is
             deliberate. Standardising per branch would make `a` mean composition
@@ -689,8 +745,15 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         super().__init__()
         self.referent_embedding_size = referent_embedding_size
         self.message_width = message_width
+        self.normalises_score = kwargs.get("normalise_score", True)
 
-        self._init_score_volume()
+        # Gated on the flag rather than only dropped from `forward`. An
+        #     ungated volume under `normalise_score = false` would be a
+        #     parameter that exists, is claimed by `SCALAR_GROUPS`, and never
+        #     receives gradient -- which is exactly the state `builder.py`'s
+        #     "an applicable group matches a parameter" invariant exists to
+        #     make impossible.
+        self._init_score_volume(self.normalises_score)
 
         self.d_model = kwargs["d_model"]
         self.layers = kwargs["layers"]
@@ -823,6 +886,7 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
             self.referent_embedding_size,
             self.message_width,
             score_scale=False,
+            normalise_score=self.normalises_score,
         )
 
         # `mix_logit_init` -4.0 puts `a` at 0.116 for the default floor of
