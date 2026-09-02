@@ -1001,6 +1001,7 @@ class Receiver(nn.Module):
     def __init__(
         self,
         feature_model,
+        adapter,
         token_embedding_module,
         language_model,
         discriminator,
@@ -1011,6 +1012,11 @@ class Receiver(nn.Module):
 
         Args:
             feature_model: produces embeddings from referents
+            adapter: `ReferentAdapter`, the constant stage that brings the
+                backbone's output to this agent's language model `d_model`.
+                Both slots are sized from its output rather than from the
+                backbone's, so the listener's width is the language model's
+                business and not the vision model's.
             language_model: encodes the message, `(batch, slots, width)`
             discriminator: scores the candidates from that encoding
             dropout: the listener's one dropout, on the referent embeddings.
@@ -1038,6 +1044,7 @@ class Receiver(nn.Module):
         """
         super().__init__()
         self.feature_model = feature_model
+        self.adapter = adapter
         self.token_embedding = token_embedding_module
         self.language_model = language_model
         self.discriminator = discriminator
@@ -1050,7 +1057,7 @@ class Receiver(nn.Module):
 
         # Embed the referents
         referents_flat = referents.view(batch_size * n_obj, *rest)
-        embedded_referents = self.feature_model(referents_flat)
+        embedded_referents = self.adapter(self.feature_model(referents_flat))
         embedded_referents = embedded_referents.view(batch_size, n_obj, -1)
         embedded_referents = self.input_dropout(embedded_referents)
 
@@ -1063,6 +1070,7 @@ class Receiver(nn.Module):
 
     def reset_parameters(self):
         self.feature_model.reset_parameters()
+        self.adapter.reset_parameters()
         self.token_embedding.reset_parameters()
         self.language_model.reset_parameters()
         self.discriminator.reset_parameters()

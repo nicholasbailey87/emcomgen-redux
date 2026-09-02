@@ -48,25 +48,42 @@ token_embedding_size = 320
 d_model = 320
 heads = 5    # head_dim 64, as everywhere
 
-# 6 blocks, chosen on parameters rather than on taste, and 6 rather than the
-# 4 this rung used to take because the blocks got cheaper. They stopped
-# cross-attending into a latent memory when the referents moved into the stack's
-# input, which cost each block a sublayer -- about 1.6M across the stack. Two
-# more blocks and `ff_inner_size = 512` (see DEFAULT.toml) buy that back:
-# 5,854,089 against the GRU baseline's 5,764,923 on ShapeWorld and 5,859,855
-# against 5,774,073 on CUB, so 1.015x on both. That is closer to 1.0 than the
-# 1.029x this rung carried at 4 blocks and 576.
+# 7 blocks, chosen on parameters rather than on taste, and the third depth this
+# rung has taken: 4, then 6, now 7. Each move was the same move -- hold the
+# speaker's language model at the GRU baseline's size when something changed
+# what that size is.
+#
+# 4 -> 6 was the blocks getting cheaper. They stopped cross-attending into a
+# latent memory when the referents moved into the stack's input, which cost each
+# block a sublayer, about 1.6M across the stack, and two more blocks at
+# `ff_inner_size = 512` bought it back.
+#
+# 6 -> 7 is the *baseline* moving, not this rung. `ReferentAdapter` sizes each
+# agent from its own language model's `d_model` rather than from its backbone,
+# so `SenderGRULM.init_h` -- which reads `2 * referent_width` -- went from
+# 512-wide referents to 1024-wide ones and the GRU speaker grew by 1,048,576.
+# This stack did not move with it: its width is its own `d_model`, 320, and the
+# adapter delivers the referents already at that width. Held at 6 the ratio was
+# 0.859x, well outside the 0.05 band `test_the_speakers_language_models_are_
+# matched` pins. At 7 it is 6,758,354 against the baseline's 6,813,499 on
+# ShapeWorld, so 0.992x -- the closest this rung has ever been to 1.0, against
+# 1.015x at 6 blocks and 1.029x at 4.
+#
+# The alternative was 6 blocks at `ff_inner_size = 640`, which reads 0.968x. It
+# was not taken: `ff_inner_size = 512` is argued for in DEFAULT.toml on its own
+# grounds and depth is the free variable here, so a depth change is the cheaper
+# thing to spend.
 #
 # The cost of matching on parameters is not matching on depth, and this rung now
-# pays it twice over: 6 blocks against the GRU's 1, and 6 against its own
-# previous 4. Depth or parameters, not both, and the ladder is built on
+# pays it three times over: 7 blocks against the GRU's 1, and 7 against its own
+# previous 4 and 6. Depth or parameters, not both, and the ladder is built on
 # parameters. Note the depth is *not* free of the design change either, so a
 # difference against the runs recorded before 2026-08-26 covers both.
 #
 # Depth is close to inert for the thing the redesign was for, at least at init:
 # measured init-time code strength runs 0.2236 / 0.2158 / 0.2173 / 0.2250 at 4 /
 # 5 / 6 / 7 blocks, flat inside the noise. See docs/anecdotes.md.
-layers = 6
+layers = 7
 
 # `false` selects the causal arm: the blocks run over the latent array under a
 # causal mask and the message slots in its tail are generated in order, each

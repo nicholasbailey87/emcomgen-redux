@@ -430,6 +430,10 @@ def test_both_slots_see_the_same_masked_referents(language_model, discriminator)
     listener = _four_cell(language_model, discriminator, dropout=0.5)
     receiver = R.Receiver(
         nn.Identity(),
+        # The adapter, identity here: this test is about where the dropout sits
+        # relative to the two slots, and a real adapter would only add a stage
+        # upstream of the tensor both of them are asserted to share.
+        nn.Identity(),
         nn.Embedding(8, listener.token_embedding_size),
         listener.language_model,
         listener.discriminator,

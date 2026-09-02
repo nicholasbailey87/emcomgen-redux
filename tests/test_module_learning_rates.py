@@ -148,10 +148,12 @@ def test_the_default_rates_are_one_factor_of_two():
 
     expected = {
         "sender_vision": base_lr * speaker,
+        "sender_adapter": base_lr * speaker,
         "sender_prototyper": base_lr * speaker,
         "sender_contrast": base_lr * speaker,
         "sender_language_model": base_lr * speaker,
         "receiver_vision": base_lr,
+        "receiver_adapter": base_lr,
         "receiver_token_embedding": base_lr,
         "receiver_language_model": base_lr,
         "receiver_discriminator": base_lr,

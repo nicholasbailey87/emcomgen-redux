@@ -2,7 +2,10 @@
 Model building utils
 """
 
-from broccoli.activation import ReLU, GELU, SquaredReLU, SwiGLU
+import torch.nn as nn
+
+from broccoli.activation import ReLU, GELU, SquaredReLU, Swish, SwiGLU
+from broccoli.transformer import FeedforwardBlock
 
 
 # Name -> broccoli activation, so `activation` can be set from a TOML config.
@@ -128,3 +131,93 @@ def scale_without_attenuating(x, scale):
         `scale * x` in value, with the gradient described above
     """
     return scale * x.detach() + (x - x.detach())
+
+
+class ReferentAdapter(nn.Module):
+    """
+    The one stage between a vision backbone and everything that consumes its
+        output, on both agents and on every rung.
+
+    **Why it exists.** Until this was added, `feature_model.final_feat_dim` was
+        threaded straight into the prototyper, the language model, the contrast
+        stage and the discriminator, so a single scalar chosen by the backbone
+        set the width of the entire agent. That coupling is what made rung 9
+        unreadable as an experiment: `SenderTransformerLM` rejects
+        `token_embedding_size != referent_embedding_size` outright, so the
+        speaker's language model had to take the ViT's 320 and the ViT had to
+        take the language model's, and neither could move without the other.
+        The language model is quadratic in width -- 5,854,089 parameters at 320
+        against 12,113,481 at 512 -- so 320 was the only width at which rung 9
+        was capacity-matched to the GRU baseline it is compared against, and the
+        vision model was pinned there by that match rather than by anything
+        about vision.
+
+        With this in the path, the backbone emits whatever it emits and the
+        agent runs at its language model's `d_model`. Backbone capacity and
+        language model capacity become independent variables, which is what a
+        comparison across backbones needs.
+
+    **An architectural constant, not a rung.** It is present on both agents at
+        every rung, at the same shape, so it is never what a rung is testing.
+        The alternative -- introducing it only where a width has to change --
+        would put an extra stage on exactly the rungs whose results are being
+        compared, which is the confound it exists to remove.
+
+    **Shape.** A `broccoli` `FeedforwardBlock`, SwiGLU, inner size twice the
+        output width. The block has no internal residual, so an input width
+        different from its output width is native rather than something worked
+        around with a projection on a shortcut. Note SwiGLU doubles the up
+        projection: at inner size `2 * d_out` the first linear is `4 * d_out`
+        wide, so a 512 -> 320 adapter is 862,721 parameters and not the ~500k
+        the ratio suggests.
+
+    **The output norm is the block's own.** `FeedforwardBlock.process` already
+        ends in `RMSNorm(output_features, elementwise_affine=True)`, so what
+        leaves here is normalised with a learnable gain and nothing is stacked
+        on top of it. An `nn.LayerNorm` after that would re-centre and re-scale
+        what the RMSNorm gain had just set, which is a second normalisation
+        rather than the one asked for. The learnable affine is the point: unlike
+        `ExampleContrast.adapter`, whose non-affine norm exists so the
+        backbone's scale divides out exactly, this stage is a width change that
+        downstream modules read as their input distribution, so it is allowed to
+        choose that distribution's scale.
+    """
+
+    def __init__(self, input_features, output_features, activation="SwiGLU"):
+        """
+        Args:
+            input_features: the backbone's `final_feat_dim`
+            output_features: the agent's language model `d_model`
+        """
+        super().__init__()
+        self.input_features = input_features
+        self.output_features = output_features
+        self.block = FeedforwardBlock(
+            input_features,
+            output_features,
+            ratio=2,
+            activation=get_activation(activation),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+    def reset_parameters(self):
+        """
+        `FeedforwardBlock.reset_parameters` walks its `process` sequence and
+            calls `reset_parameters` on whatever has one, and broccoli's `Swish`
+            does not have one -- so under SwiGLU its `swish_beta` survives a
+            reset that is supposed to return the whole stage to its opening
+            state. That matters because `receiver_reset_interval` resets the
+            listener mid-run, and a parameter that persists across that is a
+            parameter the reset was not told about.
+
+        Restored here explicitly rather than by a `hasattr` guard on the walk,
+            which is the same choice `Sender.reset_parameters` makes: a guard
+            turns a module that has no reset into one that is silently skipped.
+            1.0 is `Swish.__init__`'s opening value.
+        """
+        self.block.reset_parameters()
+        for module in self.block.modules():
+            if isinstance(module, Swish):
+                nn.init.constant_(module.swish_beta, 1.0)

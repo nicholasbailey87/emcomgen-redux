@@ -1686,6 +1686,7 @@ class Sender(nn.Module):
     def __init__(
         self,
         feat_model: nn.Module,
+        adapter: nn.Module,
         prototyper: nn.Module,
         language_model: nn.Module,
         contrast: Optional[nn.Module] = None,
@@ -1698,6 +1699,11 @@ class Sender(nn.Module):
 
         Args:
             feat_model: produces embeddings from referents
+            adapter: `ReferentAdapter`, the constant stage that brings the
+                backbone's output to the language model's `d_model`. Everything
+                downstream of it -- the contrast stage, the prototyper, the
+                language model -- is sized from its output rather than from the
+                backbone's.
             prototyper: builds prototypes from positive and negative examples
             language_model: builds utterances from prototypes
             contrast: optional `ExampleContrast`, run between the two so the
@@ -1710,7 +1716,12 @@ class Sender(nn.Module):
         """
         super().__init__()
         self.feat_model = feat_model
-        self.feat_size = feat_model.final_feat_dim
+        # The width every stage after the backbone runs at. This is the
+        #     adapter's output, not `feat_model.final_feat_dim`: the backbone
+        #     no longer sets the speaker's width. See
+        #     `model_util.ReferentAdapter`.
+        self.adapter = adapter
+        self.feat_size = adapter.output_features
         self.prototyper = prototyper
         self.contrast = contrast
         self.language_model = language_model
@@ -1787,7 +1798,12 @@ class Sender(nn.Module):
         n_obj = samples.shape[1]
         rest = samples.shape[2:]
         flat_samples = samples.view(batch_size * n_obj, *rest)
-        embedded_samples = self.vision_dropout(self.feat_model(flat_samples))
+        # Adapter before the dropout, so the mask lands on the referent
+        #     embedding the rest of the speaker actually reads -- the contrast
+        #     stage relies on seeing the same mask the prototyper does, and
+        #     `vision_dropout` is documented as being on per-image embeddings.
+        adapted = self.adapter(self.feat_model(flat_samples))
+        embedded_samples = self.vision_dropout(adapted)
         return embedded_samples.view(batch_size, n_obj, -1)
 
     def get_prototypes(self, samples, targets):
@@ -1871,6 +1887,7 @@ class Sender(nn.Module):
         #     a missing method into a silently skipped backbone. See
         #     docs/anecdotes.md.
         self.feat_model.reset_parameters()
+        self.adapter.reset_parameters()
         self.prototyper.reset_parameters()
         # The `None` guard is the architecture, not a `hasattr` fallback: a
         #     speaker built without the contrast stage has nothing to reset,

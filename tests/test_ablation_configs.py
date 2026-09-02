@@ -156,9 +156,29 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
 @pytest.mark.parametrize(
     "config_file,module,expected",
     [
+        # Every count below is taken with `ReferentAdapter` in the path, which
+        # sizes each agent from its own language model's `d_model` rather than
+        # from its backbone. The numbers that moved, moved for that reason and
+        # not because a module was redesigned:
+        #
+        #   * the speakers' `init_h` reads `2 * referent_width`, so it doubles
+        #     at the GRU rungs as the referents go 512 -> 1024. That restores
+        #     jayelm's own width: their speaker sits on `Conv4`, whose
+        #     `final_feat_dim` is 1024, so `Linear(2048 -> 1024)` is the paper's
+        #     projection and 512 was `ResNet18SmallInput`'s number.
+        #   * the bilinear discriminator is linear in referent width, so it
+        #     doubles with them.
+        #   * rungs 13-16 go the other way. Their listener language model runs
+        #     at `d_model = 256` where the ViT emitted 320, so the referents
+        #     narrow and both listener modules shrink.
+        #
+        # The adapters themselves are not pinned here. They are an architectural
+        # constant at every rung and their size is a function of two widths that
+        # are already pinned, so a claim about them would restate the two rows
+        # above it.
         # ShapeWorld: the CNN/GRU baseline.
         ("01_shapeworld_baseline.toml", "sender.feat_model", 11_168_832),
-        ("01_shapeworld_baseline.toml", "sender.language_model", 5_764_923),
+        ("01_shapeworld_baseline.toml", "sender.language_model", 6_813_499),
         # The listener is two modules: `receiver.language_model` encodes the
         # message and `receiver.discriminator` scores the candidates from it.
         #
@@ -179,26 +199,26 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # the `bilinear` weight and nothing else: it was 524,289 while
         # `log_score_scale` carried the volume, and that scalar is gone -- the
         # weight carries it now. See test_score_scale.py.
-        ("01_shapeworld_baseline.toml", "receiver.discriminator", 524_290),
+        ("01_shapeworld_baseline.toml", "receiver.discriminator", 1_048_578),
         # ShapeWorld: the top of the ladder. The speaker's language model is the
-        # causal arm at six blocks -- see rung 9's `layers` for why six, and why
-        # it was four until the blocks stopped cross-attending.
+        # causal arm at seven blocks -- see rung 9's `layers` for why seven, and
+        # for the two depths before it.
         ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 10_317_986),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 5_854_089),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_784_566),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_548_294),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 6_758_354),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_768_182),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_515_526),
         # CUB: the CNN/GRU baseline.
         ("02_birds_baseline.toml", "sender.feat_model", 11_176_512),
-        ("02_birds_baseline.toml", "sender.language_model", 5_774_073),
+        ("02_birds_baseline.toml", "sender.language_model", 6_822_649),
         ("02_birds_baseline.toml", "receiver.language_model", 4_687_872),
-        ("02_birds_baseline.toml", "receiver.discriminator", 524_290),
+        ("02_birds_baseline.toml", "receiver.discriminator", 1_048_578),
         # CUB: the top of the ladder. Only the two vision-dependent counts differ
         # from ShapeWorld's -- the ViT's patch tokeniser scales with image size,
         # and the speaker's language model carries a longer message.
         ("16_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 11_332_626),
-        ("16_birds_receiver_cross_attention_lm.toml", "sender.language_model", 5_859_855),
-        ("16_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_784_566),
-        ("16_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_548_294),
+        ("16_birds_receiver_cross_attention_lm.toml", "sender.language_model", 6_764_120),
+        ("16_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_768_182),
+        ("16_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_515_526),
         # Rung 13's discriminator, still pinned because it is still the number
         # that makes the 13 -> 15 step unclean, though far less so than it was:
         # 2,990,662 against rung 15's 2,548,294. The gap is a `memory_adapter`
@@ -225,17 +245,18 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # rungs 1-12 could place the score against `train.py`'s fixed
         # `lis_scores > 0`. Two scalars is the whole cost of the listener's
         # readout.
-        ("13_shapeworld_attention_discriminator.toml", "receiver.discriminator", 2_990_662),
-        ("14_birds_attention_discriminator.toml", "receiver.discriminator", 2_990_662),
+        ("13_shapeworld_attention_discriminator.toml", "receiver.discriminator", 3_891_782),
+        ("14_birds_attention_discriminator.toml", "receiver.discriminator", 3_891_782),
         # The two intermediate vision swaps, so a rung that stopped inheriting
         # the shared ViT specification shows up here rather than in a run.
         ("03_shapeworld_sender_vit.toml", "sender.feat_model", 10_317_986),
         ("04_birds_sender_vit.toml", "sender.feat_model", 11_332_626),
-        # And the prototyper, which is 642 parameters -- one scoring direction
-        # and a bias per polarity, at the ViT's 320 -- where rung 3's is nothing
-        # at all.
-        ("05_shapeworld_attention_prototyper.toml", "sender.prototyper", 642),
-        ("06_birds_attention_prototyper.toml", "sender.prototyper", 642),
+        # And the prototyper, which is one scoring direction and a bias per
+        # polarity, where rung 3's is nothing at all. 2,050 rather than the 642
+        # it was: it sizes off the referents, which the adapter now delivers at
+        # the speaker's GRU width of 1024 rather than at the ViT's 320.
+        ("05_shapeworld_attention_prototyper.toml", "sender.prototyper", 2_050),
+        ("06_birds_attention_prototyper.toml", "sender.prototyper", 2_050),
     ],
 )
 def test_the_arms_are_the_sizes_they_claim(config_file, module, expected):
@@ -251,15 +272,19 @@ def test_the_arms_are_the_sizes_they_claim(config_file, module, expected):
 @pytest.mark.parametrize(
     "baseline,transformer,tolerance",
     [
-        # Measured at 1.015x on both datasets, at six blocks and
-        # `ff_inner_size = 512`. The tolerance is 0.05 rather than something
-        # tighter because `layers` is an integer: at 512 the neighbouring depths
-        # are 0.88x and 1.08x, so nothing between them is reachable on depth
-        # alone and a tighter band would only be pinning the arithmetic of one
-        # depth against one feedforward width.
+        # Measured at 0.992x on ShapeWorld and 0.991x on CUB, at seven blocks
+        # and `ff_inner_size = 512`. The tolerance is 0.05 rather than something
+        # tighter because `layers` is an integer: the neighbouring depths are
+        # 0.86x and 1.13x, so nothing between them is reachable on depth alone
+        # and a tighter band would only be pinning the arithmetic of one depth
+        # against one feedforward width.
         #
-        # It was 1.029x at four blocks and 576, before the speaker's blocks lost
-        # their cross-attention sublayer.
+        # It was 1.029x at four blocks and 576, then 1.015x at six once the
+        # speaker's blocks lost their cross-attention sublayer, and six became
+        # seven when `ReferentAdapter` widened the *baseline* -- `init_h` reads
+        # `2 * referent_width`, which the adapter took from the backbone's 512
+        # to the GRU's own 1024. This rung's stack runs at its own `d_model` and
+        # did not move with it. See rung 9's `layers`.
         ("01_shapeworld_baseline.toml", "09_shapeworld_sender_transformer_lm.toml", 0.05),
         ("02_birds_baseline.toml", "10_birds_sender_transformer_lm.toml", 0.05),
         # The same speaker at the top of the ladder, which nothing above rung 9
@@ -403,13 +428,22 @@ def test_contrast_opens_at_the_parent_rung(config_file):
 @pytest.mark.parametrize(
     "config_file,expected",
     [
-        # ResNet18 and Conv4 both hand over 512; the ViT2 rungs hand over their
-        #     own `d_model`, 320. The rest is the stage's own width, so the two
-        #     numbers are `2 * feat * 320 + 4 * 320^2 + 320 + 2 * 320 + feat + 1`
-        #     -- the two projections, the attention's four, its `out_norm` gain,
-        #     the label tag and the gate.
-        ("01_shapeworld_baseline.toml", 738_753),
-        ("02_birds_baseline.toml", 738_753),
+        # What the stage sees is no longer the backbone's width but the
+        #     adapter's output, which is the speaker's own language model
+        #     `d_model`: 1024 at the GRU rungs, 320 wherever
+        #     `SenderTransformerLM` sets it there. The rest is the stage's own
+        #     width, so the numbers are
+        #     `2 * feat * 320 + 4 * 320^2 + 320 + 2 * 320 + feat + 1` -- the two
+        #     projections, the attention's four, its `out_norm` gain, the label
+        #     tag and the gate.
+        #
+        #     Both datasets read the same number now where they always did, but
+        #     for a different reason: it used to be that `ResNet18` and `Conv4`
+        #     both happened to hand over 512, and it is now that both speakers
+        #     run their GRU at the same `d_model`. A backbone swap no longer
+        #     moves this count at all, which is the adapter working.
+        ("01_shapeworld_baseline.toml", 1_066_945),
+        ("02_birds_baseline.toml", 1_066_945),
         ("11_shapeworld_receiver_vit.toml", 615_681),
         ("12_birds_receiver_vit.toml", 615_681),
     ],

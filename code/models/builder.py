@@ -7,6 +7,7 @@ from . import sender as sender
 from . import receiver as receiver
 
 from .backbone import vision
+from .model_util import ReferentAdapter
 
 from torch import nn
 
@@ -98,10 +99,18 @@ def split_out_parameter(optimiser, pair, suffix, lr, config_key):
 #     change. Add a module here and it is clipped and rateable at once.
 MODULE_GROUPS = (
     ("sender_vision", lambda pair: pair.sender.feat_model),
+    # Its own group rather than folded into the vision model it follows. The
+    #     adapter is the one stage whose *input* width is the backbone's and
+    #     whose output width is the language model's, so a gradient norm taken
+    #     across the pair of them would be read as the backbone's and is not.
+    #     It is also the stage a backbone swap changes the shape of, which is
+    #     exactly what a per-module clip column is for.
+    ("sender_adapter", lambda pair: pair.sender.adapter),
     ("sender_prototyper", lambda pair: pair.sender.prototyper),
     ("sender_contrast", lambda pair: pair.sender.contrast),
     ("sender_language_model", lambda pair: pair.sender.language_model),
     ("receiver_vision", lambda pair: pair.receiver.feature_model),
+    ("receiver_adapter", lambda pair: pair.receiver.adapter),
     ("receiver_token_embedding", lambda pair: pair.receiver.token_embedding),
     ("receiver_language_model", lambda pair: pair.receiver.language_model),
     ("receiver_discriminator", lambda pair: pair.receiver.discriminator),
@@ -488,9 +497,19 @@ def build_models(dataloaders, config):
         n_feats=n_feats,
         **config['sender_feature_model']
     )
-    sender_prototyper = sender_prototyper_class(sender_feature_model.final_feat_dim)
-    sender_language_model = sender_language_model_class(
+    # Every stage after the backbone is sized from the adapter's output rather
+    #     than from `final_feat_dim`, which is the whole point of it: the
+    #     speaker runs at its language model's `d_model` and the vision model
+    #     emits whatever it emits. See `model_util.ReferentAdapter`.
+    sender_referent_width = config['sender_language_model']['d_model']
+    sender_adapter = ReferentAdapter(
         sender_feature_model.final_feat_dim,
+        sender_referent_width,
+        activation=config['sender_language_model']['activation'],
+    )
+    sender_prototyper = sender_prototyper_class(sender_referent_width)
+    sender_language_model = sender_language_model_class(
+        sender_referent_width,
         **config['sender_language_model']
     )
 
@@ -501,7 +520,7 @@ def build_models(dataloaders, config):
     #     `sender.ExampleContrast`.
     sender_contrast = (
         sender.ExampleContrast(
-            sender_feature_model.final_feat_dim,
+            sender_referent_width,
             **config['sender_contrast']
         )
         if config['sender']['contrast']
@@ -510,6 +529,7 @@ def build_models(dataloaders, config):
 
     sender_ = sender_class(
         feat_model = sender_feature_model,
+        adapter = sender_adapter,
         prototyper = sender_prototyper,
         language_model = sender_language_model,
         contrast = sender_contrast,
@@ -549,8 +569,14 @@ def build_models(dataloaders, config):
             "must be equal to sender_language_model.message_length"
         )
 
-    receiver_language_model = receiver_language_model_class(
+    receiver_referent_width = config['receiver_language_model']['d_model']
+    receiver_adapter = ReferentAdapter(
         receiver_feature_model.final_feat_dim,
+        receiver_referent_width,
+        activation=config['receiver_language_model']['activation'],
+    )
+    receiver_language_model = receiver_language_model_class(
+        receiver_referent_width,
         **config['receiver_language_model']
     )
 
@@ -559,13 +585,14 @@ def build_models(dataloaders, config):
     #     -- `2 * d_model` for a bidirectional GRU, `d_model` for the decoder
     #     stack -- and a config key restating it is a key that can be wrong.
     receiver_discriminator = receiver_discriminator_class(
-        receiver_feature_model.final_feat_dim,
+        receiver_referent_width,
         receiver_language_model.output_size,
         **config['receiver_discriminator']
     )
 
     receiver_ = receiver_class(
         feature_model = receiver_feature_model,
+        adapter = receiver_adapter,
         token_embedding_module=receiver_token_embedding_module,
         language_model = receiver_language_model,
         discriminator = receiver_discriminator,

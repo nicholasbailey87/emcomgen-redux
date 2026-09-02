@@ -69,10 +69,32 @@ class _StubLanguageModel(nn.Module):
         raise AssertionError("get_prototypes must not speak")
 
 
+class _IdentityAdapter(nn.Module):
+    """
+    Stands in for `ReferentAdapter`, which `Sender` requires and reads
+        `output_features` off.
+
+    Identity rather than the real block because these tests are about the
+        spread of the referents the prototyper pools, and a real adapter is a
+        non-linearity between the stub backbone and that pooling: it would
+        preserve `test_identical_referents_read_zero` but not
+        `test_a_global_rescale_leaves_it_alone`, whose claim is scale
+        invariance of the *statistic* rather than of the adapter.
+    """
+
+    def __init__(self, feat_size):
+        super().__init__()
+        self.output_features = feat_size
+
+    def forward(self, x):
+        return x
+
+
 def _sender(contrast=None, feat_size=FEAT, seed=0):
     torch.manual_seed(seed)
     return S.Sender(
         _StubBackbone(feat_size),
+        _IdentityAdapter(feat_size),
         S.AveragePrototyper(),
         _StubLanguageModel(),
         contrast=contrast,

@@ -59,7 +59,7 @@ heads = 5    # head_dim 64, as everywhere
 # sublayer when the referents moved into the stack's input, so they are cheaper
 # and there are more of them. The argument is at rung 9; this rung is not
 # supposed to touch the speaker at all.
-layers = 6
+layers = 7
 
 # `false` selects the causal arm: the blocks run over the latent array under a
 # causal mask and the message slots in its tail are generated in order, each

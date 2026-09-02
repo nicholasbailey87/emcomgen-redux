@@ -51,13 +51,15 @@ token_embedding_size = 320
 d_model = 320
 heads = 5    # head_dim 64, as everywhere
 
-# 6 blocks and `ff_inner_size = 512`, which together hold the speaker's language
-# model at 1.015x the GRU baseline's -- 5,859,855 against 5,774,073 here. The
+# 7 blocks and `ff_inner_size = 512`, which together hold the speaker's language
+# model at 0.991x the GRU baseline's -- 6,764,120 against 6,822,649 here. It was
+# 6 blocks at 1.015x until `ReferentAdapter` widened the GRU speaker's `init_h`
+# and left this stack, which runs at its own 320, where it was. The
 # blocks lost their cross-attention sublayer when the referents moved into the
 # stack's input, so they are cheaper and there are more of them. Rung 9 carries
 # the argument; this rung is its twin on CUB and takes the same depth, which is
 # the point of the pair.
-layers = 6
+layers = 7
 
 # `false` selects the causal arm: the blocks run over the latent array under a
 # causal mask and the message slots in its tail are generated in order, each

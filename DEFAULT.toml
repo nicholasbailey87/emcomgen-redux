@@ -711,10 +711,17 @@ contrast_gate_lr = 2e-3
 # theirs, flatten the table in that rung rather than everywhere.
 [optimiser.module_lr]
 sender_vision = 1e-4
+# The adapter takes its agent's rate rather than a rate of its own. It is an
+# architectural constant present at every rung, so a rate here would be a knob
+# on every rung at once, and the speaker's stages are all at 1e-4 -- there is no
+# argument for this one stage sitting between the vision model and the
+# prototyper at a third rate. See `model_util.ReferentAdapter`.
+sender_adapter = 1e-4
 sender_prototyper = 1e-4
 sender_contrast = 1e-4
 sender_language_model = 1e-4
 receiver_vision = 5e-5
+receiver_adapter = 5e-5
 receiver_token_embedding = 5e-5
 receiver_language_model = 5e-5
 receiver_discriminator = 5e-5
