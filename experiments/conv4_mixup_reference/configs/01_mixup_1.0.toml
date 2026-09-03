@@ -31,16 +31,15 @@
 # be broken at all, not which of the two breaks it. Separating them is the next
 # question and only worth asking if this one answers yes.
 #
-# Silhouetting at 0.5 on top, which makes this the everything-on corner of a
-# three-point ladder rather than a controlled contrast:
+# Silhouetting stays off, which keeps the two interventions on separate axes:
 #
 #     conv4_lr_reference/02_lr_1e-4    nothing
 #     conv4_silhouette_reference       silhouette only
-#     this                             silhouette + flips + rotation + mixup
+#     this                             flips + rotation + mixup, no silhouette
 #
-# So it cannot attribute an effect to any one of them. What it can do is answer
-# whether the memorisation is breakable at all -- 0.913 train against 0.564 on
-# the first of those -- and the attribution is only worth paying for if it is.
+# The augmentations attack memorisation of individual images; silhouetting
+# attacks which attribute the pair leans on. Crossing them is a fourth arm, not
+# this one.
 
 name = "conv4_mixup_reference"
 
