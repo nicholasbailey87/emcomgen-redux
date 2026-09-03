@@ -1,0 +1,38 @@
+# conv4_lr_reference: a flat learning rate of 2e-4 on Conv4, with no
+# silhouetting, no warm-up and no per-module split. The arms differ in the rate
+# alone.
+
+name = "conv4_lr_reference"
+
+[sender]
+feature_model = "Conv4"
+
+[receiver]
+feature_model = "Conv4"
+
+[data]
+silhouette_p_sender = 0.0
+silhouette_p_receiver = 0.0
+
+[scheduler]
+epochs = 100
+warm_up_epochs = 0
+lr_schedule_shape = "flat"
+
+[optimiser]
+lr = 2e-4
+
+[optimiser.module_lr]
+sender_vision = 2e-4
+sender_adapter = 2e-4
+sender_prototyper = 2e-4
+sender_contrast = 2e-4
+sender_language_model = 2e-4
+receiver_vision = 2e-4
+receiver_adapter = 2e-4
+receiver_token_embedding = 2e-4
+receiver_language_model = 2e-4
+receiver_discriminator = 2e-4
+
+[experiment]
+repeats = 3
