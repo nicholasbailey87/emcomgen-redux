@@ -4,6 +4,9 @@ import torch.nn.functional as F
 import os
 
 from PIL import Image
+from torchvision.transforms import InterpolationMode
+from torchvision.transforms import functional as TF
+
 from . import language
 from . import util
 
@@ -193,6 +196,8 @@ class ConceptDataset:
         silhouette_p_sender=0.0,
         silhouette_p_receiver=0.0,
         silhouette_fill=DEFAULT_SILHOUETTE_FILL,
+        augment_flip=False,
+        augment_affine_degrees=0.0,
         **kwargs,
     ):
         self.x = data["x"]
@@ -217,6 +222,8 @@ class ConceptDataset:
         self.silhouette_p_sender = silhouette_p_sender
         self.silhouette_p_receiver = silhouette_p_receiver
         self.silhouette_fill = silhouette_fill
+        self.augment_flip = augment_flip
+        self.augment_affine_degrees = augment_affine_degrees
         assert self.n_examples % 2 == 0
         # Assign the rest of the kwargs
         for name, val in kwargs.items():
@@ -237,6 +244,76 @@ class ConceptDataset:
         if self.silhouette_p_receiver and np.random.rand() < self.silhouette_p_receiver:
             lis_inp = silhouette(lis_inp, self.silhouette_fill)
         return spk_inp, lis_inp
+
+    def _augment_geometry(self, imgs):
+        """
+        Flip and rotate each of one agent's referents, independently.
+
+        Per *image* and not per game, and called once per agent rather than
+        once on the whole row. Both matter. A single draw applied to the whole
+        tensor would leave every referent in the game -- and both agents' views
+        of the shared stored image -- under the same transform, which varies
+        the epoch but not the game. Drawing per image means the listener never
+        sees the same pixel array twice, which is the point: the store holds 20
+        positives per game and a hundred epochs of the same twenty is what a
+        listener memorises. See docs/data.md.
+
+        Safe against this dataset's five shapes -- circle, ellipse, rectangle,
+        square, triangle -- which is not a property of affine transforms in
+        general and is why `translate`, `scale` and `shear` are pinned off
+        rather than left to a config:
+
+        - Flips alias nothing. A flipped triangle is still a triangle; there is
+          no inverted-triangle label.
+        - Rotation aliases nothing at small angles. The dangerous one is 45
+          degrees on a square, and there is no diamond label anyway.
+        - *Shear* would alias. A sheared rectangle is a parallelogram and a
+          sheared square stops being square.
+        - *Anisotropic* scaling would alias two label pairs outright:
+          circle-ellipse and square-rectangle. `RandomAffine`'s own `scale` is
+          isotropic and so would be safe, but nothing here needs it.
+
+        `fill=0` because ShapeWorld renders on a black background (see
+        `silhouette`), so the corners rotation leaves behind are the background
+        colour rather than a value that appears nowhere else in the dataset and
+        which a model could key on.
+
+        Applied after `_apply_silhouette`, not before: the silhouette thresholds
+        stored pixel values, and interpolation would blur exactly the edges that
+        threshold reads.
+        """
+        if not (self.augment_flip or self.augment_affine_degrees):
+            return imgs
+
+        out = imgs.clone()
+        for j in range(out.shape[0]):
+            img = out[j]
+            if self.augment_flip:
+                # Independent draws, so a quarter of images get both.
+                if np.random.rand() < 0.5:
+                    img = TF.hflip(img)
+                if np.random.rand() < 0.5:
+                    img = TF.vflip(img)
+            if self.augment_affine_degrees:
+                # Every image, not a fraction of them: a rotation of zero is
+                #     already in the range, so a probability here would only
+                #     concentrate mass on the identity.
+                img = TF.affine(
+                    img,
+                    angle=float(
+                        np.random.uniform(
+                            -self.augment_affine_degrees,
+                            self.augment_affine_degrees,
+                        )
+                    ),
+                    translate=[0, 0],
+                    scale=1.0,
+                    shear=[0.0, 0.0],
+                    interpolation=InterpolationMode.BILINEAR,
+                    fill=0,
+                )
+            out[j] = img
+        return out
 
     def _game_language(self, i, pos_i):
         return self.lang_idx[i]
@@ -293,6 +370,14 @@ class ConceptDataset:
             img, label, self.n_examples, percent_novel=self._game_percent_novel()
         )
         spk_inp, lis_inp = self._apply_silhouette(spk_inp, lis_inp)
+
+        # Train only, like the permutation above and the silhouette, and drawn
+        #     separately for each agent so that the two views of a shared stored
+        #     image diverge.
+        if self.augment:
+            spk_inp = self._augment_geometry(spk_inp)
+            lis_inp = self._augment_geometry(lis_inp)
+
         return (spk_inp, spk_label, lis_inp, lis_label, lang, md)
 
     def to_text(self, idxs, join=True):

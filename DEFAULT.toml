@@ -151,6 +151,42 @@ n_workers = 0
 silhouette_p_sender = 0.0
 silhouette_p_receiver = 0.1
 
+# Geometric augmentation of the referents, train-only and drawn per image.
+#
+# `augment_flip` gives each image an independent 50% horizontal flip and an
+# independent 50% vertical flip, so a quarter of images get both.
+# `augment_affine_degrees` rotates every image by a uniform draw from
+# +/- that many degrees; 0.0 leaves the rotation out entirely.
+#
+# Why they exist. The store holds 20 positives and 20 negatives per game, and
+# `ConceptDataset.__getitem__`'s permutation only decides which agent sees
+# which -- the image *set* a game presents never changes. A hundred epochs of
+# the same twenty images is what a listener memorises, and the 2026-09-03 Conv4
+# baseline is what that looks like: shape at 0.880 on train and 0.484 on both
+# eval splits, with colour transferring and shape not at all. These are drawn
+# separately for each agent, so the two views of a shared stored image diverge
+# and the listener never sees the same pixel array twice.
+#
+# Note the original ShapeWorld store had 40-50 positives per game and
+# `split_spk_lis` read 20 of them, so a fresh subset arrived every epoch;
+# `data/shrink_shapeworld.py` kept 20 and that variation went with it. Its
+# docstring's defence -- "C(20,10) = 184,756 speaker/listener divisions" --
+# counts partitions of a fixed set, not distinct images.
+#
+# Both default off, so every run recorded before this key existed is
+# reproducible from its own config.
+#
+# What is deliberately absent, and why the transform is pinned rather than
+# configurable. The five shapes are circle, ellipse, rectangle, square and
+# triangle. Flips alias none of them and small rotations alias none of them,
+# but *shear* turns a rectangle into a parallelogram, and *anisotropic* scaling
+# maps circle to ellipse and square to rectangle -- two label pairs destroyed
+# outright. `RandomResizedCrop` is out for the same reason: its `ratio`
+# argument is exactly that scaling. Colour jitter is out on its own terms,
+# since colour is a label here rather than a nuisance variable.
+augment_flip = false
+augment_affine_degrees = 0.0
+
 # The colour a lit pixel comes back at, as a per-channel fraction of maximum.
 # Every pixel above half the image's peak luma is repainted to it and every
 # other pixel to zero, so a silhouette is two-valued.

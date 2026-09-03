@@ -232,6 +232,26 @@ def validate_config(config: dict) -> bool:
         if not 0.0 <= p <= 1.0:
             raise InvalidConfig(f"`{key}` must be in [0, 1], got {p}.")
 
+    degrees = config['data']['augment_affine_degrees']
+    if not isinstance(degrees, (int, float)) or isinstance(degrees, bool):
+        raise InvalidConfig(
+            f"`augment_affine_degrees` must be a number, got {degrees!r}."
+        )
+    if not 0.0 <= degrees <= 45.0:
+        # 45 is where a rotated square becomes a diamond. Nothing in this
+        #     dataset labels one, but a rotation that large is a config error
+        #     rather than an experiment, and the ceiling says where the
+        #     transform stops being label-preserving in principle.
+        raise InvalidConfig(
+            f"`augment_affine_degrees` must be in [0, 45], got {degrees}."
+        )
+
+    if not isinstance(config['data']['augment_flip'], bool):
+        raise InvalidConfig(
+            "`augment_flip` must be a boolean, got "
+            f"{config['data']['augment_flip']!r}."
+        )
+
     # A scalar is broadcast to three channels by `silhouette`, so both forms
     #     are accepted; anything else is a config that will not paint a colour.
     fill = config['data']['silhouette_fill']

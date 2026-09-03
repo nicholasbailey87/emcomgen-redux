@@ -132,6 +132,10 @@ def load(config, fast=False):
             # Not split-gated: the fill only has an effect where a rate is
             # non-zero, and eval's rates are already 0.0 above.
             silhouette_fill=config['data']['silhouette_fill'],
+            # Gated on `augment` inside the dataset, so these are train-only
+            #     too and are passed unconditionally.
+            augment_flip=config['data']['augment_flip'],
+            augment_affine_degrees=config['data']['augment_affine_degrees'],
             shapes=datas[split]["shapes"],
             metadata_vocab=md_vocab,
             **dataset_kwargs,
