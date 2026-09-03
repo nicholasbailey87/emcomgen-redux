@@ -100,7 +100,26 @@ load_shapeworld_into_memory = true
 batch_size = 32
 percent_novel = 1.0
 n_examples = 20 # number of examples seen by agents, including distractors
-n_workers = 0
+
+# Dataloader subprocesses. PyTorch's `0` is a literal count, not a sentinel --
+# it means the data is loaded in the calling process -- so until 2026-09-03 this
+# ran every `__getitem__` inline in the training loop while `[slurm]
+# cpus_per_task = 6` sat idle. That was close to free when the only per-item
+# work was a permutation and a silhouette. It stopped being free with
+# `augment_flip`, `augment_affine_degrees` and `mixup_alpha`, whose rotation
+# loops over images in Python.
+#
+# The reason to be careful here is memory rather than correctness:
+# `load_shapeworld_into_memory` holds ~9.8 GB, each worker forks a
+# copy-on-write view of it, and the allocation is 24 GB. Copy-on-write should
+# hold, since nothing writes to the store -- `__getitem__` copies before it
+# permutes, and every augmentation returns a new tensor. If a run dies on
+# memory, this is the first key to lower.
+#
+# `worker_init` reseeds numpy and torch per worker, so the augmentations' draws
+# stay independent across them; what it does not do is make them reproducible,
+# and they were not reproducible at 0 either.
+n_workers = 5
 
 # Probability of repainting an agent's whole view as flat single-colour
 # silhouettes, per game, at training time only. This attacks the colour-only
