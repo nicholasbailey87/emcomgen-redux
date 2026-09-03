@@ -1,5 +1,8 @@
 # conv4_mixup_reference: `conv4_lr_reference/02_lr_1e-4.toml` with every
-# augmentation this repo has except silhouetting. One arm, one repeat.
+# augmentation this repo has. One arm, one repeat.
+#
+# The folder name is narrower than its contents and is kept for the URL it was
+# pushed under.
 #
 # Based on the unsilhouetted baseline rather than on
 # `conv4_silhouette_reference`, so that mixup is the only difference from a run
@@ -28,10 +31,16 @@
 # be broken at all, not which of the two breaks it. Separating them is the next
 # question and only worth asking if this one answers yes.
 #
-# Silhouetting stays off, so the comparison against `02_lr_1e-4.toml` is
-# augmentation against none, and the comparison against
-# `conv4_silhouette_reference` is augmentation against the colour shortcut being
-# removed. Those are different interventions and this keeps them apart.
+# Silhouetting at 0.5 on top, which makes this the everything-on corner of a
+# three-point ladder rather than a controlled contrast:
+#
+#     conv4_lr_reference/02_lr_1e-4    nothing
+#     conv4_silhouette_reference       silhouette only
+#     this                             silhouette + flips + rotation + mixup
+#
+# So it cannot attribute an effect to any one of them. What it can do is answer
+# whether the memorisation is breakable at all -- 0.913 train against 0.564 on
+# the first of those -- and the attribution is only worth paying for if it is.
 
 name = "conv4_mixup_reference"
 
@@ -43,7 +52,7 @@ feature_model = "Conv4"
 
 [data]
 silhouette_p_sender = 0.0
-silhouette_p_receiver = 0.0
+silhouette_p_receiver = 0.5
 augment_flip = true
 augment_affine_degrees = 10.0
 mixup_alpha = 1.0
