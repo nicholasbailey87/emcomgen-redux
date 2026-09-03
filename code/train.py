@@ -532,6 +532,60 @@ def run(
                     shuffled_message_acc=shuffled_acc, batch_size=batch_size
                 )
 
+            # The same control on the train pass, where the question actually
+            #     is. A listener that has memorised individual training images
+            #     scores well above chance with the message rolled away, and
+            #     until now nothing measured that: `shuffled_message_acc` was
+            #     an eval-only column, so a train accuracy of 0.913 against an
+            #     eval accuracy of 0.564 had no reading that separated a
+            #     memorised image from a protocol that fails to transfer.
+            #
+            # `eval_mode_acc` is the comparator and not a redundancy. The live
+            #     `acc` above is scored in train mode -- dropout on, BatchNorm
+            #     on batch statistics -- so differencing the rolled score
+            #     against it would confound the message with the mode. Both
+            #     numbers here are taken under the same conditions, so their
+            #     gap is the message and nothing else.
+            #
+            # The listener is switched to eval mode for both passes and put
+            #     back afterwards, which is correctness rather than tidiness:
+            #     in train mode these forwards would draw from the global
+            #     generator for dropout and would fold two extra batches into
+            #     every BatchNorm running mean, so the probe would perturb the
+            #     run it is measuring. `no_grad` because
+            #     `torch.set_grad_enabled(training)` is True on this pass.
+            #
+            # Two extra listener forwards per batch is real compute, which is
+            #     why the original block stayed off the train pass and why
+            #     `train_listener_probe` can turn this off.
+            if (
+                training
+                and speaking
+                and batch_size > 1
+                and config['train_listener_probe']
+            ):
+                was_training = pair.receiver.training
+                pair.receiver.eval()
+                try:
+                    with torch.no_grad():
+                        eval_mode_acc = per_game_accuracy(
+                            pair.receiver(lis_inp, lang),
+                            lis_y,
+                            config['reference_game_xent'],
+                        ).mean()
+                        shuffled_acc = per_game_accuracy(
+                            pair.receiver(lis_inp, torch.roll(lang, 1, 0)),
+                            lis_y,
+                            config['reference_game_xent'],
+                        ).mean()
+                finally:
+                    pair.receiver.train(was_training)
+                stats.update(
+                    eval_mode_acc=eval_mode_acc,
+                    shuffled_message_acc=shuffled_acc,
+                    batch_size=batch_size,
+                )
+
             # Save language
             if config['use_lang']:
                 lang_i = lang.argmax(2).detach().cpu()
@@ -762,8 +816,14 @@ def run(
     # column after it in the appended row. It cannot be NaN-filled per batch the
     # way an absent module's is, because `Statistics` takes a running mean and
     # one NaN would poison the average rather than mark a gap.
-    if not training and speaking:
+    #
+    # The train pass takes the same treatment when `train_listener_probe` is
+    # on, and adds no column at all when it is off -- so a run with the probe
+    # disabled has exactly the header it had before this existed.
+    if speaking and (not training or config['train_listener_probe']):
         metrics.setdefault("shuffled_message_acc", float("nan"))
+        if training:
+            metrics.setdefault("eval_mode_acc", float("nan"))
 
     if collect and all_messages:
         concept_keys = concept_keys_from_true_lang(

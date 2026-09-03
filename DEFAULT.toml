@@ -41,6 +41,29 @@ reference_game = false
 reference_game_xent = false
 debug = false
 vis = false
+
+# Score the listener a second and third time on every training batch, in eval
+# mode, once with the real message and once with the batch's messages rolled by
+# one. Emits `train_eval_mode_acc` and `train_shuffled_message_acc` beside the
+# eval splits' `shuffled_message_acc`.
+#
+# What it is for. `train_acc` is scored in train mode on sampled messages;
+# `test_acc` is scored in eval mode on greedy ones. When the two diverge --
+# 0.913 against 0.564 on the 2026-09-03 Conv4 baseline -- nothing in the
+# metrics separated the three things that could cause it: the listener
+# recognising individual training images, the mode switch, or a protocol that
+# genuinely fails to transfer. These two columns separate the first two.
+# `train_eval_mode_acc` against `train_acc` is the mode; `train_eval_mode_acc`
+# against `train_shuffled_message_acc` is the message. A listener winning by
+# memorised images holds its accuracy with the message rolled away.
+#
+# The cost is two extra listener forwards per training batch, with no backward
+# and no graph. That is why this is a switch and not unconditional, and why the
+# eval-only version of the control has always been unconditional.
+#
+# Turning it off restores the exact metrics header this file had before the
+# probe existed: the two columns are not written at all rather than written NaN.
+train_listener_probe = true
 receiver_reset_interval = 0.0
 
 [analysis]
