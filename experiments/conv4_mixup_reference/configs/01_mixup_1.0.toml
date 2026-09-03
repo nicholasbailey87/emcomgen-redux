@@ -1,5 +1,5 @@
-# conv4_mixup_reference: `conv4_lr_reference/02_lr_1e-4.toml` with mixup on the
-# listener's candidates. One arm, one variable, one repeat.
+# conv4_mixup_reference: `conv4_lr_reference/02_lr_1e-4.toml` with every
+# augmentation this repo has except silhouetting. One arm, one repeat.
 #
 # Based on the unsilhouetted baseline rather than on
 # `conv4_silhouette_reference`, so that mixup is the only difference from a run
@@ -21,8 +21,17 @@
 # each blend. `train_loss` is comparable, and so is everything on the eval
 # splits, which are never mixed.
 #
-# `augment_flip` and `augment_affine_degrees` stay off. They attack the same
-# memorisation and would confound this arm.
+# The flips and the rotation are on alongside the mixup rather than held back.
+# They attack the same memorisation from a different side -- the geometry
+# changes which pixels a stored image presents, the mixup stops any stored image
+# being presented alone -- and this arm is asking whether the memorisation can
+# be broken at all, not which of the two breaks it. Separating them is the next
+# question and only worth asking if this one answers yes.
+#
+# Silhouetting stays off, so the comparison against `02_lr_1e-4.toml` is
+# augmentation against none, and the comparison against
+# `conv4_silhouette_reference` is augmentation against the colour shortcut being
+# removed. Those are different interventions and this keeps them apart.
 
 name = "conv4_mixup_reference"
 
@@ -35,6 +44,8 @@ feature_model = "Conv4"
 [data]
 silhouette_p_sender = 0.0
 silhouette_p_receiver = 0.0
+augment_flip = true
+augment_affine_degrees = 10.0
 mixup_alpha = 1.0
 
 [scheduler]
