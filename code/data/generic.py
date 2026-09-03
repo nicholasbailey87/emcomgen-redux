@@ -4,8 +4,6 @@ import torch.nn.functional as F
 import os
 
 from PIL import Image
-from torchvision.transforms import InterpolationMode
-from torchvision.transforms import functional as TF
 
 from . import language
 from . import util
@@ -181,6 +179,36 @@ def silhouette(imgs, fill=DEFAULT_SILHOUETTE_FILL):
     return out.to(imgs.dtype).contiguous()
 
 
+def _rotation_theta(angles):
+    """
+    `(N, 2, 3)` rotation-only affine matrices for `F.affine_grid`.
+
+    One matrix per angle, so a batch of twenty different angles goes through a
+        single `grid_sample` kernel rather than twenty torchvision calls.
+
+    Rotation only, and structurally so: the (2, 2) block is orthonormal with
+        determinant +1 and the translation column is exactly zero, so there is
+        no shear, no anisotropic scale and no translation to turn off. That
+        matters for label preservation rather than for speed -- against this
+        dataset's five shapes a shear turns a rectangle into a parallelogram
+        and an anisotropic scale maps circle to ellipse and square to
+        rectangle. See `ConceptDataset._augment_geometry`.
+
+    `angles` is in radians.
+    """
+    angles = torch.as_tensor(angles, dtype=torch.float32).reshape(-1)
+    cos = torch.cos(angles)
+    sin = torch.sin(angles)
+    zero = torch.zeros_like(angles)
+    return torch.stack(
+        (
+            torch.stack((cos, -sin, zero), dim=-1),
+            torch.stack((sin, cos, zero), dim=-1),
+        ),
+        dim=-2,
+    )
+
+
 class ConceptDataset:
     def __init__(
         self,
@@ -262,8 +290,8 @@ class ConceptDataset:
 
         Safe against this dataset's five shapes -- circle, ellipse, rectangle,
         square, triangle -- which is not a property of affine transforms in
-        general and is why `translate`, `scale` and `shear` are pinned off
-        rather than left to a config:
+        general and is why translation, scaling and shear are absent from
+        `_rotation_theta`'s matrix rather than left to a config:
 
         - Flips alias nothing. A flipped triangle is still a triangle; there is
           no inverted-triangle label.
@@ -275,10 +303,18 @@ class ConceptDataset:
           circle-ellipse and square-rectangle. `RandomAffine`'s own `scale` is
           isotropic and so would be safe, but nothing here needs it.
 
-        `fill=0` because ShapeWorld renders on a black background (see
-        `silhouette`), so the corners rotation leaves behind are the background
-        colour rather than a value that appears nowhere else in the dataset and
-        which a model could key on.
+        `padding_mode="zeros"` because ShapeWorld renders on a black background
+        (see `silhouette`), so the corners rotation leaves behind are the
+        background colour rather than a value that appears nowhere else in the
+        dataset and which a model could key on.
+
+        Vectorised, and that is the whole reason it looks like this. The
+        per-image Python loop it replaced -- one `TF.affine` call and up to two
+        `TF.hflip`/`TF.vflip` calls per referent, twice per game -- cost about
+        7 1/4 minutes of the roughly 9 minute Conv4 ShapeWorld epoch, against
+        1 min 45 for the same epoch unaugmented: five times everything else
+        combined. Two masked `flip`s and one `grid_sample` compute the same
+        transform from the same distribution in two kernels.
 
         Applied after `_apply_silhouette`, not before: the silhouette thresholds
         stored pixel values, and interpolation would blur exactly the edges that
@@ -287,34 +323,67 @@ class ConceptDataset:
         if not (self.augment_flip or self.augment_affine_degrees):
             return imgs
 
+        n = imgs.shape[0]
+        # Cloned because the masked assignments below are in place and `imgs`
+        #     may be a view onto the shared store.
         out = imgs.clone()
-        for j in range(out.shape[0]):
-            img = out[j]
-            if self.augment_flip:
-                # Independent draws, so a quarter of images get both.
-                if np.random.rand() < 0.5:
-                    img = TF.hflip(img)
-                if np.random.rand() < 0.5:
-                    img = TF.vflip(img)
-            if self.augment_affine_degrees:
-                # Every image, not a fraction of them: a rotation of zero is
-                #     already in the range, so a probability here would only
-                #     concentrate mass on the identity.
-                img = TF.affine(
-                    img,
-                    angle=float(
-                        np.random.uniform(
-                            -self.augment_affine_degrees,
-                            self.augment_affine_degrees,
-                        )
-                    ),
-                    translate=[0, 0],
-                    scale=1.0,
-                    shear=[0.0, 0.0],
-                    interpolation=InterpolationMode.BILINEAR,
-                    fill=0,
-                )
-            out[j] = img
+
+        if self.augment_flip:
+            # Two independent masks over the batch, so a quarter of images get
+            #     both -- the per-image draw the loop used to make, in one
+            #     call. A flip is a permutation of pixels and introduces no new
+            #     values, which is why it is not folded into the rotation
+            #     matrix below: `grid_sample` would risk a half-pixel error for
+            #     no measurable gain.
+            horizontal = torch.as_tensor(np.random.rand(n) < 0.5)
+            vertical = torch.as_tensor(np.random.rand(n) < 0.5)
+            out[horizontal] = out[horizontal].flip(-1)
+            out[vertical] = out[vertical].flip(-2)
+
+        if self.augment_affine_degrees:
+            # Every image, not a fraction of them: a rotation of zero is
+            #     already in the range, so a probability here would only
+            #     concentrate mass on the identity.
+            angles = np.random.uniform(
+                -self.augment_affine_degrees,
+                self.augment_affine_degrees,
+                size=n,
+            )
+
+            # `affine_grid` works in coordinates normalised to [-1, 1] on both
+            #     axes, so the matrix is a rotation only on a square image.
+            #     ShapeWorld is 64x64 (`shapeworld.py`) and `__getitem__` has
+            #     already resized; a non-square input would need the aspect
+            #     ratio folded into the matrix.
+            assert out.shape[-1] == out.shape[-2], (
+                "rotation assumes a square image, got "
+                f"{out.shape[-2]}x{out.shape[-1]}"
+            )
+
+            # `affine_grid`'s theta is the *inverse* map -- it sends output
+            #     coordinates to input coordinates -- so this rotates each
+            #     image by `-angle`. Deliberate and not a bug to fix: the draw
+            #     is symmetric about zero, so the distribution is identical.
+            grid = F.affine_grid(
+                _rotation_theta(np.deg2rad(angles)),
+                list(out.shape),
+                align_corners=False,
+            )
+            sampled = F.grid_sample(
+                out.to(torch.float32),
+                grid,
+                mode="bilinear",
+                # The `fill=0` this replaces.
+                padding_mode="zeros",
+                align_corners=False,
+            )
+            if not imgs.dtype.is_floating_point:
+                # Rounded rather than truncated, as in `_apply_mixup`:
+                #     truncation would bias every pixel down, and down is
+                #     towards the background.
+                sampled = sampled.round()
+            out = sampled.to(imgs.dtype)
+
         return out
 
     def _apply_mixup(self, imgs, labels):
