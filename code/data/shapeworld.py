@@ -136,6 +136,7 @@ def load(config, fast=False):
             #     too and are passed unconditionally.
             augment_flip=config['data']['augment_flip'],
             augment_affine_degrees=config['data']['augment_affine_degrees'],
+            mixup_alpha=config['data']['mixup_alpha'],
             shapes=datas[split]["shapes"],
             metadata_vocab=md_vocab,
             **dataset_kwargs,

@@ -252,6 +252,14 @@ def validate_config(config: dict) -> bool:
             f"{config['data']['augment_flip']!r}."
         )
 
+    alpha = config['data']['mixup_alpha']
+    if not isinstance(alpha, (int, float)) or isinstance(alpha, bool):
+        raise InvalidConfig(f"`mixup_alpha` must be a number, got {alpha!r}.")
+    if alpha < 0.0:
+        # No upper bound to give. `Beta(a, a)` concentrates on 0.5 as `a`
+        #     grows, which is a weaker augmentation rather than an invalid one.
+        raise InvalidConfig(f"`mixup_alpha` must be >= 0, got {alpha}.")
+
     # A scalar is broadcast to three channels by `silhouette`, so both forms
     #     are accepted; anything else is a config that will not paint a colour.
     fill = config['data']['silhouette_fill']

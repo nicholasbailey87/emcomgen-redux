@@ -198,6 +198,7 @@ class ConceptDataset:
         silhouette_fill=DEFAULT_SILHOUETTE_FILL,
         augment_flip=False,
         augment_affine_degrees=0.0,
+        mixup_alpha=0.0,
         **kwargs,
     ):
         self.x = data["x"]
@@ -224,6 +225,7 @@ class ConceptDataset:
         self.silhouette_fill = silhouette_fill
         self.augment_flip = augment_flip
         self.augment_affine_degrees = augment_affine_degrees
+        self.mixup_alpha = mixup_alpha
         assert self.n_examples % 2 == 0
         # Assign the rest of the kwargs
         for name, val in kwargs.items():
@@ -315,6 +317,82 @@ class ConceptDataset:
             out[j] = img
         return out
 
+    def _apply_mixup(self, imgs, labels):
+        """
+        Replace each of the listener's candidates by a blend of itself and
+            another drawn from the same set, and its label by the same blend.
+
+        `lambda ~ Beta(alpha, alpha)`, one draw per candidate, partners sampled
+            with replacement across the whole set -- positives and negatives
+            together, which is the point. The label that comes back is
+            `lambda * y_i + (1 - lambda) * y_j`, so a candidate built from 0.7
+            of a satisfying image and 0.3 of an unsatisfying one is labelled
+            0.7 and the listener has to return a score reflecting it.
+            `BCEWithLogitsLoss` takes that natively; it is cross-entropy
+            against a Bernoulli of that parameter.
+
+        **The label is the mixing weight, not a claim about the picture.**
+            Worth being clear about, because the picture does not support the
+            claim: a ShapeWorld world holds exactly one object, so blending a
+            red circle with a blue square gives two half-lit ghosts rather than
+            an object that is 70% red, and "is the object red" has no answer
+            for it. What is well defined is how the image was *built*, and that
+            is what the target states. This is Zhang et al. 2018
+            (arXiv:1710.09412) unchanged, including its justification: the
+            target imposes a linearity prior on the listener's score between
+            training points rather than supplying extra supervision. Their
+            headline experiment is that it stops a network memorising training
+            labels, which is the failure this is aimed at -- `train_acc` 0.913
+            against 0.564 on both eval splits, with `test_same` no better than
+            `test`.
+
+        Where it is genuinely noisy: when the two objects land on top of each
+            other the blend is a single object at an intermediate colour, and
+            0.7 red over 0.3 blue is indistinguishable from other pairs mixing
+            to the same value, so `lambda` is not recoverable from the image at
+            all. Objects are placed independently, so this is the minority
+            case, and mixup tolerates it by design -- but it is why the target
+            is a regulariser rather than a signal.
+
+        A candidate can draw itself as its partner, which leaves it unblended
+            at its own label. That is what sampling with replacement means and
+            it is left in: excluding it would make `lambda` unidentifiable at
+            the ends, since `lambda = 1` against a different partner and
+            `lambda = 1` against itself are the same image.
+
+        Listener only, and train only. The speaker describes clean images; the
+            asymmetry is the one silhouetting already relies on.
+
+        Returns float labels whether or not `alpha` moves them off 0 and 1;
+            `train.py` calls `.float()` on them regardless.
+        """
+        if not self.mixup_alpha:
+            return imgs, labels
+
+        n = imgs.shape[0]
+        partner = torch.as_tensor(np.random.randint(n, size=n))
+        weight = torch.as_tensor(
+            np.random.beta(self.mixup_alpha, self.mixup_alpha, size=n),
+            dtype=torch.float32,
+        )
+
+        # One trailing axis per image dimension, so the weight broadcasts over
+        #     channels and pixels rather than over candidates.
+        image_weight = weight.reshape(-1, *([1] * (imgs.ndim - 1)))
+        blended = (
+            image_weight * imgs.to(torch.float32)
+            + (1.0 - image_weight) * imgs[partner].to(torch.float32)
+        )
+        if not imgs.dtype.is_floating_point:
+            # Rounded rather than truncated: an integer store has 256 levels and
+            #     truncation would bias every blend downwards, which on a black
+            #     background is a bias towards the background.
+            blended = blended.round()
+        blended = blended.to(imgs.dtype)
+
+        labels = labels.to(torch.float32)
+        return blended, weight * labels + (1.0 - weight) * labels[partner]
+
     def _game_language(self, i, pos_i):
         return self.lang_idx[i]
 
@@ -377,6 +455,12 @@ class ConceptDataset:
         if self.augment:
             spk_inp = self._augment_geometry(spk_inp)
             lis_inp = self._augment_geometry(lis_inp)
+            # After the geometry, so that a blend is of two images the listener
+            #     could actually have been shown, and after the silhouette for
+            #     the same reason the geometry is: the silhouette thresholds at
+            #     half the image's peak luma, and against two ghosts at
+            #     different weights the dimmer one falls below it and vanishes.
+            lis_inp, lis_label = self._apply_mixup(lis_inp, lis_label)
 
         return (spk_inp, spk_label, lis_inp, lis_label, lang, md)
 

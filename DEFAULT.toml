@@ -187,6 +187,38 @@ silhouette_p_receiver = 0.1
 augment_flip = false
 augment_affine_degrees = 0.0
 
+# Mixup on the listener's candidates: each is replaced by a blend of itself and
+# another drawn from the same set with replacement, weight `lambda` from
+# `Beta(mixup_alpha, mixup_alpha)`, and its label by the same blend. 0.0 is off.
+#
+# Positives and negatives are mixed together, so the target becomes continuous:
+# a candidate built from 0.7 of a satisfying image and 0.3 of an unsatisfying
+# one is labelled 0.7 and the listener has to return a score reflecting it.
+# `BCEWithLogitsLoss` takes that natively.
+#
+# **The label is the mixing weight, not a claim about the picture.** A
+# ShapeWorld world holds one object, so blending a red circle with a blue square
+# gives two half-lit ghosts rather than an object that is 70% red, and "is the
+# object red" has no answer for it. What is well defined is how the image was
+# built. This is Zhang et al. 2018 (arXiv:1710.09412) unchanged, including its
+# justification -- a linearity prior on the listener's score between training
+# points rather than extra supervision -- and its headline result is that it
+# stops a network memorising training labels, which is what this is aimed at.
+#
+# `alpha = 1.0` is `Beta(1, 1)`, i.e. uniform `lambda`, and is what most
+# implementations ship. The mixup paper preferred 0.2 on ImageNet because larger
+# values underfit; underfitting is not this repo's problem -- `train_acc` 0.913
+# against 0.564 -- and 0.2 concentrates `lambda` near 0 and 1, which leaves most
+# candidates nearly clean and is the regime where the augmentation does least.
+# If 1.0 does underfit it is visible rather than silent: train accuracy falls
+# towards eval accuracy rather than eval accuracy rising.
+#
+# What it costs. `train_acc` scores against `lis_y > 0.5`, i.e. against the
+# dominant source of each blend, so with this on it is no longer the same
+# quantity as `test_acc` and the two should not be differenced. `train_loss` is
+# unaffected. Eval is never mixed, as it is never silhouetted.
+mixup_alpha = 0.0
+
 # The colour a lit pixel comes back at, as a per-channel fraction of maximum.
 # Every pixel above half the image's peak luma is repainted to it and every
 # other pixel to zero, so a silhouette is two-valued.

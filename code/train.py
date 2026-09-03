@@ -283,7 +283,17 @@ def per_game_accuracy(lis_scores, lis_y, reference_game_xent):
     #     decision off it. `train_acc` is not comparable across the commit that
     #     removed the centring, in either direction -- see
     #     `receiver.ScoreVolume`.
-    return ((lis_scores > 0).float() == lis_y).float().mean(1).cpu().numpy()
+    # `lis_y > 0.5` and not `lis_y` because `[data] mixup_alpha` makes the
+    #     listener's targets continuous, and an equality against a soft label is
+    #     false almost everywhere. A no-op on hard labels, which are already 0.0
+    #     or 1.0. Note what it costs: with mixup on, `train_acc` scores the
+    #     listener against the *dominant* source of each blend, so it is no
+    #     longer the same quantity as `test_acc` and the two should not be
+    #     differenced. `train_loss` is unaffected -- `BCEWithLogitsLoss` takes
+    #     the soft target directly.
+    return (
+        (lis_scores > 0).float() == (lis_y > 0.5).float()
+    ).float().mean(1).cpu().numpy()
 
 
 def clip_gradients(pair, max_norm):
