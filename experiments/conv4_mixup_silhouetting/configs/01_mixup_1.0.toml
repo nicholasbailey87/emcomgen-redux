@@ -55,6 +55,7 @@ silhouette_p_receiver = 0.5
 augment_flip = true
 augment_affine_degrees = 10.0
 mixup_alpha = 1.0
+silhouette_fill = [1.0, 1.0, 1.0]
 
 [scheduler]
 epochs = 100

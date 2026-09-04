@@ -142,6 +142,42 @@ def load(config, fast=False):
             **dataset_kwargs,
         )
 
+        if split == "train":
+            # The same games, drawn the way eval draws them: no silhouette, no
+            #     flip, no rotation, no mixup. `train.calibrate_batch_norm`
+            #     re-estimates every BatchNorm's running statistics on this
+            #     before each eval pass, because the statistics the train pass
+            #     gathers are of a silhouetted/augmented *mixture* and eval
+            #     applies them to clean images. See docs/data.md and
+            #     `bn_calibration_batches` in DEFAULT.toml.
+            #
+            # `augment=False` is enough on its own -- `__getitem__` gates the
+            #     positive/negative shuffles, `_augment_geometry` and
+            #     `_apply_mixup` on it -- but the rates are set explicitly
+            #     anyway, because `_apply_silhouette` is *not* gated on
+            #     `augment`.
+            #
+            # It shares `datas["train"]`'s store rather than copying it, so the
+            #     cost is one more DataLoader's workers and no extra memory.
+            #     Never passed to `run`: it is a calibration loader, not a
+            #     split, and nothing scores on it.
+            datasets["train_clean"] = ShapeWorldDataset(
+                datas[split],
+                vocab,
+                augment=False,
+                percent_novel=config['data']['percent_novel'],
+                reference_game=config['reference_game'],
+                silhouette_p_sender=0.0,
+                silhouette_p_receiver=0.0,
+                silhouette_fill=config['data']['silhouette_fill'],
+                augment_flip=False,
+                augment_affine_degrees=0.0,
+                mixup_alpha=0.0,
+                shapes=datas[split]["shapes"],
+                metadata_vocab=md_vocab,
+                **dataset_kwargs,
+            )
+
     return datasets
 
 
