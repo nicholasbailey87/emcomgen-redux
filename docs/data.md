@@ -23,6 +23,16 @@ jayelm's naming is kept: "same" means the concepts are the same ones training
 used, so `test_same` is the paper's **Acc (Seen)** column and `test` is
 **Acc (Unseen)**.
 
+ShapeWorld's `load` returns a fourth entry, `train_clean`, and it is not a
+split: it is the training games drawn the way eval draws them — no silhouette,
+no flip, no rotation, no mixup — sharing the training store rather than copying
+it. Nothing is ever scored on it. `train.calibrate_batch_norm` reads it to
+re-estimate BatchNorm's running statistics on clean images, and because it gets
+no columns in `metrics.csv` it is exempt from the header check that raises when a
+split has none. See "The silhouette intervention" below, and
+`bn_calibration_batches` in `DEFAULT.toml`. CUB has no equivalent; the
+calibration is a no-op where the key is absent.
+
 ### ShapeWorld
 
 `test_same.npz` holds freshly generated worlds, so they are unseen *images* of
@@ -197,6 +207,18 @@ never silhouetted (below), those running statistics are gathered on a mixture
 and then applied to clean images, and any gap between the two is a fixed offset
 of `(μ_clean − μ_running) / σ` on every eval activation. The learned affine
 cannot absorb it, because at train the offset is zero.
+
+That argument is about the input layer because that is where it is easiest to
+state, but nothing in it is specific to the input layer: every deeper BatchNorm
+in either agent is estimated on the same mixture, and the augmentations added
+since — flips, rotation, mixup — shift them too. The top-level
+`bn_calibration_batches` is the answer to it. When it is non-zero,
+`train.calibrate_batch_norm` re-estimates every BatchNorm's running statistics
+on a clean `train_clean` loader between the train pass and the eval passes, so
+eval reads statistics gathered on the distribution eval actually sees. It
+defaults to `0`, which is what every run on record — the whole silhouette
+titration included — was scored under;
+`diagnostics/bn_calibration_probe.py` is what says which N to turn it up to.
 
 White was the worst available answer by this measure: the brightest image the
 model ever sees. Against the palette as `tests/test_silhouette.py` states it —

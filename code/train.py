@@ -333,6 +333,157 @@ def clip_gradients(pair, max_norm):
     return norms
 
 
+def prepare_batch(batch, dataloader, config):
+    """
+    One batch's four image/label tensors, scaled and on the device.
+
+    Factored out of `run` so that `calibrate_batch_norm` cannot drift from it:
+        the calibration pass has to see pixels on exactly the scale training
+        does, or the statistics it gathers are of a different distribution
+        again. ShapeWorld is stored as `uint8` and divided by 255 here;
+        everything else is already float-valued.
+
+    Args:
+        batch: a `ConceptDataset` item as the dataloader collates it. Only the
+            first four entries are read; the language, metadata and index ride
+            along untouched.
+        dataloader: read for `dataset.name`, which is what selects the scaling
+        config: read for `cuda`
+
+    Returns:
+        `(spk_inp, spk_y, lis_inp, lis_y)`
+    """
+    spk_inp, spk_y, lis_inp, lis_y = batch[:4]
+
+    # Determine what's input
+    if dataloader.dataset.name == "shapeworld":
+        spk_inp = spk_inp.float() / 255
+        lis_inp = lis_inp.float() / 255
+    else:
+        spk_inp = spk_inp.float()
+        lis_inp = lis_inp.float()
+
+    spk_y = spk_y.float()
+    lis_y = lis_y.float()
+
+    if config['cuda']:
+        spk_inp = spk_inp.cuda()
+        spk_y = spk_y.cuda()
+        lis_inp = lis_inp.cuda()
+        lis_y = lis_y.cuda()
+
+    return spk_inp, spk_y, lis_inp, lis_y
+
+
+def calibrate_batch_norm(pair, dataloader, config, n_batches):
+    """
+    Re-estimate every BatchNorm's running statistics on clean images.
+
+    Why this exists. Silhouetting and the geometric augmentations are
+        training-time only -- `shapeworld.load` zeroes both rates and passes
+        `augment=False` on every split but `train` -- so every BatchNorm in the
+        pair accumulates its running mean and variance over a
+        silhouetted/augmented *mixture* and then applies them to clean images at
+        eval. docs/data.md names the consequence for the receiver's input layer:
+        a fixed offset of `(mu_clean - mu_running) / sigma` on every eval
+        activation, which the learned affine cannot absorb because at train time
+        the offset is zero. The same argument holds for every deeper BatchNorm.
+        That is not tidiness: the silhouette titration measured shape transfer
+        at eval, through exactly these corrupted statistics.
+
+    `momentum = None` and `reset_running_stats()` together are what make the
+        result readable. PyTorch then accumulates a true cumulative average over
+        exactly the batches seen here, rather than an exponential average that
+        still carries the train pass's mixture with weight `(1 - m)^n`. So the
+        statistics are a function of `n_batches` alone, and
+        `diagnostics/bn_calibration_probe.py` can ask how large `n_batches` has
+        to be.
+
+    `pair.train()`, under `no_grad`: batch statistics and updating running
+        statistics is the train-mode behaviour, and it is the whole point of the
+        pass. `torch.random.fork_rng` so that the dropout draws made here do not
+        advance the run's own stochastic stream -- a calibration pass must not
+        change the training trajectory it is measuring.
+
+    The two feature models directly, rather than `pair.sender(...)` and
+        `pair.receiver(...)`. Every `_BatchNorm` in the pair lives inside them
+        (`models/backbone/vision.py`, plus broccoli's `ViT` output
+        `BatchNorm1d`), so this reaches all of them, and it keeps the language
+        model out of the pass entirely: no Gumbel draws and no autoregressive
+        decode, neither of which would move a running statistic and both of
+        which cost. `Receiver.forward` could not have been called here anyway --
+        it needs a message to embed.
+
+    Args:
+        pair: the sender/receiver `Pair`
+        dataloader: the `train_clean` loader -- the training games, drawn the
+            way eval draws them
+        config: read by `prepare_batch`, and for the autocast dtype
+        n_batches: how many batches to estimate from. `0` disables calibration
+            entirely, which is the default and what every run on record did.
+
+    Returns:
+        None. The statistics are updated in place.
+    """
+    batch_norms = [
+        module for module in pair.modules()
+        if isinstance(module, torch.nn.modules.batchnorm._BatchNorm)
+    ]
+
+    # An architecture with no BatchNorm has nothing to calibrate, and the ViT
+    #     rungs are one `BatchNorm1d` away from being that.
+    if not batch_norms or n_batches == 0:
+        return
+
+    momenta = {module: module.momentum for module in batch_norms}
+    was_training = pair.training
+
+    try:
+        for module in batch_norms:
+            module.momentum = None
+            module.reset_running_stats()
+
+        pair.train()
+
+        with torch.no_grad(), torch.random.fork_rng():
+            for batch_i, batch in enumerate(dataloader):
+                if batch_i >= n_batches:
+                    break
+
+                spk_inp, spk_y, lis_inp, _ = prepare_batch(
+                    batch, dataloader, config
+                )
+
+                # The dtype training gathers its statistics in, so a run does
+                #     not switch precision between the two.
+                with autocast(
+                    device_type='cuda',
+                    dtype=(
+                        torch.bfloat16
+                        if torch.cuda.is_bf16_supported()
+                        else torch.float16
+                    )
+                ):
+                    _flat_feature_forward(pair.sender.feat_model, spk_inp)
+                    _flat_feature_forward(pair.receiver.feature_model, lis_inp)
+    finally:
+        for module, momentum in momenta.items():
+            module.momentum = momentum
+        pair.train(was_training)
+
+
+def _flat_feature_forward(feature_model, images):
+    """
+    Run a backbone over a (batch, referents, C, H, W) tensor.
+
+    The same flattening `Sender.embed_images` and `Receiver.forward` do, and for
+        the same reason: a backbone takes a batch of images and the dataloader
+        hands over a batch of *games*.
+    """
+    batch_size, n_obj = images.shape[:2]
+    return feature_model(images.view(batch_size * n_obj, *images.shape[2:]))
+
+
 def run(
     split,
     epoch,
@@ -446,22 +597,7 @@ def run(
         spk_inp, spk_y, lis_inp, lis_y, true_lang, md, idx = batch
         batch_size = spk_inp.shape[0]
 
-        # Determine what's input
-        if dataloader.dataset.name == "shapeworld":
-            spk_inp = spk_inp.float() / 255
-            lis_inp = lis_inp.float() / 255
-        else:
-            spk_inp = spk_inp.float()
-            lis_inp = lis_inp.float()
-
-        spk_y = spk_y.float()
-        lis_y = lis_y.float()
-
-        if config['cuda']:
-            spk_inp = spk_inp.cuda()
-            spk_y = spk_y.cuda()
-            lis_inp = lis_inp.cuda()
-            lis_y = lis_y.cuda()
+        spk_inp, spk_y, lis_inp, lis_y = prepare_batch(batch, dataloader, config)
 
         # This is the bit where the models process the inputs
         with autocast(
@@ -1152,9 +1288,15 @@ if __name__ == "__main__":
         with open(metrics_path) as f:
             header = f.readline().rstrip("\n").split(",")
 
+        # `train_clean` is exempt because it is not a split: it is the
+        #     calibration loader `calibrate_batch_norm` reads, it is never
+        #     passed to `run`, and so it never gets columns of its own. The
+        #     eval loop below lists its splits explicitly and so needs no
+        #     matching exemption.
         missing = [
             split for split in dataloaders
-            if not any(column.startswith(f"{split}_") for column in header)
+            if split != "train_clean"
+            and not any(column.startswith(f"{split}_") for column in header)
         ]
         if missing:
             raise RuntimeError(
@@ -1233,6 +1375,23 @@ if __name__ == "__main__":
         # Train
         train_metrics, lang = run("train", epoch, *run_args)
         util.update_with_prefix(metrics, train_metrics, "train")
+
+        # Between the train pass and the eval passes, so that eval reads
+        #     BatchNorm statistics estimated on the distribution it is actually
+        #     scored on. Off by default (`bn_calibration_batches = 0`), which is
+        #     what every run on record did. See `calibrate_batch_norm`.
+        #
+        # The in-train `train_eval_mode_acc` probe is deliberately left alone:
+        #     it reads the *uncalibrated* state mid-pass, so the gap between it
+        #     and the eval splits is a direct readout of what BatchNorm was
+        #     costing.
+        if "train_clean" in dataloaders:
+            calibrate_batch_norm(
+                model_config['pair'],
+                dataloaders['train_clean'],
+                config,
+                config['bn_calibration_batches'],
+            )
 
         # Eval on the novel (`test`) and held-out seen (`test_same`) concepts;
         # `test_same` is the paper's Acc (Seen). See docs/data.md.

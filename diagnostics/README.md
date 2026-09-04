@@ -17,10 +17,13 @@ What these scripts do is build the real modules from a real rung config and then
 run them on a synthetic task where the answer is known, so that a failure has
 one possible cause instead of five. They need no dataset, no GPU and no cluster.
 
-`silhouette_shape_probe.py` is the exception on both counts. It builds no rung
+Two are exceptions on both counts. `silhouette_shape_probe.py` builds no rung
 and asks nothing about the loop: it measures what the *data* makes available
-after the ShapeWorld silhouette, so it needs the real dataset and a GPU, and it
-runs on the cluster.
+after the ShapeWorld silhouette. `bn_calibration_probe.py` goes the other way and
+rebuilds a whole trained run, because the quantity it measures — how many clean
+batches a BatchNorm re-estimate needs — is a property of trained weights and not
+of an architecture. Both need the real dataset and a GPU, and both run on the
+cluster; the second needs a checkpoint as well.
 
 Nothing here is part of training. They are read when a run is not working.
 
@@ -260,3 +263,50 @@ ShapeWorld's `gray`, so a grey object under that arm is not repainted at all.
 It answers what is available to be learned, not what a given run did learn. For
 that, see `probe_shape.py` in the parent checkout, which sweeps a trained
 sender across its checkpoints on un-augmented images.
+
+---
+
+## `bn_calibration_probe.py`
+
+How many clean batches does a BatchNorm re-estimate need?
+
+Silhouetting and the geometric augmentations are training-time only, so every
+BatchNorm in the pair gathers its running statistics over a
+silhouetted/augmented *mixture* and then applies them to clean images at eval.
+docs/data.md works the consequence out for the receiver's input layer: a fixed
+offset of `(μ_clean − μ_running) / σ` on every eval activation, which the
+learned affine cannot absorb because at train time that offset is zero.
+
+`train.calibrate_batch_norm` re-estimates those statistics on the `train_clean`
+loader before each eval pass, and `bn_calibration_batches` says how many batches
+it may use. This script is how that number is chosen.
+
+```
+sbatch --export=ALL,CHECKPOINT=<run>/checkpoint_last.pt,CONFIG=<run's toml> \
+    scripts/bn_calibration_probe.sbatch
+```
+
+It rebuilds the run from its own config with `silhouette_p_receiver = 0.5`,
+loads the weights — either `checkpoint_last.pt`, whose model lives inside
+gradboard's `PASS` state, or a finished run's plain `final_model.pt` — and
+**trains one epoch at 0.5 before sweeping**. The pollution has to be there to be
+corrected: the checkpoint's statistics were gathered under whatever rate that
+run used, and the question is how many batches undo the damage at 0.5. Then,
+from those same post-train weights, it calibrates at each N and scores `test`
+and `test_same`.
+
+**N = 0 is the uncalibrated baseline, and it is the number every silhouetted run
+on record was scored at** — all ten runs of the titration included. It is the
+column the rest of the table is read against.
+
+Two quantities per N, and they are meant to agree: `acc`, `acc_md_shape` and
+`acc_md_color` on both splits, and `stat drift` — the largest relative change in
+any `running_mean` or `running_var` between this N and the previous one. Where
+they disagree, believe the drift. One fit's accuracy is noisy in exactly the way
+`silhouette_shape_probe.py` documents, which is also why `--seeds` defaults to 3
+and every individual fit is printed under the table. The polluting epoch is run
+once and shared by every seed and every N, so the only things varying within a
+row are the calibration draw and the eval passes.
+
+What it cannot say: whether calibration changes the *answer*. That takes one
+silhouetted run at the N this settles on, read against the same run at N = 0.

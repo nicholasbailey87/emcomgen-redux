@@ -64,6 +64,40 @@ vis = false
 # Turning it off restores the exact metrics header this file had before the
 # probe existed: the two columns are not written at all rather than written NaN.
 train_listener_probe = true
+
+# Batches of clean training images to re-estimate every BatchNorm's running
+# statistics from, once per epoch, between the train pass and the eval passes.
+# `0` is off.
+#
+# What it is for. Silhouetting and the geometric augmentations are training-time
+# only: `shapeworld.load` zeroes both silhouette rates and passes
+# `augment = false` on every split but `train`. So every BatchNorm in the pair
+# gathers its running mean and variance over a silhouetted/augmented *mixture*
+# and then applies them to clean images at eval. docs/data.md works the
+# consequence out for the receiver's input layer -- a fixed offset of
+# `(mu_clean - mu_running) / sigma` on every eval activation, which the learned
+# affine cannot absorb because at train time that offset is zero -- and the same
+# argument holds for every deeper BatchNorm.
+#
+# That is a measurement problem and not a tidiness one. The silhouette titration
+# read shape transfer at eval, through exactly these corrupted statistics, and
+# put shape at chance in nine runs of ten. Silhouetting is also the only
+# intervention that has ever produced an escape (`baseline_speed_6`), so it has
+# to be usable, and it is not usable while its own eval numbers are suspect.
+#
+# The 100-epoch no-silhouette control of 2026-09-04 is the other half of the
+# argument: with nothing perturbing BatchNorm, `train_eval_mode_acc` sits exactly
+# on `train_acc` (0.627 against 0.627). There is nothing here to fix when
+# silhouetting is off. This key is what makes turning it back on measurable.
+#
+# The cost is `n x 2` forward passes per epoch -- one through each feature model
+# per batch, no backward, no language model -- against a clean `train_clean`
+# loader that shares the training store and so costs no extra memory.
+#
+# Default 0, i.e. off, so that no recorded run changes behaviour and every
+# existing config still reproduces from itself. What to set it to is what
+# `diagnostics/bn_calibration_probe.py` measures.
+bn_calibration_batches = 0
 receiver_reset_interval = 0.0
 
 [analysis]
