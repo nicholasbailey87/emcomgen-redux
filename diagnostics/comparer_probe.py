@@ -132,10 +132,13 @@ def build_receiver(config_path):
     return config, pair.receiver.train()
 
 
-def widths(language_model, config):
+def widths(receiver, config):
     """What shapes this listener wants, asked of the module rather than assumed."""
+    language_model = receiver.language_model
     return (
-        language_model.referent_embedding_size,
+        # The backbone's width, which is what the interfaces read: this probe
+        #     stands in for the vision model, so it has to emit what one would.
+        receiver.feature_size,
         language_model.token_embedding_size,
         getattr(
             language_model,
@@ -147,13 +150,26 @@ def widths(language_model, config):
 
 def score(receiver, referents, message):
     """
-    `Receiver.forward` from the referent embeddings inwards -- the dropout, then
-        the two slots. Reproduced here rather than called because `Receiver`
-        takes images and this probe has none.
+    `Receiver.forward` from the backbone features inwards -- the interfaces,
+        then the two slots. Reproduced here rather than called because
+        `Receiver` takes images and this probe has none, but the interfaces
+        themselves are `Receiver`'s own and are delivered through its own
+        helper.
     """
-    referents = receiver.input_dropout(referents)
+    interfaces = receiver.interfaces
+    message_repr = receiver.language_model(
+        message,
+        models.receiver.through(
+            interfaces, models.receiver.LANGUAGE_MODEL_REFERENTS, referents
+        ),
+    )
     return receiver.discriminator(
-        referents, receiver.language_model(message, referents)
+        models.receiver.through(
+            interfaces, models.receiver.DISCRIMINATOR_REFERENTS, referents
+        ),
+        models.receiver.through(
+            interfaces, models.receiver.DISCRIMINATOR_MESSAGE, message_repr
+        ),
     )
 
 
@@ -163,7 +179,7 @@ def main():
     language_model = receiver.language_model
     discriminator = receiver.discriminator
 
-    d_ref, d_msg, msg_len = widths(language_model, config)
+    d_ref, d_msg, msg_len = widths(receiver, config)
     batch = config["data"]["batch_size"]
     n_obj = config["data"]["n_examples"]
     lr = args.lr if args.lr is not None else config["optimiser"]["lr"]

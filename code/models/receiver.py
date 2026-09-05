@@ -7,9 +7,13 @@ The listener is two swappable slots, mirroring the speaker's
     language_model  encodes the message           -> (batch, slots, width)
     discriminator   scores the candidates from it -> (batch, n_objects)
 
-`Receiver` owns the composition, the token embedding, and one dropout. Both
-slots are named in `[receiver]` and configured from `[receiver_language_model]`
-and `[receiver_discriminator]`, which makes four legal combinations:
+`Receiver` owns the composition, the token embedding, and every interface
+between the vision backbone or the message encoder and a slot: each slot
+declares the widths it wants and `Receiver` delivers each input at that width
+in a stated distribution. See `model_util.LinearInterface` for the rule -- it
+is the speaker's `adapter` too. Both slots are named in `[receiver]` and
+configured from `[receiver_language_model]` and
+`[receiver_discriminator]`, which makes four legal combinations:
 
                              BilinearDiscriminator  AttentionDiscriminator
     ReceiverGRULM            the historical baseline        new
@@ -36,10 +40,12 @@ import broccoli
 from . import model_util
 from . import transformer_decoder
 
-# Mirrors `sender.LAYER_NORM_EPS`, and load-bearing for the same reason: below
-#     the 1e-5 default the normaliser quietly stops normalising and the score's
-#     magnitude goes back to the backbone. See docs/channel.md.
-LAYER_NORM_EPS = 1e-12
+# Re-exported under the name it has always had, and shared with the speaker
+#     rather than restated: below the 1e-5 default the normaliser quietly stops
+#     normalising and the score's magnitude goes back to the backbone. Two
+#     modules writing `1e-12` independently is two places one of them can drift.
+#     See `model_util.LAYER_NORM_EPS` and docs/channel.md.
+LAYER_NORM_EPS = model_util.LAYER_NORM_EPS
 
 # Every broccoli module below is constructed with its full argument list, even
 #     where an argument is inert under the current settings, because broccoli's
@@ -91,8 +97,9 @@ class ScoreVolume:
         -- that pairing is what stops the volume meaning something different
         under every backbone -- but the normalising happens on the
         discriminator's *inputs* rather than on its output.
-        `BilinearDiscriminator` layer-norms both operands of its bilinear form,
-        so its score opens at `1 / sqrt(3)` at any width and any backbone by
+        Both operands of `BilinearDiscriminator`'s bilinear form arrive
+        layer-normed -- from `Receiver`'s interfaces, unconditionally -- so its
+        score opens at `1 / sqrt(3)` at any width and any backbone by
         construction, and there is nothing left for a normaliser downstream to
         fix.
 
@@ -138,7 +145,7 @@ class ScoreVolume:
         its own candidate scores. Two reasons it is gone, and the weaker one is
         listed second deliberately.
 
-        It is redundant. Both of `BilinearDiscriminator`'s operands are already
+        It is redundant. Both of `BilinearDiscriminator`'s operands arrive
         normalised, so the score is already backbone-independent and already
         opens at a stated number. A second normaliser downstream of that buys
         nothing and costs the calibration -- `7b10d47` deleted the exact
@@ -168,31 +175,42 @@ class ScoreVolume:
         load-bearing.
     """
 
-    def _init_score_volume(self, learns_score_scale=True):
+    def _init_score_volume(self, scale=True, bias=True):
         """
-        Call from `__init__` where the parameter should be created: creation
+        Call from `__init__` where the parameters should be created: creation
             order fixes which RNG draw every later parameter gets.
 
-        `learns_score_scale=False` reaches here two ways. The config's
-            `[receiver_discriminator] normalise_score = false` turns the whole
-            readout off on either discriminator, which is what makes the
-            listener's arithmetic a switchable ladder rung rather than a fork.
+        **Two gates rather than one**, because the volume and the offset answer
+            two questions and the config asks them separately:
+            `[receiver_discriminator] scale_score` builds `log_score_scale` and
+            `bias_score` builds `score_bias`. Both default true, which is the
+            arithmetic every recorded run has. A listener can now have a
+            threshold without a loudness, or the reverse; under the single flag
+            these keys replace it could only have both or neither, which was
+            never a decision anybody made -- it was one boolean standing in for
+            two.
 
-        The other is from inside
-            `AttentionDiscriminator`, to the bilinear path it composes, because
-            a volume there is degenerate with the one that module already has:
-            the composed path is one of two branches multiplied by
-            `1 - mix_weight` and then read out through this mixin downstream, so
-            a scale on the branch and a move in `mix_logit` express the same
-            thing and the pair would drift against each other. One volume per
-            discriminator. Absent rather than frozen, so
-            `split_out_parameter`'s suffix match sees the truth.
+        There is no third question here. The `1/sqrt(d)` calibration these
+            gates used to travel with is unconditional and lives in
+            `BilinearDiscriminator.forward`: it is what makes the score open at
+            `1/sqrt(3)` under any width and any backbone, so it is design and
+            not a hypothesis. See that method.
 
-        It gates the offset too, for the matching reason: the outer readout is
-            what reaches the decision, and an inner constant is annihilated by
-            nothing -- it would simply be degenerate with the outer one.
+        `False` also reaches here from inside `AttentionDiscriminator`, for
+            *both* gates, to the bilinear path it composes -- because a volume
+            there is degenerate with the one that module already has: the
+            composed path is one of two branches multiplied by `1 - mix_weight`
+            and then read out through this mixin downstream, so a scale on the
+            branch and a move in `mix_logit` express the same thing and the pair
+            would drift against each other. The same argument covers the offset:
+            an inner constant is annihilated by nothing and is simply degenerate
+            with the outer one. One volume and one offset per discriminator.
+
+        Absent rather than frozen, either way, so `split_out_parameter`'s suffix
+            match and `SCALAR_GROUPS`' membership see the truth.
         """
-        self.learns_score_scale = learns_score_scale
+        self.learns_score_scale = scale
+        self.learns_score_bias = bias
 
         if self.learns_score_scale:
             # Stored as its log so `exp` keeps it strictly positive: gradient
@@ -202,6 +220,7 @@ class ScoreVolume:
             #     `BilinearDiscriminator.forward`.
             self.log_score_scale = nn.Parameter(torch.zeros(()))
 
+        if self.learns_score_bias:
             # Not a log, unlike the volume: an offset is signed, and zero is
             #     both where it opens and a value it must be able to return to.
             self.score_bias = nn.Parameter(torch.zeros(()))
@@ -222,9 +241,17 @@ class ScoreVolume:
             put the game's own margin in the denominator. See the class
             docstring, including why the offset is second.
 
-        A discriminator built with `learns_score_scale=False` returns the
-            comparison untouched. Its caller owns both scalars for the whole
-            module and a second pair here would be degenerate with them.
+        Each half is applied only if it exists, so this is the identity on a
+            discriminator built with both gates off -- which is what
+            `AttentionDiscriminator` builds its composed bilinear path as. Its
+            caller owns both scalars for the whole module and a second pair here
+            would be degenerate with them.
+
+        The two are independent: `scale_score = false, bias_score = true` gives
+            `scores + score_bias`, a threshold on an uncalibrated-loudness
+            score, and the reverse gives a volume with the origin left where the
+            calibration puts it. Both are reachable configurations rather than
+            accidents of one flag.
 
         **The volume goes on through `scale_without_attenuating`**, so the
             forward value is `score_scale * scores + score_bias` as it reads,
@@ -235,23 +262,27 @@ class ScoreVolume:
             nine of the same idea and for the one thing round seven's argument
             does not cover.
         """
-        if not self.learns_score_scale:
-            return scores
+        if self.learns_score_scale:
+            scores = model_util.scale_without_attenuating(
+                scores, self.score_scale
+            )
 
-        return (
-            model_util.scale_without_attenuating(scores, self.score_scale)
-            + self.score_bias
-        )
+        if self.learns_score_bias:
+            scores = scores + self.score_bias
+
+        return scores
 
     def reset_score_volume(self):
         """
         Put the volume back to its 1.0 opening and the offset back to zero, so
             a reset does not leave a trained confidence or a trained threshold
-            behind a fresh listener.
+            behind a fresh listener. Each is reset only if it was built.
         """
-        if self.learns_score_scale:
-            with torch.no_grad():
+        with torch.no_grad():
+            if self.learns_score_scale:
                 self.log_score_scale.zero_()
+
+            if self.learns_score_bias:
                 self.score_bias.zero_()
 
 
@@ -274,11 +305,21 @@ class ReceiverGRULM(nn.Module):
             uniform signature is what makes the slot swappable, and an unused
             argument is cheaper than dispatching on class at the call site.
 
+        Because `referent_input_size` is `None`, `Receiver` builds no referent
+            interface for this slot and passes `None` here. That the argument is
+            ignored is therefore structural rather than a convention: there is
+            no tensor to ignore.
+
         Returns a length-1 sequence rather than a bare vector so either
             discriminator can consume either language model.
-            `BilinearDiscriminator` means over that axis, which is the identity
-            here; `AttentionDiscriminator` takes it as cross-attention memory,
-            where a length-1 memory is perfectly legal.
+            `BilinearDiscriminator` takes the last position, which is the
+            identity here; `AttentionDiscriminator` takes it as cross-attention
+            memory, where a length-1 memory is perfectly legal.
+
+        Args:
+            referent_embedding_size: recorded and not used. This slot reads no
+                referents at all. Kept on the signature because it is the slot
+                contract's shape.
         """
         super().__init__()
         self.referent_embedding_size = referent_embedding_size
@@ -297,24 +338,45 @@ class ReceiverGRULM(nn.Module):
             #     `nn.GRU` applies this *between* layers and `layers` is back to
             #     1, so it would only become a live decision under a config that
             #     deepened the stack. The listener's regularisation is
-            #     `[receiver] dropout`, which masks the referents once in
-            #     `Receiver` -- see docs/architecture.md.
+            #     `[receiver] dropout`, which masks the referents at the end
+            #     of each of `Receiver`'s referent interfaces -- see
+            #     docs/architecture.md.
             dropout=0.0,
             bidirectional=self.bidirectional
         )
 
     @property
+    def referent_input_size(self):
+        """
+        `None`: this slot does not read the candidate set at all, so `Receiver`
+            builds it no referent interface and hands it `None`. See
+            `Receiver.__init__` for the declaration contract.
+        """
+        return None
+
+    @property
+    def message_input_size(self):
+        """
+        `None`, and for a different reason than `referent_input_size`'s: a
+            language model is the thing that *produces* a message
+            representation, so there is no message interface to declare. It
+            reads the token embeddings directly.
+        """
+        return None
+
+    @property
     def output_size(self):
         """
-        The width the discriminator must adapt from. Read here rather than
-            recomputed at the call site so the two cannot drift apart.
+        The width the discriminator's message interface must adapt from. Read
+            here rather than recomputed at the call site so the two cannot drift
+            apart.
         """
         return self.d_model * 2 if self.bidirectional else self.d_model
 
     def forward(
         self,
         messages: torch.Tensor, # (batch, seq_len, token_embedding_size)
-        referents: torch.Tensor, # (batch, n_objects, d_embedding), ignored
+        referents: torch.Tensor, # ignored, and `None` from `Receiver`
         ) -> torch.Tensor: # -> (batch, 1, output_size)
         token_embeddings, _ = self.gru(messages) # (b, seq, directions * d_model)
 
@@ -358,14 +420,20 @@ class ReceiverCrossAttentionLM(nn.Module):
             construction, which is the point of the ordering; see
             docs/architecture.md.
 
-        This slot owns its own referent projection and norm rather than taking
-            them from `Receiver`. The width a projection targets is a property
-            of the consumer, and pairing this with `AttentionDiscriminator`
-            gives two consumers at possibly different widths -- so a shared
-            adapter would have `Receiver` reaching into slot internals to work
-            out which of them needs one, which is the coupling this split
-            exists to remove. The duplication costs one `d_model x feat` matrix
-            in the one combination where both slots want it.
+        The candidates arrive already at `d_model` and already normalised.
+            This slot used to own the projection and the norm that got them
+            there, on the argument that the width a projection targets is a
+            property of the consumer and `Receiver` could not know it without
+            reaching into slot internals. It does not have to reach: the slot
+            *declares* the width, through `referent_input_size`, and `Receiver`
+            builds the interface. See `Receiver.__init__` for the contract and
+            for the two asymmetries in it.
+
+        Args:
+            referent_embedding_size: recorded and not used. This slot declares
+                its own `d_model` as the width it wants the candidates at, so
+                what `build_models` passes here sizes nothing. Kept on the
+                signature because it is the slot contract's shape.
         """
         super().__init__()
         self.referent_embedding_size = referent_embedding_size
@@ -404,24 +472,11 @@ class ReceiverCrossAttentionLM(nn.Module):
             kwargs["stochastic_depth"] if self.layers > 1 else 0.0
         )
 
-        # `bias=False`, and load-bearing: `referent_layer_norm` can only divide
-        #     the backbone's scale out exactly if what reaches it is homogeneous
-        #     in the input. See docs/architecture.md.
-        self.referent_adapter = nn.Linear(
-            self.referent_embedding_size,
-            self.d_model,
-            bias=False
-        )
-
-        # Parameter-free, and what it fixes is *per-object* magnitude: V is not
-        #     normed anywhere, so without this an object can win the attention
-        #     for being large rather than for matching. A post-norm stack
-        #     normalises its own stream and never its memory, and the candidate
-        #     set is this stack's memory. See docs/architecture.md.
-        self.referent_layer_norm = nn.LayerNorm(
-            self.d_model, elementwise_affine=False, eps=LAYER_NORM_EPS
-        )
-
+        # The message's own adapter, and not an interface in `Receiver`'s
+        #     sense: it reads the *token embeddings*, which is this slot's raw
+        #     input, rather than an encoded message representation. There is no
+        #     message interface upstream of a message encoder, which is what
+        #     `message_input_size` returning `None` states.
         self.message_adapter = nn.Linear(
             self.token_embedding_size,
             self.d_model
@@ -476,23 +531,43 @@ class ReceiverCrossAttentionLM(nn.Module):
         )
 
     @property
+    def referent_input_size(self):
+        """
+        `d_model`. The candidate set is this stack's cross-attention memory, so
+            it has to arrive in the stream's own space.
+
+        The norm `Receiver` puts on top of the interface is not decoration
+            here: V is not normed anywhere inside the stack, so without it an
+            object could win the attention for being large rather than for
+            matching. A post-norm stack normalises its own stream and never its
+            memory, and the candidate set is this stack's memory. See
+            docs/architecture.md.
+        """
+        return self.d_model
+
+    @property
+    def message_input_size(self):
+        """`None`: this slot is the message encoder. See `ReceiverGRULM`."""
+        return None
+
+    @property
     def output_size(self):
         return self.d_model
 
     def forward(
         self,
         messages: torch.Tensor, # (batch, seq_len, token_embedding_size)
-        referents: torch.Tensor, # (batch, n_objects, d_embedding)
+        referents: torch.Tensor, # (batch, n_objects, d_model), from `Receiver`
         ) -> torch.Tensor: # -> (batch, message slots, d_model)
-        adapted = self.referent_layer_norm(self.referent_adapter(referents))
-        return self.message_decoder(self.message_adapter(messages), adapted)
+        return self.message_decoder(self.message_adapter(messages), referents)
 
     def reset_parameters(self):
-        # Every submodule holding a parameter, including the two adapters (which
-        #     were missing here once) and the parameter-free norm. See
+        # Every submodule holding a parameter. The referent projection and its
+        #     norm are `Receiver`'s now, and `Receiver.reset_parameters` resets
+        #     them; the bug this comment used to mark -- two adapters left out
+        #     of a reset and surviving a listener reset -- is the reason that
+        #     one is written as a walk over the whole interface container. See
         #     docs/anecdotes.md.
-        self.referent_adapter.reset_parameters()
-        self.referent_layer_norm.reset_parameters()
         self.message_adapter.reset_parameters()
         self.message_decoder.reset_parameters()
 
@@ -508,6 +583,7 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
         referent_embedding_size,
         message_width,
         score_scale=True,
+        score_bias=True,
         **kwargs
     ):
         """
@@ -532,31 +608,62 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
             path rather than a competing one.
 
         Args:
-            referent_embedding_size: width of the backbone's output
-            message_width: the language model's `output_size`
+            referent_embedding_size: the width the comparison runs at, and the
+                one the `1/sqrt(d)` calibration is taken over. Declared upstream
+                as `referent_input_size`, so `Receiver` projects the backbone's
+                output to it. `build_models` passes
+                `[receiver_language_model] d_model`; `AttentionDiscriminator`
+                passes its own `d_model` for the path it composes.
+            message_width: the width the message is read at, declared upstream
+                as `message_input_size`. `build_models` passes the language
+                model's `output_size`, which makes that interface square.
             score_scale: build the learnable volume. False only from inside
                 `AttentionDiscriminator`; see `ScoreVolume._init_score_volume`.
+            score_bias: build the learnable offset, and False from the same one
+                place and for the same reason. These are the *composition*
+                gates, distinct from the config's `scale_score` / `bias_score`
+                in `kwargs`: either one alone is enough to leave a scalar
+                unbuilt, and they are separate arguments because a composed path
+                is not a configuration choice.
 
-        `normalise_score` arrives in `kwargs` from `[receiver_discriminator]`
-            and defaults true, which is today's arithmetic exactly. False
-            removes the whole score-shaping apparatus at once -- both operand
-            norms, the `/sqrt(d)` calibration and the `ScoreVolume` readout --
-            leaving the bare bilinear form `r_j . W m` that `ce7d6a5` scored
-            with. The three go together because they are one decision: the
-            norms are what make the calibration exact and what make a volume in
-            front of the score mean the same thing under every backbone, so
-            keeping the readout over unnormalised operands would be neither
-            today's design nor the old one. See docs/channel.md.
+        **This module owns no norms.** Both operands arrive normalised, because
+            `Receiver` delivers every input to a slot in a stated distribution
+            -- `dropout(norm(adapter(referents)))` and `norm(adapter(message))`
+            -- and this module declares the two widths it wants them at. The
+            two `nn.LayerNorm`s that used to live here did the same job one
+            stage later.
+
+        `scale_score` and `bias_score` arrive in `kwargs` from
+            `[receiver_discriminator]` and both default true, which is today's
+            arithmetic exactly. Each builds one scalar of the `ScoreVolume`
+            readout and nothing else. **Neither reaches the `1/sqrt(d)`
+            calibration**, which is unconditional -- see `forward`.
+
+            They replace a single `normalise_score`, which gated the calibration
+            and both scalars together and, before the interface hoist, this
+            module's two operand norms as well. That third job is what made the
+            flag's `false` an exact revert to jayelm's unnormalised
+            `CopyListener.compare`; the norms are `Receiver`'s interfaces now,
+            unconditional and part of delivering an input at a declared width,
+            so `false` had stopped being a revert and had started being an
+            arrangement -- normalised operands, uncalibrated score -- that
+            nobody designed and no run has used. Rather than reach back into
+            `Receiver` from a discriminator's config key, which would
+            reintroduce exactly the coupling the hoist removed, the calibration
+            is design and the two scalars are the configuration. See
+            docs/channel.md.
         """
         super().__init__()
         self.referent_embedding_size = referent_embedding_size
         self.message_width = message_width
-        self.normalises_score = kwargs.get("normalise_score", True)
 
-        # `score_scale` is the composition gate -- `AttentionDiscriminator`
-        #     passes False for the path it owns -- and the flag is the config's.
-        #     Either one alone is enough to leave the volume unbuilt.
-        self._init_score_volume(score_scale and self.normalises_score)
+        # Two gates each way: the composition arguments -- `AttentionDiscrimin-
+        #     ator` passes False for the path it owns -- and the config's keys.
+        #     Either one alone is enough to leave a scalar unbuilt.
+        self._init_score_volume(
+            score_scale and kwargs.get("scale_score", True),
+            score_bias and kwargs.get("bias_score", True),
+        )
 
         self.bilinear = nn.Linear(
             self.message_width,
@@ -564,29 +671,24 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
             bias=False
         )
 
-        # The two operands of the dot product, normalised per example over the
-        #     feature axis so the score's magnitude is not inherited from the
-        #     vision model. Neither norm is affine. Note they are in *different*
-        #     spaces: the message is normalised before `bilinear` reads it, so
-        #     that norm is `message_width` wide, and the referent one is in
-        #     referent space. See docs/architecture.md.
-        #
-        # Unbuilt rather than bypassed when the flag is off, so the module has
-        #     no attribute a later reader could apply by accident. Neither norm
-        #     holds a parameter either way, so the `state_dict` is unchanged by
-        #     their absence and nothing here consumes the generator -- which is
-        #     what lets the default path stay bit-identical.
-        if self.normalises_score:
-            self.referent_layer_norm = nn.LayerNorm(
-                self.referent_embedding_size,
-                elementwise_affine=False,
-                eps=LAYER_NORM_EPS,
-            )
-            self.message_layer_norm = nn.LayerNorm(
-                self.message_width,
-                elementwise_affine=False,
-                eps=LAYER_NORM_EPS,
-            )
+    @property
+    def referent_input_size(self):
+        """
+        The width the candidates are compared at, and the one the `1/sqrt(d)`
+            calibration is taken over. Set from the constructor argument, which
+            `build_models` takes from `[receiver_language_model] d_model`.
+        """
+        return self.referent_embedding_size
+
+    @property
+    def message_input_size(self):
+        """
+        The width `bilinear` reads the message at -- the language model's
+            `output_size`, as `build_models` passes it. Declared rather than
+            assumed, so the interface upstream is sized from this module's
+            statement of what it wants and not from a guess about the encoder.
+        """
+        return self.message_width
 
     def forward(
         self,
@@ -608,44 +710,23 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
         """
         message_embeddings = message_repr[:, -1, :]
 
-        if not self.normalises_score:
-            # The bare bilinear form, which is what `ce7d6a5` scored with and
-            #     what jayelm's `CopyListener.compare` has always computed: no
-            #     norm on either operand, no calibration, and -- because
-            #     `_init_score_volume` was told not to build them -- no volume
-            #     and no offset either. `readout` is still called and still
-            #     returns its argument untouched on that path, so the off-path
-            #     needs no branch of its own here.
-            #
-            # The score's magnitude therefore comes from the backbone again,
-            #     which is the coupling under test rather than an oversight.
-            return self.readout(
-                torch.einsum(
-                    "ijh,ih->ij",
-                    (referents, self.bilinear(message_embeddings)),
-                )
-            )
-
-        # Both operands normalised, and both halves of each norm load-bearing
-        #     now that nothing downstream normalises the score. The message norm
-        #     divides out whatever magnitude the language model happens to emit,
-        #     which would otherwise be a common factor on every candidate; the
-        #     referent norm treats each candidate separately, so it changes
-        #     their relative order and not just a common scale -- without it a
-        #     large referent is read loudly for being large.
-        projected = self.bilinear(self.message_layer_norm(message_embeddings))
-        referents = self.referent_layer_norm(referents)
-
+        projected = self.bilinear(message_embeddings)
         scores = torch.einsum("ijh,ih->ij", (referents, projected)) # (batch, n_objects)
 
-        # The calibration, and it is exact rather than approximate because both
-        #     operands arrive normalised. Each is at per-element unit variance,
+        # The calibration, and it is **unconditional**: it is exact rather than
+        #     approximate because both operands arrive normalised -- which they
+        #     do by the interface contract rather than by a norm this module
+        #     owns, and so under every configuration. Each is at unit variance,
         #     so `|r| = |m| = sqrt(d)`, and with `nn.Linear`'s default init --
         #     uniform on `+/- 1/sqrt(d)`, standard deviation `1/sqrt(3d)` -- the
         #     score's standard deviation at init is `sigma_w * d = sqrt(d / 3)`.
         #     Dividing by `sqrt(d)` leaves `1/sqrt(3)` = 0.577 at every width
         #     and under every backbone, which is what makes the opening a number
-        #     this repo can state rather than measure per rung.
+        #     this repo can state rather than measure per rung. Removing it is
+        #     not a rung and never was a hypothesis: measured on this module,
+        #     the uncalibrated score opens at sd 9.6 and BCE 3.81 at d = 256,
+        #     and sd 18.4 and BCE 6.87 at d = 1024, against `ln 2` = 0.693.
+        #     There is no configuration that turns it off.
         #
         # `log_score_scale` opens at 0, so the readout opens there too. BCE on
         #     a random map at that spread is 0.725 against `ln 2` = 0.693; at
@@ -654,15 +735,10 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
         return self.readout(scores / math.sqrt(self.referent_embedding_size))
 
     def reset_parameters(self):
+        # Two things, and there is nothing else here to miss: the operand norms
+        #     moved to `Receiver`, which resets its own interfaces.
         self.bilinear.reset_parameters()
         self.reset_score_volume()
-        # No-ops while the two norms are parameter-free, and listed anyway so
-        #     that turning `elementwise_affine` back on cannot leave a reset
-        #     listener holding trained gains. Guarded because
-        #     `normalise_score = false` does not build them.
-        if self.normalises_score:
-            self.referent_layer_norm.reset_parameters()
-            self.message_layer_norm.reset_parameters()
 
 
 class AttentionDiscriminator(ScoreVolume, nn.Module):
@@ -700,17 +776,37 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         **Where the volume lives.** One `log_score_scale`, from `ScoreVolume`,
             downstream of the mix -- the same readout `BilinearDiscriminator`
             uses, so there is one volume mechanism on the listener rather than
-            two. The composed bilinear path is built with `score_scale=False`
-            because it now feeds this readout instead of being one.
+            two. The composed bilinear path is built with both composition gates
+            off because it now feeds this readout instead of being one: it
+            calibrates its score and hands it over raw, and the mix is what
+            reaches the volume and the offset.
 
-        Under `normalise_score = false` there is no volume and no offset on
-            either, and the composed path scores the bare bilinear form, so this
-            module returns `(1 - a) * bilinear + a * attention` unaltered.
-            `referent_layer_norm` and `memory_layer_norm` below are *not*
-            touched by the flag: they are this stack's input and memory norms,
-            and a post-norm decoder normalises its own stream but never its
-            memory, so removing them would break the stack rather than change
-            how loudly it speaks.
+        `scale_score` and `bias_score` therefore act here, on the outer readout,
+            and not on the branch. With both off this module returns
+            `(1 - a) * bilinear + a * attention` unaltered -- still calibrated,
+            because the `1/sqrt(d)` inside the composed path is unconditional.
+            The stack's input and memory norms are untouched by either key, as
+            they always were -- but they are `Receiver`'s interface norms now
+            rather
+            than this module's own, so the exemption is no longer written here
+            as a special case. A post-norm decoder normalises its own stream but
+            never its memory, and both of this stack's inputs are memory or
+            stream it did not produce.
+
+        **One referent width.** This module used to consume the candidates
+            twice at two widths: its own stack at `d_model`, and the raw tensor
+            handed to the `BilinearDiscriminator` it composes, at whatever
+            `referent_embedding_size` the config set -- 1024 against 320 on
+            rungs 13 and 14. That second consumer was invisible to `Receiver`.
+            The composed module is now built at `d_model` on both operands and
+            reads the same tensors the stack does, so the slot declares one
+            referent width and one message width and both are true.
+
+            The cost is stated rather than hidden: the bilinear arm here is
+            about an order of magnitude smaller than it was, so rung 13 is no
+            longer "rung 11 plus attention" at the same bilinear capacity. The
+            bootstrapping argument above is unchanged in form and weaker in
+            capacity.
 
         Neither branch is standardised, so `a` is a weight and not a share:
             a loud branch can dominate a heavily-weighted quiet one. That is
@@ -739,21 +835,28 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
             this module's docstring for why that invariant matters.
 
         Args:
-            referent_embedding_size: width of the backbone's output
-            message_width: the language model's `output_size`
+            referent_embedding_size: recorded and not used. Both of this
+                module's widths are its own `d_model` -- see
+                `referent_input_size` -- so what `build_models` passes here
+                (`[receiver_language_model] d_model`) sizes nothing. Kept on the
+                signature because it is the slot contract's shape and dropping
+                it would make the two discriminators take different arguments.
+            message_width: recorded and not used, for the same reason.
         """
         super().__init__()
         self.referent_embedding_size = referent_embedding_size
         self.message_width = message_width
-        self.normalises_score = kwargs.get("normalise_score", True)
 
-        # Gated on the flag rather than only dropped from `forward`. An
-        #     ungated volume under `normalise_score = false` would be a
-        #     parameter that exists, is claimed by `SCALAR_GROUPS`, and never
-        #     receives gradient -- which is exactly the state `builder.py`'s
-        #     "an applicable group matches a parameter" invariant exists to
-        #     make impossible.
-        self._init_score_volume(self.normalises_score)
+        # Gated on the config keys rather than only dropped from `forward`. An
+        #     ungated volume under `scale_score = false` would be a parameter
+        #     that exists, is claimed by `SCALAR_GROUPS`, and never receives
+        #     gradient -- which is exactly the state `builder.py`'s "an
+        #     applicable group matches a parameter" invariant exists to make
+        #     impossible. Same for the offset and `split_out_parameter`.
+        self._init_score_volume(
+            kwargs.get("scale_score", True),
+            kwargs.get("bias_score", True),
+        )
 
         self.d_model = kwargs["d_model"]
         self.layers = kwargs["layers"]
@@ -787,28 +890,14 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
             kwargs["stochastic_depth"] if self.layers > 1 else 0.0
         )
 
-        # This slot's own projection and norm; see `ReceiverCrossAttentionLM`
-        #     for why they are not shared with the language model's.
-        self.referent_adapter = nn.Linear(
-            self.referent_embedding_size,
-            self.d_model,
-            bias=False
-        )
-        self.referent_layer_norm = nn.LayerNorm(
-            self.d_model, elementwise_affine=False, eps=LAYER_NORM_EPS
-        )
-
-        # The memory this stack reads, brought to `d_model` from whatever width
-        #     the language model works at -- 2 * d_model for a bidirectional
-        #     GRU, its own d_model for the cross-attention encoder, and there is
-        #     no arithmetic that makes those agree. Normed for the same reason
-        #     the referents are: a post-norm stack normalises its own stream and
-        #     never its memory, so nothing else would divide out a GRU state's
-        #     magnitude.
-        self.memory_adapter = nn.Linear(self.message_width, self.d_model)
-        self.memory_layer_norm = nn.LayerNorm(
-            self.d_model, elementwise_affine=False, eps=LAYER_NORM_EPS
-        )
+        # The projection and norm that used to sit here -- `referent_adapter`,
+        #     `referent_layer_norm`, `memory_adapter`, `memory_layer_norm` --
+        #     are `Receiver`'s interfaces now, built from the two widths this
+        #     module declares below. The memory in particular still has to be
+        #     brought to `d_model` from whatever the language model emits at
+        #     (2 * d_model for a bidirectional GRU, its own d_model for the
+        #     decoder stack, and no arithmetic makes those agree); it is the
+        #     same `nn.Linear` and the same norm, one stage upstream.
 
         # `causal=False` is not negotiable, and `relative_position_embedding`
         #     is False for the same reason: referent order is the label vector,
@@ -878,15 +967,28 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         #     the module that was measured bootstrapping and not a lookalike.
         #     It reads `message_repr`; it owns no encoder.
         #
-        # Built without a volume: this branch is multiplied by `1 - mix_weight`
-        #     and read out through this module's own `score_scale`, so a scalar
-        #     here would say the same thing `mix_logit` already says. See
+        # Built without a volume and without an offset: this branch is
+        #     multiplied by `1 - mix_weight` and read out through this module's
+        #     own `score_scale` and `score_bias`, so a scalar here would say
+        #     what `mix_logit` already says and a constant here would be
+        #     annihilated by nothing and be degenerate with the outer one. See
         #     `ScoreVolume._init_score_volume`.
+        #
+        # The config's own keys are deliberately *not* forwarded. They belong to
+        #     the readout that reaches the decision, which is this module's, and
+        #     passing them down would only be able to turn off scalars that are
+        #     already off. What the branch keeps unconditionally is the
+        #     `1/sqrt(d)` calibration, which is why the mix opens at a stated
+        #     number under every configuration.
+        #
+        # At `d_model` on both operands, because it reads the same two tensors
+        #     the stack does. See the class docstring for what that changes
+        #     about rungs 13 and 14.
         self.bilinear = BilinearDiscriminator(
-            self.referent_embedding_size,
-            self.message_width,
+            self.d_model,
+            self.d_model,
             score_scale=False,
-            normalise_score=self.normalises_score,
+            score_bias=False,
         )
 
         # `mix_logit_init` -4.0 puts `a` at 0.116 for the default floor of
@@ -951,6 +1053,23 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         self.decision_kurtosis = float("nan")
 
     @property
+    def referent_input_size(self):
+        """
+        `d_model`, and one width for the whole slot: the stack and the composed
+            bilinear path read the same tensor. See the class docstring.
+        """
+        return self.d_model
+
+    @property
+    def message_input_size(self):
+        """
+        `d_model`. The encoded message is this stack's cross-attention memory
+            and the composed bilinear path's second operand, at the same width
+            and from the same interface.
+        """
+        return self.d_model
+
+    @property
     def mix_weight(self):
         """
         The weight on the attention path, in `[mix_floor, 1)`. Read here rather
@@ -985,15 +1104,17 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
             a fixed number per architecture rather than a moving one -- measure
             it with a forward pass if a rung needs its openings matched.
         """
-        adapted = self.referent_layer_norm(self.referent_adapter(referents))
-        memory = self.memory_layer_norm(self.memory_adapter(message_repr))
-
         # Each candidate reads the message, then the candidates read each other,
         #     once per block. Read out through `decision`; that last post-norm
         #     is an `RMSNorm`, so the candidates reach it at equal length.
-        refined = self.referent_decoder(adapted, memory)
+        #
+        # Both arguments arrive at `d_model` and normalised, from `Receiver`'s
+        #     interfaces. Nothing is adapted here.
+        refined = self.referent_decoder(referents, message_repr)
         attention = self.decision(refined).squeeze(-1)
 
+        # The same two tensors, which is the point of one declared width per
+        #     input rather than a second consumer at a width of its own.
         bilinear = self.bilinear(referents, message_repr)
 
         weight = self.mix_weight
@@ -1050,10 +1171,6 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         return scores
 
     def reset_parameters(self):
-        self.referent_adapter.reset_parameters()
-        self.referent_layer_norm.reset_parameters()
-        self.memory_adapter.reset_parameters()
-        self.memory_layer_norm.reset_parameters()
         self.referent_decoder.reset_parameters()
         self.decision.reset_parameters()
         self.bilinear.reset_parameters()
@@ -1061,11 +1178,114 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         nn.init.constant_(self.mix_logit, float(self.mix_logit_init))
 
 
+# --------------------------------------------------------------------------
+# The interfaces. One per (slot, input) pair that a slot declares a width for.
+#
+# `model_util.LinearInterface` is the whole of what one is -- a linear map to
+#     the declared width, an affine-free `LayerNorm`, and a mask on the referent
+#     side. It is the speaker's `adapter` too; see that class for the rule and
+#     for the two asymmetries in it.
+# --------------------------------------------------------------------------
+
+# The keys of `Receiver.interfaces`, in build order -- which is also RNG order,
+#     so moving one moves every parameter drawn after it.
+LANGUAGE_MODEL_REFERENTS = "language_model_referents"
+DISCRIMINATOR_REFERENTS = "discriminator_referents"
+DISCRIMINATOR_MESSAGE = "discriminator_message"
+
+
+def build_interfaces(
+    feature_size, message_width, language_model, discriminator, dropout
+):
+    """
+    One `model_util.LinearInterface` per input a slot declares a width for,
+        keyed by
+        `(slot, input)`.
+
+    A function rather than three lines in `Receiver.__init__` so that the test
+        shim in `tests/_bootstrap.py`, which stands in for `Receiver` from the
+        backbone features inwards, mirrors this arrangement by calling it
+        rather than by reproducing it. A shim that reproduces the thing it
+        stands in for is a shim that will one day disagree with it.
+
+    Args:
+        feature_size: the backbone's `final_feat_dim`, the input width of every
+            referent interface
+        message_width: the language model's `output_size`, the input width of
+            every message interface
+        language_model: the message-encoding slot
+        discriminator: the scoring slot
+        dropout: the mask rate on referent interfaces; message interfaces are
+            never masked
+
+    Returns:
+        An `nn.ModuleDict`. A slot that declares `None` for an input, or that
+            declares nothing at all, gets no entry -- see `Receiver.__init__`
+            for what that means at the call site.
+    """
+    interfaces = nn.ModuleDict()
+
+    for key, module, input_size, attribute in (
+        (
+            LANGUAGE_MODEL_REFERENTS,
+            language_model,
+            feature_size,
+            "referent_input_size",
+        ),
+        (
+            DISCRIMINATOR_REFERENTS,
+            discriminator,
+            feature_size,
+            "referent_input_size",
+        ),
+        (
+            DISCRIMINATOR_MESSAGE,
+            discriminator,
+            message_width,
+            "message_input_size",
+        ),
+    ):
+        # `getattr` with a default rather than a bare attribute read: the
+        #     contract is "absent or None means this module does not take that
+        #     input", so a slot written before this existed declares nothing and
+        #     gets nothing, rather than raising at build time inside a module it
+        #     has no business knowing about.
+        declared = getattr(module, attribute, None)
+
+        if declared is None:
+            continue
+
+        referents = attribute == "referent_input_size"
+
+        interfaces[key] = model_util.LinearInterface(
+            input_size,
+            declared,
+            bias=not referents,
+            dropout=dropout if referents else None,
+        )
+
+    return interfaces
+
+
+def through(interfaces, key, x):
+    """
+    Deliver `x` through the named interface, or hand back `None` where the slot
+        declared it takes no such input.
+
+    Shared with the test shim for the same reason `build_interfaces` is, and
+        read at every call site so that "no interface" and "no tensor" cannot
+        come apart.
+    """
+    # `in` rather than a `.get`: `nn.ModuleDict` is not a `dict` and has no
+    #     `get`.
+    return interfaces[key](x) if key in interfaces else None
+
+
 class Receiver(nn.Module):
     def __init__(
         self,
         feature_model,
-        adapter,
+        feature_size,
         token_embedding_module,
         language_model,
         discriminator,
@@ -1076,65 +1296,115 @@ class Receiver(nn.Module):
 
         Args:
             feature_model: produces embeddings from referents
-            adapter: `ReferentAdapter`, the constant stage that brings the
-                backbone's output to this agent's language model `d_model`.
-                Both slots are sized from its output rather than from the
-                backbone's, so the listener's width is the language model's
-                business and not the vision model's.
+            feature_size: the backbone's `final_feat_dim`. Passed rather than
+                read off `feature_model` so that a test can compose the
+                listener's plumbing around something that is not a backbone.
+            token_embedding_module: the message's embedding table
             language_model: encodes the message, `(batch, slots, width)`
             discriminator: scores the candidates from that encoding
-            dropout: the listener's one dropout, on the referent embeddings.
-                Counterpart to the speaker's `prototype_dropout`. Note there is
-                no separate `vision_dropout` here, unlike `Sender`: it would
-                mask this same tensor with nothing but a reshape between the
-                two. See docs/architecture.md.
+            dropout: the rate on every referent interface. Counterpart to the
+                speaker's `prototype_dropout`. Note there is no separate
+                `vision_dropout` here, unlike `Sender`: it would mask the same
+                tensor with nothing but a reshape between the two. See
+                docs/architecture.md.
 
-        The mask is element-wise over `(batch, n_objects, features)`, so it
+        **The slots declare, `Receiver` delivers.** Each slot exposes
+            `referent_input_size` and `message_input_size`; `None` means the
+            slot does not take that input at all, and `Receiver` then builds
+            nothing and passes `None` in its place. For every declared width it
+            builds a `model_util.LinearInterface` -- see that class for the
+            rule, for the two asymmetries in it, and for why the norms are
+            unconditional.
+
+            This inverts the arrangement it replaces, where each consumer owned
+            its own projection and the widths were decided four different ways:
+            `Receiver` held one adapter of its own upstream of the lot, each
+            slot held its own projection and norm, `BilinearDiscriminator` held
+            no projection at all and took the referent width as its own output
+            width, and
+            `AttentionDiscriminator` consumed the referents *twice at two
+            widths* -- a second consumer that `Receiver` could not see, which is
+            what made the arrangement hard to change. The objection to sharing
+            was that `Receiver` would have to work out which slots wanted which
+            width, which is reaching into slot internals. Under a declaration it
+            works nothing out: it reads what the slot states.
+
+        **One mask per referent interface, drawn independently.** The masks used
+            to be one mask, applied once here and handed to both slots, on the
+            argument that a per-slot mask would regularise the listener at a
+            rate no config key names. That argument was about masking *one*
+            tensor twice. These are two tensors: each slot's own projected copy
+            of the referents, each masked once at the rate `[receiver] dropout`
+            names. Independence is what makes them the two masks the rate
+            describes rather than a correlated pair.
+
+            The mask is element-wise over `(batch, n_objects, features)`, so it
             removes features within each candidate rather than removing whole
             candidates -- which would leak the label ordering.
 
-        Applied once here and handed to both slots, rather than inside each,
-            so a configuration cannot silently regularise twice. The message
-            operand is left alone: it already arrives through the Gumbel
-            channel, whose noise `logit_scale` and `uniform_weight` calibrate,
-            and a mask on top is a second and uncalibrated perturbation of a
-            signal that has one.
-
-        Note this puts the mask *before* each slot's norm, where both of the
-            modules it replaces put it after. A `LayerNorm` following dropout
-            renormalises the corrupted vector, so the two are genuinely
-            different operations and the pre-split numbers are reproducible
-            only at `dropout = 0`. See docs/anecdotes.md.
+        **The message operand is never masked.** See `model_util.LinearInterface`.
         """
         super().__init__()
         self.feature_model = feature_model
-        self.adapter = adapter
+        self.feature_size = feature_size
         self.token_embedding = token_embedding_module
         self.language_model = language_model
         self.discriminator = discriminator
-        self.input_dropout = nn.Dropout(p=dropout)
+        self.dropout = dropout
+
+        # One container rather than three attributes, so `MODULE_GROUPS` can
+        #     select the lot with one entry: `receiver_adapter` keeps its name,
+        #     its `[optimiser.module_lr]` key and its `clip_*` column, and
+        #     `GROUP_NAMES` does not change shape. The alternative -- three
+        #     group names -- cascades into `train.py`'s header,
+        #     `validate_config`'s key check and `DEFAULT.toml`, for no gain.
+        #
+        # An `nn.ModuleDict` and not a list: which interface an entry is has to
+        #     survive a slot that declares no width, and a positional container
+        #     would renumber itself when one goes missing.
+        self.interfaces = build_interfaces(
+            feature_size,
+            language_model.output_size,
+            language_model,
+            discriminator,
+            dropout,
+        )
 
     def forward(self, referents, messages):
         batch_size = referents.shape[0]
         n_obj = referents.shape[1]
         rest = referents.shape[2:]
 
-        # Embed the referents
+        # Embed the referents, once. Everything below is a view of these
+        #     features through one interface or another.
         referents_flat = referents.view(batch_size * n_obj, *rest)
-        embedded_referents = self.adapter(self.feature_model(referents_flat))
-        embedded_referents = embedded_referents.view(batch_size, n_obj, -1)
-        embedded_referents = self.input_dropout(embedded_referents)
+        features = self.feature_model(referents_flat).view(batch_size, n_obj, -1)
 
         # Embed the messages
         messages = messages @ self.token_embedding.weight
 
-        message_repr = self.language_model(messages, embedded_referents)
+        message_repr = self.language_model(
+            messages,
+            through(self.interfaces, LANGUAGE_MODEL_REFERENTS, features),
+        )
 
-        return self.discriminator(embedded_referents, message_repr)
+        return self.discriminator(
+            # A mask of its own, drawn here rather than shared with the
+            #     language model's. See `__init__`.
+            through(self.interfaces, DISCRIMINATOR_REFERENTS, features),
+            through(self.interfaces, DISCRIMINATOR_MESSAGE, message_repr),
+        )
 
     def reset_parameters(self):
         self.feature_model.reset_parameters()
-        self.adapter.reset_parameters()
         self.token_embedding.reset_parameters()
         self.language_model.reset_parameters()
         self.discriminator.reset_parameters()
+
+        # A walk over the container rather than a list of attribute names, so
+        #     an interface cannot be added and left out of the reset. That is
+        #     not hypothetical: two of the adapters this replaces were once
+        #     missing from `ReceiverCrossAttentionLM.reset_parameters` and
+        #     survived a `receiver_reset_interval` reset. See docs/anecdotes.md.
+        for interface in self.interfaces.values():
+            interface.reset_parameters()

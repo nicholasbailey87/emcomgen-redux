@@ -7,7 +7,7 @@ from . import sender as sender
 from . import receiver as receiver
 
 from .backbone import vision
-from .model_util import ReferentAdapter
+from .model_util import LinearInterface
 
 from torch import nn
 
@@ -110,7 +110,13 @@ MODULE_GROUPS = (
     ("sender_contrast", lambda pair: pair.sender.contrast),
     ("sender_language_model", lambda pair: pair.sender.language_model),
     ("receiver_vision", lambda pair: pair.receiver.feature_model),
-    ("receiver_adapter", lambda pair: pair.receiver.adapter),
+    # Every interface between the listener's backbone or message encoder and a
+    #     slot, in one group. They are one `nn.ModuleDict` on `Receiver` for
+    #     exactly this reason: the group keeps the name it had when the listener
+    #     held a single adapter of its own, so `[optimiser.module_lr]
+    #     receiver_adapter`, the `clip_receiver_adapter` column and
+    #     `GROUP_NAMES` are all unchanged by the hoist.
+    ("receiver_adapter", lambda pair: pair.receiver.interfaces),
     ("receiver_token_embedding", lambda pair: pair.receiver.token_embedding),
     ("receiver_language_model", lambda pair: pair.receiver.language_model),
     ("receiver_discriminator", lambda pair: pair.receiver.discriminator),
@@ -149,13 +155,19 @@ MODULE_GROUPS = (
 #     raises if an applicable one matches nothing.
 SCALAR_GROUPS = (
     # Both of these are now gated on a config flag as well as on the
-    #     architecture. `[receiver_discriminator] normalise_score = false`
-    #     leaves the listener with no volume and `[sender_language_model]
+    #     architecture. `[receiver_discriminator] scale_score = false` leaves
+    #     the listener with no volume and `[sender_language_model]
     #     normalise_logits = false` leaves the speaker with no channel scale,
     #     so on those rungs the group is inapplicable rather than missing --
     #     the same distinction `mix_logit` and `contrast_gate` already make,
     #     read off the module that owns the parameter rather than off the
     #     config, so the gate and the parameter cannot disagree.
+    #
+    # Note `bias_score` has no entry here and needs none: `score_bias` is an
+    #     offset rather than a scale and belongs to its module's clip norm, as
+    #     the paragraph above says. It is gated only where it is *found*, in
+    #     `SPLIT_LEARNING_RATES`, and there on `learns_score_bias` rather than
+    #     on the volume's flag.
     (
         "log_score_scale",
         lambda pair: pair.receiver.discriminator.learns_score_scale,
@@ -378,7 +390,7 @@ SPLIT_LEARNING_RATES = (
         #     `log_score_scale` on each, so the `mix_scale_lr` that used to
         #     move `AttentionDiscriminator`'s own scalar has no successor.
         #
-        # Inapplicable, not broken, under `normalise_score = false`: there is no
+        # Inapplicable, not broken, under `scale_score = false`: there is no
         #     volume for it to move. The key stays live and simply has no
         #     effect, exactly as `mix_logit_lr` does on a bilinear listener.
         "score_scale_lr",
@@ -399,16 +411,21 @@ SPLIT_LEARNING_RATES = (
         #     whole travel at 0.23 over thirty epochs, against a score whose own
         #     opening spread is 0.577.
         #
-        # The *same* condition as `score_scale_lr` above rather than one of its
-        #     own: `learns_score_scale` is a misnomer and gates the offset too,
-        #     by design -- an inner constant is annihilated by nothing and would
-        #     simply be degenerate with the outer one -- so the one attribute
-        #     governs both parameters' existence. Note `score_bias` is not a
-        #     `SCALAR_GROUPS` entry: it belongs to its module's clip norm and
-        #     takes only a separate rate, so this is the one gate it needs.
+        # Its **own** condition, which it did not used to have. A single
+        #     `normalise_score` built both scalars or neither, so this predicate
+        #     could read `learns_score_scale` and be right by construction; with
+        #     `scale_score` and `bias_score` separate keys, a listener asking for
+        #     a threshold and no loudness is reachable, and reading the volume's
+        #     attribute here would have raised on it -- the rate would find a
+        #     parameter the gate said was absent. `learns_score_bias` is the
+        #     attribute that governs this one, and only this one.
+        #
+        # Note `score_bias` is not a `SCALAR_GROUPS` entry: it belongs to its
+        #     module's clip norm and takes only a separate rate, so this is the
+        #     one gate it needs.
         "score_bias_lr",
         "score_bias",
-        lambda pair: pair.receiver.discriminator.learns_score_scale,
+        lambda pair: pair.receiver.discriminator.learns_score_bias,
     ),
     (
         # Moves the parameter reported as `train_mix_alpha`. Named for the
@@ -532,12 +549,13 @@ def build_models(dataloaders, config):
     # Every stage after the backbone is sized from the adapter's output rather
     #     than from `final_feat_dim`, which is the whole point of it: the
     #     speaker runs at its language model's `d_model` and the vision model
-    #     emits whatever it emits. See `model_util.ReferentAdapter`.
+    #     emits whatever it emits. The same class the listener's interfaces are,
+    #     at the same defaults -- no bias, no mask. See
+    #     `model_util.LinearInterface`.
     sender_referent_width = config['sender_language_model']['d_model']
-    sender_adapter = ReferentAdapter(
+    sender_adapter = LinearInterface(
         sender_feature_model.final_feat_dim,
         sender_referent_width,
-        activation=config['sender_language_model']['activation'],
     )
     sender_prototyper = sender_prototyper_class(sender_referent_width)
     sender_language_model = sender_language_model_class(
@@ -601,12 +619,13 @@ def build_models(dataloaders, config):
             "must be equal to sender_language_model.message_length"
         )
 
+    # The width `BilinearDiscriminator` compares at, and nothing else's now:
+    #     the listener holds no adapter of its own, and every slot that reads the
+    #     referents is sized from the width it declares rather than from this
+    #     key. `ReceiverCrossAttentionLM` and `AttentionDiscriminator` both
+    #     declare their own `d_model`, so for them this is inert -- it is the
+    #     bilinear arm's comparison width. See `model_util.LinearInterface`.
     receiver_referent_width = config['receiver_language_model']['d_model']
-    receiver_adapter = ReferentAdapter(
-        receiver_feature_model.final_feat_dim,
-        receiver_referent_width,
-        activation=config['receiver_language_model']['activation'],
-    )
     receiver_language_model = receiver_language_model_class(
         receiver_referent_width,
         **config['receiver_language_model']
@@ -624,7 +643,10 @@ def build_models(dataloaders, config):
 
     receiver_ = receiver_class(
         feature_model = receiver_feature_model,
-        adapter = receiver_adapter,
+        # The interfaces are sized straight from the backbone, which is what
+        #     replaces the listener's single adapter: two linear maps in
+        #     series with nothing between them are one linear map.
+        feature_size = receiver_feature_model.final_feat_dim,
         token_embedding_module=receiver_token_embedding_module,
         language_model = receiver_language_model,
         discriminator = receiver_discriminator,

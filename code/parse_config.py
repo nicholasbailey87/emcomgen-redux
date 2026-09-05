@@ -118,21 +118,59 @@ def validate_config(config: dict) -> bool:
             f'"gumbel" or "identity" — got {estimator!r}.'
         )
 
-    # The two normalisation flags, checked here for the same reason and in the
-    # same style. Both default to today's behaviour in the modules that read
-    # them, so a missing key would run the normalised arm silently rather than
+    # The channel and readout flags, checked here for the same reason and in
+    # the same style. All three default to today's behaviour in the modules that
+    # read them, so a missing key would run the default arm silently rather than
     # failing -- which is precisely the confusion an experiment folder whose
     # whole treatment is one of these keys cannot survive. Required and
     # boolean, so a `"false"` string cannot read as true either.
+    #
+    # `scale_score` and `bias_score` replace a single `normalise_score`. That
+    # key also gated the `1/sqrt(d)` calibration, which is now unconditional --
+    # it is what makes the listener's score open at a stated number rather than
+    # a width-dependent one, so it is design and not a rung. What remains
+    # configurable is the two scalars of the readout, and they are two keys
+    # because they answer two questions: a loudness and a threshold.
     for table, key in (
         ('sender_language_model', 'normalise_logits'),
-        ('receiver_discriminator', 'normalise_score'),
+        ('receiver_discriminator', 'scale_score'),
+        ('receiver_discriminator', 'bias_score'),
     ):
         value = config[table].get(key)
         if not isinstance(value, bool):
             raise InvalidConfig(
                 f"`{table}.{key}` must be present and a boolean — got "
                 f"{value!r}."
+            )
+
+    # Keys that no longer exist, rejected by name rather than ignored.
+    #
+    # Nothing else in this file needs a check like this, because every live key
+    # is read by the module that names it and a typo shows up as a missing
+    # setting. A *retired* key is the opposite failure: it sits in a config
+    # looking like a treatment while the code reads straight past it, and the
+    # config still validates. `experiments/silhouette_titration_norms/` is the
+    # concrete case -- ten of its fifteen cells set `normalise_score = false`
+    # and are named for it, and without this they would run the default arm
+    # under a filename saying they did not.
+    #
+    # Retiring a key means putting it here, with what to do instead. Removing an
+    # entry once nothing in the repo names it is fine; the entry is a migration
+    # aid, not a permanent record. That is what docs/ is for.
+    for table, key, guidance in (
+        (
+            'receiver_discriminator',
+            'normalise_score',
+            "it gated the operand norms, the `1/sqrt(d)` calibration and both "
+            "readout scalars, and the first two are unconditional now. Use "
+            "`scale_score` and `bias_score` -- one per scalar. There is no "
+            "setting that removes the calibration",
+        ),
+    ):
+        if key in config.get(table, {}):
+            raise InvalidConfig(
+                f"`{table}.{key}` no longer exists: {guidance}. See "
+                "DEFAULT.toml beside the keys that replaced it."
             )
 
     # `[optimiser.module_lr]`, one rate per module clip group. Checked here

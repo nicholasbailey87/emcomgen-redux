@@ -53,9 +53,11 @@ def trim_messages(token_id_rows):
     return trimmed
 
 
-# Well below `F.layer_norm`'s 1e-5 default, so the normaliser keeps normalising
-#     as a speaker's logit scale collapses. See docs/channel.md.
-LAYER_NORM_EPS = 1e-12
+# Re-exported under the name it has always had, and shared with the listener
+#     rather than restated: well below `F.layer_norm`'s 1e-5 default, so the
+#     normaliser keeps normalising as a speaker's logit scale collapses. See
+#     `model_util.LAYER_NORM_EPS` and docs/channel.md.
+LAYER_NORM_EPS = model_util.LAYER_NORM_EPS
 
 
 # The speaker's channel scale is bounded above by projection rather than by a
@@ -1755,11 +1757,12 @@ class Sender(nn.Module):
 
         Args:
             feat_model: produces embeddings from referents
-            adapter: `ReferentAdapter`, the constant stage that brings the
-                backbone's output to the language model's `d_model`. Everything
-                downstream of it -- the contrast stage, the prototyper, the
-                language model -- is sized from its output rather than from the
-                backbone's.
+            adapter: `model_util.LinearInterface`, the constant stage that
+                brings the backbone's output to the language model's `d_model`
+                and normalises it there. Everything downstream of it -- the
+                contrast stage, the prototyper, the language model -- is sized
+                from its output rather than from the backbone's, and reads it at
+                the norm's scale rather than at the backbone's.
             prototyper: builds prototypes from positive and negative examples
             language_model: builds utterances from prototypes
             contrast: optional `ExampleContrast`, run between the two so the
@@ -1775,9 +1778,9 @@ class Sender(nn.Module):
         # The width every stage after the backbone runs at. This is the
         #     adapter's output, not `feat_model.final_feat_dim`: the backbone
         #     no longer sets the speaker's width. See
-        #     `model_util.ReferentAdapter`.
+        #     `model_util.LinearInterface`.
         self.adapter = adapter
-        self.feat_size = adapter.output_features
+        self.feat_size = adapter.output_size
         self.prototyper = prototyper
         self.contrast = contrast
         self.language_model = language_model

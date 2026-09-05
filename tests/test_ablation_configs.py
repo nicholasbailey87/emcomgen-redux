@@ -159,36 +159,55 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
 @pytest.mark.parametrize(
     "config_file,module,expected",
     [
-        # Every count below is taken with `ReferentAdapter` in the path, which
-        # sizes each agent from its own language model's `d_model` rather than
-        # from its backbone. The numbers that moved, moved for that reason and
-        # not because a module was redesigned:
+        # The speaker's counts are taken with its adapter in the path,
+        # which sizes that agent from its language model's `d_model` rather than
+        # from its backbone. The numbers that moved when it arrived, moved for
+        # that reason and not because a module was redesigned:
         #
         #   * the speakers' `init_h` reads `2 * referent_width`, so it doubles
         #     at the GRU rungs as the referents go 512 -> 1024. That restores
         #     jayelm's own width: their speaker sits on `Conv4`, whose
         #     `final_feat_dim` is 1024, so `Linear(2048 -> 1024)` is the paper's
         #     projection and 512 was `ResNet18SmallInput`'s number.
-        #   * the bilinear discriminator is linear in referent width, so it
-        #     doubles with them.
-        #   * rungs 13-16 go the other way. Their listener language model runs
-        #     at `d_model = 256` where the ViT emitted 320, so the referents
-        #     narrow and both listener modules shrink.
         #
-        # The adapters themselves are not pinned here. They are an architectural
-        # constant at every rung and their size is a function of two widths that
-        # are already pinned, so a claim about them would restate the two rows
-        # above it.
+        # **The listener's counts all moved again when its adapters were hoisted
+        # into `Receiver`.** Its single adapter is gone; each slot declares
+        # the widths it wants and `Receiver` delivers each input through a
+        # `model_util.LinearInterface` sized straight from `final_feat_dim`,
+        # which is the same class the speaker's adapter is. Three
+        # consequences show up in the rows below:
+        #
+        #   * `receiver.language_model` on the transformer arm lost its
+        #     `referent_adapter` -- 4,784,566 -> 4,702,646 -- which is what makes
+        #     the parity number against the GRU +0.3% rather than +2.1%. See
+        #     test_receiver_slots.py.
+        #   * `receiver.discriminator` on the attention arm lost its two
+        #     adapters and two norms, and its composed bilinear path moved from
+        #     `[receiver_language_model] d_model` down to the slot's own
+        #     `d_model`. 3,891,782 -> 2,384,198.
+        #   * that same module is now *the same size on rungs 13 and 15*, where
+        #     it used to differ by a `memory_adapter` reading a 1024-wide GRU
+        #     state against a 256-wide one. The memory still has to be brought to
+        #     `d_model`; it is an interface one stage upstream, so the 13 -> 15
+        #     step is clean on this module and the difference has moved into
+        #     `receiver.interfaces`.
+        #
+        # The interfaces are pinned per rung below rather than left implicit,
+        # because they are where the listener's remaining width arithmetic
+        # lives and they are the group `[optimiser.module_lr] receiver_adapter`
+        # still names. The speaker's adapter is not pinned: it is an
+        # architectural constant whose size is a function of two widths that are
+        # already pinned, so a claim about it would restate them.
         # ShapeWorld: the CNN/GRU baseline.
         ("01_shapeworld_baseline.toml", "sender.feat_model", 11_168_832),
-        ("01_shapeworld_baseline.toml", "sender.language_model", 6_813_498),
+        ("01_shapeworld_baseline.toml", "sender.language_model", 6_813_499),
         # The listener is two modules: `receiver.language_model` encodes the
         # message and `receiver.discriminator` scores the candidates from it.
         #
         # **These two are a capacity-matching argument, and that is new.** The
         # baseline's GRU encoder is 4,687,872 -- jayelm's 1 layer unidirectional
-        # at 1024 -- against 4,784,566 for `ReceiverCrossAttentionLM` at rung
-        # 15's 6 blocks, which is +2.1%. Both numbers are pinned here so that a
+        # at 1024 -- against 4,702,646 for `ReceiverCrossAttentionLM` at rung
+        # 15's 6 blocks, which is +0.3%. Both numbers are pinned here so that a
         # config change to either arm breaks this test rather than quietly
         # reopening the gap.
         #
@@ -198,54 +217,75 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # 1024 wide with a 500-wide token embedding. Parity is now sought at
         # jayelm's width by deepening the transformer arm instead.
         ("01_shapeworld_baseline.toml", "receiver.language_model", 4_687_872),
-        # Halved with the GRU's `output_size`, 2048 -> 1024. Exactly 512 * 1024,
-        # the `bilinear` weight and nothing else: it was 524,289 while
-        # `log_score_scale` carried the volume, and that scalar is gone -- the
-        # weight carries it now. See test_score_scale.py.
+        # 1024 * 1024 for the `bilinear` weight, plus `log_score_scale` and
+        # `score_bias`. The comment here used to say "exactly 512 * 1024" and
+        # name 524,289, which had not matched the pinned value since the
+        # discriminator started comparing at the language model's width; the
+        # arithmetic is 1024 * 1024 + 2. Both operand norms have moved to
+        # `Receiver` and neither held a parameter, so this count is unchanged by
+        # the hoist. See test_score_scale.py.
         ("01_shapeworld_baseline.toml", "receiver.discriminator", 1_048_578),
-        # **Every `sender.language_model` count here lost one parameter on
-        # 2026-09-05**, when `[sender_language_model] normalise_logits` became
-        # `false` by default: `log_logit_scale` is a lone scalar and it is
-        # *absent* from the module under that setting rather than frozen, which
-        # is the arrangement that lets `split_out_parameter` and `SCALAR_GROUPS`
-        # see the truth. Four numbers, all -1, on both datasets and both speaker
-        # arms. No rung sets the key, so the capacity match between arms is
-        # unmoved -- they each lost the same one. A rung that pins the key back
-        # on will read one higher here and that is the setting talking, not a
+        # The interfaces. `discriminator_referents` is 512 -> 1024 with no bias
+        # and `discriminator_message` 1024 -> 1024 with one; the GRU declares no
+        # referent width, so there is no third. This is the whole of what
+        # replaced the listener's single adapter, which was 512 -> 1024
+        # through a SwiGLU block.
+        ("01_shapeworld_baseline.toml", "receiver.interfaces", 1_573_888),
+        # **Every `sender.language_model` count here moved by one parameter
+        # twice on 2026-09-05, and is back where it started.**
+        # `[sender_language_model] normalise_logits` was defaulted to `false`
+        # that morning as one of four settings that moved together, and back to
+        # `true` that evening -- see DEFAULT.toml beside the key for why the
+        # confound was the reason to return it. The parameter is
+        # `log_logit_scale`, a lone scalar that is *absent* from the module when
+        # the key is off rather than frozen, which is the arrangement that lets
+        # `split_out_parameter` and `SCALAR_GROUPS` see the truth. Four numbers,
+        # all -1 and then +1, on both datasets and both speaker arms.
+        #
+        # No rung sets the key, so the capacity match between arms was never
+        # disturbed -- they moved together both times. A rung that pins the key
+        # off will read one lower here and that is the setting talking, not a
         # size drift.
         #
         # ShapeWorld: the top of the ladder. The speaker's language model is the
         # causal arm at seven blocks -- see rung 9's `layers` for why seven, and
         # for the two depths before it.
         ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 10_317_986),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 6_758_353),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_768_182),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_515_526),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 6_758_354),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_198),
+        # Three interfaces here, and all of them narrow: 320 -> 256 twice for
+        # the two slots' referents and 256 -> 256 for the message. Against rung
+        # 13's 344,320 the difference is the message interface, which reads a
+        # 256-wide encoded message rather than a 1024-wide GRU state.
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.interfaces", 229_632),
         # CUB: the CNN/GRU baseline.
         ("02_birds_baseline.toml", "sender.feat_model", 11_176_512),
-        ("02_birds_baseline.toml", "sender.language_model", 6_822_648),
+        ("02_birds_baseline.toml", "sender.language_model", 6_822_649),
         ("02_birds_baseline.toml", "receiver.language_model", 4_687_872),
         ("02_birds_baseline.toml", "receiver.discriminator", 1_048_578),
         # CUB: the top of the ladder. Only the two vision-dependent counts differ
         # from ShapeWorld's -- the ViT's patch tokeniser scales with image size,
         # and the speaker's language model carries a longer message.
         ("16_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 11_332_626),
-        ("16_birds_receiver_cross_attention_lm.toml", "sender.language_model", 6_764_119),
-        ("16_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_768_182),
-        ("16_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_515_526),
-        # Rung 13's discriminator, still pinned because it is still the number
-        # that makes the 13 -> 15 step unclean, though far less so than it was:
-        # 2,990,662 against rung 15's 2,548,294. The gap is a `memory_adapter`
-        # bringing the GRU's output down to 256 rather than reading a 256-wide
-        # message directly, and it shrank from 3,580,487 when that output went
-        # 2048 -> 1024 with the listener GRU's restoration.
+        ("16_birds_receiver_cross_attention_lm.toml", "sender.language_model", 6_764_120),
+        ("16_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
+        ("16_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_198),
+        # Rung 13's discriminator, pinned because it used to be the number that
+        # made the 13 -> 15 step unclean and now is not: it is *equal* to rung
+        # 15's. The gap was a `memory_adapter` bringing the GRU's 1024-wide
+        # output down to 256 where rung 15 read a 256-wide message directly, and
+        # that adapter is `Receiver`'s message interface now -- so the two rungs
+        # differ in `receiver.interfaces`, pinned separately below, and not in
+        # the module under test. It was 3,891,782 before the hoist, and
+        # 3,580,487 before the listener GRU's output went 2048 -> 1024.
         #
         # These two are unchanged across `7b10d47`, and the arithmetic is worth
         # stating because it is a coincidence: the module gained one parameter
         # in `log_score_scale` and lost one in `decision.bias`, which the
         # readout's per-game centring annihilated. Its composed bilinear path
-        # has neither of `ScoreVolume`'s scalars, being built with
-        # `score_scale=False`.
+        # has neither of `ScoreVolume`'s scalars, being built with both
+        # composition gates off.
         #
         # Unchanged again by the commit that added `score_bias`, and again by
         # coincidence: this module already had an offset in `mix_bias`, which
@@ -259,8 +299,14 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # rungs 1-12 could place the score against `train.py`'s fixed
         # `lis_scores > 0`. Two scalars is the whole cost of the listener's
         # readout.
-        ("13_shapeworld_attention_discriminator.toml", "receiver.discriminator", 3_891_782),
-        ("14_birds_attention_discriminator.toml", "receiver.discriminator", 3_891_782),
+        ("13_shapeworld_attention_discriminator.toml", "receiver.discriminator", 2_384_198),
+        ("14_birds_attention_discriminator.toml", "receiver.discriminator", 2_384_198),
+        # Where the 13 -> 15 difference went: 320 -> 256 for the referents and
+        # 1024 -> 256 for the GRU's state, against rung 15's 229,632. The
+        # language model declares no referent width on this rung, so there are
+        # two interfaces here and three there.
+        ("13_shapeworld_attention_discriminator.toml", "receiver.interfaces", 344_320),
+        ("14_birds_attention_discriminator.toml", "receiver.interfaces", 344_320),
         # The two intermediate vision swaps, so a rung that stopped inheriting
         # the shared ViT specification shows up here rather than in a run.
         ("03_shapeworld_sender_vit.toml", "sender.feat_model", 10_317_986),
@@ -295,7 +341,7 @@ def test_the_arms_are_the_sizes_they_claim(config_file, module, expected):
         #
         # It was 1.029x at four blocks and 576, then 1.015x at six once the
         # speaker's blocks lost their cross-attention sublayer, and six became
-        # seven when `ReferentAdapter` widened the *baseline* -- `init_h` reads
+        # seven when the speaker's adapter widened the *baseline* -- `init_h` reads
         # `2 * referent_width`, which the adapter took from the backbone's 512
         # to the GRU's own 1024. This rung's stack runs at its own `d_model` and
         # did not move with it. See rung 9's `layers`.

@@ -91,11 +91,12 @@ def config_section(section, config_file=None, **overrides):
 
 
 # The listener is two modules now -- a language model and a discriminator, each
-#     named in `[receiver]` and configured from its own table. Most of what the
+#     named in `[receiver]` and configured from its own table, with `Receiver`
+#     owning every interface between them and the backbone. Most of what the
 #     tests below assert is a property of the *pair* (the score cannot see the
 #     referents' magnitude, no stage can read their ordering, the residual
-#     stream does not grow), so they compose the two the way `Receiver` does and
-#     hand the result referent embeddings and message embeddings directly.
+#     stream does not grow), so they compose the three the way `Receiver` does
+#     and hand the result backbone features and message embeddings directly.
 #     `Receiver` itself takes images, which these tests have none of.
 
 import torch  # noqa: E402
@@ -106,38 +107,81 @@ from models import receiver as _receiver  # noqa: E402
 
 class Listener(nn.Module):
     """
-    `Receiver` from the referent embeddings inwards: one dropout, then the two
+    `Receiver` from the backbone features inwards: the interfaces, then the two
         slots, in that order.
+
+    The interfaces come from `receiver.build_interfaces` and are delivered by
+        `receiver.through`, rather than being rebuilt here. A shim that
+        reproduces the thing it stands in for is a shim that will one day
+        disagree with it -- which is the whole reason those two are functions.
 
     `dropout` defaults to 0.0 rather than to DEFAULT's 0.1 because almost every
         property under test is deterministic, and a test that has to remember
         to call `.eval()` is a test that will one day forget.
     """
 
-    def __init__(self, language_model, discriminator, dropout=0.0):
+    def __init__(self, language_model, discriminator, feature_size, dropout=0.0):
         super().__init__()
         self.language_model = language_model
         self.discriminator = discriminator
-        self.input_dropout = nn.Dropout(p=dropout)
+
+        # What the backbone would have emitted, and so the width of the tensor
+        #     these tests feed in. Not `discriminator.referent_embedding_size`,
+        #     which since the hoist is the *comparison* width the bilinear arm
+        #     declares and has nothing to do with the listener's input.
+        self.feature_size = feature_size
+
+        self.interfaces = _receiver.build_interfaces(
+            feature_size,
+            language_model.output_size,
+            language_model,
+            discriminator,
+            dropout,
+        )
 
         # Forwarded so a test can size its inputs without knowing which slot
         #     holds which width.
-        self.referent_embedding_size = discriminator.referent_embedding_size
         self.token_embedding_size = language_model.token_embedding_size
         if hasattr(language_model, "message_length"):
             self.message_length = language_model.message_length
 
+    def deliver(self, key, x):
+        """
+        What one slot actually receives, for a test that calls that slot
+            directly rather than through `forward`. `None` where the slot
+            declared it takes no such input, exactly as `Receiver` passes.
+        """
+        return _receiver.through(self.interfaces, key, x)
+
+    def reset_parameters(self):
+        """Mirrors `Receiver.reset_parameters`, interfaces included."""
+        self.language_model.reset_parameters()
+        self.discriminator.reset_parameters()
+
+        for interface in self.interfaces.values():
+            interface.reset_parameters()
+
     def forward(self, referents, messages):
-        referents = self.input_dropout(referents)
+        message_repr = self.language_model(
+            messages,
+            _receiver.through(
+                self.interfaces, _receiver.LANGUAGE_MODEL_REFERENTS, referents
+            ),
+        )
         return self.discriminator(
-            referents, self.language_model(messages, referents)
+            _receiver.through(
+                self.interfaces, _receiver.DISCRIMINATOR_REFERENTS, referents
+            ),
+            _receiver.through(
+                self.interfaces, _receiver.DISCRIMINATOR_MESSAGE, message_repr
+            ),
         )
 
 
 def build_listener(
     language_model,
     discriminator,
-    referent_dim,
+    feature_size,
     config_file=None,
     dropout=0.0,
     seed=0,
@@ -150,11 +194,19 @@ def build_listener(
     Args:
         language_model: class name in `code/models/receiver.py`
         discriminator: class name in `code/models/receiver.py`
-        referent_dim: what the vision model would have produced
+        feature_size: what the vision model would have produced. The interfaces
+            are sized from it, exactly as `build_models` sizes them from
+            `final_feat_dim`.
         config_file: a rung, or None for `DEFAULT.toml` alone
         dropout: `[receiver] dropout`, defaulting to off
         seed: set immediately before each slot is built, so two builds of the
             same pairing are identical
+
+    Both slots take `[receiver_language_model] d_model` as their
+        `referent_embedding_size` constructor argument, which is what
+        `build_models` passes and is no longer the listener's input width: on
+        `BilinearDiscriminator` it is the width the comparison runs at, and on
+        the other three it is inert.
     """
     language_model_class = getattr(_receiver, language_model)
     discriminator_class = getattr(_receiver, discriminator)
@@ -166,17 +218,25 @@ def build_listener(
         "receiver_discriminator", config_file, **(discriminator_overrides or {})
     )
 
+    referent_width = language_model_settings["d_model"]
+
     torch.manual_seed(seed)
     built_language_model = language_model_class(
-        referent_dim, **language_model_settings
+        referent_width, **language_model_settings
     )
 
     torch.manual_seed(seed)
     built_discriminator = discriminator_class(
-        referent_dim,
+        referent_width,
         # Sized from the language model, exactly as `build_models` does it.
         built_language_model.output_size,
         **discriminator_settings,
     )
 
-    return Listener(built_language_model, built_discriminator, dropout=dropout)
+    torch.manual_seed(seed)
+    return Listener(
+        built_language_model,
+        built_discriminator,
+        feature_size,
+        dropout=dropout,
+    )

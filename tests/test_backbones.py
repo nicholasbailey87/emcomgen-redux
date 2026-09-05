@@ -53,6 +53,7 @@ import _bootstrap  # noqa: F401
 
 import parse_config
 import models.builder
+import models.receiver as R
 import train
 from models.backbone import vision
 
@@ -373,13 +374,18 @@ def test_reset_parameters_clears_the_measured_survival_and_keeps_the_channel_sca
     assert speaker.logit_scale == scale
 
 
-def test_attention_listener_reset_covers_its_adapters():
+def test_attention_listener_reset_covers_its_interfaces():
     """
     The baseline rungs use `ReceiverGRULM + BilinearDiscriminator`, so the
     pair-level test above never reaches these two classes. `reset_parameters`
     used to omit both adapters and the referent norm -- i.e. everything mapping
     the listener's two inputs into `d_model` -- while re-drawing everything
     downstream of them.
+
+    Those adapters are `Receiver`'s interfaces now, and the table below covers
+    them as a third slot: the reset walks a container rather than a list of
+    attribute names, which is the shape that bug argues for, but a walk that
+    started from the wrong container would still be silent.
     """
     from _bootstrap import build_listener, rung
 
@@ -396,29 +402,34 @@ def test_attention_listener_reset_covers_its_adapters():
     )
 
     _perturb(listener)
-    listener.language_model.reset_parameters()
-    listener.discriminator.reset_parameters()
+    listener.reset_parameters()
 
     slots = {
         "language_model": (
-            "referent_adapter",
             "message_adapter",
-            "referent_layer_norm",
             "message_decoder",
         ),
         "discriminator": (
-            "referent_adapter",
-            "referent_layer_norm",
-            "memory_adapter",
-            "memory_layer_norm",
             "referent_decoder",
             "decision",
             "bilinear",
         ),
+        # Every width change and every norm on the listener's input path, named
+        # literally so that adding an interface without resetting it fails here
+        # even though `Receiver.reset_parameters` iterates.
+        "interfaces": (
+            R.LANGUAGE_MODEL_REFERENTS,
+            R.DISCRIMINATOR_REFERENTS,
+            R.DISCRIMINATOR_MESSAGE,
+        ),
     }
     for slot, names in slots.items():
+        container = getattr(listener, slot)
         for name in names:
-            module = getattr(getattr(listener, slot), name)
+            module = (
+                container[name] if slot == "interfaces"
+                else getattr(container, name)
+            )
             # broccoli owns these and does not re-draw them, exactly as in
             # `test_backbone_reset_parameters_redraws_everything` above:
             # `rotary_embedding` is a deterministic function of position and

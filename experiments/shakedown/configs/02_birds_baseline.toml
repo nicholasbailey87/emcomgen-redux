@@ -1,0 +1,39 @@
+# Shakedown, CUB: the baseline pair on birds. The other half of the pair of runs
+# described in `01_shapeworld_baseline.toml`, which carries the argument for why
+# this experiment exists and what to watch; read that file first.
+#
+# Configuration-identical to `ablation_birds/configs/02_birds_baseline.toml`.
+# Naming the dataset is the only structural change needed:
+# `parse_config.get_config` switches to the `[birds.*]` family off the *name* of
+# the dataset directory, which brings in the stock-stem ResNet18 for both agents,
+# batch_size 16, n_examples 10, vocabulary 20, message_length 10, no
+# silhouetting and accumulator_steps 1.
+#
+# **Birds is the half that answers the question.** ShapeWorld has not learned
+# shape since 17 August 2026, so a flat ShapeWorld trace is the status quo and
+# says nothing either way about the refactor. Birds learns, so this is the run
+# whose failure would be informative: if `train_acc` does not leave chance here,
+# the interface hoist broke something and the ladder should not be queued.
+#
+# `epochs` and `repeats` below are not overrides -- see rung 1's note. `[slurm]`
+# is read from the first config in the folder only, which is
+# `01_shapeworld_baseline.toml`, so this block is documentation; it is stated
+# anyway because every config in an experiment carries the whole block, and
+# because it is this job that the shared block is sized for.
+
+name = "shakedown"
+
+[data]
+dataset = "../data/cub"
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

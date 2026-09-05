@@ -256,7 +256,7 @@ BOTH = pytest.mark.parametrize(
 def _inputs(listener, referent_scale=1.0, seed=0):
     generator = torch.Generator().manual_seed(seed)
     referents = referent_scale * torch.randn(
-        BATCH, N_OBJ, listener.referent_embedding_size, generator=generator
+        BATCH, N_OBJ, listener.feature_size, generator=generator
     )
     messages = torch.randn(
         BATCH,
@@ -288,53 +288,71 @@ def _bilinear_weight(discriminator):
 # The norms, and which of them carry an affine.
 # --------------------------------------------------------------------------
 
-def test_neither_bilinear_operand_norm_has_an_affine():
-    discriminator = _comparer().discriminator
-    assert discriminator.referent_layer_norm.weight is None
-    assert discriminator.referent_layer_norm.bias is None
-    assert discriminator.message_layer_norm.weight is None
-    assert discriminator.message_layer_norm.bias is None
-
-
-def test_the_cross_attention_norms_that_must_be_affine_free_are():
+def test_no_interface_norm_has_an_affine():
     """
-    `referent_layer_norm` has no affine because one there is a second route to
-        score magnitude, and because the adapter above it is `bias=False`
-        precisely so this norm can divide the backbone's scale out exactly.
+    Every norm on the listener's input path is `Receiver`'s now, and none of
+        them carries a gain. An affine there is a second route to score
+        magnitude, and on a referent interface it would also break the exact
+        cancellation the `bias=False` below is for.
 
-    The last thing before the readout is instead the referent stack's own
-        post-norm, an `RMSNorm` carrying broccoli's default learnable gain --
-        not ours to turn off, since the same class is used by every stack in the
-        repo. That gain is a route to global score magnitude and it is
-        deliberately open: `decision_spread` watches it, and two attempts to
-        close it are in docs/anecdotes.md. What the RMSNorm still does
-        structurally is equalise the candidates against *each other*, which is
-        the part that has to hold, so its affine is asserted here as present
-        rather than absent.
+    Both arms, in one test, because after the hoist there is one kind of object
+        to check rather than two slots' worth of privately-owned norms.
+    """
+    for listener in (_comparer(), _cross_comparer()):
+        assert listener.interfaces, "the listener declared no interfaces at all"
+
+        for name, interface in listener.interfaces.items():
+            assert interface.norm.weight is None, name
+            assert interface.norm.bias is None, name
+
+
+def test_the_last_norm_before_the_attention_readout_keeps_its_gain():
+    """
+    The counterpart of the test above, and the one place a gain is deliberately
+        left open.
+
+    The last thing before `decision` is the referent stack's own post-norm, an
+        `RMSNorm` carrying broccoli's default learnable gain -- not ours to turn
+        off, since the same class is used by every stack in the repo. That gain
+        is a route to global score magnitude and it is deliberately open:
+        `decision_spread` watches it, and two attempts to close it are in
+        docs/anecdotes.md. What the RMSNorm still does structurally is equalise
+        the candidates against *each other*, which is the part that has to hold,
+        so its affine is asserted here as present rather than absent.
     """
     listener = _cross_comparer()
 
-    assert listener.language_model.referent_layer_norm.weight is None
-    assert listener.discriminator.referent_layer_norm.weight is None
-    assert listener.discriminator.memory_layer_norm.weight is None
     assert (
         listener.discriminator.referent_decoder.blocks[-1].post_mlp_norm.weight
         is not None
     )
 
 
-def test_the_referent_adapter_has_no_bias():
+def test_the_referent_interfaces_have_no_bias_and_the_message_ones_do():
     """
-    Load-bearing for the invariance below, not tidiness: the norm after it can
-        only remove the vision model's scale exactly if what reaches it is
-        homogeneous in the input. `W(cx) = cW(x)` gives `LN(W(cx)) = LN(W(x))`;
-        `W(cx) + b` does not.
+    Load-bearing for the invariance below, not tidiness: the norm after a
+        referent adapter can only remove the vision model's scale exactly if
+        what reaches it is homogeneous in the input. `W(cx) = cW(x)` gives
+        `LN(W(cx)) = LN(W(x))`; `W(cx) + b` does not.
+
+    The norm that follows each adapter is what makes this a claim about the
+        whole run rather than about initialisation: a zero-initialised bias
+        would open invariant and lose it the moment it learned anything, and a
+        `BatchNorm` trunk's output scale really does drift during a run.
+
+    The message interfaces carry a bias, and the asymmetry is the point: no
+        cross-backbone scale claim rides on the message side, which arrives
+        through the Gumbel channel rather than off a vision model.
     """
-    listener = _cross_comparer()
-    # One per slot, because each owns its own projection; see
-    #     test_receiver_slots.py for why they are not shared.
-    assert listener.language_model.referent_adapter.bias is None
-    assert listener.discriminator.referent_adapter.bias is None
+    for listener in (_comparer(), _cross_comparer()):
+        for name, interface in listener.interfaces.items():
+            if name.endswith("referents"):
+                assert interface.adapter.bias is None, name
+                assert interface.dropout is not None, name
+            else:
+                assert interface.adapter.bias is not None, name
+                # And no mask on a signal the channel already perturbs.
+                assert interface.dropout is None, name
 
 
 # --------------------------------------------------------------------------
@@ -424,14 +442,20 @@ def test_an_unnormalised_referent_would_have_been_promoted():
         change.
     """
     listener = _comparer().eval()
+    interface = listener.interfaces[R.DISCRIMINATOR_REFERENTS]
     referents, messages = _inputs(listener)
     inflated = referents.clone()
     inflated[:, 3, :] *= 50.0
 
     with torch.no_grad():
-        message_repr = listener.language_model(messages, referents)
-        projected = listener.discriminator.bilinear(message_repr.mean(1))
-        raw = torch.einsum("ijh,ih->ij", (inflated, projected))
+        message_repr = listener.language_model(messages, None)
+        message = listener.interfaces[R.DISCRIMINATOR_MESSAGE](message_repr)
+        projected = listener.discriminator.bilinear(message.mean(1))
+        # The interface's adapter without its norm: the width change has to
+        #     happen either way, and it is the norm that is the counterfactual.
+        raw = torch.einsum(
+            "ijh,ih->ij", (interface.adapter(inflated), projected)
+        )
 
     assert raw[:, 3].abs().mean() > 10.0 * raw.abs().mean()
 
@@ -449,13 +473,16 @@ def test_an_unnormalised_referent_would_have_hijacked_the_value_mixture():
     """
     listener = _cross_comparer(referent_dim=320).eval()
     language_model = listener.language_model
+    interface = listener.interfaces[R.LANGUAGE_MODEL_REFERENTS]
     referents, messages = _inputs(listener)
     inflated = referents.clone()
     inflated[:, 3, :] *= 50.0
 
     with torch.no_grad():
-        adapted = language_model.referent_adapter(referents)
-        adapted_inflated = language_model.referent_adapter(inflated)
+        # The interface's two halves, taken apart: the adapter has to run
+        #     either way to reach `d_model`, and the norm is the counterfactual.
+        adapted = interface.adapter(referents)
+        adapted_inflated = interface.adapter(inflated)
         encoded = language_model.message_adapter(messages)
 
         def stage_one(values):
@@ -465,10 +492,8 @@ def test_an_unnormalised_referent_would_have_hijacked_the_value_mixture():
 
         raw = stage_one(adapted)
         raw_inflated = stage_one(adapted_inflated)
-        normed = stage_one(language_model.referent_layer_norm(adapted))
-        normed_inflated = stage_one(
-            language_model.referent_layer_norm(adapted_inflated)
-        )
+        normed = stage_one(interface.norm(adapted))
+        normed_inflated = stage_one(interface.norm(adapted_inflated))
 
     moved_raw = ((raw_inflated - raw).norm(dim=-1) / raw.norm(dim=-1)).mean()
     moved_normed = (
@@ -599,8 +624,8 @@ def test_each_discriminator_owns_exactly_one_volume_and_one_offset():
 
 def test_the_composed_bilinear_path_has_neither_of_its_own():
     """
-    `AttentionDiscriminator` builds its bilinear path with `score_scale=False`,
-        and that flag gates both of `ScoreVolume`'s scalars.
+    `AttentionDiscriminator` builds its bilinear path with both of
+        `BilinearDiscriminator`'s composition gates off, one per scalar.
 
     The reason is degeneracy, for each of them. The composed path is one of two
         branches multiplied by `1 - mix_weight` and read out through the outer
@@ -609,13 +634,24 @@ def test_the_composed_bilinear_path_has_neither_of_its_own():
         already says. Either would still match its `SPLIT_LEARNING_RATES` suffix
         and still report a value.
 
+    The composition gates are separate from `[receiver_discriminator]
+        scale_score` and `bias_score`, which are the config's and act on the
+        outer readout: this holds whatever those say, which is asserted here by
+        building the default pair, where both config keys are on.
+
+    What the branch keeps is the `1/sqrt(d)` calibration, which is
+        unconditional, so the mix opens at a stated number rather than a
+        width-dependent one.
+
     Absent rather than frozen, so `split_out_parameter`'s suffix match sees the
         truth.
     """
     attention = _cross_comparer().discriminator
 
     assert attention.learns_score_scale
+    assert attention.learns_score_bias
     assert not attention.bilinear.learns_score_scale
+    assert not attention.bilinear.learns_score_bias
     assert not hasattr(attention.bilinear, "log_score_scale")
     assert not hasattr(attention.bilinear, "score_bias")
 
@@ -1478,7 +1514,7 @@ def test_an_attention_rung_with_a_normalised_channel_asks_for_the_mix_weight_rat
 
     Exactly one `log_score_scale` and one `score_bias` on the whole listener,
         and no `log_mix_scale` or `mix_bias`: `AttentionDiscriminator` composes
-        a bilinear path built with `score_scale=False`, so the composed module
+        a bilinear path built with neither scalar, so the composed module
         contributes neither a second volume nor a second offset, and the offset
         it used to own itself now comes from `ScoreVolume` like the volume does.
     """

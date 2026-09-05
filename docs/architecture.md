@@ -23,11 +23,11 @@ single `--dropout` is the latter. Dropping features *before* the pool is much
 weaker, because the average over n/2 examples largely restores them — which is
 exactly why the two are not redundant.
 
-The listener has no counterpart to `vision_dropout`. Its one dropout is
-`[receiver] dropout`, applied by `Receiver` itself; a second between the
-backbone and it would land on the same tensor with nothing but a reshape
-between them, so the pair would silently compose into one mask at a rate
-neither knob names.
+The listener has no counterpart to `vision_dropout`. Its one rate is
+`[receiver] dropout`, applied by `Receiver` at the end of each referent
+interface; a second between the backbone and those would land on the same tensor
+with nothing but a reshape between them, so the pair would silently compose into
+one mask at a rate neither knob names.
 
 ### `speak` versus `forward`
 
@@ -177,7 +177,7 @@ way — `contrast_polarity_embedding` included — would silently join the speak
 tag's parameter group.
 
 The adapter carries `bias=False` for the same reason
-`ReceiverCrossAttentionLM.referent_adapter` does: the norm can only divide the
+every other `model_util.LinearInterface` does: the norm can only divide the
 backbone's scale out exactly if what reaches it is homogeneous in the input,
 which is what makes the *rate* of departure comparable across arms. The residual
 is over the raw `x`, so what the prototyper pools is still at the backbone's own
@@ -543,28 +543,86 @@ than dispatching on class at the call site.
 bidirectional GRU and `d_model` for the decoder stack. No arithmetic makes those
 agree, so a key restating one in the other's table could only ever be wrong.
 
-**`Receiver` drops out; each slot projects and norms for itself.** `Receiver`
-applies `input_dropout` once to the raw referent embeddings and hands the same
-masked tensor to both slots. It owns no projection, because the width a
-projection targets is a property of the consumer: with four legal combinations a
-shared adapter would force `Receiver` to work out which slots want `d_model` and
-whether to build one at all, which is reaching into slot internals and is the
-coupling this split exists to remove. Each slot therefore owns its own
-`nn.Linear(feat, d_model, bias=False)` and its own non-affine `LayerNorm`, in
-that order, because a post-norm stack wants unit RMS in `d_model` space rather
-than in feature space. The duplication costs one matrix, and only in the one
-combination where both slots want it.
+**The slots declare, `Receiver` delivers.** Every swappable module exposes
+`referent_input_size` and `message_input_size`; `None`, or the attribute being
+absent, means the module does not take that input at all.
 
-The mask is element-wise over `(batch, n_objects, features)`, so it removes
-features within each candidate rather than removing whole candidates — which
-would leak the label ordering.
+| module | `referent_input_size` | `message_input_size` |
+| --- | --- | --- |
+| `ReceiverGRULM` | `None` — ignores referents | `None` — it *is* the encoder |
+| `ReceiverCrossAttentionLM` | its `d_model` | `None` |
+| `BilinearDiscriminator` | its `referent_embedding_size` | its `message_width` |
+| `AttentionDiscriminator` | its `d_model` | its `d_model` |
 
-*One consequence, accepted deliberately.* Both of the modules this replaces
-applied dropout **after** their norm; this applies it before. A LayerNorm
-following dropout renormalises the corrupted vector, so the two are genuinely
-different operations and the pre-split numbers reproduce only at `dropout = 0`.
-`tests/test_receiver_slots.py` pins the bilinear arm bit-for-bit at that setting,
-which is the whole safety net for the refactor.
+For each declared width `Receiver` builds a `model_util.LinearInterface` — the
+same class the speaker's `adapter` is — and hands the input
+over in a stated distribution:
+
+> - **Referent interfaces:** `dropout(norm(adapter(referents)))`
+> - **Message interfaces:** `norm(adapter(message_repr))` — adapter and norm, **no
+>   dropout**
+>
+> Adapters are plain `nn.Linear`. Norms are affine-free `LayerNorm`. Masks are
+> drawn independently per referent interface. Referent adapters are sized from
+> the backbone's `final_feat_dim` and message adapters from
+> `language_model.output_size`.
+
+**This inverts what was here before**, and the paragraph it replaces is worth
+keeping in view because its objection was a good one. The arrangement was:
+`Receiver` held one adapter of its own and one dropout, each slot owned its own
+projection and norm, `BilinearDiscriminator` owned no projection at all and took
+the referent width as its own output width, and `AttentionDiscriminator` consumed
+the referents **twice at two widths** — its stack at `d_model`, and the raw
+tensor handed to the `BilinearDiscriminator` it composes internally. That last
+consumer was invisible to `Receiver`, which is what made the arrangement hard to
+change at all. The stated reason for not sharing was that `Receiver` would have
+to work out which slots want `d_model` and whether to build one at all, which is
+reaching into slot internals. Under a declaration it works nothing out: it reads
+what the slot states. That is the whole of the change.
+
+**`bias=False` on referent interfaces, bias on message interfaces.** `LN(W(cx)) =
+LN(W(x))` holds for a homogeneous `W`; `LN(W(cx) + b)` does not. A bias on the
+referent side would break the listener's invariance to the scale its backbone
+happens to emit at, which is pinned over seven orders of magnitude by
+`test_scores_are_independent_of_the_referent_magnitude` — and not only at
+initialisation, which a zero init would cover, but for the whole run, during
+which a `BatchNorm` trunk's output scale really does drift. A bias would also
+buy little: the norm subtracts the mean, so a uniform one is annihilated
+outright and what survives is a constant direction added to every candidate,
+which is what `score_bias` already is. No cross-backbone scale claim rides on
+the message side, which arrives through the Gumbel channel rather than off a
+vision model, so it keeps its bias.
+
+**No dropout on message interfaces.** The message already arrives through the
+Gumbel channel, whose noise `uniform_weight` calibrates. A mask on top is a
+second and uncalibrated perturbation of a signal that already has one.
+
+The referent mask is element-wise over `(batch, n_objects, features)`, so it
+removes features within each candidate rather than removing whole candidates —
+which would leak the label ordering.
+
+**One mask per referent interface, drawn independently — and this answers the
+prior rejection of per-interface masks rather than dropping it.** The objection
+recorded below under [the interface norms](#the-interface-norms) was that two
+masks would regularise the listener at a rate no config key names. That is a
+correct argument about masking *one* tensor twice, which is not what this is:
+each slot reads its own projected copy of the referents, and each copy is masked
+exactly once at the rate `[receiver] dropout` names. Independence between the
+draws is what makes them the two masks that rate describes rather than a
+correlated pair.
+
+*Two consequences, accepted deliberately.* The mask is now **downstream** of each
+interface's norm, where every module this has replaced masked upstream of its
+own. A LayerNorm after a dropout renormalises the corrupted vector and one before
+it does not, so these are genuinely different operations and no earlier numbers
+reproduce except at `dropout = 0`. And `Receiver` holds no adapter of its own
+upstream of these: two linear maps in series with only a norm between them are
+one linear map and a norm, so the separate stage bought only a rank bottleneck
+at its output width, and each interface is sized straight from `final_feat_dim`
+instead.
+`tests/test_receiver_slots.py` still pins the bilinear arm against the pre-split
+module at `dropout = 0`, and records the four places it now deliberately
+diverges.
 
 ### `ReceiverGRULM`
 
@@ -575,7 +633,15 @@ with no view of what it is being compared against.
 **Default 1 layer, unidirectional, 1024 wide** — jayelm's listener exactly, and
 4,687,872 parameters. Parameter parity with the transformer arm is bought at
 *that* width, by taking `ReceiverCrossAttentionLM` to 6 blocks on rungs 15 and 16
-for 4,784,566, which is +2.1%.
+for 4,702,646, which is +0.3%.
+
+That was +2.1% before the interfaces were hoisted, and the gap was almost
+entirely one thing: `ReceiverCrossAttentionLM` owned a `referent_adapter` and
+this module had nothing corresponding, so the ladder was comparing an encoder
+against an encoder-plus-a-projection. Parity is measured over the **slots
+alone**, and the hoist is what makes that the right boundary — counting the
+interfaces back in would put the backbone's `final_feat_dim` into a comparison
+about message encoders.
 
 Parity used to be sought the other way round, at a shared width of 256, with this
 key at 2 and `bidirectional = true`: 1,972,224 against
@@ -592,8 +658,9 @@ published one.
 
 Parity remains a property of the pair of widths and not of the key: set both
 widths together, or set neither. And parameter parity is not interface parity —
-`output_size` is 1024 here against 256 on the transformer, so the discriminator
-downstream differs in size between the arms even at matched encoder parameters.
+`output_size` is 1024 here against 256 on the transformer, so the message
+interface and the discriminator downstream of it differ in size between the arms
+even at matched encoder parameters.
 See the note beside `layers` in DEFAULT.toml.
 
 **The `-1` timestep.** Taking timestep `-1` gives the state after the GRU has
@@ -653,9 +720,9 @@ without one, and it has the property a downstream normaliser cannot have: it
 does not divide each game by anything the listener's own performance moves.
 
 One scalar, not one per operand: `c·LN(p)·LN(r)` and `LN(p)·c·LN(r)` are the
-same function. `AttentionDiscriminator` builds its composed bilinear path with
-`score_scale=False` for a related reason — that branch is multiplied by
-`1 − mix_weight` and read out through the module's own scalar, so a scale on it
+same function. `AttentionDiscriminator` builds its composed bilinear path
+without either readout scalar for a related reason — that branch is multiplied
+by `1 − mix_weight` and read out through the module's own pair, so a scale on it
 would say what `mix_logit` already says. Absent rather than frozen, so a
 parameter that could not move never matches an elevated learning-rate group.
 
@@ -730,20 +797,48 @@ matrix is not competing for the job. Inside `AttentionDiscriminator` the
 branches also mix at their own magnitudes, so there both weights additionally
 set what the score is made of.
 
-#### Turning the whole readout off: `normalise_score`
+#### The two readout keys: `scale_score` and `bias_score`
 
-`[receiver_discriminator] normalise_score = false` removes, together: both
-operand layer norms, the `1/√d` calibration that follows them, and the whole
-`ScoreVolume` readout — `log_score_scale` *and* `score_bias`, on either
-discriminator. What is left is the bare bilinear form `r_j · W m`. It defaults
-`true`, which is bit-identical to this section as written.
+`[receiver_discriminator] scale_score` builds `ScoreVolume.log_score_scale` and
+`bias_score` builds `ScoreVolume.score_bias`, on either discriminator. Both
+default `true`, which is bit-identical to this section as written. Each removes
+one scalar and nothing else.
 
-The four go together because they are one decision rather than four. The norms
-are what make the calibration exact and what make a volume in front of the score
-mean the same thing under every backbone; a readout over unnormalised operands
-would be neither today's design nor the old one.
+**Neither reaches the `1/√d`, which is unconditional.** With both operands at
+unit variance the raw score's standard deviation is `√(d/3)`, so the division
+leaves `1/√3` = 0.577 at every width and under every backbone. That is the whole
+reason this repo can state the listener's opening rather than measure it per
+rung, and it is a calibration, not a hypothesis — uncalibrated, the score opens
+at sd 18.4 and BCE 6.87 at d = 1024, against `ln 2` = 0.693. There is no
+configuration that removes it.
 
-**Why the switch exists.** No ShapeWorld run has learned shape since 17 August.
+**Why two keys.** They answer two questions. `train.py` decides on
+`lis_scores > 0`, so the offset places the scores against a fixed origin, while
+the volume says how loudly the listener states a conclusion — and
+`[optimiser] score_scale_lr` and `score_bias_lr` already moved them at separate
+rates. A listener with a threshold and no loudness is a coherent thing to run,
+and under the single key these replace it was unreachable.
+
+**They replace `normalise_score`, which had stopped meaning what it said.** That
+key gated four things: `BilinearDiscriminator`'s two operand norms, the
+calibration, and both scalars. The norms went first, in the interface hoist —
+they are `Receiver`'s interface norms now, unconditional, part of delivering an
+input at the width a slot declared rather than part of shaping a score, and
+there is one referent interface per slot, so the old arrangement (this key
+gating `BilinearDiscriminator`'s norms while `AttentionDiscriminator`'s were
+deliberately immune to it) had nowhere left to live. The alternative would have
+been a `[receiver_discriminator]` key reaching back into `Receiver` to suppress
+its interface norms, which reintroduces exactly the config coupling the hoist
+removed.
+
+What that left was an off-state of normalised operands under an uncalibrated
+score: not `ce7d6a5`, not jayelm's `CopyListener.compare`, and not the design —
+a third arrangement nobody chose and no run has used. So the calibration follows
+the norms into the design, and the configuration is the two scalars that were
+always the only genuinely optional part.
+
+**The history the old key carried, which is still live.** No ShapeWorld run
+has learned shape since 17 August.
 `4248fca` added all of this on the 19th, its stated purpose to take the score's
 volume "out of the backbone's hands", and `60f9094` moved the backbone to
 `ResNet18SmallInput` the day before. The two are perfectly confounded — and
@@ -754,14 +849,21 @@ every arm of both silhouette titrations, 0.996 → 0.21–0.28, never once
 reversing. The backbone half is under test in
 `experiments/silhouette_titration_conv4/` against
 `experiments/silhouette_titration_resnet18/`;
-`experiments/silhouette_titration_norms/` is the other half.
+`experiments/silhouette_titration_norms/` was the other half, and its ten
+score-arm cells no longer parse: the treatment they name is gone.
 
-**This one is a revert**, unlike its speaker-side counterpart
-`[sender_language_model] normalise_logits`: `false` returns the listener to
-`ce7d6a5`'s arithmetic exactly, which is the last state a ShapeWorld run
-demonstrably learned shape from, and is also what jayelm's
-`CopyListener.compare` has always computed. See [channel.md](channel.md) for why
-the speaker's key is not.
+**The listener half is no longer a single switch, because three of its four
+parts turned out not to be optional.** `normalise_score = false` used to return
+the listener to `ce7d6a5`'s arithmetic exactly — the last state a ShapeWorld run
+demonstrably learned shape from, and what jayelm's `CopyListener.compare` has
+always computed, a dot product on raw backbone output. The interface hoist ended
+that, and the calibration's removal completes it. What can still be turned off is
+the volume and the offset, separately. The speaker-side counterpart
+`[sender_language_model] normalise_logits` is a different case and stays one
+key: it is not a calibration but a norm over the vocabulary axis on the quantity
+that is actually sampled, so it sets the channel's fidelity budget, and
+`logit_scale` only means anything because it multiplies a unit-variance
+quantity. See [channel.md](channel.md).
 
 The gradient argument above is also weaker than it was. `4248fca` reasoned about
 the straight-through Gumbel Jacobian, and the ladder has run
@@ -770,28 +872,34 @@ the straight-through Gumbel Jacobian, and the ladder has run
 own docstring and where a volume scalar sits relative to the backward pass no
 longer changes what the optimiser sees.
 
-**What it does not touch.** `AttentionDiscriminator`'s own `referent_layer_norm`
-and `memory_layer_norm` stay under both settings — they are that stack's input
-and memory norms, and a post-norm stack normalises its own stream but never its
-memory, which is why they exist. `mix_floor`, `mix_logit` and `mix_logit_init`
-are untouched, so that module returns `(1 − a)·bilinear + a·attention` unaltered
-with the key off.
+**What they do not touch.** `AttentionDiscriminator`'s input and memory norms
+stay under every setting, as they always have — but they are `Receiver`'s
+interface norms now, so this is no longer an exemption written into a key. The
+reason is unchanged: a post-norm stack normalises its own stream but never its
+memory. `mix_floor`, `mix_logit` and `mix_logit_init` are untouched, so with both
+keys off that module returns `(1 − a)·bilinear + a·attention` unaltered — still
+calibrated, because the bilinear path it composes keeps the `1/√d`. On that
+module the keys act on the outer readout, downstream of the mix; the composed
+path carries neither scalar whatever they say, a volume on it being degenerate
+with `mix_logit` and a constant on it with the outer offset.
 
-`score_scale_lr` and `score_bias_lr` stay live and simply have no effect;
-`train_score_scale`, `train_score_bias` and `train_clip_log_score_scale` read
-NaN. `bilinear_weight_norm` is the only volume column left, and with nothing
-downstream of the matrix it reads as the listener's whole volume rather than as
-the fast scalar's slow partner. Checkpoints do not cross the key: with it off,
-`log_score_scale` and `score_bias` are absent from the `state_dict`.
+`score_scale_lr` and `score_bias_lr` stay live and simply have no effect when
+their own key is off; `train_score_scale`, `train_score_bias` and
+`train_clip_log_score_scale` read NaN, each independently of the other. With the
+volume gone `bilinear_weight_norm` is the only volume column left, and with
+nothing downstream of the matrix it reads as the listener's whole volume rather
+than as the fast scalar's slow partner. Checkpoints do not cross either key: the
+scalar it builds is absent from the `state_dict` when it is off.
 
-**Dropout masks the referents only,** and lives on `Receiver`. It used to mask
-the message operand too, on the argument that a dot product lets the listener
-lean on whichever side is left intact. True, but it assumed the two sides arrive
-on equal terms and they do not: the message comes through the Gumbel channel,
-whose noise is already calibrated by `logit_scale` and `uniform_weight`, so a
-mask on top is a second perturbation of a signal that has one — and the listener
-cannot tell which of the two it is being asked to be robust to. The referents
-arrive clean.
+**Dropout masks the referents only,** and lives on `Receiver`'s referent
+interfaces. It used to mask the message operand too, on the argument that a dot
+product lets the listener lean on whichever side is left intact. True, but it
+assumed the two sides arrive on equal terms and they do not: the message comes
+through the Gumbel channel, whose noise is already calibrated by `logit_scale`
+and `uniform_weight`, so a mask on top is a second perturbation of a signal that
+has one — and the listener cannot tell which of the two it is being asked to be
+robust to. The referents arrive clean. This is why message interfaces are adapter
+and norm with no dropout, where referent interfaces carry all three.
 
 
 ### `ReceiverCrossAttentionLM` and `AttentionDiscriminator`
@@ -809,14 +917,21 @@ stream as memory:
 Then a plain linear readout scores each one, and the mix below combines that
 score with a bilinear one over the same encoding.
 
-`AttentionDiscriminator` owns a `memory_adapter` — an `nn.Linear` from the
-language model's `output_size` to its own `d_model`, followed by a non-affine
-`LayerNorm`. The adapter is what makes the slot swappable at all, since no
-arithmetic makes a bidirectional GRU's `2 * d_model` agree with this stack's
-width. The norm is there for the same reason `referent_layer_norm` is: a
-post-norm stack normalises its own stream and never its memory, and
-`message_decoder`'s last post-norm used to make that safe by accident where a
+`AttentionDiscriminator` declares `message_input_size = d_model`, and `Receiver`
+builds it a message interface — an `nn.Linear` from the language model's
+`output_size` to that width, followed by a non-affine `LayerNorm`. The
+projection is what makes the slot swappable at all, since no arithmetic makes a
+bidirectional GRU's `2 * d_model` agree with this stack's width. The norm is
+there because a post-norm stack normalises its own stream and never its memory,
+and `message_decoder`'s last post-norm used to make that safe by accident where a
 GRU state would not.
+
+It owned that adapter and that norm itself, as `memory_adapter` and
+`memory_layer_norm`, until the interfaces were hoisted. The same tensors, one
+stage upstream — with the consequence that this module is now **the same size on
+rungs 13 and 15**, where it used to differ by a `memory_adapter` reading a
+1024-wide GRU state against a 256-wide encoded message. The difference has moved
+into `Receiver.interfaces`.
 
 **Why two stacks rather than four bare stages.** The structure this replaces
 crossed the message into the referent stream exactly once, at a single
@@ -908,18 +1023,27 @@ permutation-equivariant and cannot read the ordering at all.
 `BilinearDiscriminator` is immune for a different reason: it scores each referent
 in isolation and never sees the set.
 
-**`referent_adapter` has `bias=False`, and that is load-bearing rather than
-tidy.** `referent_layer_norm` is what makes the score independent of the size the
-vision model happens to emit, and it can only do that exactly if what reaches it
-is homogeneous in the input: `W(cx) = cW(x)` gives `LN(W(cx)) = LN(W(x))`, where
-`W(cx) + b` does not. With a bias, a backbone emitting features a hundred times
-smaller gets a score shaped partly by this layer's bias and one emitting large
-features does not — a weaker form of exactly the defect being removed, and one
-that would leave the invariance test asserting an approximation. The following
-norm subtracts the mean anyway, so most of a bias here would be annihilated a
-line later.
+**Each referent interface's adapter has `bias=False`, and that is load-bearing
+rather than tidy.** The norm after it is what makes the score independent of the
+size the vision model happens to emit, and it can only do that exactly if what
+reaches it is homogeneous in the input: `W(cx) = cW(x)` gives `LN(W(cx)) =
+LN(W(x))`, where `W(cx) + b` does not. With a bias, a backbone emitting features
+a hundred times smaller gets a score shaped partly by this layer's bias and one
+emitting large features does not — a weaker form of exactly the defect being
+removed, and one that would leave the invariance test asserting an
+approximation. The following norm subtracts the mean anyway, so most of a bias
+here would be annihilated a line later.
 
-**`referent_layer_norm` is parameter-free, and not for the reason originally
+The norm that follows is what makes this a claim about the *whole run* rather
+than about initialisation. It is `model_util.LinearInterface`'s, unconditional,
+on both agents: the speaker's adapter used to end in an affine `RMSNorm` inside
+a `FeedforwardBlock`, and when that block became a plain `nn.Linear` the norm
+stayed and the learnable gain went. A gain is a route to global magnitude, and
+neither agent should be choosing one at a width change. The message interfaces
+carry a bias, and the asymmetry is deliberate: no cross-backbone scale claim
+rides on the message side.
+
+**The interface norms are parameter-free, and not for the reason originally
 given.** broccoli's `project_qkv` RMS-normalises Q and K per head, so the
 attention *logits* are already free of the vision model's scale, and
 `MHAttention.out_norm` handles a uniformly louder backbone (measured: the whole
@@ -933,16 +1057,24 @@ averaging has already happened. That is an object winning for being large rather
 than for matching. An affine here would also be a route to *global* score
 magnitude.
 
-**The dropout is `Receiver`'s and now precedes both slots' norms,** where it used
-to sit between `referent_layer_norm` and the stacks. The old placement had an
-argument behind it: a mask upstream of a learned projection is a mask the
-projection can average away, and a mask upstream of a LayerNorm has its
-`1/(1−p)` rescale thrown away and its survivors renormalised *up*, so the
-perturbation is neither the size nor the shape the knob names. All of that is
-still true, and it is the price of one mask reaching two slots identically —
-which is the thing that cannot be got any other way, because a mask inside each
-slot would regularise the two-adapter combinations twice at a rate no key names.
-The consequence is stated under the slot contract above. Only the referents are
+<a id="the-interface-norms"></a>
+**The dropout is `Receiver`'s, and it is back downstream of the norms** — one
+mask per referent interface, drawn independently, at the end of the interface.
+That is the placement the original argument wanted: a mask upstream of a learned
+projection is a mask the projection can average away, and a mask upstream of a
+LayerNorm has its `1/(1−p)` rescale thrown away and its survivors renormalised
+*up*, so the perturbation is neither the size nor the shape the knob names.
+
+It was moved upstream to buy one thing — one mask reaching both slots
+identically — on the argument that a mask inside each slot would regularise the
+two-adapter combinations twice at a rate no key names. **That argument is
+answered rather than dropped.** It is correct about masking one tensor twice.
+Under the interface contract each slot reads its own projected copy of the
+referents and each copy is masked exactly once at the rate `[receiver] dropout`
+names, so two independent masks on two tensors is the rate the key describes and
+not double the rate. What is given up is that the two slots no longer see the
+same masked referents, which was itself only ever a means to the rate. The
+consequence is stated under the slot contract above. Only the referents are
 masked; attention dropout is a separate setting
 (`receiver_discriminator.cross_attention_dropout`).
 

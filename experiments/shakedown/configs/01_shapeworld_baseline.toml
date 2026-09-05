@@ -1,0 +1,61 @@
+# Shakedown, ShapeWorld: the baseline pair, run to confirm the listener's
+# interface hoist did not break training end to end.
+#
+# **This is not a ladder rung and it is not an ablation.** It is two runs -- this
+# one and `02_birds_baseline.toml` -- whose only job is to answer "does a pair
+# still learn at all after the refactor", before sixteen rungs are queued behind
+# an answer nobody has checked. It is configuration-identical to
+# `ablation_shapeworld/configs/01_shapeworld_baseline.toml` and exists as its own
+# experiment so its results land somewhere that will not be confused with the
+# ladder's, under `<output_root>/shakedown/` rather than
+# `<output_root>/ablation_shapeworld/`.
+#
+# **What it is shaking down.** Every adapter on both agents is now
+# `model_util.LinearInterface` -- a plain `nn.Linear` with `bias=False`, an
+# affine-free `LayerNorm`, and a dropout mask on the referent side. That
+# replaces, on the speaker, a broccoli `FeedforwardBlock` (SwiGLU, inner size
+# twice the output width, affine `RMSNorm`); and on the listener, a single
+# `ReferentAdapter` upstream of four differently-owned projections and norms,
+# one of which -- `AttentionDiscriminator`'s composed bilinear path -- consumed
+# the referents a second time at a second width. Parameter counts move on every
+# listener module. No trajectory recorded before this pools with one recorded
+# after it, on either dataset. See docs/architecture.md.
+#
+# **What to watch, in the first few epochs.**
+#
+#   * `train_loss` against `ln 2` = 0.6931. The bilinear score is still
+#     calibrated to open at `1/sqrt(3)` = 0.577, which puts opening BCE at about
+#     0.72; a run sitting at 0.6931 to four decimals is the trivial optimum and
+#     means nothing is moving.
+#   * `test_unique_message_count`. A speaker that has collapsed onto one message
+#     is the other way a run can look alive and be dead.
+#   * `train_referent_spread` and `train_logit_prior_share`. The speaker's
+#     adapter no longer ends in a *learnable* gain, so the scale its prototyper
+#     reads is the interface norm's and not a trained one. If that is going to
+#     bite it will bite here.
+#
+# A pass is not a result about ShapeWorld. ShapeWorld has not learned shape since
+# 17 August 2026 and this run is not expected to change that; what it is allowed
+# to establish is that the machinery runs, the metrics are finite and the loss
+# leaves its opening. Read `md_shape` against `md_color` on the ladder, not here.
+#
+# `epochs` and `repeats` below are not overrides: scripts/job_utils.py reads both
+# straight out of this file rather than out of the merged config, so every config
+# in an experiment must carry them even when they restate the default. `[slurm]`
+# is read from the *first* config in the folder only (sorted by filename), which
+# in this experiment is this file, so the block here governs both jobs -- it is
+# sized for the heavier of the two, which is the birds one at 224px.
+
+name = "shakedown"
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

@@ -105,10 +105,11 @@ def _stages(listener, referents, messages):
         change to one that is not made to the other fails loudly instead of
         leaving these tests measuring a module nobody runs.
 
-    Note the two slots adapt the referents *separately*. Each owns its
-        projection and its norm, because the width a projection targets is a
-        property of the consumer; see test_receiver_slots.py for why that is not
-        shared.
+    Note the two slots receive the referents *separately*. Each declares the
+        width it wants and `Receiver` builds it an interface of its own -- a
+        linear map, a non-affine norm and a mask -- so there is one projected
+        copy per slot and the masks are independent. See
+        `model_util.LinearInterface`.
     """
     language_model = listener.language_model
     discriminator = listener.discriminator
@@ -120,9 +121,7 @@ def _stages(listener, referents, messages):
 
     encoder_referents = record(
         "encoder referents",
-        language_model.referent_layer_norm(
-            language_model.referent_adapter(referents)
-        ),
+        listener.deliver(R.LANGUAGE_MODEL_REFERENTS, referents),
     )
     encoded = record(
         "encoded message",
@@ -133,20 +132,20 @@ def _stages(listener, referents, messages):
 
     scored_referents = record(
         "scored referents",
-        discriminator.referent_layer_norm(
-            discriminator.referent_adapter(referents)
-        ),
+        listener.deliver(R.DISCRIMINATOR_REFERENTS, referents),
     )
     memory = record(
-        "memory",
-        discriminator.memory_layer_norm(discriminator.memory_adapter(encoded)),
+        "memory", listener.deliver(R.DISCRIMINATOR_MESSAGE, encoded)
     )
     refined = record(
         "refined referents",
         discriminator.referent_decoder(scored_referents, memory),
     )
     record("attention readout", discriminator.decision(refined).squeeze(-1))
-    record("bilinear readout", discriminator.bilinear(referents, encoded))
+    # The same two tensors the stack reads, which is what one declared width
+    #     per input buys: this branch is no longer a second consumer of the
+    #     referents at a width of its own.
+    record("bilinear readout", discriminator.bilinear(scored_referents, memory))
     return seen
 
 
@@ -371,7 +370,13 @@ def test_the_memory_reaches_the_scored_stack_normalised():
         whatever the language model hands over arrives at whatever magnitude it
         happens to have. `message_decoder`'s last post-norm used to make that
         safe by accident; a GRU state would not, and the slot is swappable now.
-        Hence `memory_layer_norm`, which makes it safe on purpose.
+        Hence the norm on the message interface, which makes it safe on
+        purpose. It was this module's own `memory_layer_norm` until the
+        interfaces were hoisted into `Receiver`; the same operation, one stage
+        upstream, and unconditional there rather than exempted from a
+        `normalise_score` by hand -- that key is gone, and what replaced it,
+        `scale_score` and `bias_score`, reaches nothing but the two readout
+        scalars.
     """
     listener = _listener()
     referents, messages = _inputs(listener)
@@ -498,7 +503,11 @@ def test_reset_parameters_leaves_nothing_trained():
     """
     The adapters were missing from this list once, so a reset listener kept the
         projections that map referents and messages into `d_model` while
-        everything downstream of them was re-drawn.
+        everything downstream of them was re-drawn. They are `Receiver`'s
+        interfaces now and the reset is a walk over the container rather than a
+        list of names, which is the shape that bug argues for -- so this covers
+        the interfaces too, through the shim's mirror of
+        `Receiver.reset_parameters`.
     """
     listener = _listener()
     with torch.no_grad():
@@ -506,8 +515,7 @@ def test_reset_parameters_leaves_nothing_trained():
             parameter.add_(1.0)
     before = [p.detach().clone() for p in listener.parameters()]
 
-    listener.language_model.reset_parameters()
-    listener.discriminator.reset_parameters()
+    listener.reset_parameters()
 
     # broccoli owns these and does not re-draw them, which is correct for both:
     #     `rotary_embedding.freqs` is a deterministic function of position, so

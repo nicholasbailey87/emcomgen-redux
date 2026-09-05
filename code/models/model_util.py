@@ -4,8 +4,7 @@ Model building utils
 
 import torch.nn as nn
 
-from broccoli.activation import ReLU, GELU, SquaredReLU, Swish, SwiGLU
-from broccoli.transformer import FeedforwardBlock
+from broccoli.activation import ReLU, GELU, SquaredReLU, SwiGLU
 
 
 # Name -> broccoli activation, so `activation` can be set from a TOML config.
@@ -133,91 +132,167 @@ def scale_without_attenuating(x, scale):
     return scale * x.detach() + (x - x.detach())
 
 
-class ReferentAdapter(nn.Module):
+# Well below `F.layer_norm`'s 1e-5 default, and load-bearing wherever it is
+#     used: at 1e-5 the normaliser quietly stops normalising once the incoming
+#     variance gets small, and whatever it was dividing out goes back to the
+#     module upstream. `sender.LAYER_NORM_EPS` and `receiver.LAYER_NORM_EPS`
+#     are this constant, re-exported under the names they have always had. See
+#     docs/channel.md.
+LAYER_NORM_EPS = 1e-12
+
+
+class LinearInterface(nn.Module):
     """
-    The one stage between a vision backbone and everything that consumes its
-        output, on both agents and on every rung.
+    How anything reaches a module that declared a width: a plain linear map to
+        that width, an affine-free `LayerNorm`, and -- where the consumer asks
+        for one -- a dropout mask.
 
-    **Why it exists.** Until this was added, `feature_model.final_feat_dim` was
-        threaded straight into the prototyper, the language model, the contrast
-        stage and the discriminator, so a single scalar chosen by the backbone
-        set the width of the entire agent. That coupling is what made rung 9
-        unreadable as an experiment: `SenderTransformerLM` rejects
-        `token_embedding_size != referent_embedding_size` outright, so the
-        speaker's language model had to take the ViT's 320 and the ViT had to
-        take the language model's, and neither could move without the other.
-        The language model is quadratic in width -- 5,854,089 parameters at 320
-        against 12,113,481 at 512 -- so 320 was the only width at which rung 9
-        was capacity-matched to the GRU baseline it is compared against, and the
-        vision model was pinned there by that match rather than by anything
-        about vision.
+    **One class for both agents.** This is `Sender.adapter`, every one of
+        `Receiver.interfaces`, and nothing else. They were two classes briefly
+        and the split did not survive contact: a stage that changes width and
+        then normalises is one idea, and having a `ReferentAdapter` on the
+        speaker beside a listener-only `LinearInterface` made it look like two.
 
-        With this in the path, the backbone emits whatever it emits and the
-        agent runs at its language model's `d_model`. Backbone capacity and
-        language model capacity become independent variables, which is what a
-        comparison across backbones needs.
+    **The rule, stated once and applied everywhere.**
 
-    **An architectural constant, not a rung.** It is present on both agents at
-        every rung, at the same shape, so it is never what a rung is testing.
-        The alternative -- introducing it only where a width has to change --
+        Every swappable module declares the widths it wants. The agent brings
+        each input to the declared width and hands it over in a stated
+        distribution.
+
+            referent interfaces: dropout(norm(adapter(referents)))
+            message interfaces:  norm(adapter(message_repr))
+
+        Adapters are plain `nn.Linear`. Norms are affine-free `LayerNorm`.
+        Masks are drawn independently per referent interface.
+
+    **Why it exists at all.** Until the first version of this was added,
+        `feature_model.final_feat_dim` was threaded straight into the
+        prototyper, the language model, the contrast stage and the
+        discriminator, so a single scalar chosen by the backbone set the width
+        of an entire agent. That coupling is what made rung 9 unreadable as an
+        experiment: `SenderTransformerLM` rejects `token_embedding_size !=
+        referent_embedding_size` outright, so the speaker's language model had
+        to take the ViT's 320 and the ViT had to take the language model's, and
+        neither could move without the other. The language model is quadratic
+        in width -- 5,854,089 parameters at 320 against 12,113,481 at 512 -- so
+        320 was the only width at which rung 9 was capacity-matched to the GRU
+        baseline it is compared against, and the vision model was pinned there
+        by that match rather than by anything about vision.
+
+        With these in the path the backbone emits whatever it emits and each
+        consumer runs at the width it asked for. Backbone capacity and language
+        model capacity become independent variables, which is what a comparison
+        across backbones needs.
+
+    **An architectural constant, not a rung.** One is present on the speaker at
+        every rung and one per declared input on the listener, at the same
+        shapes, so an interface is never what a rung is testing. The
+        alternative -- introducing one only where a width has to change --
         would put an extra stage on exactly the rungs whose results are being
-        compared, which is the confound it exists to remove.
+        compared, which is the confound this exists to remove.
 
-    **Shape.** A `broccoli` `FeedforwardBlock`, SwiGLU, inner size twice the
-        output width. The block has no internal residual, so an input width
-        different from its output width is native rather than something worked
-        around with a projection on a shortcut. Note SwiGLU doubles the up
-        projection: at inner size `2 * d_out` the first linear is `4 * d_out`
-        wide, so a 512 -> 320 adapter is 862,721 parameters and not the ~500k
-        the ratio suggests.
+    **A plain `nn.Linear`, and that is the change worth stating.** The
+        speaker's was a broccoli `FeedforwardBlock` -- SwiGLU, inner size twice
+        the output width, ending in an affine `RMSNorm`, no residual.
 
-    **The output norm is the block's own.** `FeedforwardBlock.process` already
-        ends in `RMSNorm(output_features, elementwise_affine=True)`, so what
-        leaves here is normalised with a learnable gain and nothing is stacked
-        on top of it. An `nn.LayerNorm` after that would re-centre and re-scale
-        what the RMSNorm gain had just set, which is a second normalisation
-        rather than the one asked for. The learnable affine is the point: unlike
-        `ExampleContrast.adapter`, whose non-affine norm exists so the
-        backbone's scale divides out exactly, this stage is a width change that
-        downstream modules read as their input distribution, so it is allowed to
-        choose that distribution's scale.
+        A random linear map approximately preserves inner products, so at
+        initialisation the geometry every consumer reads is the backbone's
+        geometry. A random SwiGLU block does not: the gate is a multiplication,
+        so angles are scrambled before anything has learned to unscramble them.
+        The listener's entire early signal is angular -- magnitude cannot flip
+        the sign of a bilinear score under BCE, only direction can -- so that
+        was a cost paid at exactly the moment a run decides whether to ignite.
+        A linear map lets the information through and leaves the departure from
+        it to be learned rather than assumed.
+
+    **The norm is unconditional, and it is what the block's `RMSNorm` used to
+        do.** That norm was the only thing between a backbone and its
+        downstream stages that bounded the feature scale, and dropping it with
+        the block would have left the speaker's prototyper reading whatever
+        magnitude its vision model happened to emit -- differently per batch on
+        a `BatchNorm` trunk, and differently again at eval. So the norm stays;
+        what goes is the learnable gain on it. A gain is a route to global
+        magnitude, and this stage is not where an agent should be choosing one.
+
+        It is also unconditional in the config sense. The listener's operand
+        norms used to be gated by a `[receiver_discriminator]` key, which made
+        "deliver an input in a stated distribution" a thing a rung could switch
+        off. Nothing in that table reaches them now: `scale_score` and
+        `bias_score` build one `ScoreVolume` scalar each and nothing else, and
+        the `1/sqrt(d)` calibration below them is unconditional too. See
+        `receiver.BilinearDiscriminator`.
+
+    **`bias=False` by default, and load-bearing rather than tidy.**
+        `LN(W(cx)) = LN(cW(x)) = LN(W(x))` exactly, because the norm divides
+        out any common factor; `LN(W(cx) + b)` does not collapse, because as
+        `c` moves the bias's share of the pre-norm vector moves with it. So a
+        bias on a referent interface would break the agent's invariance to
+        whatever scale its backbone happens to emit at -- not only at
+        initialisation, which a zero init would cover, but for the whole run,
+        during which a `BatchNorm` trunk's output scale really does drift. That
+        invariance is pinned over seven orders of magnitude by
+        `test_scores_are_independent_of_the_referent_magnitude`.
+
+        A bias would also buy very little. The norm subtracts the mean, so a
+        uniform bias is annihilated outright, and what survives is a constant
+        direction added to every candidate before normalising -- a component
+        common across candidates, which is what `ScoreVolume.score_bias`
+        already is and what `ScoreVolume`'s docstring argues should not be
+        spent out of the discriminative capacity.
+
+        Message interfaces pass `bias=True`. No cross-backbone scale claim
+        rides on the message side: it arrives through the Gumbel channel rather
+        than off a vision model.
+
+    **No dropout unless the consumer asks for one**, and on the listener only
+        the referent interfaces do. The message already arrives through the
+        Gumbel channel, whose noise `uniform_weight` calibrates, so a mask on
+        top is a second and uncalibrated perturbation of a signal that already
+        has one.
     """
 
-    def __init__(self, input_features, output_features, activation="SwiGLU"):
+    def __init__(self, input_size, output_size, bias=False, dropout=None):
         """
         Args:
-            input_features: the backbone's `final_feat_dim`
-            output_features: the agent's language model `d_model`
+            input_size: the producer's width -- a backbone's `final_feat_dim`
+                on a referent interface, a language model's `output_size` on a
+                message one
+            output_size: the width the consumer declared
+            bias: `False` on referent interfaces, `True` on message ones; see
+                the class docstring for why that asymmetry is deliberate
+            dropout: the mask rate, or `None` for no mask at all. `None` rather
+                than 0.0 so that "this interface is never masked" is a
+                structural fact about the interface and not a rate a config
+                could accidentally set.
         """
         super().__init__()
-        self.input_features = input_features
-        self.output_features = output_features
-        self.block = FeedforwardBlock(
-            input_features,
-            output_features,
-            ratio=2,
-            activation=get_activation(activation),
+        self.input_size = input_size
+        self.output_size = output_size
+
+        self.adapter = nn.Linear(input_size, output_size, bias=bias)
+        self.norm = nn.LayerNorm(
+            output_size, elementwise_affine=False, eps=LAYER_NORM_EPS
         )
+        self.dropout = None if dropout is None else nn.Dropout(p=dropout)
 
     def forward(self, x):
-        return self.block(x)
+        adapted = self.norm(self.adapter(x))
+        return adapted if self.dropout is None else self.dropout(adapted)
 
     def reset_parameters(self):
         """
-        `FeedforwardBlock.reset_parameters` walks its `process` sequence and
-            calls `reset_parameters` on whatever has one, and broccoli's `Swish`
-            does not have one -- so under SwiGLU its `swish_beta` survives a
-            reset that is supposed to return the whole stage to its opening
-            state. That matters because `receiver_reset_interval` resets the
-            listener mid-run, and a parameter that persists across that is a
-            parameter the reset was not told about.
+        Two submodules, one of which holds nothing. The norm is reset anyway so
+            that turning `elementwise_affine` back on cannot leave a reset agent
+            holding trained gains.
 
-        Restored here explicitly rather than by a `hasattr` guard on the walk,
-            which is the same choice `Sender.reset_parameters` makes: a guard
-            turns a module that has no reset into one that is silently skipped.
-            1.0 is `Swish.__init__`'s opening value.
+        This used to re-initialise `Swish.swish_beta` by hand as well, because
+            `FeedforwardBlock.reset_parameters` walks its `process` sequence and
+            broccoli's `Swish` has no `reset_parameters` for the walk to find --
+            so under SwiGLU that parameter survived a reset which was supposed
+            to return the whole stage to its opening state, and
+            `receiver_reset_interval` resets an agent mid-run. There is no
+            `Swish` here any more, and nothing left for that fix-up to
+            re-initialise.
         """
-        self.block.reset_parameters()
-        for module in self.block.modules():
-            if isinstance(module, Swish):
-                nn.init.constant_(module.swish_beta, 1.0)
+        self.adapter.reset_parameters()
+        self.norm.reset_parameters()

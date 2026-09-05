@@ -68,11 +68,20 @@ pins at the ceiling by epoch 14 of 29 in all ten arms of both silhouette
 titrations, while `logit_margin` sits at 0.44–0.88 against a budget of 3.883.
 The speaker is asking for fidelity it cannot have, through the only route this
 norm leaves open, and a one-way traverse that runs until something stops it is
-not a control finding an optimum. Its listener-side counterpart is
-`[receiver_discriminator] normalise_score`; see
+not a control finding an optimum. Its nearest listener-side counterpart is
+`[receiver_discriminator] scale_score`, though only loosely: that key builds or
+withholds one scalar, where this one also decides whether the quantity the
+scalar multiplies has a fixed second moment at all. See
 [architecture.md](architecture.md).
 
-**It is not a revert**, unlike that counterpart. `layer_norm_logits` was already
+**It is not a revert**, and there is no longer a listener-side key that is. The
+one that used to be lost the claim when the interfaces were hoisted — it left
+the operand norms standing, because they are `Receiver`'s rather than the
+discriminator's — and has since been retired into `scale_score` and
+`bias_score`, which reach nothing but the two readout scalars. What follows was
+written when the counterpart *was* an exact revert and the contrast was the
+point; the argument about this key stands on its own.
+`layer_norm_logits` was already
 present at `ce7d6a5`, having arrived at `1510a55`/`df95063` on 10–12 August, so
 every ShapeWorld run that has ever learned shape ran with it on, and the
 successful configs also carry `logit_scale_lr` = 2e-3 and `init_energy` = 0.9.
@@ -251,10 +260,14 @@ between candidates back out of the listener's hands and putting them in the
 backbone's. Not currently binding — ViT2 emits RMS 0.23 — but closing it costs
 nothing. The score's overall magnitude is no longer at stake there: the
 listener normalises both operands of its bilinear form, so what a backbone emits
-reaches the score only through its *direction*. `referent_layer_norm` is half of
-that, and it is also what stops a large candidate being read loudly for being
-large — which is the half no downstream normalisation could have undone. See
-`ScoreVolume` in [architecture.md](architecture.md).
+reaches the score only through its *direction*. `Receiver`'s referent interface
+norm is half of that, and it is also what stops a large candidate being read
+loudly for being large — which is the half no downstream normalisation could
+have undone. It is unconditional since the interfaces were hoisted, so this
+holds under every `[receiver_discriminator]` setting: what those keys reach is
+the two readout scalars, and the `1/√d` calibration below them is unconditional
+too. See `ScoreVolume` and the slot contract in
+[architecture.md](architecture.md).
 
 ## `mask_reserved_tokens`
 

@@ -285,9 +285,10 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
     whose gradient is zero below its bound. Watch `train_mix_alpha` and
     `train_path_agreement` together.
 - `[receiver] dropout`: the listener's **only** dropout, and the
-    counterpart of the sender's `prototype_dropout`. `Receiver` masks the
-    incoming referent embeddings once and hands the same masked tensor to both
-    slots, so no pairing can regularise twice; it defaults to `0.1` to match the
+    counterpart of the sender's `prototype_dropout`. `Receiver` owns every
+    interface between the backbone and a slot, and the mask is the last stage of
+    each referent interface — one per slot that reads the candidates, drawn
+    independently, each at this rate. It defaults to `0.1` to match the
     sender. It masks *elements* of `(batch, n_objects, features)`, so it removes
     features within a candidate and never a whole candidate, which would leak
     the label ordering. It used to mask
@@ -536,8 +537,9 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     scalar per
     discriminator, in front of the candidate scores standardised per game, at an
     elevated `score_scale_lr` of 2e-3. Live on every rung: the attention arm
-    composes a bilinear path built with `score_scale=False` and carries the one
-    scale downstream of its mix.
+    composes a bilinear path built with neither readout scalar and carries the one
+    scale downstream of its mix. `[receiver_discriminator] scale_score = false`
+    removes it and the column reads NaN; nothing else in that table does.
     It cannot move the decision: `scores > 0` and the reference-game argmax are
     both invariant to a positive rescale. What it moves is BCE — which is
     exactly why it needs a column, since `train_acc` cannot see it.

@@ -71,20 +71,23 @@ class _StubLanguageModel(nn.Module):
 
 class _IdentityAdapter(nn.Module):
     """
-    Stands in for `ReferentAdapter`, which `Sender` requires and reads
-        `output_features` off.
+    Stands in for `model_util.LinearInterface`, which `Sender` requires and
+        reads `output_size` off.
 
-    Identity rather than the real block because these tests are about the
-        spread of the referents the prototyper pools, and a real adapter is a
-        non-linearity between the stub backbone and that pooling: it would
+    Identity rather than the real stage because these tests are about the
+        spread of the referents the prototyper pools, and a real interface sits
+        between the stub backbone and that pooling: its projection would
         preserve `test_identical_referents_read_zero` but not
-        `test_a_global_rescale_leaves_it_alone`, whose claim is scale
-        invariance of the *statistic* rather than of the adapter.
+        `test_a_global_rescale_leaves_it_alone`, whose claim is scale invariance
+        of the *statistic* rather than of the interface. Its norm would make
+        that test pass for the wrong reason, which is worse -- the statistic is
+        supposed to be scale-invariant on its own, not because something
+        upstream removed the scale first.
     """
 
     def __init__(self, feat_size):
         super().__init__()
-        self.output_features = feat_size
+        self.output_size = feat_size
 
     def forward(self, x):
         return x

@@ -864,23 +864,31 @@ def run(
             if training:
                 discriminator = pair.receiver.discriminator
 
-                # NaN rather than an absent column when `normalise_score` is
-                # off and neither parameter exists, so the metrics header keeps
-                # its shape across the flag -- the same convention the contrast
-                # columns and the per-group gradient norms follow.
+                # NaN rather than an absent column when a parameter does not
+                # exist, so the metrics header keeps its shape across the flags
+                # -- the same convention the contrast columns and the per-group
+                # gradient norms follow.
+                #
+                # Read separately, because `scale_score` and `bias_score` are
+                # separate keys: each column reads NaN exactly when its own
+                # scalar is absent, and a run with a threshold and no loudness
+                # reports the threshold rather than nothing.
                 #
                 # The `isinstance` guard is what keeps the `else` below
                 # reachable: an unknown discriminator class must still reach its
                 # `TypeError` rather than dying on a missing attribute here.
-                if (
-                    isinstance(discriminator, models.receiver.ScoreVolume)
-                    and discriminator.learns_score_scale
-                ):
-                    score_scale = discriminator.score_scale.item()
-                    score_bias = discriminator.score_bias.item()
-                else:
-                    score_scale = float("nan")
-                    score_bias = float("nan")
+                volume = isinstance(discriminator, models.receiver.ScoreVolume)
+
+                score_scale = (
+                    discriminator.score_scale.item()
+                    if volume and discriminator.learns_score_scale
+                    else float("nan")
+                )
+                score_bias = (
+                    discriminator.score_bias.item()
+                    if volume and discriminator.learns_score_bias
+                    else float("nan")
+                )
 
                 if isinstance(
                     discriminator, models.receiver.BilinearDiscriminator

@@ -462,6 +462,13 @@ reset, so a reset listener kept the projections that map referents and messages
 into `d_model` — most of what it had learned about its inputs — while everything
 downstream of them was re-drawn.
 
+Those adapters are `Receiver.interfaces` now, and this anecdote is the reason
+`Receiver.reset_parameters` **walks the container** rather than naming each one:
+a list of attribute names is a list somebody can add to the module and forget to
+add here, which is exactly what happened. The walk cannot miss an interface that
+exists; what it can still miss is an interface built somewhere other than the
+container, so `tests/test_backbones.py` names all three literally as a backstop.
+
 Parameter-free norms are listed in every `reset_parameters` anyway, for the
 mirror reason: turning `elementwise_affine` back on must not leave a reset
 listener holding trained gains.
@@ -542,9 +549,13 @@ broccoli's `project_qkv` RMS-normalises Q and K per head, and
 `MHAttention.out_norm` handles a uniformly louder backbone — measured, the whole
 referent set at 10× moves the output by 0.0%. What neither handles is *per-object*
 magnitude: V is not normed anywhere, so at `message_cross_attention` one candidate
-50× larger than its neighbours moves the attention output by **116%** without
-`referent_layer_norm` and by 0.0% with it. No downstream norm can undo it, because
-the averaging has already happened.
+50× larger than its neighbours moves the attention output by **116%** without the
+listener's referent norm and by 0.0% with it. No downstream norm can undo it,
+because the averaging has already happened. That norm was
+`ReceiverCrossAttentionLM.referent_layer_norm` when this was measured and is the
+slot's `model_util.LinearInterface` norm now; the measurement is unchanged,
+since it is the
+same operation one stage upstream.
 
 ## The ResNet stem discards shape
 

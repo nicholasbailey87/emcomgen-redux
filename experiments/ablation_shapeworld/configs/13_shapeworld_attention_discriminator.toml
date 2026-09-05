@@ -19,8 +19,8 @@
 # `train_mix_alpha` and `train_path_agreement` are the columns that say which
 # happened. See docs/architecture.md.
 #
-# **Read the parameter counts here with care.** They have just been fixed, and
-# the fix is worth knowing about. `ReceiverGRULM` used to inherit 2 layers
+# **Read the parameter counts here with care.** They have been fixed twice, and
+# both fixes are worth knowing about. `ReceiverGRULM` used to inherit 2 layers
 # bidirectional at DEFAULT's 1024 wide, which is 28,262,400 parameters, against
 # this discriminator's 3,580,487 -- itself inflated by a `memory_adapter`
 # bringing the GRU's then-2048-wide output down to 256. The listener on this
@@ -29,12 +29,27 @@
 # *and* a 26M parameter change, which is not the clean contrast the rest of the
 # ladder is built on.
 #
-# `[receiver_language_model]` now restores jayelm's 1 layer unidirectional:
+# `[receiver_language_model]` restores jayelm's 1 layer unidirectional:
 # 4,687,872 here at an `output_size` of 1024, and rung 15 deepens its
-# transformer to 6 blocks for 4,784,566. Parity is bought at jayelm's width by
+# transformer to 6 blocks for 4,702,646. Parity is bought at jayelm's width by
 # moving the arm under test, rather than at a shared 256 by moving the baseline.
-# This discriminator is 2,990,663 at the halved `memory_adapter`, against rung
-# 15's 2,548,295.
+#
+# The second fix is the interface hoist, and it closes the last of the gap.
+# `AttentionDiscriminator` owned two adapters and two norms; they are
+# `Receiver.interfaces` now, sized from the widths this slot declares. So this
+# discriminator is **2,384,198 on this rung and on rung 15 alike** -- the same
+# module at the same size, where it used to differ by a `memory_adapter` reading
+# a 1024-wide GRU state against a 256-wide encoded message. That difference has
+# moved into `receiver.interfaces`, which is 344,320 here against 229,632 there.
+#
+# **What the hoist changed about what this rung *is*.** The composed bilinear
+# path used to run at `[receiver_language_model] d_model` = 1024, which is the
+# same width and the same form as rung 11's standalone bilinear -- that is what
+# made this rung "rung 11 plus attention". It now runs at this slot's own
+# `d_model` = 256, so the fallback branch is about an order of magnitude
+# smaller. The mix's bootstrapping argument still holds; it holds at less
+# capacity. No trajectory recorded before the hoist pools with one recorded
+# after it.
 
 name = "ablation_shapeworld"
 
@@ -107,8 +122,10 @@ discriminator = "AttentionDiscriminator"
 #
 # No `token_embedding_size` here. The width the message arrives at is the
 # language model's `output_size`, which `build_models` passes in, and
-# `memory_adapter` brings it to this `d_model` -- so the two tables' widths need
-# not agree and a key restating one in the other could only be wrong.
+# `Receiver`'s message interface brings it to this `d_model` -- so the two
+# tables' widths need not agree and a key restating one in the other could only
+# be wrong. This `d_model` is what the slot declares for both of its inputs, so
+# it also sets the width of the composed bilinear path.
 d_model = 256
 heads = 4
 ff_inner_size = 320

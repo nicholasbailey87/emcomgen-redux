@@ -143,14 +143,18 @@ never inherits its module's rate.
 **Every entry is gated, and two of the gates are now config rather than
 architecture.** `mix_logit` needs an `AttentionDiscriminator` and
 `contrast_gate` needs the contrast stage; `log_score_scale` needs
-`[receiver_discriminator] normalise_score` and `log_logit_scale` needs
-`[sender_language_model] normalise_logits`, both read off the module that owns
-the parameter rather than off the config so the gate and the parameter cannot
-disagree. On an arm where a gate is false the group is *inapplicable*, not
-missing, and the same three keys — `score_scale_lr`, `score_bias_lr`,
+`[receiver_discriminator] scale_score` — which builds that one scalar and
+nothing else, the `1/√d` calibration being unconditional — and `log_logit_scale`
+needs `[sender_language_model] normalise_logits`, both read off the module that
+owns the parameter rather than off the config so the gate and the parameter
+cannot disagree. On an arm where a gate is false the group is *inapplicable*,
+not missing, and the same three keys — `score_scale_lr`, `score_bias_lr`,
 `logit_scale_lr` — stay live in `[optimiser]` and simply have no effect.
-`score_bias_lr` shares `score_scale_lr`'s condition rather than having one of
-its own: `learns_score_scale` is a misnomer and gates the offset too, by design.
+`score_bias_lr` has a condition of its own, `learns_score_bias`, gated by
+`[receiver_discriminator] bias_score`. It used to share the volume's, which was
+right only because one key built both scalars; with the two separated, a
+listener asking for a threshold and no loudness is reachable and the shared
+predicate would have raised on it.
 
 `group_parameters` and `split_out_parameter` both raise when an *applicable*
 group matches no parameter, at `build_models` time and so before a step runs.

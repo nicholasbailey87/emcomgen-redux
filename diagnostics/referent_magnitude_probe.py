@@ -1,11 +1,11 @@
 """
-Is what `referent_layer_norm` deletes signal or nuisance?
+Is what the listener's referent norm deletes signal or nuisance?
 
     python diagnostics/referent_magnitude_probe.py --run RUN_DIR [--games N]
     python diagnostics/referent_magnitude_probe.py --config PATH --untrained
 
 `BilinearDiscriminator` scores candidate `j` as `LN(r_j) . proj`, and
-`referent_layer_norm` is non-affine, so `LN` deletes exactly two numbers per
+The interface norm is non-affine, so `LN` deletes exactly two numbers per
 candidate: the mean and the standard deviation of `r_j` over its feature axis.
 The norm went in at `4248fca` on the premise that those are nuisance -- "no
 candidate is read loudly for being large" -- and that premise has never been
@@ -97,6 +97,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 
 import data.loader          # noqa: E402
 import models.builder       # noqa: E402
+import models.receiver      # noqa: E402
 import parse_config         # noqa: E402
 
 DEV = "cuda" if torch.cuda.is_available() else "cpu"
@@ -126,11 +127,14 @@ def rank_auc(scores, labels):
 
 def embed(receiver, referents, bn_mode, batch):
     """
-    The tensor `Receiver.forward` hands to the discriminator, for one split.
+    The tensor `Receiver.forward` hands to the discriminator's interface, for
+        one split.
 
-    `adapter(feature_model(...))` and nothing after it: `input_dropout` is a
-        regulariser and is off here, and the discriminator's own norm is the
-        thing under test.
+    `feature_model(...)` through that interface's *adapter* and nothing after
+        it: the mask is a regulariser and is off here, and the interface's norm
+        is the thing under test. The listener has no `adapter` of its own any
+        more -- each slot declares a width and `Receiver` builds it a
+        `model_util.LinearInterface` -- so the projection is read off it.
     """
     was_training = receiver.training
     receiver.train(bn_mode == "train")
@@ -140,7 +144,10 @@ def embed(receiver, referents, bn_mode, batch):
             block = referents[i:i + batch].to(DEV).float()
             n_game, n_obj = block.shape[0], block.shape[1]
             flat = block.view(n_game * n_obj, *block.shape[2:])
-            e = receiver.adapter(receiver.feature_model(flat))
+            interface = receiver.interfaces[
+                models.receiver.DISCRIMINATOR_REFERENTS
+            ]
+            e = interface.adapter(receiver.feature_model(flat))
             out.append(e.view(n_game, n_obj, -1).float().cpu())
     receiver.train(was_training)
     return torch.cat(out)

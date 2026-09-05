@@ -23,11 +23,17 @@ the pre-split module bit for bit. It is the only pairing that can be pinned that
 exactly -- the other three did not exist -- so everything else here is a
 property test.
 
-It has to be at `dropout = 0` because the mask moved. `Receiver` now applies it
-once to the raw referent embeddings and hands the same masked tensor to both
-slots, where both of the modules it replaced applied it *after* their own norm.
-A LayerNorm following dropout renormalises the corrupted vector, so the two are
-genuinely different operations and there is no seed at which they agree.
+It has to be at `dropout = 0` because the mask moved, twice. `Receiver` draws
+one mask per referent interface, downstream of that interface's norm, where the
+modules it replaced masked once upstream of their own norm. A LayerNorm either
+side of a dropout is a genuinely different operation, and two independent masks
+are a different one again, so there is no seed at which they agree.
+
+The parity section also runs at `feature_size = d_model`, which the listener no
+longer requires and the legacy module did: `Receiver` brings the backbone's
+output to each slot's declared width through an interface of its own, so the two
+widths are independent now. Holding them equal is what lets the legacy module's
+`bilinear` be loaded into the new one at all.
 """
 
 import math
@@ -56,7 +62,7 @@ CROSS_RUNG = "15_shapeworld_receiver_cross_attention_lm.toml"
 def _inputs(listener, seed=0):
     generator = torch.Generator().manual_seed(seed)
     referents = torch.randn(
-        BATCH, N_OBJ, listener.referent_embedding_size, generator=generator
+        BATCH, N_OBJ, listener.feature_size, generator=generator
     )
     messages = torch.randn(
         BATCH,
@@ -116,14 +122,21 @@ class LegacyBilinearGRUComparer(nn.Module):
         return scores / math.sqrt(self.referent_dim)
 
 
-def _legacy_pair(d_model=128, referent_dim=REFERENT_DIM, token_dim=TOKEN_DIM):
+def _legacy_pair(d_model=128, token_dim=TOKEN_DIM):
+    """
+    At one width throughout. `BilinearDiscriminator` compares at
+        `[receiver_language_model] d_model` and the backbone feeds it through an
+        interface, so the comparison width and the backbone width are separate
+        numbers now; the legacy module had only one. Building both at `d_model`
+        is what makes its `bilinear` loadable into the new one.
+    """
     torch.manual_seed(11)
-    legacy = LegacyBilinearGRUComparer(referent_dim, token_dim, d_model).eval()
+    legacy = LegacyBilinearGRUComparer(d_model, token_dim, d_model).eval()
 
     listener = build_listener(
         "ReceiverGRULM",
         "BilinearDiscriminator",
-        referent_dim,
+        d_model,
         language_model_overrides=dict(
             token_embedding_size=token_dim,
             d_model=d_model,
@@ -158,7 +171,9 @@ def test_the_gru_slot_still_reproduces_the_module_it_replaced():
 
     with torch.no_grad():
         legacy_readout = legacy.gru(messages)[0][:, -1, ...]
-        slot_readout = listener.language_model(messages, referents)
+        slot_readout = listener.language_model(
+            messages, listener.deliver(R.LANGUAGE_MODEL_REFERENTS, referents)
+        )
 
     assert slot_readout.shape[1] == 1
     assert torch.equal(legacy_readout, slot_readout[:, -1, :])
@@ -171,7 +186,9 @@ def test_the_gru_reproduction_is_not_an_artefact_of_one_width(d_model):
 
     with torch.no_grad():
         legacy_readout = legacy.gru(messages)[0][:, -1, ...]
-        slot_readout = listener.language_model(messages, referents)
+        slot_readout = listener.language_model(
+            messages, listener.deliver(R.LANGUAGE_MODEL_REFERENTS, referents)
+        )
 
     assert torch.equal(legacy_readout, slot_readout[:, -1, :])
 
@@ -183,20 +200,27 @@ def test_the_score_deliberately_no_longer_matches_the_legacy_module():
         be written down here rather than patched into the copy, so: **the
         scores no longer match, in exactly one place, on purpose.**
 
-    The divergence is in three places, all in the readout, and the legacy
-        module still has the GRU half bit-identical.
+    The divergence is in four places, all in the input path or the readout, and
+        the legacy module still has the GRU half bit-identical.
 
     One: the ordering. The legacy path is `message_layer_norm(bilinear(m))`,
-        which pins the projected message to unit variance;
-        `BilinearDiscriminator` runs `bilinear(message_layer_norm(m))`, so the
-        norm sets where `bilinear` starts rather than where it ends.
+        which pins the projected message to unit variance; the message now
+        reaches `bilinear` through `Receiver`'s message interface, which is a
+        learned `nn.Linear` *and* a norm, so the norm sets where `bilinear`
+        starts rather than where it ends and there is a projection in between
+        that the legacy module has no counterpart for.
 
     Two: the referents are layer-normed before the dot product, so no candidate
         is read loudly for being large. The legacy module compares them raw.
 
-    Three: `score_scale`. The legacy module holds its volume in the product of
+    Three: that norm is one third of a `LinearInterface` too, so the referents
+        also pass through a learned projection that the legacy module does not
+        have. Both interfaces are new since the hoist; before it, the norms sat
+        inside `BilinearDiscriminator` with no projection of their own.
+
+    Four: `score_scale`. The legacy module holds its volume in the product of
         the backbone's magnitude and its weight, the way jayelm's unnormalised
-        `compare` does; this one normalises both operands, keeps the exact
+        `compare` does; this one takes both operands normalised, keeps the exact
         `/sqrt(referent_embedding_size)` that makes the opening `1/sqrt(3)` at
         any width, and puts the volume in one scalar on top. See
         test_score_scale.py.
@@ -204,8 +228,8 @@ def test_the_score_deliberately_no_longer_matches_the_legacy_module():
     Everything else about the pairing is unchanged, which is what the two tests
         above still pin. This one exists so the divergence cannot widen
         silently: it asserts the scores differ, and that they differ *only*
-        through those three, by rebuilding the new arithmetic out of the
-        module's own parts.
+        through those four, by rebuilding the new arithmetic out of the
+        listener's own parts.
     """
     legacy, listener = _legacy_pair()
     referents, messages = _inputs(listener)
@@ -218,12 +242,15 @@ def test_the_score_deliberately_no_longer_matches_the_legacy_module():
             atol=1e-6,
         )
 
-        # The new ordering and readout, by hand, from the module's own tensors.
-        readout = listener.language_model(messages, referents)[:, -1, :]
-        projected = discriminator.bilinear(
-            discriminator.message_layer_norm(readout)
+        # The new input path and readout, by hand, from the listener's own
+        #     tensors -- the interfaces included, which is where three of the
+        #     four differences now live.
+        encoded = listener.language_model(
+            messages, listener.deliver(R.LANGUAGE_MODEL_REFERENTS, referents)
         )
-        normed = discriminator.referent_layer_norm(referents)
+        readout = listener.deliver(R.DISCRIMINATOR_MESSAGE, encoded)[:, -1, :]
+        projected = discriminator.bilinear(readout)
+        normed = listener.deliver(R.DISCRIMINATOR_REFERENTS, referents)
         raw = torch.einsum("ijh,ih->ij", (normed, projected))
         rebuilt = discriminator.score_scale * (
             raw / math.sqrt(discriminator.referent_embedding_size)
@@ -267,14 +294,26 @@ def test_the_two_listener_arms_are_parameter_matched(config_file):
     Parity is a property of the pair of configs, so assert it as one: build the
         default GRU and the rung's transformer and compare the counts.
 
-    4,687,872 against 4,784,566, which is +2.1%. Note 2 layers bidirectional
+    4,687,872 against 4,702,646, which is +0.3%. Note 2 layers bidirectional
         would be 2.5x one layer's parameters and not 2x -- the second layer's
         input is the first's concatenated output, so its `weight_ih` is double
         -- which is the arithmetic that made the shared-256 scheme look cheaper
         than it was at 1024.
 
+    **Measured over the slot alone, and the hoist is what makes that the right
+        boundary.** It was +2.1% before, and the gap was almost entirely one
+        thing: `ReceiverCrossAttentionLM` owned a `referent_adapter` and
+        `ReceiverGRULM` had nothing corresponding, so the ladder was comparing
+        an encoder against an encoder-plus-a-projection. That projection is
+        `Receiver`'s interface now. Counting the interfaces back in would put
+        the backbone's `final_feat_dim` -- a property of the vision model, and a
+        different number on the two arms of the ladder -- into a comparison
+        about message encoders, which is the confound the count is here to
+        exclude. So: slots only.
+
     Parameter parity is not interface parity: `output_size` is 1024 on the GRU
-        against 256 on the transformer, so the discriminators downstream differ.
+        against 256 on the transformer, so the message interfaces and the
+        discriminators downstream of them differ.
     """
     gru = build_listener(
         "ReceiverGRULM", "BilinearDiscriminator", REFERENT_DIM
@@ -288,7 +327,7 @@ def test_the_two_listener_arms_are_parameter_matched(config_file):
     n_cross = sum(p.numel() for p in cross.parameters())
 
     assert n_gru == 4_687_872
-    assert n_cross == 4_784_566
+    assert n_cross == 4_702_646
     assert abs(n_cross / n_gru - 1.0) < 0.05
 
     assert gru.output_size == 1024
@@ -363,7 +402,9 @@ def test_the_language_model_returns_a_sequence(language_model, discriminator):
     referents, messages = _inputs(listener)
 
     with torch.no_grad():
-        representation = listener.language_model(messages, referents)
+        representation = listener.language_model(
+            messages, listener.deliver(R.LANGUAGE_MODEL_REFERENTS, referents)
+        )
 
     assert representation.ndim == 3
     assert representation.shape[0] == BATCH
@@ -386,11 +427,25 @@ def test_the_discriminator_is_sized_from_the_language_model(
     listener = _four_cell(language_model, discriminator)
     width = listener.language_model.output_size
 
+    # The message interface is what reads the encoder's output now, so this is
+    #     the one place the sizing shows. What the discriminator itself asks for
+    #     is `message_input_size`, and the interface bridges the two.
+    interface = listener.interfaces[R.DISCRIMINATOR_MESSAGE]
+    assert interface.adapter.in_features == width
+    assert interface.output_size == listener.discriminator.message_input_size
+
     if discriminator == "BilinearDiscriminator":
+        # This arm declares the encoder's own width, so the interface is
+        #     square and `bilinear` still reads at `output_size`.
+        assert listener.discriminator.message_input_size == width
         assert listener.discriminator.bilinear.in_features == width
     else:
-        assert listener.discriminator.memory_adapter.in_features == width
-        assert listener.discriminator.bilinear.bilinear.in_features == width
+        # This one declares `d_model`, and the composed bilinear path reads the
+        #     same tensor the stack does rather than a second copy at a width of
+        #     its own.
+        d_model = listener.discriminator.d_model
+        assert listener.discriminator.message_input_size == d_model
+        assert listener.discriminator.bilinear.bilinear.in_features == d_model
 
 
 @ALL_FOUR
@@ -408,45 +463,65 @@ def test_the_gru_slot_ignores_the_candidate_set(language_model, discriminator):
     perturbed[:, 0, :] += 5.0
 
     with torch.no_grad():
-        before = listener.language_model(messages, referents)
-        after = listener.language_model(messages, perturbed)
+        before = listener.language_model(
+            messages, listener.deliver(R.LANGUAGE_MODEL_REFERENTS, referents)
+        )
+        after = listener.language_model(
+            messages, listener.deliver(R.LANGUAGE_MODEL_REFERENTS, perturbed)
+        )
 
     if language_model == "ReceiverGRULM":
+        # And structurally, not just numerically: this slot declares no
+        #     referent width, so there is no interface and `Receiver` hands it
+        #     `None`. There is no tensor for it to ignore.
+        assert R.LANGUAGE_MODEL_REFERENTS not in listener.interfaces
+        assert listener.language_model.referent_input_size is None
         assert torch.equal(before, after)
     else:
         assert not torch.allclose(before, after, atol=1e-6)
 
 
 @ALL_FOUR
-def test_both_slots_see_the_same_masked_referents(language_model, discriminator):
+def test_each_referent_interface_draws_its_own_mask(
+    language_model, discriminator
+):
     """
-    `Receiver` masks once. Two masks -- one per slot -- would regularise the
-        listener at a rate no config key names, and only in the two pairings
-        where both slots read the referents.
+    One mask per referent interface, drawn independently, at the rate
+        `[receiver] dropout` names.
+
+    This assertion used to be its opposite: `Receiver` masked once and handed
+        the same tensor to both slots, and this test pinned the equality. The
+        argument for that was that a per-slot mask would regularise the listener
+        at a rate no config key names -- and it was a good argument about
+        masking *one* tensor twice, which is not what this is. Since the hoist
+        each slot reads its own projected copy of the referents, and each copy
+        is masked once at the documented rate. So what is checked here is that
+        the rate holds on every interface and that the draws are independent;
+        the two slots' inputs are not required to be equal, and on the pairings
+        that have two referent interfaces they must not be.
 
     Checked through `Receiver` itself rather than through the test shim, since
-        the whole claim is about where the dropout lives.
+        the whole claim is about where the masks live.
     """
     listener = _four_cell(language_model, discriminator, dropout=0.5)
     receiver = R.Receiver(
+        # The identity in place of a backbone: this test is about the masks, and
+        #     a real backbone would only put a stage upstream of them.
         nn.Identity(),
-        # The adapter, identity here: this test is about where the dropout sits
-        # relative to the two slots, and a real adapter would only add a stage
-        # upstream of the tensor both of them are asserted to share.
-        nn.Identity(),
+        REFERENT_DIM,
         nn.Embedding(8, listener.token_embedding_size),
         listener.language_model,
         listener.discriminator,
         dropout=0.5,
     ).train()
 
-    seen = []
+    seen = {}
     handles = [
         receiver.language_model.register_forward_pre_hook(
-            lambda _module, args: seen.append(args[1])
+            lambda _module, args: seen.__setitem__("language_model", args[1])
         ),
         receiver.discriminator.register_forward_pre_hook(
-            lambda _module, args: seen.append(args[0])
+            lambda _module, args: seen.__setitem__("discriminator", args[0])
         ),
     ]
 
@@ -457,8 +532,8 @@ def test_both_slots_see_the_same_masked_referents(language_model, discriminator)
         listener.token_embedding_size,
     )
     # `Receiver` embeds the message with `messages @ token_embedding.weight`,
-    #     so the "message" it wants is one-hot-shaped. The shim above sidesteps
-    #     that; here it cannot.
+    #     so the "message" it wants is one-hot-shaped. The shim sidesteps that;
+    #     here it cannot.
     receiver.token_embedding = nn.Embedding(
         listener.token_embedding_size, listener.token_embedding_size
     )
@@ -473,10 +548,30 @@ def test_both_slots_see_the_same_masked_referents(language_model, discriminator)
     for handle in handles:
         handle.remove()
 
-    assert len(seen) == 2
-    assert torch.equal(seen[0], seen[1])
-    # And the mask really is on -- otherwise the equality above is vacuous.
-    assert (seen[0] == 0.0).any()
+    masked = [
+        tensor for tensor in seen.values() if tensor is not None
+    ]
+    # One per referent interface: the GRU declares no referent width, so on
+    #     those two pairings the language model is handed `None` and there is
+    #     one mask rather than two.
+    expected = 1 if language_model == "ReceiverGRULM" else 2
+    assert len(masked) == expected
+    assert (seen["language_model"] is None) == (expected == 1)
+
+    for tensor in masked:
+        # The rate, on every one of them. 0.5 over 20 candidates' worth of
+        #     features is far enough from 0 and 1 that a loose band is still a
+        #     real check.
+        share = (tensor == 0.0).float().mean().item()
+        assert 0.3 < share < 0.7, share
+
+    if expected == 2:
+        # Independent draws, which is what makes them the two masks the rate
+        #     describes rather than a correlated pair. The widths may differ, so
+        #     compare the patterns over the axes they share.
+        first = (seen["language_model"] == 0.0).float().mean(-1)
+        second = (seen["discriminator"] == 0.0).float().mean(-1)
+        assert not torch.equal(first, second)
 
 
 @ALL_FOUR
@@ -484,19 +579,32 @@ def test_the_mask_removes_features_and_not_candidates(
     language_model, discriminator
 ):
     """
-    Element-wise over `(batch, n_objects, features)`. A mask that removed whole
-        candidates would leak the label ordering, which is the first half of
-        the tensor.
+    Element-wise over `(batch, n_objects, features)`, on every referent
+        interface. A mask that removed whole candidates would leak the label
+        ordering, which is the first half of the tensor.
+
+    The one property of the mask that the hoist must not be allowed to change,
+        so it is asserted per interface rather than once on a dropout that
+        `Receiver` no longer owns.
     """
     listener = _four_cell(language_model, discriminator, dropout=0.5).train()
-    referents = torch.ones(BATCH, N_OBJ, REFERENT_DIM)
 
-    torch.manual_seed(5)
-    masked = listener.input_dropout(referents)
+    referent_interfaces = [
+        (name, interface)
+        for name, interface in listener.interfaces.items()
+        if name.endswith("referents")
+    ]
+    assert referent_interfaces
 
-    surviving = (masked != 0.0).float().mean(-1)
-    assert (surviving > 0.0).all(), "a whole candidate was dropped"
-    assert (surviving < 1.0).all(), "no candidate was masked at all"
+    for name, interface in referent_interfaces:
+        referents = torch.ones(BATCH, N_OBJ, interface.output_size)
+
+        torch.manual_seed(5)
+        masked = interface.dropout(referents)
+
+        surviving = (masked != 0.0).float().mean(-1)
+        assert (surviving > 0.0).all(), f"{name} dropped a whole candidate"
+        assert (surviving < 1.0).all(), f"{name} masked no candidate at all"
 
 
 def test_no_discriminator_reads_the_token_embedding():
@@ -730,7 +838,14 @@ def test_the_bilinear_readout_takes_the_eos_slot():
     referents, messages = _inputs(listener)
 
     with torch.no_grad():
-        slots = listener.language_model(messages, referents)
+        slots = listener.deliver(
+            R.DISCRIMINATOR_MESSAGE,
+            listener.language_model(
+                messages,
+                listener.deliver(R.LANGUAGE_MODEL_REFERENTS, referents),
+            ),
+        )
+        adapted = listener.deliver(R.DISCRIMINATOR_REFERENTS, referents)
 
     # One slot per message position, so the readout is a real choice here.
     assert slots.shape[1] == listener.message_length
@@ -738,9 +853,9 @@ def test_the_bilinear_readout_takes_the_eos_slot():
 
     bilinear = listener.discriminator.bilinear
     with torch.no_grad():
-        taken = bilinear(referents, slots)
-        from_eos = bilinear(referents, slots[:, -1:, :])
-        from_mean = bilinear(referents, slots.mean(1, keepdim=True))
+        taken = bilinear(adapted, slots)
+        from_eos = bilinear(adapted, slots[:, -1:, :])
+        from_mean = bilinear(adapted, slots.mean(1, keepdim=True))
 
     assert torch.allclose(taken, from_eos, atol=1e-6)
     assert not torch.allclose(taken, from_mean, atol=1e-5)
@@ -753,10 +868,10 @@ def test_the_two_arms_build_the_same_bilinear_comparison():
         it says the mix's `a -> mix_floor` limit is the module that was measured
         bootstrapping and not a lookalike.
 
-    They differ by their readout, and only there. `score_scale=False` on the
-        composed path is what makes them differ, and it gates both of
-        `ScoreVolume`'s scalars: the composed path gets neither a volume nor an
-        offset. Both would be degenerate with the outer module's. The branch is
+    They differ by their readout, and only there. The composed path is built
+        with both of `BilinearDiscriminator`'s composition gates off, so it gets
+        neither a volume nor an offset. Both would be degenerate with the outer
+        module's. The branch is
         multiplied by `1 - mix_weight` and read out downstream, so a scale on it
         says what `mix_logit` already says, and an inner constant across
         candidates says what the outer `score_bias` already says.
@@ -828,8 +943,8 @@ def test_a_scale_on_a_standardised_path_would_have_been_inert():
     """
     Why the readout no longer standardises, kept as the measurement behind
         `485b38e` rather than as a live justification. It used to be the reason
-        `AttentionDiscriminator` builds its composed path with
-        `score_scale=False`; that reason is now degeneracy with `mix_logit`,
+        `AttentionDiscriminator` builds its composed path without a volume;
+        that reason is now degeneracy with `mix_logit`,
         which is asserted in
         `test_the_two_arms_build_the_same_bilinear_comparison` above.
 
@@ -935,8 +1050,10 @@ def test_reset_parameters_leaves_nothing_trained(language_model, discriminator):
         with torch.no_grad():
             parameter.add_(1.0)
 
-    listener.language_model.reset_parameters()
-    listener.discriminator.reset_parameters()
+    # Through the shim's own `reset_parameters`, which mirrors `Receiver`'s:
+    #     the interfaces are the listener's parameters too, and leaving them out
+    #     is exactly the bug docs/anecdotes.md records.
+    listener.reset_parameters()
 
     # broccoli owns these and does not re-draw them, which is correct for both:
     #     `rotary_embedding.freqs` is a deterministic function of position, so

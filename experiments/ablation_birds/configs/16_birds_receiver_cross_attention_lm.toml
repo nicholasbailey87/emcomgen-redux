@@ -9,16 +9,24 @@
 # Against rung 13 this moves the message encoder only, the discriminator having
 # moved there. The two encoders are now parameter-matched, which they were not
 # when this rung was written: the GRU it replaces is 4,687,872 and this stack is
-# 4,784,566 at the 6 blocks stated below, +2.1%. That match is why `layers` is 6
+# 4,702,646 at the 6 blocks stated below, +0.3%. That match is why `layers` is 6
 # here and 3 on `[receiver_discriminator]`, and it is bought at jayelm's width
 # rather than at a shared 256 -- see `layers` in `DEFAULT.toml`. It used to be
 # 28,262,400 against 2,466,139, so the 13 -> 15 step was a 26M parameter change
 # as well as an architecture one.
 #
-# The discriminator still shrinks across the step, 2,990,663 to 2,548,295,
-# because its `memory_adapter` now reads a 256-wide message rather than the
-# GRU's 1024-wide one. Parameter parity between the encoders does not make the
-# listeners identical in size, and is not meant to.
+# **The step is now clean on the discriminator too.** It used to shrink across
+# it, 2,990,663 to 2,548,295, because `AttentionDiscriminator` owned a
+# `memory_adapter` that read a 1024-wide GRU state on rung 13 and a 256-wide
+# encoded message here. That adapter is `Receiver`'s message interface now, so
+# the discriminator is 2,384,198 on both rungs and the difference has moved into
+# `receiver.interfaces` -- 344,320 on rung 13 against 229,632 here. The encoder
+# parity number improved for the mirror reason: this stack owned a
+# `referent_adapter` that the GRU had nothing corresponding to, and that is an
+# interface now as well.
+#
+# Parameter parity between the encoders does not make the listeners identical in
+# size, and is not meant to.
 
 name = "ablation_birds"
 
@@ -95,8 +103,9 @@ discriminator = "AttentionDiscriminator"
 #
 # No `token_embedding_size` here. The width the message arrives at is the
 # language model's `output_size`, which `build_models` passes in, and
-# `memory_adapter` brings it to this `d_model` -- so the two tables' widths need
-# not agree and a key restating one in the other could only be wrong.
+# `Receiver`'s message interface brings it to this `d_model` -- so the two
+# tables' widths need not agree and a key restating one in the other could only
+# be wrong.
 d_model = 256
 heads = 4
 ff_inner_size = 320
@@ -118,7 +127,9 @@ token_embedding_size = 256
 # two tables deliberately disagree. This is where listener parameter parity with
 # the GRU arm is paid for: `DEFAULT.toml` restores `[receiver_language_model]` to
 # jayelm's 1 layer unidirectional at 1024 wide, which is 4,687,872 parameters,
-# and a block of this stack is 772,809, so 6 of them is 4,784,566 -- +2.1%.
+# and a block of this stack is 772,809, so 6 of them is 4,702,646 -- +0.3%. The
+# match got closer, not looser: this stack's `referent_adapter` is one of
+# `Receiver`'s interfaces now, and the GRU never had anything corresponding.
 # Parity is bought by deepening the arm under test rather than by inflating the
 # published baseline; see `layers` in `DEFAULT.toml`.
 #

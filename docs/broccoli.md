@@ -128,12 +128,23 @@ unrelated games meet in the same statistic.
 
 Turning it off leaves this backbone's output unnormalised: `SequencePool` into a
 plain `Linear`. That is the intended state. Whichever consumer needs the referent
-at a controlled magnitude should normalise it where the score is formed —
-`SenderTransformerLM.referent_layer_norm` and
-`TransformerCrossAttentionComparer.referent_layer_norm` both already do — rather
+at a controlled magnitude should normalise it where it is consumed —
+`SenderTransformerLM.referent_layer_norm` does, and on the listener every
+`model_util.LinearInterface` does, unconditionally and for every slot — rather
 than have one flag inside the vision model decide it for every consumer at once,
-per batch, differently at eval. Note `BilinearGRUComparer` has no such norm, so
-its score inherits whatever magnitude the backbone emits.
+per batch, differently at eval.
+
+The listener's side of that is stronger than it used to be. Its norms were once
+per-slot and, on the bilinear arm, gated by a `[receiver_discriminator]`
+config key, so `BilinearGRUComparer` and its successor could inherit whatever
+magnitude the backbone emitted. Since the interfaces were hoisted into
+`Receiver` there is one norm per declared input and it is never optional; the
+key that used to gate them is gone, and the two that replaced it —
+`scale_score` and `bias_score` — reach nothing but the readout's scalars. Note
+that the speaker's `adapter` is the same class and gets the same treatment: it
+used to end in an affine `RMSNorm` inside a `FeedforwardBlock`, and it now ends
+in the same affine-free `LayerNorm` every interface has. The norm stayed; the
+learnable gain went.
 
 **Pooling geometry is derived from the image size, not configured**: these size
 the patch grid, and so the transformer's `source_size`, from the data.

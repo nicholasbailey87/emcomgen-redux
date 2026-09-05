@@ -633,16 +633,21 @@ layer-normed — and differ only in what else they have to report:
 | `AttentionDiscriminator` | `score_scale`, `score_bias`, `decision_spread`, `bilinear_weight_norm`, `decision_weight_norm` | `decision_kurtosis` | `mix_alpha`, `mix_share`, `path_agreement` |
 
 **`score_scale`** — both classes, one per discriminator.
-`AttentionDiscriminator` composes a `BilinearDiscriminator` built with
-`score_scale=False`, because that branch is multiplied by `1 − mix_weight` and
-read out through the module's own scalar, so a scale on it would say what
-`mix_logit` already says and the two would drift against each other.
+`AttentionDiscriminator` composes a `BilinearDiscriminator` built with neither
+scalar, because that branch is multiplied by `1 − mix_weight` and read out
+through the module's own pair, so a scale on it would say what `mix_logit`
+already says and a constant on it what the outer offset already says.
 
-Under `[receiver_discriminator] normalise_score = false` there is no readout at
-all, and `score_scale`, `score_bias` and `train_clip_log_score_scale` read NaN.
-The operand norms and the `1/√d` go with it, so on that arm the paragraph below
-about a score calibrated to open at 0.577 does not apply and
-`bilinear_weight_norm` is the only volume column left. See
+Under `[receiver_discriminator] scale_score = false` there is no volume, and
+`score_scale` and `train_clip_log_score_scale` read NaN; `bilinear_weight_norm`
+is then the only volume column left. `bias_score = false` does the same for
+`score_bias`, independently — the two are separate keys, so one column can be
+NaN while the other reads a value.
+
+**The `1/√d` is unconditional and no key removes it**, so the paragraph below
+about a score calibrated to open at 0.577 applies on every arm. The operand
+norms are `Receiver`'s interface norms and likewise unconditional, which is what
+makes that calibration exact rather than approximate. See
 [architecture.md](architecture.md).
 
 On the bilinear arm it multiplies a score calibrated to open at `1/√3` = 0.577
@@ -651,8 +656,9 @@ rungs without further arithmetic. On the attention arm it multiplies a mix whose
 opening depends on what `decision` emits — a fixed number per architecture, but
 not that one.
 
-**`score_bias`** — both classes, one per discriminator, and gated by the same
-`score_scale=False` that withholds the volume from the composed bilinear path.
+**`score_bias`** — both classes, one per discriminator, withheld from the
+composed bilinear path alongside the volume and gated in the config by
+`[receiver_discriminator] bias_score`, which is its own key and not the volume's.
 The offset half of the readout: `train.py` decides on `lis_scores > 0`, so this
 is the parameter that places the scores against that fixed origin.
 
