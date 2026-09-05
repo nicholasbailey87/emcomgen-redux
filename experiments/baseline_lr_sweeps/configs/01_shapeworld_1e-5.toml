@@ -1,0 +1,73 @@
+# baseline_lr_sweeps: the backbone learning rate, measured at the scale the
+# ladder actually runs it at.
+#
+# Eight arms -- `[optimiser.module_lr] sender_vision` and `receiver_vision` moved
+# together over 1e-5, 2e-5, 5e-5 and 1e-4, on the ShapeWorld baseline (rung 1)
+# and the CUB baseline (rung 2). Nothing else differs between the arms, and
+# nothing else differs from the rung each one copies.
+#
+# **Why this experiment exists.** jayelm's `--lr` default of 1e-4 was tuned on
+# `Conv4` at 113,088 parameters. This repository restored 1e-4 on 2026-09-05 as
+# "jayelm's own rate" while running `ResNet18SmallInput` at 11,168,832 from
+# random init -- 99 times the size it was measured at. His CUB runs are not a
+# counterexample: `run_cub.sh` passes `--pretrained_feat_model` on every one, so
+# 1e-4 there is fine-tuning from ImageNet weights rather than training 11.2M from
+# scratch. The rate has never been measured at the size the ladder runs, on
+# either dataset.
+#
+# `ResNet56` is the other half of the answer and landed in the commit before
+# this one: it brings ShapeWorld's backbone to 852,368, where the inherited rate
+# is at least arguable. This experiment measures the rate rather than assuming
+# either backbone makes it right.
+#
+# **Only the backbone rate moves, and `[optimiser] lr` stays at 1e-4.** The
+# adapters, the prototyper, the language models and the discriminator did not
+# change scale -- only the vision models did -- so moving the whole table would
+# confound "the backbone wants a different rate" with "everything does".
+# `[optimiser.module_lr]` exists to express exactly this, and the eight keys not
+# named here stay at DEFAULT.toml's 1e-4.
+#
+# **Both agents move together.** A sweep that moved the speaker's backbone alone
+# would be measuring asymmetry at the same time as rate, and the speaker learns
+# only through the listener, so the two are not independent.
+#
+# **30 epochs, 1 repeat.** The signals this is looking for land early: rung 9
+# escaped at epoch 3 and rung 3 collapsed at epoch 10. It also keeps every arm
+# clear of the point where `[optimiser] weight_decay = 0.1` approaches
+# equilibrium, at which the effective rate compresses from `lr` toward
+# `sqrt(lr * lambda)` and the arms would stop being separated by the number they
+# are named for.
+#
+# **What to read.** `train_loss` against `ln 2` = 0.6931, which is where a
+# listener that has learned nothing sits; the new `weight_*` columns against the
+# `clip_*` ones beside them, since an inverse relation between the two is the
+# evidence that a spiking gradient norm is a collapsing `||W||` under BatchNorm's
+# scale invariance rather than a gradient growing on its own; and
+# `test_unique_message_count` in the first few epochs, which is what a channel
+# that never ignites looks like.
+#
+# `epochs` and `repeats` are restated in every file: `scripts/job_utils.py` reads
+# both straight out of the file rather than out of the merged config. `[slurm]`
+# is read from the *first* config in the folder only, sorted by filename, so the
+# block in `01_shapeworld_1e-5.toml` governs the whole array and is sized for the
+# heaviest job in it, which is a 30-epoch birds arm.
+
+name = "baseline_lr_sweeps"
+
+[optimiser.module_lr]
+# The two vision models, and only them. Every other key in this table
+# stays at DEFAULT.toml's 1e-4.
+sender_vision = 1e-5
+receiver_vision = 1e-5
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "12:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

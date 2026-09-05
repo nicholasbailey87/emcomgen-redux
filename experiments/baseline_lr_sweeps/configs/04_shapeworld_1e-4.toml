@@ -1,0 +1,19 @@
+# baseline_lr_sweeps arm: ShapeWorld backbones at 1e-4.
+#
+# See `01_shapeworld_1e-5.toml` for what this experiment measures and why. This
+# file differs from that one in `[optimiser.module_lr]` and, where it is a birds
+# arm, in `[data] dataset` -- nothing else.
+
+name = "baseline_lr_sweeps"
+
+[optimiser.module_lr]
+# The two vision models, and only them. Every other key in this table
+# stays at DEFAULT.toml's 1e-4.
+sender_vision = 1e-4
+receiver_vision = 1e-4
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
