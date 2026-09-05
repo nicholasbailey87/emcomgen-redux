@@ -24,7 +24,7 @@ feature_model = "ViT2"
 prototyper = "AttentionPrototyper"
 
 [scheduler]
-epochs = 30
+epochs = 100
 
 [experiment]
 repeats = 1

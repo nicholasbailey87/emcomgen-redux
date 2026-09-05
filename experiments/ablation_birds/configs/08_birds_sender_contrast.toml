@@ -35,7 +35,7 @@ prototyper = "AttentionPrototyper"
 contrast = true
 
 [scheduler]
-epochs = 30
+epochs = 100
 
 [experiment]
 repeats = 1

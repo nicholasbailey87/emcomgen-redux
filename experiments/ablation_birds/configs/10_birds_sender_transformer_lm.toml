@@ -86,19 +86,27 @@ bidirectional = false
 # other rung on the ladder states for itself. DEFAULT.toml's 100 is the notional
 # full run and no rung takes it.
 #
-# Comfortable against the `[slurm] time` below. Birds ran ~4 min an epoch at the
-# 3,100 games an epoch it drew before 2026-08-31, so DEFAULT.toml's 5,000 puts
-# it near ~6.5 min and 30 epochs near ~3.3h against the 24h budget;
-# `accumulator_steps` costs nothing on top, compute following games seen rather
-# than optimiser steps. Even the 5.84 min an epoch an older rung 10 ran at
-# (`run-10-maybe-old.csv`) would come in around 4.7h.
+# Against the `[slurm] time` below, at the 100 epochs the ladder runs as of
+# 2026-09-05. Birds ran ~4 min an epoch at the 3,100 games an epoch it drew
+# before 2026-08-31, so DEFAULT.toml's 5,000 puts it near ~6.5 min and 100
+# epochs near ~11h against the 24h budget; `accumulator_steps` costs nothing on
+# top, compute following games seen rather than optimiser steps. The 5.84 min an
+# epoch an older rung 10 ran at (`run-10-maybe-old.csv`) would come in near
+# ~9.7h. Both fit, with less room than the 30-epoch figures had -- ~3.3h and
+# ~4.7h -- so a rung that slows down for any other reason now has one margin
+# rather than two. The ShapeWorld half has no measured per-epoch figure in this
+# repo and its heaviest rungs are unbudgeted at this length; check 15 and 13
+# against the wall clock on their first run rather than assuming this one
+# transfers.
 #
-# Note what this does to the warm-up. Ten epochs of ramp is a third of a
-# 30-epoch run rather than the tenth DEFAULT.toml sized it as -- its own comment
-# says to revisit the figure as a fraction rather than a count if it is kept.
-# Rung 9 is in the same position, so the two stay comparable, but neither is
-# comparable to a birds trace opening at full rate.
-epochs = 30
+# The warm-up paragraph that stood here is retired. It read the ten-epoch ramp
+# as a third of a 30-epoch run rather than the tenth DEFAULT.toml sized it as,
+# and closed by saying neither this rung nor rung 9 was comparable to a birds
+# trace opening at full rate. `warm_up_epochs` is 0 as of 2026-09-05, so there
+# is no ramp on any rung and every trace opens at full rate -- which makes the
+# sentence true of nothing rather than of these two. See rung 1 for what else
+# moved that day and for the risk the rate carries.
+epochs = 100
 
 [experiment]
 repeats = 1

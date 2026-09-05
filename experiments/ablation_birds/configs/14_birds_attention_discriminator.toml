@@ -118,7 +118,7 @@ ff_inner_size = 320
 layers = 3
 
 [scheduler]
-epochs = 30
+epochs = 100
 
 [experiment]
 repeats = 1

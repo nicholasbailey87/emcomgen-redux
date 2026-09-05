@@ -141,7 +141,7 @@ layers = 6
 bidirectional = true
 
 [scheduler]
-epochs = 30
+epochs = 100
 
 [experiment]
 repeats = 1

@@ -33,7 +33,7 @@ dataset = "../data/cub"
 feature_model = "ViT2"
 
 [scheduler]
-epochs = 30
+epochs = 100
 
 [experiment]
 repeats = 1

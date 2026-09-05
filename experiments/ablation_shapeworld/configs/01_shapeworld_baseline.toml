@@ -35,16 +35,55 @@
 #
 # This rung is therefore not comparable to any ShapeWorld run recorded before
 # the change -- the whole ladder rebaselines, not just the arms that moved. The
-# settings it used to carry -- `weight_decay` 0.0, `silhouette_p_receiver` (0.1
-# when this was written, 0.5 from 2026-08-25, 0.0 from 2026-08-30 and 0.1 again
-# since 2026-08-31), and the `logit_scale_lr` / `uniform_weight` pair -- are
-# DEFAULT.toml's own values,
+# settings it used to carry -- `weight_decay` 0.0, `silhouette_p_receiver` and
+# the `logit_scale_lr` / `uniform_weight` pair -- are DEFAULT.toml's own values,
 # so every rung inherits them rather than rung 1 alone.
 #
-# The rate that key is set at is not settled, and the `silhouette_titration`
+# **The ladder rebaselines again on 2026-09-05, and harder.** Four inherited
+# settings moved that day, in two commits aimed at the channel rather than at
+# this experiment, and the decision was to let the ladder move with them rather
+# than pin it back:
+#
+#     [optimiser] lr                          5e-5  -> 1e-4   both halves
+#     [scheduler] warm_up_epochs              10    -> 0      both halves
+#     [sender_language_model] normalise_logits true  -> false  both halves
+#     [data] silhouette_p_receiver            0.1   -> 0.5    ShapeWorld only
+#     [data] silhouette_fill                  mean  -> white  ShapeWorld only
+#     [data] augment_flip / affine / mixup    off   -> on     ShapeWorld only
+#
+# `[birds.data]` pins the three augmentations back off, so the birds half takes
+# the rate, the warm-up and the channel only. The listener's five module rates
+# moved with the base, so the whole `[optimiser.module_lr]` table is flat at
+# 1e-4.
+#
+# **Read no ShapeWorld `train_acc` across that date.** With `mixup_alpha` on,
+# `per_game_accuracy` scores against `lis_y > 0.5` -- the dominant source of each
+# blend -- so it is a different quantity from the one every recorded ablation
+# trace holds, and from `test_acc` in the same row. `train_loss` and the eval
+# splits are unaffected; eval is never mixed and never silhouetted.
+#
+# **The rate carries a known risk and it is being taken deliberately.** On the
+# 2026-08-30 ladder rung 3 collapsed at epoch 10 -- `logit_prior_share` 0.891 ->
+# 0.9992 and `referent_spread` 0.221 -> 0.0040 in one epoch, then flat to four
+# decimals for the remaining twenty. DEFAULT.toml reads that not as a shock at
+# the warm-up join, which is continuous, but as the first point the rate reached
+# its maximum and stayed there, i.e. a stability threshold; halving the rate was
+# the direct test of the reading. Both halves of that test are now off. If the
+# reading holds, rung 3 meets the same rate at step one with no ramp to escape
+# in first, so a rung 3 that dies immediately is the *expected* outcome under
+# that hypothesis rather than a new failure -- and rung 9's escape at epoch 3
+# happened at roughly 30% of base rate, which was the ramp. Watch
+# `logit_prior_share` and `referent_spread` in the first two epochs on rungs 3
+# and 9, and if they go, that is the evidence for the threshold rather than
+# against the ladder.
+#
+# The silhouette rate is not settled either, and the `silhouette_titration`
 # experiment is what settles it: five copies of this rung at 0.1 through 0.5,
 # read on the `md_shape` / `md_color` breakdown. Until it reports, a ladder
-# result at 0.1 is a result at a provisional setting.
+# result at 0.5 is a result at a provisional setting -- and 0.5 is the rate that
+# titration found leaves shape at chance in nine runs of ten, so a ladder that
+# ranks nothing may be ranking nothing for that reason and not for an
+# architectural one.
 #
 # **Eight configs here, one per ShapeWorld rung, and no variants.** Half-rate and
 # silhouette-rate forks of rungs 3 and 10 lived here through August 2026; the
@@ -64,7 +103,7 @@
 name = "ablation_shapeworld"
 
 [scheduler]
-epochs = 30
+epochs = 100
 
 [experiment]
 repeats = 1
