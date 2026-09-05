@@ -1,8 +1,4 @@
-# Rung 6: rung 4 with the attention prototyper.
-#
-# The CUB counterpart of rung 5, and identical to it in what it adds: both
-# datasets' senders now emit 320, so the pooler costs the same 642 parameters on
-# each.
+# Rung 5: rung 3 with the attention prototyper.
 #
 # Replaces the mean over each polarity's examples with broccoli's `SequencePool`
 # attention pooling, one instance per polarity. The prototyper is sized from the
@@ -14,10 +10,7 @@
 # parent finished. `train_pool_effective_examples` and `train_pool_score_norm`
 # are what say whether it ever left. See docs/architecture.md.
 
-name = "ablation"
-
-[data]
-dataset = "../data/cub"
+name = "ablation_shapeworld"
 
 [sender]
 feature_model = "ViT2"

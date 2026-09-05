@@ -61,9 +61,9 @@ whether the listener is failing to supply signal or the speaker is failing to
 use it.
 
     python scripts/ignition_audit.py \
-        --configs experiments/ablation/configs/07_shapeworld_sender_contrast.toml \
-                  experiments/ablation/configs/09_shapeworld_sender_transformer_lm.toml \
-                  experiments/ablation/configs/13_shapeworld_attention_discriminator.toml \
+        --configs experiments/ablation_shapeworld/configs/07_shapeworld_sender_contrast.toml \
+                  experiments/ablation_shapeworld/configs/09_shapeworld_sender_transformer_lm.toml \
+                  experiments/ablation_shapeworld/configs/13_shapeworld_attention_discriminator.toml \
         --steps 800 --out results/ignition_audit
 
 Real data, real optimiser, real `accumulator_steps`, and the same bf16 autocast

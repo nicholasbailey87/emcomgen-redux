@@ -24,7 +24,7 @@
 # compared against. One width for both datasets is what makes rungs 9 and 10
 # comparable.
 
-name = "ablation"
+name = "ablation_birds"
 
 [data]
 dataset = "../data/cub"

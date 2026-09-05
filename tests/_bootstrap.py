@@ -13,12 +13,21 @@ sys.path.insert(
 from parse_config import get_config  # noqa: E402
 
 
-# Two directories, searched in order, because `experiments/ablation/configs/`
-#     is the live SLURM queue rather than the canonical home of the ladder:
-#     `scripts/run_experiment.sh` and `scripts/job_utils.py` build the job array
-#     from `configs/*.toml`, so `973a68b` moved fourteen rungs up a level to run
-#     two of them on their own. That is a legitimate workflow and the tests must
-#     survive it, so they resolve a rung wherever it is currently parked.
+# Four directories, searched in order: two experiments, each with two places a
+#     rung can be parked.
+#
+#     The ladder is two experiments rather than one since the ShapeWorld and
+#     birds arms were split, and the split is only a foldering change -- the
+#     rungs kept their numbers (odd ShapeWorld, even birds), so the ladder as a
+#     whole is still what these tests check and they resolve a rung without
+#     caring which arm it belongs to.
+#
+#     Within an experiment, `configs/` is the live SLURM queue rather than the
+#     canonical home of the ladder: `scripts/run_experiment.sh` and
+#     `scripts/job_utils.py` build the job array from `configs/*.toml`, so
+#     `973a68b` moved fourteen rungs up a level to run two of them on their own.
+#     That is a legitimate workflow and the tests must survive it, so they
+#     resolve a rung wherever it is currently parked.
 #
 #     It went unnoticed for a day because the failure is a `FileNotFoundError`
 #     inside `get_config` at collection time, which reads as 159 failing tests
@@ -26,14 +35,22 @@ from parse_config import get_config  # noqa: E402
 #     backstop: every name this scan returns must resolve to a file that parses.
 #     It does not check how many there are or which -- that is the experiment's
 #     business, and the experiment is allowed to change.
-ABLATION_DIR = os.path.join(
+EXPERIMENTS_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..",
     "experiments",
-    "ablation",
 )
 
-CONFIG_DIRS = (os.path.join(ABLATION_DIR, "configs"), ABLATION_DIR)
+ABLATION_DIRS = tuple(
+    os.path.join(EXPERIMENTS_DIR, name)
+    for name in ("ablation_shapeworld", "ablation_birds")
+)
+
+CONFIG_DIRS = tuple(
+    os.path.join(ablation, directory)
+    for ablation in ABLATION_DIRS
+    for directory in ("configs", "")
+)
 
 
 def rung(config_file):

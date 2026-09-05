@@ -17,7 +17,11 @@
 #   15, 16  + ReceiverCrossAttentionLM
 #
 # Odd numbers are ShapeWorld, even are CUB. The two datasets never mix: rung 4
-# is rung 2 plus one change, not rung 3 plus a dataset.
+# is rung 2 plus one change, not rung 3 plus a dataset. That is why the ladder
+# is two experiments -- the odd rungs here in `ablation_shapeworld`, the even
+# ones in `ablation_birds` -- so either arm can be queued, re-run and read
+# without waiting on the other. The numbers did not change with the split, so
+# this folder runs 1, 3, 5, ..., 15 and the gaps are the birds arm.
 #
 # The backbone was Conv4 (113,088 parameters) until the rebalancing. Conv4 is
 # both tiny and, at 1024, oddly wide -- that width is a flattened 64x4x4 feature
@@ -42,7 +46,7 @@
 # read on the `md_shape` / `md_color` breakdown. Until it reports, a ladder
 # result at 0.1 is a result at a provisional setting.
 #
-# **Sixteen configs, one per rung, and no variants.** Half-rate and
+# **Eight configs here, one per ShapeWorld rung, and no variants.** Half-rate and
 # silhouette-rate forks of rungs 3 and 10 lived here through August 2026; the
 # half-rate one is now DEFAULT.toml's `[optimiser] lr` and the silhouette ones
 # are the `silhouette_titration` experiment, so the ladder is back to one file
@@ -53,10 +57,11 @@
 # both straight out of this file rather than out of the merged config, so every
 # config in an experiment must carry them even when they restate the default.
 # `[slurm]` is read from the *first* config in the folder only (sorted by
-# filename), so the block here governs the whole array -- it is sized for the
-# heaviest job in the set, which is rung 16.
+# filename), so the block here governs this experiment's whole array -- it is
+# sized for the heaviest job in the set, which is rung 15. The birds arm's array
+# is governed by rung 2's block, not this one.
 
-name = "ablation"
+name = "ablation_shapeworld"
 
 [scheduler]
 epochs = 30

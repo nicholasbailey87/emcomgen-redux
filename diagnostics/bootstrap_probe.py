@@ -69,12 +69,18 @@ import models.builder   # noqa: E402
 import parse_config     # noqa: E402
 import train            # noqa: E402  -- for `clip_gradients`, the real one
 
-# Both, in order: `experiments/ablation/configs/` is the live SLURM queue that
+# Four, in order. The ladder is two experiments since the ShapeWorld and birds
+#     arms were split -- the rungs kept their numbers, odd ShapeWorld and even
+#     birds, so a rung is still named the same and just lives in one arm or the
+#     other. Within an arm, `configs/` is the live SLURM queue that
 #     `scripts/run_experiment.sh` builds its job array from, so rungs get moved
 #     a level up to take them out of it. Matches `tests/_bootstrap.rung`.
 CONFIG_DIRS = tuple(
-    os.path.join(os.path.dirname(__file__), "..", "experiments", "ablation", d)
-    for d in ("configs", "")
+    os.path.join(
+        os.path.dirname(__file__), "..", "experiments", ablation, directory,
+    )
+    for ablation in ("ablation_shapeworld", "ablation_birds")
+    for directory in ("configs", "")
 )
 
 

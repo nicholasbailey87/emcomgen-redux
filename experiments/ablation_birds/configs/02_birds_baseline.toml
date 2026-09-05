@@ -1,4 +1,8 @@
-# Rung 2: CUB with the GRU/CNN baseline agents.
+# Rung 2: CUB with the GRU/CNN baseline agents. The bottom of `ablation_birds`,
+# which is the even half of the sixteen-rung ladder -- see rung 1, in
+# `ablation_shapeworld`, for the ladder in full and for why the two arms are
+# separate experiments. The rungs kept their ladder numbers across the split, so
+# this folder runs 2, 4, 6, ..., 16 and the gaps are the ShapeWorld arm.
 #
 # Naming the dataset is the only structural change needed.
 # `parse_config.get_config` switches to the `[birds.*]` family off the *name* of
@@ -18,8 +22,15 @@
 # -- are DEFAULT.toml's values, and the `[birds.*]` family overrides none of the
 # three, so birds and ShapeWorld differ in their data and their agents' vision
 # models rather than in their optimiser or their channel.
+#
+# `epochs` and `repeats` below are not overrides: scripts/job_utils.py reads both
+# straight out of this file rather than out of the merged config, so every config
+# in an experiment must carry them even when they restate the default. `[slurm]`
+# is read from the *first* config in the folder only (sorted by filename), which
+# in this experiment is this file, so the block here governs the birds array --
+# it is sized for the heaviest job in the set, which is rung 16.
 
-name = "ablation"
+name = "ablation_birds"
 
 [data]
 dataset = "../data/cub"

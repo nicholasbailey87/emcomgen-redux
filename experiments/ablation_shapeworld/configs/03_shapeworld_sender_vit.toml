@@ -31,7 +31,7 @@
 # compared against. One width for both datasets is what makes rungs 9 and 10
 # comparable.
 
-name = "ablation"
+name = "ablation_shapeworld"
 
 [sender]
 feature_model = "ViT2"

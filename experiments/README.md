@@ -18,14 +18,54 @@ into `experiments/<experiment>/` and leave only what should be submitted --
 which is what `973a68b` did to run rungs 9 and 10 on their own. A rung parked
 up there is still a rung; it is just not queued.
 
-Anything that reads a rung must therefore look in both places.
-`tests/_bootstrap.rung` and `all_rungs` do, and so do the two probes in
+Anything that reads a rung must therefore look in both places, and since the
+ablation is two folders (below), that is four directories for a rung of the
+ladder. `tests/_bootstrap.rung` and `all_rungs` do, and so do the two probes in
 `diagnostics/`. The failure mode when something does not is quiet: a
 `FileNotFoundError` inside `parse_config.get_config` at collection time reads
 as a wall of failing tests rather than as a missing path, and it hid 159 tests
 for a day in August 2026. `test_there_are_sixteen_rungs` is the backstop.
 
 The rest of this file is a reference for the columns of that `metrics.csv`.
+
+## The ablation ladder is two experiments
+
+The ladder runs as **`ablation_shapeworld` and `ablation_birds`**, one folder
+each, where it used to run as a single `ablation`. Submit them separately:
+
+```
+scripts/run_experiment.sh ablation_shapeworld
+scripts/run_experiment.sh ablation_birds
+```
+
+Why. The two arms never shared a job in any meaningful sense -- rung 4 is rung 2
+plus one change, not rung 3 plus a dataset -- but they shared a queue, so the
+whole sixteen-job array was the unit of submission and of waiting. With
+ShapeWorld not learning, the birds arm is the one that says whether an
+architecture works at all, and it should be launchable, re-runnable and readable
+without ShapeWorld's eight jobs in front of it.
+
+**The rungs kept their numbers.** `ablation_shapeworld` holds the odd rungs 1-15
+and `ablation_birds` the even 2-16, so each folder's numbering is gappy and
+every existing reference to "rung 10" still names the same file. This is
+deliberate: renumbering is what made the previous change to this ladder
+expensive to read back (see the table below), and there was no reason to pay it
+twice for a change that moves no config content.
+
+What the split does change:
+
+* **Results move.** Output is `<output_root>/<experiment>/...`, so new runs land
+  under `ablation_shapeworld/` and `ablation_birds/` rather than `ablation/`.
+  Runs recorded before the split are under `ablation/` and are not re-run by
+  either experiment -- `run_experiment.sh`'s completed-job check looks only at
+  the new paths, so an un-flagged submission will rerun rungs that already have
+  results elsewhere.
+* **`[slurm]` is now read per arm.** The block is taken from the first config in
+  the folder by filename, which is rung 1 for ShapeWorld and rung 2 for birds.
+  Both still carry the whole block, as every config in an experiment must.
+* The top-level `name` key in each config was updated to match its folder. It is
+  documentation -- `train.py` takes the experiment name from the config's path,
+  not from that key.
 
 ## The ablation ladder was renumbered
 

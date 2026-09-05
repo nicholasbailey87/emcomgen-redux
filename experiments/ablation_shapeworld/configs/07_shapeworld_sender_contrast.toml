@@ -1,4 +1,4 @@
-# Rung 8: rung 6 with the referent contrast stage.
+# Rung 7: rung 5 with the referent contrast stage.
 #
 # One self-attention over all the referents -- positive and negative together,
 # tagged by label -- whose output is added back as a residual before they are
@@ -24,10 +24,7 @@
 # it can raise accuracy and lower compositionality at once. See
 # docs/measurement.md.
 
-name = "ablation"
-
-[data]
-dataset = "../data/cub"
+name = "ablation_shapeworld"
 
 [sender]
 feature_model = "ViT2"

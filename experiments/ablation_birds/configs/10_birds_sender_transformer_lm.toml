@@ -30,7 +30,7 @@
 # symbol for every concept. Reading the message off the latent array puts the
 # concept back in the residual stream on both speakers. See docs/anecdotes.md.
 
-name = "ablation"
+name = "ablation_birds"
 
 [data]
 dataset = "../data/cub"

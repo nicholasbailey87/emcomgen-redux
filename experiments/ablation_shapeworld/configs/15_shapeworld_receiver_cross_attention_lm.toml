@@ -20,7 +20,7 @@
 # GRU's 1024-wide one. Parameter parity between the encoders does not make the
 # listeners identical in size, and is not meant to.
 
-name = "ablation"
+name = "ablation_shapeworld"
 
 [sender]
 feature_model = "ViT2"

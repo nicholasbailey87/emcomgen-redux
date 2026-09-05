@@ -1,4 +1,4 @@
-# Rung 14: rung 12 with the attention discriminator.
+# Rung 13: rung 11 with the attention discriminator.
 #
 # The listener is two slots -- a language model that encodes the message and a
 # discriminator that scores the candidates from it -- and this rung replaces the
@@ -36,10 +36,7 @@
 # This discriminator is 2,990,663 at the halved `memory_adapter`, against rung
 # 15's 2,548,295.
 
-name = "ablation"
-
-[data]
-dataset = "../data/cub"
+name = "ablation_shapeworld"
 
 [sender]
 feature_model = "ViT2"

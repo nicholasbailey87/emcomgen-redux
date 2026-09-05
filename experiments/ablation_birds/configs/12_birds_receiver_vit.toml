@@ -15,7 +15,7 @@
 # jayelm's 1 layer unidirectional: the projection's fan-in is the GRU's
 # `output_size`, which went 2048 -> 1024.)
 
-name = "ablation"
+name = "ablation_birds"
 
 [data]
 dataset = "../data/cub"

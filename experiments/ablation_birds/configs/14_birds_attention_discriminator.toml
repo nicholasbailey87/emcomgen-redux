@@ -1,26 +1,42 @@
-# Rung 16: rung 14 with the cross-attention message encoder.
+# Rung 14: rung 12 with the attention discriminator.
 #
-# The other half of the listener, and the top of the ladder.
-# `ReceiverCrossAttentionLM` reads the message with a decoder stack that
-# cross-attends into the candidate set, so the meaning it refines is
-# discriminative rather than absolute -- its output is referent-conditioned by
-# construction, which is the point of the ordering.
+# The listener is two slots -- a language model that encodes the message and a
+# discriminator that scores the candidates from it -- and this rung replaces the
+# second one only. The message is still read by `ReceiverGRULM`; what changes is
+# how the encoding is compared against the candidate set.
 #
-# Against rung 13 this moves the message encoder only, the discriminator having
-# moved there. The two encoders are now parameter-matched, which they were not
-# when this rung was written: the GRU it replaces is 4,687,872 and this stack is
-# 4,784,566 at the 6 blocks stated below, +2.1%. That match is why `layers` is 6
-# here and 3 on `[receiver_discriminator]`, and it is bought at jayelm's width
-# rather than at a shared 256 -- see `layers` in `DEFAULT.toml`. It used to be
-# 28,262,400 against 2,466,139, so the 13 -> 15 step was a 26M parameter change
-# as well as an architecture one.
+# That split is the point of the pair of rungs. One `comparer` key used to
+# choose both halves at once, so a rung swapping the bilinear comparer for the
+# cross-attention one changed the message encoder *and* the comparison, and
+# "attention helps" could not be attributed to either. 13 moves the comparison
+# and 15 moves the encoder.
 #
-# The discriminator still shrinks across the step, 2,990,663 to 2,548,295,
-# because its `memory_adapter` now reads a 256-wide message rather than the
-# GRU's 1024-wide one. Parameter parity between the encoders does not make the
-# listeners identical in size, and is not meant to.
+# `AttentionDiscriminator` scores the candidates with a decoder stack that reads
+# the encoded message as memory, mixed with a bilinear score over the same
+# message. The mix opens at the bilinear limit and departs only if attention
+# earns it, because the attention path alone does not bootstrap: under a nuisance
+# level where the bilinear comparison reaches 0.938 it sits at 0.469.
+# `train_mix_alpha` and `train_path_agreement` are the columns that say which
+# happened. See docs/architecture.md.
+#
+# **Read the parameter counts here with care.** They have just been fixed, and
+# the fix is worth knowing about. `ReceiverGRULM` used to inherit 2 layers
+# bidirectional at DEFAULT's 1024 wide, which is 28,262,400 parameters, against
+# this discriminator's 3,580,487 -- itself inflated by a `memory_adapter`
+# bringing the GRU's then-2048-wide output down to 256. The listener on this
+# rung was therefore dominated by an encoder that rung 15 replaced with a
+# 2,466,139-parameter one, so the step from 13 to 15 was an architecture change
+# *and* a 26M parameter change, which is not the clean contrast the rest of the
+# ladder is built on.
+#
+# `[receiver_language_model]` now restores jayelm's 1 layer unidirectional:
+# 4,687,872 here at an `output_size` of 1024, and rung 15 deepens its
+# transformer to 6 blocks for 4,784,566. Parity is bought at jayelm's width by
+# moving the arm under test, rather than at a shared 256 by moving the baseline.
+# This discriminator is 2,990,663 at the halved `memory_adapter`, against rung
+# 15's 2,548,295.
 
-name = "ablation"
+name = "ablation_birds"
 
 [data]
 dataset = "../data/cub"
@@ -70,7 +86,6 @@ bidirectional = false
 
 [receiver]
 feature_model = "ViT2"
-language_model = "ReceiverCrossAttentionLM"
 discriminator = "AttentionDiscriminator"
 
 [receiver_discriminator]
@@ -101,44 +116,6 @@ d_model = 256
 heads = 4
 ff_inner_size = 320
 layers = 3
-
-[receiver_language_model]
-# Widths matched to `[receiver_discriminator]` above and held equal for want of
-# a reason to favour either -- see there for where 256 / 4 / 320 comes from.
-# `layers` is the exception and is argued for below.
-#
-# `token_embedding_size` *is* restated here, unlike in the discriminator's
-# table: the listener's embedding table is built from this key in `builder.py`
-# and then adapted into `d_model`, so matching the two keeps the adapter square.
-d_model = 256
-heads = 4
-ff_inner_size = 320
-token_embedding_size = 256
-# 6 blocks, against 3 on `[receiver_discriminator]` above, and the one place the
-# two tables deliberately disagree. This is where listener parameter parity with
-# the GRU arm is paid for: `DEFAULT.toml` restores `[receiver_language_model]` to
-# jayelm's 1 layer unidirectional at 1024 wide, which is 4,687,872 parameters,
-# and a block of this stack is 772,809, so 6 of them is 4,784,566 -- +2.1%.
-# Parity is bought by deepening the arm under test rather than by inflating the
-# published baseline; see `layers` in `DEFAULT.toml`.
-#
-# DeepNorm's constants follow the `"deepnorm"` sentinel from this key, so the
-# depth change rescales `alpha` and `beta` on its own with nothing further to
-# set.
-#
-# Note this buys parameter parity and not interface parity: `output_size` is 256
-# here against the restored GRU's 1024, so the discriminator downstream is a
-# different size on the two arms.
-layers = 6
-
-# `true`, i.e. no causal mask, for the same reason the speaker's key is `false`:
-# neither is about masking for its own sake. The key is shared with
-# `ReceiverGRULM`, which passes it to `nn.GRU(bidirectional=)`;
-# `ReceiverCrossAttentionLM` turns it into `causal = not bidirectional` on the
-# stack that encodes the incoming message. Masking that stack left to right
-# models a listener that must commit to an interpretation of symbol 1 before
-# seeing symbol 5, which is not the listening task -- the message arrives whole.
-bidirectional = true
 
 [scheduler]
 epochs = 30

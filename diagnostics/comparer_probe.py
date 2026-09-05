@@ -59,14 +59,16 @@ import models.builder   # noqa: E402
 import models.receiver  # noqa: E402
 import parse_config     # noqa: E402
 
-# `experiments/ablation/configs/` is the live SLURM queue, not the ladder's
-#     canonical home -- `scripts/run_experiment.sh` builds the job array from
-#     it, so rungs get moved a level up to take them out of the queue. Look in
-#     both, as `tests/_bootstrap.rung` does.
+# Rung 16 is a birds rung, so it lives under `experiments/ablation_birds/` since
+#     the ladder was split into a ShapeWorld and a birds experiment. Within that
+#     experiment `configs/` is the live SLURM queue, not the ladder's canonical
+#     home -- `scripts/run_experiment.sh` builds the job array from it, so rungs
+#     get moved a level up to take them out of the queue. Look in both, as
+#     `tests/_bootstrap.rung` does.
 DEFAULT_CONFIG = next(
     path for path in (
         os.path.join(
-            os.path.dirname(__file__), "..", "experiments", "ablation",
+            os.path.dirname(__file__), "..", "experiments", "ablation_birds",
             directory, "16_birds_receiver_cross_attention_lm.toml",
         )
         for directory in ("configs", "")

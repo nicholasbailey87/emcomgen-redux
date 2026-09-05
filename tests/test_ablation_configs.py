@@ -79,11 +79,14 @@ def test_every_rung_found_can_be_opened():
     """
     The plumbing backstop, and deliberately not a count.
 
-    `all_rungs` looks in `experiments/ablation/configs/` and in
-        `experiments/ablation/` above it, because the first is the live SLURM
+    `all_rungs` looks in `experiments/ablation_shapeworld/configs/` and
+        `experiments/ablation_birds/configs/`, and in the two experiment
+        folders above them, because the first of each pair is the live SLURM
         queue rather than the ladder's home: `scripts/run_experiment.sh` builds
         its job array from `configs/*.toml`, so running a subset means moving
-        the rest up a level. `973a68b` did exactly that and left `CONFIG_DIR`
+        the rest up a level. The two experiments are the ladder's ShapeWorld and
+        birds arms, split so they can be queued independently; the rungs kept
+        their numbers, so this scan still returns the whole ladder. `973a68b` did exactly that and left `CONFIG_DIR`
         pointing at the queue, which raised `FileNotFoundError` inside
         `get_config` for the fourteen rungs that had moved and hid 159 tests for
         a day.
