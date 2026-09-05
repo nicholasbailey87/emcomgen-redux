@@ -108,12 +108,23 @@ flattened by it — but a group added afterwards would not appear in
 New groups are appended, so group 0 remains the main one that `PASS.lr` reports.
 Calling it more than once is fine for the same reason.
 
-The new group takes `weight_decay = 0.0` to match what `get_optimiser` gave both
-of these, and for the same reason in each case. The listener's volume is a log,
-so decay would pull `exp` towards 1, and a volume of 1 is not a meaningful anchor
-— it is whatever the score's opening spread happens to make it. The polarity tag
-opens at the scale of the layer-normed prototype it is added to, so decay would
-be a force on it that answers to neither the loss nor that scale.
+**Each moved parameter keeps the `weight_decay` it already had**, so `_regroup`
+adds one new group per decay level the selection spans — usually one. It used to
+add a single group at `weight_decay = 0.0`, justified on the grounds that the
+parameters it moved were already undecayed. That is true of the lone scalars
+`split_out_parameter` moves: they are 0-dimensional and take `get_optimiser`'s
+0.0 branch whatever their name, and it is the right answer for them on their own
+merits — the listener's volume is a log, so decay would pull `exp` towards 1, and
+a volume of 1 is not a meaningful anchor; the polarity tag opens at the scale of
+the layer-normed prototype it is added to, so decay would be a force answering to
+neither the loss nor that scale.
+
+It was never true of `split_out_module`, which moves whole backbones, and it was
+inert only while `[optimiser] weight_decay` was 0.0. At the 0.1 it carries since
+2026-09-06, a module given a rate of its own would have been the one module with
+no decay — and `experiments/baseline_lr_sweeps/` moves exactly the two modules
+the decay is aimed at, so the sweep would have measured the rate with the decay
+switched off underneath it.
 
 If the suffix matches nothing, `split_out_parameter` raises rather than silently
 doing nothing — the error names the config key so a rename says which knob went
@@ -124,12 +135,12 @@ quiet. `split_out_module` has no equivalent, because it cannot fail that way.
 One table in `models/builder.py` decides both what is clipped together and what
 is trained at what rate.
 
-`MODULE_GROUPS` names eight modules, each picked off the constructed pair by
+`MODULE_GROUPS` names ten modules, each picked off the constructed pair by
 attribute:
 
-`sender_vision`, `sender_prototyper`, `sender_contrast`,
-`sender_language_model`, `receiver_vision`, `receiver_token_embedding`,
-`receiver_language_model`, `receiver_discriminator`
+`sender_vision`, `sender_adapter`, `sender_prototyper`, `sender_contrast`,
+`sender_language_model`, `receiver_vision`, `receiver_adapter`,
+`receiver_token_embedding`, `receiver_language_model`, `receiver_discriminator`
 
 `SCALAR_GROUPS` names the four scaling scalars — `log_score_scale`,
 `log_logit_scale`, `mix_logit`, `contrast_gate` — each of which is a group of one
@@ -379,7 +390,7 @@ gradient. It does not change the *ratio* between modules — a uniform rescale
 never did, and AdamW normalises per coordinate anyway — what it removes is the
 cross-module noise coupling.
 
-The groups are `models.builder`'s — eight modules and four lone scalars, see
+The groups are `models.builder`'s — ten modules and four lone scalars, see
 [the group table](#the-group-table) — and an `other` group catches anything a
 future architecture adds, so no parameter can silently go unclipped. `other`
 being non-empty is the alarm and not the fix: it held the whole of
@@ -394,6 +405,14 @@ the header keeps its shape across a resume against a config that toggles a
 stage. These columns are new in August 2026: `clip_gradients` had built the
 norms and documented them "for logging" since it was written, and the call site
 discarded the return, so no run before then recorded one.
+
+**`train_weight_<group>` is the same partition applied to the parameters**, added
+on 2026-09-06. `weight_norms` walks `group_parameters` exactly as `clip_gradients`
+does and takes the same functional — the 2-norm of the per-tensor 2-norms — on the
+same optimiser step and before it is taken, so the two columns in a row are
+comparable by construction. They exist because a gradient norm under BatchNorm
+goes as `1/‖W‖`, which makes a `clip_*` column uninterpretable alone; see
+[measurement.md](measurement.md#weight-norms-on-the-train-pass-only).
 
 ## AMP and accumulation
 

@@ -810,8 +810,8 @@ is how the last collapse ran for a whole smoke test.
 ### Gradient norms, on the train pass only
 
 **`train_clip_<group>`** — the gradient norm of one clip group, taken *before*
-clipping, for every group in `models.builder.GROUP_NAMES`. Twelve named groups —
-eight modules and the four scaling scalars — plus `other`. See
+clipping, for every group in `models.builder.GROUP_NAMES`. Fourteen named groups
+— ten modules and the four scaling scalars — plus `other`. See
 [training.md](training.md#the-group-table) for what is in each.
 
 Averaged **per optimiser step**, not per example: a gradient norm is a property
@@ -845,6 +845,13 @@ uniform rescale of a group's gradients cancels before it becomes a step; a large
 norm does not mean the group is learning too fast, and a small one does not mean
 it is starved. Read them for the clipping and nothing else.
 
+**Read each one against the `train_weight_<group>` column beside it**, which is
+the next section. A gradient norm under BatchNorm is not an independent quantity:
+the layer's output is invariant to the scale of its own weights, so the gradient
+is orthogonal to `W` and its norm goes as `1/‖W‖`. A `clip_*` column that moves
+inversely to the `weight_*` column in the same row is therefore reporting a
+collapsing weight norm, not a growing gradient.
+
 Two shapes worth watching. A group whose norm climbs steadily while others stay
 flat is being renormalised harder over time, which changes the *ratio* between it
 and the rest — clipping per group removes the cross-module noise coupling but not
@@ -852,6 +859,44 @@ this. And a norm that collapses towards zero on the speaker side while the
 listener's holds is the signature the per-module clipping was introduced for: the
 speaker's vision model used to take a coefficient set by the listener's comparer,
 which supplies ~90% of the pair's squared norm at init.
+
+### Weight norms, on the train pass only
+
+**`train_weight_<group>`** — the parameter norm of one group, over exactly the
+partition `train_clip_<group>` uses. Same groups, same `nan`-not-absent
+convention, same per-optimiser-step averaging, recorded on the same step and
+before it is taken. The norm is the 2-norm of the per-tensor 2-norms, which is
+the 2-norm of the concatenation and is what `clip_grad_norm_` computes for the
+gradients — so a `weight_*` column and the `clip_*` column beside it are the same
+functional of the same tensors, one applied to `p` and one to `p.grad`.
+
+**What they are for.** BatchNorm makes a layer's output exactly invariant to the
+scale of its own weights, so the gradient is orthogonal to `W` and its norm goes
+as `1/‖W‖` (van Laarhoven 2017; Arora, Li & Lyu 2019). The birds speaker's
+per-epoch mean `clip_sender_vision` swings over five orders of magnitude — 0.04
+at epoch 16, 5.9 at 32, 13,738 at 36, an envelope reaching 241,760 by epoch 71 —
+while the listener stays between 0.6 and 4.9 and ShapeWorld's speaker is a
+hundred times tamer. Under that invariance a norm of 241,760 says weight norms in
+the trunk have collapsed; it does not say the gradient grew on its own.
+
+The effective rate is `lr/‖W‖²`, so a large step shrinks `‖W‖`, which raises the
+effective rate, which takes a larger step. Under plain SGD that loop is benign —
+the update stays orthogonal to `W`, `‖W‖²` grows, and the rate auto-decays. Under
+AdamW it is not: the update is the gradient rescaled elementwise by `1/√v` and is
+*not* orthogonal, so `‖W‖` is free to fall, and `weight_decay = 0.0` removed the
+one force that would have pinned it. Rung 3's recorded collapse is the same
+dynamic running the other way — `referent_spread` 0.221 → 0.0040 with
+`clip_sender_vision` decaying to 4e-4.
+
+**How to read them.** If `clip_<group>` and `weight_<group>` are inversely
+proportional, the spikes are BatchNorm's scale invariance and the disease is a
+collapsing `‖W‖`, for which `[optimiser] weight_decay` is the lever. If
+`clip_<group>` moves while `weight_<group>` sits still, the reading is wrong and
+the gradient is genuinely growing. That is the whole point of recording both:
+one column cannot distinguish the two and the pair can.
+
+The columns are new on 2026-09-06, alongside `weight_decay = 0.1`, so no run
+before that date has one.
 
 ### Per-epoch, all splits
 

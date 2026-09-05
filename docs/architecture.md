@@ -1200,6 +1200,20 @@ pooling_padding       = enough to cover the image, split symmetrically
 That is 6px patches on an 11×11 grid at ShapeWorld's 64px, and 20px patches on a
 12×12 grid at CUB's 224px.
 
+**The two datasets no longer run the same ViT.** `[sender_feature_model]` is
+ShapeWorld's — 128 wide, 6 layers, 4 heads, `ff_inner_size` 256, GELU, 876,599
+parameters — and `[birds.sender_feature_model]` pins CUB's, which is the 320 /
+10 / 5 / 576 SwiGLU stack both used to share, at 11,332,626. Each is matched to
+its own baseline backbone rather than to the other dataset's: `ResNet56` at
+852,368 on ShapeWorld and `ResNet18` at 11,176,512 on CUB. See
+[the CIFAR ResNet](#resnet56-the-cifar-resnet) below for why the ShapeWorld
+backbone shrank.
+
+The activation differs for the same reason the width does. SwiGLU's `linear_in`
+is double width because it produces the gate alongside the value, so a block's
+feedforward costs `3·d·f` where GELU's costs `2·d·f`; at 128 / 6 / 256 that is
+1,107,774 against 876,599, and only the second is within 3% of the CNN.
+
 **The tiling does not overlap, and used to.** The old rule ran stride at half the
 kernel with a matching pad, which put both datasets on a 17×17 grid of 289
 tokens. Because `pooling_type` is `"concat"` the tokenizer is a space-to-depth,
@@ -1209,16 +1223,19 @@ rather than adding information. What it bought was a locality prior and a finer
 positional grid; what it cost was 289 tokens against 121.
 
 On an A100 at 640 images of 64px, fwd+bwd in bf16 and compiled, that is 303ms
-against 118ms, where the `ResNet18SmallInput` these backbones are compared
-against runs in 81ms. The ViT was 3.75× the baseline's wall clock and is now
-1.46×. `scripts/vit_geometry_sweep.py` is the harness and can re-derive it.
+against 118ms, where the `ResNet18SmallInput` these backbones were compared
+against at the time ran in 81ms. The ViT was 3.75× the baseline's wall clock and
+is now 1.46×. Those numbers were measured at the shared 320-wide stack and rank
+the *geometries*, which is what they are for; ShapeWorld's ViT is much smaller
+now and the ResNet it is compared against smaller again.
+`scripts/vit_geometry_sweep.py` is the harness and can re-derive them.
 
-Stride appears in no weight shape, so ShapeWorld's parameter count is unmoved at
-10,319,266, or 92% of ResNet18's — which matters, because the fairness claim the
+Stride appears in no weight shape, so a geometry change moves ShapeWorld's
+parameter count not at all — which matters, because the fairness claim the
 ablation rests on is stated in parameters. CUB's does move, since a 20px patch is
 1,200 values against a 28px one's 2,352 and above `d_model` that difference is
-carried by `ResizeAndPadPatches`. It moves the right way: 101% of ResNet18 where
-the old geometry was 113%.
+carried by `ResizeAndPadPatches`. It moves the right way: 101% of `ResNet18`
+where the old geometry was 113%.
 
 The padding is what makes the tiling cover the image. Without it the final
 partial patch is silently cropped, which is a strip of the image the model cannot
@@ -1231,32 +1248,84 @@ consumer needs the referent at a controlled magnitude normalises it where the
 score is formed. See [broccoli.md](broccoli.md) for `batch_norm_logits=False` and
 the rest of the pinned arguments.
 
-### `ResNet` and the small-input stem
+### `ResNet56`: the CIFAR ResNet
 
-`ResNet18SmallInput` replaces the ImageNet stem — 7×7 stride 2 followed by a 3×3
-stride-2 maxpool — with a 3×3 stride-1 convolution and no pooling, as SimCLR does
-for CIFAR-10 (Chen et al. 2020, arXiv:2002.05709, CIFAR-10 appendix: "we replace
-the first 7×7 Conv of stride 2 with 3×3 Conv of stride 1, and also remove the
-first max pooling operation"). He et al. 2015 §4.2 is the underlying precedent,
-though their CIFAR network is a separate architecture rather than a modified
-ResNet.
+ShapeWorld's backbone on both agents, and the third one this repository has had:
+`Conv4` at 113,088 parameters, then `ResNet18SmallInput` at 11,168,832, and now
+`CifarResNet(9)` at **852,368**.
 
-The stock stem discards 4× resolution before any residual block runs. On
-ImageNet's 224px that is proportionate; on ShapeWorld's 64px it leaves 16×16 into
-stage 1 and a 2×2 map at the end, which the adaptive pool then averages to a
-single position. What survives that is colour, and what does not is shape — which
-is precisely the wrong bias for a study whose known failure mode is the speaker
-learning to name colours. With the small stem the final map is 8×8 at 64px, so
-the pool has 64 positions to average rather than 4.
+It is He et al. 2015 §4.2 rather than a modified ImageNet ResNet: a 3×3 stride-1
+convolution at 16 channels, three stages of nine blocks at 16 / 32 / 64 channels,
+stride 2 at the first block of the second and third stages, a global average pool
+and nothing else. `6n + 2` weighted layers at n = 9 is 56, of which 55 are
+convolutions here — the 56th is the classifier this repository does not build.
+`final_feat_dim` is 64.
 
-Cheaper too, though only just: `3·3·3·64 = 1,728` parameters against
-`7·7·3·64 = 9,408`, and the maxpool has none. The point is the resolution, not
-the 7,680 parameters.
+**Why it replaced an 11.2M network.** The reason is the learning rate, not the
+accuracy. jayelm maps ShapeWorld to `Conv4` and his `--lr` default is 1e-4, so
+the rate was tuned at 113,088 parameters; this repository restored 1e-4 on
+2026-09-05 as "jayelm's own rate" while running `ResNet18SmallInput` at
+11,168,832 from random init. His CUB runs are not a counterexample —
+`run_cub.sh` passes `--pretrained_feat_model` on every one, so 1e-4 there is
+fine-tuning from ImageNet weights rather than training 11.2M from scratch. The
+rate had never been measured at the size the ladder runs, and 99× is too far to
+assume it travels. `experiments/baseline_lr_sweeps/` measures it; this backbone
+is the other half, bringing the scale back to somewhere the inherited rate is at
+least arguable.
 
-It is a separate factory rather than a flag on `ResNet18` because `ResNet18` is
-pinned tensor-for-tensor against `torchvision.models.resnet18` by
-`tests/test_backbones.py`, and because the backbone is selected by name from the
-config — so a name is the whole of the registration.
+It also closes a hole. The backbone stable ran 113k and then 11.2M with nothing
+between, so "the rate is wrong for this scale" and "the rate is wrong for this
+architecture" could not be separated — and the `Conv4`/`ViT2` comparison the
+ablation is built on was 0.11M against 10.3M, a 91× mismatch on rungs whose whole
+claim is that only the architecture moved. At ~0.85M the CNN and the ViT are
+within 3% of each other.
+
+**Option A shortcuts, which is what "faithful" means here.** Where the widening
+shortcut in `SimpleBlock` is a 1×1 convolution with a BatchNorm after it —
+option B — `CifarBlock` subsamples the spatial axes by taking every other pixel
+and zero-pads the channel axis, split evenly. That carries no parameters at all,
+which is exactly why He et al. chose it for CIFAR: the residual network then has
+the same parameter count as the plain network it is being compared against, so
+the comparison is about the shortcut and not about capacity. It is also why this
+is a sibling class rather than a channel list passed to `ResNet` —
+`tests/test_backbones.py` pins that the shortcut holds nothing.
+
+**Resolution, which was the small-input stem's argument and is still the point.**
+The stock ImageNet stem discards 4× before any residual block runs — 7×7 stride 2
+then a 3×3 stride-2 maxpool — which on ShapeWorld's 64px images leaves a 2×2 map
+for the adaptive pool to average over. What survives that is colour, and what
+does not is shape, which is precisely the wrong bias for a study whose known
+failure mode is the speaker learning to name colours. `ResNet18SmallInput`
+reached 8×8 by replacing that stem with a 3×3 stride-1 convolution and no
+pooling, as SimCLR does for CIFAR-10 (Chen et al. 2020, arXiv:2002.05709).
+`ResNet56` reaches **16×16**, because it downsamples twice in total rather than
+four times.
+
+`CifarResNet.reset_parameters` recurses over `self.modules()` for the reason
+`ResNet.reset_parameters` does — see [anecdotes.md](anecdotes.md) — and here that
+is 54 convolutions of 55 that a `self.trunk` walk would miss.
+
+**`ResNet18SmallInput` is gone**, and `ResNet18` is untouched: it remains CUB's
+backbone on both agents and stays pinned tensor-for-tensor against
+`torchvision.models.resnet18`. Configs naming the deleted class — the
+`silhouette_titration_resnet18` arm and one arm of `conv4_silhouette_asymmetric`
+— now raise at construction, which is the intended loud failure; they are records
+of runs against a network this repository no longer has.
+
+**The two datasets are no longer parameter-matched to each other**: 0.85M on
+ShapeWorld against 11.2M on CUB, on both agents. That is deliberate — CUB's 224px
+photographs do not want a CIFAR network — and what each dataset preserves is the
+match *within* it, which is the comparison a rung actually makes. A difference
+between an odd rung and the even rung beside it covers two different networks at
+a 13× size ratio as well as the dataset, and is not an architecture result.
+
+### `ResNet` and the ImageNet stem
+
+`ResNet18` is CUB's backbone on both agents and the only user of the `ResNet`
+class since `ResNet18SmallInput` was removed. Its `small_input_stem` flag is
+still there and nothing selects it: the stem swap it performs is what
+`ResNet56` supersedes on ShapeWorld, and the flag is kept because a factory
+naming it is a two-line addition if a 224px small-stem arm is ever wanted.
 
 **The final pool is adaptive** rather than `AvgPool2d(7)`, which hardcodes a
 224px input. Below that, the pooling window is larger than the feature map and
