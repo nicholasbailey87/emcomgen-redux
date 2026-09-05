@@ -1,3 +1,14 @@
+# **This experiment no longer builds.** `ResNet18SmallInput` was removed on
+# 2026-09-06 when ShapeWorld's backbone became `ResNet56` -- He et al.'s CIFAR
+# network at 852,368 parameters -- so `feature_model` below names a class that
+# does not exist and `build_models` raises `AttributeError` on it. That is the
+# loud failure and it is the intended one: this arm is a record of runs that
+# happened against a network the repository no longer has, and pointing it at a
+# different backbone would silently change what it measured. See `[sender]
+# feature_model` in DEFAULT.toml. Same standing as
+# `experiments/silhouette_titration_norms/`, which `validate_config` already
+# rejects.
+#
 # conv4_silhouette_asymmetric: the backbone control, and the odd one out in this
 # folder. Arms 01 and 02 move the silhouette to the speaker and ask whether the
 # stochastic mixture is what holds shape back. This arm does not move it at all.

@@ -333,6 +333,62 @@ def clip_gradients(pair, max_norm):
     return norms
 
 
+def weight_norms(pair):
+    """
+    Each group's parameter norm, partitioned exactly as `clip_gradients`
+        partitions the gradients. See docs/measurement.md.
+
+    Recorded beside the `clip_*` columns and on the same optimiser step, because
+        the two are only readable against each other. BatchNorm makes a layer's
+        output invariant to the scale of its own weights, so the gradient is
+        orthogonal to `W` and its norm goes as `1/||W||`. A gradient norm that
+        moves inversely to the weight norm in the same row is therefore not a
+        gradient growing on its own; it is `||W||` collapsing, and the effective
+        rate `lr / ||W||^2` rising with it. A gradient norm that moves while the
+        weight norm sits still is the opposite finding and kills the reading.
+        `[optimiser] weight_decay` in DEFAULT.toml is the intervention these
+        columns are the measurement for.
+
+    The norm is taken the way `clip_grad_norm_` takes its own -- the 2-norm of
+        the per-tensor 2-norms, which is the 2-norm of the concatenation -- so a
+        `weight_*` column and the `clip_*` column beside it are the same
+        functional of the same set of tensors, one applied to `p` and one to
+        `p.grad`. One `tolist` at the end rather than an `item` per group, so
+        this costs one device synchronisation and not fifteen.
+
+    Args:
+        pair: the sender/receiver `Pair`
+
+    Returns:
+        `{group name: that group's parameter norm}`, with a key for every entry
+            of `builder.GROUP_NAMES` on every rung and `nan` where the group does
+            not exist on this architecture or holds nothing. The same
+            NaN-not-absent convention as `clip_gradients`, for the same reason:
+            the metrics header keeps its shape across a resume against a config
+            that toggles a stage.
+    """
+    names = []
+    stacked = []
+
+    # The NaN placeholder has to live where the parameters do, or the `stack`
+    # below mixes devices.
+    device = next(pair.parameters()).device
+
+    for name, params in models.builder.group_parameters(pair):
+        names.append(name)
+        stacked.append(
+            torch.linalg.vector_norm(
+                torch.stack(
+                    [torch.linalg.vector_norm(p.detach().float()) for p in params]
+                )
+            )
+            if params
+            else torch.tensor(float("nan"), device=device)
+        )
+
+    return dict(zip(names, torch.stack(stacked).cpu().tolist()))
+
+
 def prepare_batch(batch, dataloader, config):
     """
     One batch's four image/label tensors, scaled and on the device.
@@ -571,6 +627,13 @@ def run(
         stats.update(**{
             f"clip_{name}": norm for name, norm in
             clip_gradients(pair, config['optimiser']['clip_grad_norm']).items()
+        })
+
+        # The same groups' weight norms, on the same step and before it is
+        # taken. A `clip_*` column is only interpretable against the
+        # `weight_*` column beside it; see `weight_norms`.
+        stats.update(**{
+            f"weight_{name}": norm for name, norm in weight_norms(pair).items()
         })
 
         scaler.step(optimizer)

@@ -44,8 +44,9 @@ class ViT2(nn.Module):
         # It cost more than the arithmetic suggests. Measured on an A100 at 640
         #     images of 64px, fwd+bwd, bf16, compiled: 303ms at the old
         #     geometry against 118ms at this one, where the
-        #     `ResNet18SmallInput` these backbones are compared against runs in
-        #     81ms. The ViT was 3.75x the baseline's wall clock and is now
+        #     `ResNet18SmallInput` these backbones were compared against ran
+        #     in 81ms; ShapeWorld's backbone is `ResNet56` now, which is
+        #     smaller again. The ViT was 3.75x the baseline's wall clock and is now
         #     1.46x. See `scripts/vit_geometry_sweep.py`, which is the harness
         #     those numbers came from and can re-derive them.
         #
@@ -382,19 +383,155 @@ def ResNet18(*args, **kwargs):
     return rn18
 
 
-def ResNet18SmallInput(*args, **kwargs):
+class CifarBlock(nn.Module):
     """
-    `ResNet18` with SimCLR's small-image stem -- see `ResNet.__init__`.
+    He et al. 2015's CIFAR residual block: two 3x3 convolutions and an
+        *option A* shortcut.
 
-    A separate factory rather than a flag because the backbone is selected by
-        name from the config, so a name is the whole of the registration. Both
-        factories swallow their arguments, as every backbone factory here does.
+    A sibling of `SimpleBlock` rather than a configuration of it, because the
+        two differ in the one place a channel list cannot express. `SimpleBlock`
+        projects a widening shortcut through a 1x1 convolution and a BatchNorm
+        -- option B -- where this one subsamples the spatial axes by taking
+        every other pixel and zero-pads the channel axis. Option A carries no
+        parameters at all, which is why He et al. chose it for CIFAR: the
+        residual net then has exactly the parameter count of the plain net it is
+        being compared against, so the comparison is about the shortcut and not
+        about capacity. See section 4.2.
+
+    Args:
+        indim: input channels
+        outdim: output channels; may only be `indim` or a multiple of it
+        half_res: stride 2 on the first convolution, and on the shortcut
     """
-    return ResNet(
-        SimpleBlock,
-        [2, 2, 2, 2],
-        [64, 128, 256, 512],
-        flatten=True,
-        small_input_stem=True,
-    )
 
+    def __init__(self, indim, outdim, half_res):
+        super(CifarBlock, self).__init__()
+        self.indim = indim
+        self.outdim = outdim
+        self.half_res = half_res
+
+        self.C1 = nn.Conv2d(
+            indim,
+            outdim,
+            kernel_size=3,
+            stride=2 if half_res else 1,
+            padding=1,
+            bias=False,
+        )
+        self.BN1 = nn.BatchNorm2d(outdim)
+        self.C2 = nn.Conv2d(outdim, outdim, kernel_size=3, padding=1, bias=False)
+        self.BN2 = nn.BatchNorm2d(outdim)
+        self.relu1 = nn.ReLU(inplace=True)
+        self.relu2 = nn.ReLU(inplace=True)
+
+        self.parametrized_layers = [self.C1, self.C2, self.BN1, self.BN2]
+
+        self.shortcut_type = (
+            "identity" if (indim == outdim and not half_res) else "zero_pad"
+        )
+
+        for layer in self.parametrized_layers:
+            init_layer(layer)
+
+    def shortcut(self, x):
+        """
+        The identity, brought to the block's output shape without parameters.
+
+        Stride-2 subsampling rather than pooling, and zero padding split evenly
+            across the channel axis, which is what option A is. `F.pad`'s pad
+            list runs from the last axis backwards, so the channel pair is the
+            fifth and sixth entries.
+        """
+        if self.shortcut_type == "identity":
+            return x
+
+        if self.half_res:
+            x = x[:, :, ::2, ::2]
+
+        missing = self.outdim - self.indim
+
+        return F.pad(x, (0, 0, 0, 0, missing // 2, missing - missing // 2))
+
+    def forward(self, x):
+        out = self.C1(x)
+        out = self.BN1(out)
+        out = self.relu1(out)
+        out = self.C2(out)
+        out = self.BN2(out)
+        out = out + self.shortcut(x)
+        out = self.relu2(out)
+        return out
+
+
+class CifarResNet(nn.Module):
+    """
+    He et al. 2015 section 4.2's CIFAR-10 network at any depth `6n + 2`.
+
+    A separate class from `ResNet`, which is the ImageNet family and asserts
+        four stages. This one is three stages of `n` blocks at 16, 32 and 64
+        channels on a 3x3 stride-1 stem, with stride 2 at the first block of the
+        second and third stages, and a global average pool. There is no maxpool
+        and no widening beyond 64: the whole network is `6n + 2` weighted layers
+        and, at n = 9, 852,368 parameters.
+
+    Args:
+        n: blocks per stage. 9 gives ResNet-56.
+    """
+
+    def __init__(self, n):
+        super(CifarResNet, self).__init__()
+
+        conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False)
+        bn1 = nn.BatchNorm2d(16)
+        relu = nn.ReLU()
+
+        trunk = [conv1, bn1, relu]
+
+        indim = 16
+        for stage, outdim in enumerate([16, 32, 64]):
+            for block in range(n):
+                trunk.append(
+                    CifarBlock(indim, outdim, half_res=(stage >= 1 and block == 0))
+                )
+                indim = outdim
+
+        # As `ResNet`: adaptive, so nothing pins this backbone to one input
+        #     resolution. It runs on ShapeWorld's 64px images, where the last
+        #     stage is a 16x16 map.
+        trunk.append(nn.AdaptiveAvgPool2d((1, 1)))
+        trunk.append(Flatten())
+
+        self.trunk = nn.Sequential(*trunk)
+        self.final_feat_dim = indim
+
+        self.reset_parameters()
+
+    def forward(self, x):
+        return self.trunk(x)
+
+    def reset_parameters(self):
+        """
+        Re-initialise every layer exactly as `__init__` did, buffers included.
+
+        Recursing over `self.modules()` rather than over `self.trunk` is what
+            reaches the fifty-four convolutions inside the blocks; the same
+            mistake in `ResNet` left 11.1M of 11.18M parameters untouched by a
+            reset. See docs/anecdotes.md.
+        """
+        for module in self.modules():
+            if isinstance(module, (nn.Conv2d, nn.BatchNorm2d)):
+                init_layer(module)
+            if isinstance(module, nn.BatchNorm2d):
+                module.reset_running_stats()
+
+
+def ResNet56(*args, **kwargs):
+    """
+    `CifarResNet` at n = 9: 56 weighted layers, 852,368 parameters,
+        `final_feat_dim` 64.
+
+    ShapeWorld's backbone on both agents. A factory that swallows its arguments,
+        as every backbone factory here does, because the config selects a
+        backbone by name and a name is the whole of the registration.
+    """
+    return CifarResNet(9)

@@ -470,12 +470,52 @@ accumulator_steps = 4
 # undoes the 2026-08-31 halving in both places at once. The whole table is
 # flat at jayelm's own rate again -- see `[optimiser.module_lr]`.
 lr = 1e-4
-# 0.0 for both datasets -- `[birds.optimiser]` does not override it. jayelm uses
-# plain Adam with no decay, and bs6, the only run so far to reach the paper's
-# ShapeWorld numbers, set this to 0.0 explicitly. At 0.0 AdamW and Adam are the
-# same optimiser, so `class` above needs no accompanying override. The 0.01 it
-# replaces was never justified against a run that fitted its training set.
-weight_decay = 0.0
+# 0.1 for both datasets -- `[birds.optimiser]` does not override it. Non-zero
+# since 2026-09-06; it was 0.0, on the grounds that jayelm uses plain Adam with
+# no decay and that bs6, the only run to reach the paper's ShapeWorld numbers,
+# set it to 0.0 explicitly.
+#
+# **What it is for is the norm of the weights, not the size of the gradients.**
+# BatchNorm makes a layer's output exactly invariant to the scale of its own
+# weights, so the gradient is orthogonal to `W` and its norm goes as `1/||W||`
+# (van Laarhoven 2017; Arora, Li & Lyu 2019). The birds speaker's per-epoch mean
+# `clip_sender_vision` swings over five orders of magnitude -- 0.04 at epoch 16,
+# 5.9 at 32, 13,738 at 36, and an envelope reaching 241,760 by epoch 71 -- while
+# the listener stays between 0.6 and 4.9. Under that invariance a gradient norm
+# of 241,760 is not an independent quantity: it says some weight norms in the
+# trunk have collapsed. The effective rate is `lr / ||W||^2`, so a large step
+# shrinks `||W||`, which raises the effective rate, which takes a larger step.
+#
+# Under plain SGD that loop is benign -- the step stays orthogonal to `W`, so
+# `||W||^2` grows and the effective rate auto-decays. Under AdamW it is not: the
+# update is the gradient rescaled elementwise by `1/sqrt(v)` and is *not*
+# orthogonal to `W`, so `||W||` is free to fall, and `weight_decay = 0.0` removed
+# the one force that would pin it. Rung 3's recorded collapse is the same
+# dynamic running the other way -- `referent_spread` 0.221 -> 0.0040 with
+# `clip_sender_vision` decaying to 4e-4.
+#
+# **Read this as a floor against drift, not as the fix for the spikes.** AdamW's
+# decay is decoupled, `W <- W(1 - lr * lambda)`, so at 0.1 the per-step factor
+# is `lr / 10`. Over a 100-epoch run's 15,625 steps the *unopposed* shrinkage is
+# 1.6% at a backbone rate of 1e-5 and 14.5% at 1e-4. Nothing that weak competes
+# with a 241,760-norm gradient on the step where it arrives; what it does is stop
+# `||W||` wandering over tens of epochs. The diagnostic that says whether the
+# reading is right at all is the `weight_*` columns `train.py` records beside the
+# `clip_*` ones: if the two are inversely proportional, the spikes are BatchNorm's
+# scale invariance and the disease is a collapsing `||W||`.
+#
+# At 0.0 AdamW and Adam were the same optimiser and `class` above needed no
+# override; that is no longer true, and this is now genuinely decoupled AdamW.
+# Note the decay reaches only what `get_optimiser` gives a non-zero coefficient:
+# every parameter with two or more axes, scaled by `sqrt(fan_in / d_model)`.
+# Biases, norms, embeddings and every 0-d scalar are excluded, and so are the
+# BatchNorm gains -- see `builder.build_models`, which says why by name as well
+# as by shape.
+#
+# The 0.01 this replaced in an earlier revision was never justified against a run
+# that fitted its training set; 0.1 is justified against the mechanism above and
+# is measurable in the weight-norm columns rather than in the loss.
+weight_decay = 0.1
 clip_grad_norm = 1.0
 log_interval = 100
 
@@ -1003,7 +1043,34 @@ range_test = false
 
 [sender]
 class = "Sender"
-feature_model = "ResNet18SmallInput"
+# ShapeWorld's backbone on both agents; `[birds.sender]` overrides it with
+# `ResNet18`. He et al. 2015's CIFAR network at n = 9 -- 852,368 parameters,
+# `final_feat_dim` 64 -- and it replaces `ResNet18SmallInput`, which was
+# 11,168,832.
+#
+# The reason is the learning rate rather than the accuracy. jayelm's `--lr`
+# default of 1e-4 was tuned on `Conv4` at 113,088 parameters, and this repo has
+# been running it against 11.2M trained from random init. His CUB runs are not
+# a precedent for that: `run_cub.sh` passes `--pretrained_feat_model` on every
+# one, so 1e-4 there is fine-tuning from ImageNet weights. The rate has never
+# been measured at the size the ladder runs, and 99x is too far to assume it
+# travels. `experiments/baseline_lr_sweeps/` measures it; this key is the other
+# half, bringing the backbone back to a size at which the inherited rate is at
+# least arguable.
+#
+# It also closes a hole in the ladder. The backbone stable ran 113k and then
+# 11.2M with nothing between, so "the rate is wrong for this scale" and "the
+# rate is wrong for this architecture" could not be separated -- and the
+# Conv4/ViT2 comparison the ladder is built on was 0.11M against 10.3M. At
+# ~0.85M the CNN and the ViT are within 3% of each other; see
+# `[sender_feature_model]`.
+#
+# `ResNet18` is untouched and keeps its tensor-for-tensor torchvision pin, so
+# the birds arm is unaffected by this line. The two datasets therefore stop
+# being parameter-matched -- 0.85M against 11.2M -- which is deliberate given
+# CUB's 224px images, and is stated in the rung comments so that a
+# cross-dataset difference is not read as architecture.
+feature_model = "ResNet56"
 vision_dropout = 0.0    # On per-image embeddings, before pooling. jayelm's
                         # speaker has no dropout here, and it would stack a
                         # second regulariser on the same pathway.
@@ -1047,23 +1114,29 @@ heads = 5 # head_dim 64
 self_attention_dropout = 0.0
 
 [sender_feature_model]
-# The one ViT specification, used by every rung that swaps a CNN for a
-# Transformer on either agent. Sized against ResNet18's 11,176,512 parameters:
-# 320 wide, 10 layers, feedforward inner 576 comes to 10,317,986, or 92%. It was
-# 384/9/384 for birds and 128/4/128 for ShapeWorld, which matched each dataset's
-# own baseline backbone -- but `SenderTransformerLM` pins its width to the vision
-# model's, so the ShapeWorld language model inherited 128 and came out 12.8x
-# smaller than the GRU it is meant to be compared against. One width for both
-# datasets is what makes that comparison mean anything.
+# **ShapeWorld's ViT specification.** `[birds.sender_feature_model]` and
+# `[birds.receiver_feature_model]` pin CUB's, which is the 320/10/5/576 SwiGLU
+# stack this block used to hold for both datasets. The two are no longer the
+# same stack, and the reason is that each dataset is now matched to its own
+# baseline backbone rather than to the other dataset.
 #
-# `heads` is 5 for a head dimension of 64. Every attention module in the repo now
-# has that same head dimension -- see `[receiver_discriminator]`, which reaches it at
-# 256 wide with 4 heads. The previous rule was head_dim 32, chosen as broccoli's
-# 2D axial-RoPE floor; 64 clears that floor with room, so the constraint no
-# longer decides the number.
-d_model = 320 # Only applies to Transformer vision models
-layers = 10 # Only applies to Transformer vision models
-heads = 5 # head_dim 64. Only applies to Transformer vision models
+# 128 wide, 6 layers, 4 heads, feedforward inner 256 comes to **876,599**
+# parameters against `ResNet56`'s 852,368 -- 1.03x. That is the whole point of
+# the number: a ViT rung against a CNN rung is a comparison of architectures
+# only if the two are the same size, and until this change the ShapeWorld pair
+# was 0.11M of `Conv4` against 10.3M of ViT2, then 11.2M of
+# `ResNet18SmallInput` against 10.3M. The first was a 91x mismatch the ladder
+# carried for weeks. See `[sender] feature_model` for why the CNN moved.
+#
+# `heads` is 4 for a head dimension of 32, where the birds stack reaches 64 at
+# 5 heads on 320. 32 is broccoli's 2D axial-RoPE floor and clears it exactly,
+# so at this width the constraint decides the number again -- 2 heads would be
+# head_dim 64 and 8 would be 16, which is below the floor. The head dimension
+# is therefore no longer uniform across the repo; it is uniform *within* each
+# dataset's pair, which is the comparison the ladder actually makes.
+d_model = 128 # Only applies to Transformer vision models
+layers = 6 # Only applies to Transformer vision models
+heads = 4 # head_dim 32, broccoli's axial-RoPE floor. Transformer models only
 utility_tokens = 0 # Only applies to Transformer vision models
 # Architecture settings that used to be hardcoded in the model classes, and so
 # were neither recorded in a run's `args.json` nor sweepable. Every value here
@@ -1077,33 +1150,35 @@ utility_tokens = 0 # Only applies to Transformer vision models
 # geometry -- are derived rather than configured. The `cnn_*` group is inert
 # while `cnn` is False and stays in Python too.
 
-# 576 rather than the 554 the ResNet18 parameter budget solves for exactly, and
-# the two extra points of budget above buy alignment. SwiGLU makes this number
-# the shape of two matmuls -- `Linear(320 -> 2*ff_inner_size)` and
-# `Linear(ff_inner_size -> 320)` -- which between them are about 47% of the
-# ViT's FLOPs. bf16 is two bytes and the tensor-core kernels want 16-byte
-# aligned rows, so cuBLAS's fast path wants those dimensions to be multiples of
-# 8, and NVIDIA asks for 64 or 128 for good tile efficiency. 554 and its double
-# 1108 are neither; 576 is a multiple of 64 and 1152 a multiple of 128.
+# 256, which is `2 * d_model` and lands the stack 3% above `ResNet56`.
 #
-# 576 over the other aligned candidates because it stays closest to the budget.
-# 512 aligns no better in practice and drops the backbone to 86% of ResNet18,
-# four points *below* the target where 576 is two above; 552 is a multiple of 8
-# but not 64.
-#
-# Worth 1.2-2x on the affected matmuls at best, not the whole gap to the ~35
-# TFLOP/s per GPU the ImageNet ViT in `vit-representation-learning` sustains --
-# note that run reaches 896 (128 x 7) by setting `transformer_ff_ratio`, which
-# makes broccoli discard `ff_inner_size` entirely. See `compile` at the top of
-# this file for the other half, and `scripts/vit_throughput.py` to measure both.
-ff_inner_size = 576 # Only applies to Transformer vision models
+# The alignment argument that chose 576 for the birds stack still holds and is
+# satisfied for free here: bf16 is two bytes, the tensor-core kernels want
+# 16-byte aligned rows, and NVIDIA asks for multiples of 64 or 128 for good
+# tile efficiency. 256 is a multiple of both, and so is the 128 above it, so
+# every matmul in this stack is aligned without the number having to be chosen
+# for it. See `scripts/vit_throughput.py`.
+ff_inner_size = 256 # Only applies to Transformer vision models
 # Off, as in all four stacks below; the argument is at
 # [sender_language_model]. Not the stack that argument is about -- this one is
 # not inside the sampling loop -- but a bootstrap failure is not diagnosed with
 # regularisers running.
 stochastic_depth = 0.0 # Only applies to Transformer vision models
 depthwise_linear_stochastic_depth = true # ramp the rate linearly over depth
-activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
+# GELU rather than the SwiGLU the birds stack runs, and this is a parameter
+# decision as much as an activation one. SwiGLU's `linear_in` is double width
+# because it produces the gate alongside the value, so a block's feedforward
+# costs `3 * d * f` where GELU's costs `2 * d * f`. Measured at this shape:
+# 876,599 with GELU against 1,107,774 with SwiGLU, and the second is 1.30x
+# `ResNet56` where the first is 1.03x. There is no width at which SwiGLU both
+# matches the CNN and keeps `d_model` a sensible multiple of `heads`, so the
+# activation is what gives.
+#
+# It is a real difference between the two datasets' ViT rungs and not only an
+# accounting one. Nothing here claims GELU and SwiGLU are equivalent; what is
+# claimed is that within each dataset the ViT and the CNN are the same size,
+# which is the comparison each rung is making.
+activation = "GELU" # one of ReLU, GELU, SquaredReLU, SwiGLU
 # Rotary, and rotary only. There is no `absolute_position_embedding` key any
 # more: it is pinned False at every construction site in the repo.
 #
@@ -1501,7 +1576,10 @@ beta = "deepnorm"
 
 [receiver]
 class = "Receiver"
-feature_model = "ResNet18SmallInput"
+# Matched to `[sender] feature_model`, where the argument for it is. Both
+# agents move together: a rung that changed one backbone and not the other
+# would be measuring asymmetry rather than scale.
+feature_model = "ResNet56"
 # Two slots, not one `comparer`. The listener encodes the message and then scores
 # the candidates from that encoding, and until these were split a single key
 # chose both halves at once: swapping `BilinearGRUComparer` for
@@ -1564,16 +1642,19 @@ dropout = 0.1
 #     compose into a single mask at a rate neither knob names.
 
 [receiver_feature_model]
-d_model = 320 # Only applies to Transformer vision models
-layers = 10 # Only applies to Transformer vision models
-heads = 5 # head_dim 64. Only applies to Transformer vision models
+# ShapeWorld's ViT again, key for key. See [sender_feature_model] for the whole
+# argument -- 876,599 parameters against `ResNet56`'s 852,368, head_dim 32, and
+# GELU rather than SwiGLU because the gate would cost 1.30x the CNN.
+d_model = 128 # Only applies to Transformer vision models
+layers = 6 # Only applies to Transformer vision models
+heads = 4 # head_dim 32. Only applies to Transformer vision models
 utility_tokens = 0 # Only applies to Transformer vision models
 # See [sender_feature_model] for what these are and why they are here.
-ff_inner_size = 576 # Only applies to Transformer vision models
+ff_inner_size = 256 # Only applies to Transformer vision models
 # Off; see [sender_language_model].
 stochastic_depth = 0.0 # Only applies to Transformer vision models
 depthwise_linear_stochastic_depth = true
-activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
+activation = "GELU" # one of ReLU, GELU, SquaredReLU, SwiGLU
 relative_position_embedding = true
 pre_norm = false
 post_norm = true
@@ -1862,7 +1943,21 @@ augment_flip = false
 augment_affine_degrees = 0.0
 mixup_alpha = 0.0
 
-batch_size = 16
+# 32, with `[birds.optimiser] accumulator_steps` back to 1. The effective batch
+# is 32 either way and the step count is unchanged at 5,000 / 32 = 156.25 an
+# epoch, so nothing in the schedule or in any `lr * steps` traverse quoted in
+# this file moves.
+#
+# What moves is BatchNorm. Accumulation does not merge batch statistics -- each
+# micro-batch normalises against itself -- so at 16 images a micro-batch and 10
+# images a game the backbones were estimating their statistics from 160 images,
+# and now estimate them from 320. That is a model change rather than a schedule
+# change, which is why it is here and not inside a sweep: no birds run recorded
+# before it pools with one after it.
+#
+# It also saves one forward/backward per optimiser step, which the doubled
+# micro-batch pays for in memory rather than in time.
+batch_size = 32
 n_workers = 4
 n_examples = 10 # number of examples seen by agents, including distractors
 
@@ -1947,10 +2042,44 @@ eval_games_per_species = 16
 # 5,000 games at an effective batch of 32 restores the 156 steps an epoch that
 # 3,100 at 16 was producing, so no travel budget is given up and the epoch stays
 # a comparable clock across the two datasets.
-accumulator_steps = 2
+#
+# **1 since 2026-09-06, with `[birds.data] batch_size` doubled to 32 in the same
+# breath.** Everything above still describes the effective batch, which is
+# unchanged at 32, and so is the step count and every travel budget derived from
+# it. What the accumulation was costing that the batch does not is BatchNorm:
+# statistics are estimated per micro-batch and never merged, so the trunks were
+# normalising against 160 images where they now see 320. See `[birds.data]
+# batch_size`. The paragraph above is kept because the argument it makes -- that
+# the target is gradient variance and not step size -- is the argument for the
+# effective batch of 32, which this does not touch.
+accumulator_steps = 1
 
 [birds.sender]
 feature_model = "ResNet18"
+
+[birds.sender_feature_model]
+# **CUB's ViT specification, pinned rather than inherited.** These five keys
+# are exactly what `[sender_feature_model]` held before ShapeWorld's ViT was
+# narrowed to match `ResNet56`: 320 wide, 10 layers, 5 heads at head_dim 64,
+# feedforward inner 576, SwiGLU. They come to 11,332,626 parameters on CUB's
+# 224px images against `ResNet18`'s 11,176,512 -- 1.01x, which is the match the
+# birds rungs were built on.
+#
+# Without this block the ShapeWorld narrowing would have dragged the birds ViT
+# rungs down to 128 wide as well, matching them to a backbone the birds arm does
+# not run. Each dataset is internally matched; the two datasets no longer match
+# each other, and that is the deliberate consequence of `ResNet56` -- see
+# `[sender] feature_model`.
+#
+# Only the keys that differ are restated. Everything else in
+# `[sender_feature_model]` -- the geometry, the norms, the DeepNorm scaling, the
+# dropouts -- is shared and inherited, so an argument made there still governs
+# both datasets.
+d_model = 320
+layers = 10
+heads = 5 # head_dim 64
+ff_inner_size = 576
+activation = "SwiGLU"
 
 [birds.sender_language_model]
 # Neither exploration knob is overridden here, and both are doing work.
@@ -1989,6 +2118,14 @@ message_length = 10 # max message length. note this includes sos/eos token, i.e.
 
 [birds.receiver]
 feature_model = "ResNet18"
+
+[birds.receiver_feature_model]
+# CUB's ViT again, key for key; see `[birds.sender_feature_model]`.
+d_model = 320
+layers = 10
+heads = 5 # head_dim 64
+ff_inner_size = 576
+activation = "SwiGLU"
 
 [birds.receiver_language_model]
 message_length = 10 # Only applies to Transformer language models. Should be the same as sender_language_model.message_length

@@ -199,7 +199,20 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # architectural constant whose size is a function of two widths that are
         # already pinned, so a claim about it would restate them.
         # ShapeWorld: the CNN/GRU baseline.
-        ("01_shapeworld_baseline.toml", "sender.feat_model", 11_168_832),
+        #
+        # **Every ShapeWorld vision count below moved on 2026-09-06**, when the
+        # backbone became `ResNet56` -- He et al.'s CIFAR network at 852,368
+        # parameters -- and the ShapeWorld ViT2 was narrowed to 876,599 to match
+        # it. It was `ResNet18SmallInput` at 11,168,832 against a 320-wide ViT at
+        # 10,317,986, and `Conv4` at 113,088 against the same ViT before that:
+        # 91x. Neither arrangement was a comparison of architectures at a fixed
+        # size, which is what the ladder claims to be making. The birds counts
+        # are untouched -- `[birds.sender_feature_model]` pins CUB's ViT at the
+        # 320/10/5/576 SwiGLU stack it always had -- so the two datasets are no
+        # longer matched to each other, deliberately. See
+        # `test_the_shapeworld_backbones_are_matched`.
+        ("01_shapeworld_baseline.toml", "sender.feat_model", 852_368),
+        ("01_shapeworld_baseline.toml", "receiver.feature_model", 852_368),
         ("01_shapeworld_baseline.toml", "sender.language_model", 6_813_499),
         # The listener is two modules: `receiver.language_model` encodes the
         # message and `receiver.discriminator` scores the candidates from it.
@@ -225,12 +238,18 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # `Receiver` and neither held a parameter, so this count is unchanged by
         # the hoist. See test_score_scale.py.
         ("01_shapeworld_baseline.toml", "receiver.discriminator", 1_048_578),
-        # The interfaces. `discriminator_referents` is 512 -> 1024 with no bias
-        # and `discriminator_message` 1024 -> 1024 with one; the GRU declares no
-        # referent width, so there is no third. This is the whole of what
-        # replaced the listener's single adapter, which was 512 -> 1024
-        # through a SwiGLU block.
-        ("01_shapeworld_baseline.toml", "receiver.interfaces", 1_573_888),
+        # The interfaces. `discriminator_referents` is `final_feat_dim` -> 1024
+        # with no bias and `discriminator_message` 1024 -> 1024 with one; the GRU
+        # declares no referent width, so there is no third. This is the whole of
+        # what replaced the listener's single adapter.
+        #
+        # ShapeWorld reads 1,115,136 -- 64 * 1024 for the referents plus
+        # 1024 * 1024 + 1024 for the message -- where CUB reads 1,573,888 at
+        # `ResNet18`'s 512. The two used to agree at 512; they differ now because
+        # `ResNet56` emits 64, which is what a CIFAR network's last stage is
+        # wide. That narrowing is also why this number is worth pinning per
+        # dataset rather than once.
+        ("01_shapeworld_baseline.toml", "receiver.interfaces", 1_115_136),
         # **Every `sender.language_model` count here moved by one parameter
         # twice on 2026-09-05, and is back where it started.**
         # `[sender_language_model] normalise_logits` was defaulted to `false`
@@ -250,15 +269,20 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # ShapeWorld: the top of the ladder. The speaker's language model is the
         # causal arm at seven blocks -- see rung 9's `layers` for why seven, and
         # for the two depths before it.
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 10_317_986),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 876_599),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.feature_model", 876_599),
         ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 6_758_354),
         ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
         ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_198),
-        # Three interfaces here, and all of them narrow: 320 -> 256 twice for
-        # the two slots' referents and 256 -> 256 for the message. Against rung
-        # 13's 344,320 the difference is the message interface, which reads a
+        # Three interfaces here, and all of them narrow: `final_feat_dim` -> 256
+        # twice for the two slots' referents and 256 -> 256 for the message.
+        # Against rung 13 the difference is the message interface, which reads a
         # 256-wide encoded message rather than a 1024-wide GRU state.
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.interfaces", 229_632),
+        #
+        # ShapeWorld reads 131,328 -- 128 * 256 twice plus 256 * 256 + 256 --
+        # against CUB's 229,632 at the 320-wide birds ViT. The referent side is
+        # where the two datasets' ViT widths show up.
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.interfaces", 131_328),
         # CUB: the CNN/GRU baseline.
         ("02_birds_baseline.toml", "sender.feat_model", 11_176_512),
         ("02_birds_baseline.toml", "sender.language_model", 6_822_649),
@@ -301,15 +325,19 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # readout.
         ("13_shapeworld_attention_discriminator.toml", "receiver.discriminator", 2_384_198),
         ("14_birds_attention_discriminator.toml", "receiver.discriminator", 2_384_198),
-        # Where the 13 -> 15 difference went: 320 -> 256 for the referents and
-        # 1024 -> 256 for the GRU's state, against rung 15's 229,632. The
-        # language model declares no referent width on this rung, so there are
-        # two interfaces here and three there.
-        ("13_shapeworld_attention_discriminator.toml", "receiver.interfaces", 344_320),
+        # Where the 13 -> 15 difference went: `final_feat_dim` -> 256 for the
+        # referents and 1024 -> 256 for the GRU's state. The language model
+        # declares no referent width on this rung, so there are two interfaces
+        # here and three there, and the message interface is the expensive one.
+        #
+        # ShapeWorld reads 295,168 -- 128 * 256 plus 1024 * 256 + 256 -- against
+        # rung 15's 131,328. CUB reads 344,320 against rung 16's 229,632, which
+        # is the same arithmetic at 320.
+        ("13_shapeworld_attention_discriminator.toml", "receiver.interfaces", 295_168),
         ("14_birds_attention_discriminator.toml", "receiver.interfaces", 344_320),
         # The two intermediate vision swaps, so a rung that stopped inheriting
         # the shared ViT specification shows up here rather than in a run.
-        ("03_shapeworld_sender_vit.toml", "sender.feat_model", 10_317_986),
+        ("03_shapeworld_sender_vit.toml", "sender.feat_model", 876_599),
         ("04_birds_sender_vit.toml", "sender.feat_model", 11_332_626),
         # And the prototyper, which is one scoring direction and a bias per
         # polarity, where rung 3's is nothing at all. 2,050 rather than the 642
@@ -327,6 +355,121 @@ def test_the_arms_are_the_sizes_they_claim(config_file, module, expected):
         submodule = getattr(submodule, part)
 
     assert _count(submodule) == expected
+
+
+def test_the_shapeworld_backbones_are_matched():
+    """
+    The claim `ResNet56` exists to make, asserted directly rather than left to
+    be inferred from the two rows in the table above.
+
+    Both numbers are stated in DEFAULT.toml as the reason for the sizes chosen
+    there, so both are pinned here: 852,368 for the CNN, which is `6n + 2` at
+    n = 9 and is within 1% of the 0.85M the architecture is known by, and
+    876,599 for the ViT, which is what 128 / 6 / 4 / 256 with GELU comes to. The
+    ratio is the point -- a ViT rung against a CNN rung measures architecture
+    only if the two are the same size -- and 3% is the band the feedforward
+    width can be tuned to at this depth.
+
+    The `Conv4` and `ResNet18` numbers are here as the contrast: this pair used
+    to be 0.11M against 10.3M.
+    """
+    _, baseline = _pair("01_shapeworld_baseline.toml")
+    _, transformer = _pair("03_shapeworld_sender_vit.toml")
+
+    cnn = _count(baseline.sender.feat_model)
+    vit = _count(transformer.sender.feat_model)
+
+    assert cnn == 852_368
+    assert abs(cnn - 850_000) / 850_000 < 0.01, f"{cnn:,} is not 0.85M"
+    assert vit == 876_599
+
+    assert abs(vit / cnn - 1.0) < 0.03, f"{vit / cnn:.3f}x"
+
+    # Both agents, and both on the same backbone as their partner. A rung that
+    # moved one and not the other would be measuring asymmetry.
+    assert _count(baseline.receiver.feature_model) == cnn
+    _, receiver_vit = _pair("11_shapeworld_receiver_vit.toml")
+    assert _count(receiver_vit.receiver.feature_model) == vit
+
+
+@pytest.mark.parametrize(
+    "config_file",
+    ["01_shapeworld_baseline.toml", "02_birds_baseline.toml"],
+)
+def test_nothing_that_should_be_undecayed_is_decayed(config_file):
+    """
+    `[optimiser] weight_decay` is 0.1 rather than 0.0 since 2026-09-06, so which
+    parameters `get_optimiser` hands a non-zero coefficient stopped being a
+    question with only one answer.
+
+    Two things have to hold and neither is obvious from the config. First, no
+    bias, normalisation gain, embedding table or lone scalar may be decayed --
+    `gradboard` excludes them by name and, independently, gives every parameter
+    with fewer than two axes a coefficient of 0.0, and `builder.build_models`
+    adds `"bn"` to the keyword list because this repository's BatchNorm gains
+    are named `BN1` and `BN2` and match none of the stock keywords.
+
+    Second, a module moved to a rate of its own must *keep* its decay.
+    `_regroup` used to add every new group at `weight_decay = 0.0`, which was
+    inert while the base was 0.0 and would have switched the decay off under
+    exactly the two modules `experiments/baseline_lr_sweeps/` moves.
+    """
+    config = parse_config.get_config(rung(config_file))
+    config["cuda"] = False
+    config["optimiser"]["weight_decay"] = 0.1
+    # As the sweep does: both backbones off the base rate, so both are split
+    # into groups of their own on the way through `split_out_module`.
+    config["optimiser"]["module_lr"]["sender_vision"] = 1e-5
+    config["optimiser"]["module_lr"]["receiver_vision"] = 1e-5
+
+    class _Dataset:
+        n_feats = _feats(config_file)
+        name = _name(config_file)
+
+    class _Loader:
+        dataset = _Dataset()
+
+    built = models.builder.build_models({"train": _Loader()}, config)
+    pair, optimiser = built["pair"], built["optimiser"]
+
+    names = {id(p): n for n, p in pair.named_parameters()}
+    decayed = {
+        names[id(p)]
+        for group in optimiser.param_groups
+        if group["weight_decay"] != 0.0
+        for p in group["params"]
+    }
+
+    exposed = [
+        n for n in decayed
+        if any(k in n.lower() for k in ("bias", "norm", "embedding", "beta", "bn"))
+    ]
+    assert not exposed, f"decayed by name: {sorted(exposed)}"
+
+    shapes = {id(p): p.dim() for _, p in pair.named_parameters()}
+    flat = [n for n in decayed if shapes[id(dict(pair.named_parameters())[n])] < 2]
+    assert not flat, f"decayed 0-d or 1-d: {sorted(flat)}"
+
+    for module, group_name in (
+        (pair.sender.feat_model, "sender_vision"),
+        (pair.receiver.feature_model, "receiver_vision"),
+    ):
+        moved = {id(p) for p in module.parameters()}
+        still_decayed = sum(
+            1
+            for group in optimiser.param_groups
+            if group["weight_decay"] != 0.0
+            for p in group["params"]
+            if id(p) in moved
+        )
+        assert still_decayed, (
+            f"{group_name} was moved to its own rate and lost its weight decay"
+        )
+        assert all(
+            group["lr"] == 1e-5
+            for group in optimiser.param_groups
+            if any(id(p) in moved for p in group["params"])
+        ), f"{group_name} did not all move to the configured rate"
 
 
 @pytest.mark.parametrize(

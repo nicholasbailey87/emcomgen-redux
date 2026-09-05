@@ -80,7 +80,7 @@ def _backbones():
     return [
         ("Conv4", vision.Conv4(), SHAPEWORLD_FEATS),
         ("ResNet18", vision.ResNet18(), BIRDS_FEATS),
-        ("ResNet18SmallInput", vision.ResNet18SmallInput(), SHAPEWORLD_FEATS),
+        ("ResNet56", vision.ResNet56(), SHAPEWORLD_FEATS),
         (
             "ViT2",
             vision.ViT2(n_feats=SHAPEWORLD_FEATS, **config["sender_feature_model"]),
@@ -137,39 +137,86 @@ def _still_perturbed(module):
     return stale
 
 
-def test_resnet18_small_input_stem():
+def test_resnet56_is_he_et_als_cifar_network():
     """
-    `ResNet18SmallInput` is `ResNet18` with SimCLR's CIFAR stem, and the reason
-    for it is resolution rather than parameters.
+    ShapeWorld's backbone, pinned layer for layer against He et al. 2015 §4.2.
 
-    The stock stem downsamples 4x before any residual block -- 7x7 stride 2 then
-    a 3x3 stride-2 maxpool -- which on ShapeWorld's 64px images leaves a 2x2 map
-    at the end for the adaptive pool to average. Colour survives that; shape does
-    not. With the small-input stem the same input reaches the last stage as 8x8.
+    `6n + 2` at n = 9: a 3x3 stride-1 stem at 16 channels, three stages of nine
+    blocks at 16 / 32 / 64, stride 2 at the first block of the second and third
+    stages, global average pool, no maxpool anywhere. 55 convolutions here
+    rather than 56 weighted layers because the classifier this repository does
+    not have is the 56th.
+
+    The parameter count is the reason the backbone was swapped at all, so it is
+    exact: jayelm's `--lr` default of 1e-4 was tuned on `Conv4` at 113,088, and
+    `ResNet18SmallInput` ran it at 11,168,832. See `[sender] feature_model` in
+    DEFAULT.toml.
     """
-    stock = vision.ResNet18()
-    small = vision.ResNet18SmallInput()
+    model = vision.ResNet56()
 
-    stem = small.trunk[0]
+    stem = model.trunk[0]
     assert isinstance(stem, torch.nn.Conv2d)
     assert (stem.kernel_size, stem.stride, stem.padding) == ((3, 3), (1, 1), (1, 1))
-    assert not any(isinstance(m, torch.nn.MaxPool2d) for m in small.modules())
-    assert any(isinstance(m, torch.nn.MaxPool2d) for m in stock.modules())
+    assert stem.out_channels == 16
+    assert not any(isinstance(m, torch.nn.MaxPool2d) for m in model.modules())
 
-    # 3*3*3*64 against 7*7*3*64, and the maxpool has none.
-    assert sum(p.numel() for p in stock.parameters()) == 11_176_512
-    assert sum(p.numel() for p in small.parameters()) == 11_168_832
+    blocks = [m for m in model.modules() if isinstance(m, vision.CifarBlock)]
+    assert len(blocks) == 27
+    assert [b.outdim for b in blocks] == [16] * 9 + [32] * 9 + [64] * 9
+    assert [i for i, b in enumerate(blocks) if b.half_res] == [9, 18]
 
-    # Same depth, so `ResNet.reset_parameters`' 20-convolution expectation and
-    # everything keyed to it still hold.
-    convs = [m for m in small.modules() if isinstance(m, torch.nn.Conv2d)]
-    assert len(convs) == 20
+    convs = [m for m in model.modules() if isinstance(m, torch.nn.Conv2d)]
+    assert len(convs) == 55
 
-    assert small.final_feat_dim == stock.final_feat_dim == 512
+    assert sum(p.numel() for p in model.parameters()) == 852_368
+    assert model.final_feat_dim == 64
 
 
-def test_small_input_stem_keeps_more_of_a_small_image():
-    """The claim the stem swap is actually for, measured rather than asserted."""
+def test_the_option_a_shortcut_holds_no_parameters():
+    """
+    What "faithful" means here, and the reason `CifarBlock` exists beside
+    `SimpleBlock` rather than being a channel list passed to it.
+
+    He et al. chose option A for CIFAR precisely so the residual network has the
+    same parameter count as the plain network it is compared against: the
+    identity is carried by subsampling the spatial axes and zero-padding the
+    channel axis, and neither costs a weight. `SimpleBlock` does option B, a 1x1
+    projection with a BatchNorm after it, which does.
+    """
+    widening = vision.CifarBlock(16, 32, half_res=True)
+    same = vision.CifarBlock(16, 16, half_res=False)
+
+    assert widening.shortcut_type == "zero_pad"
+    assert same.shortcut_type == "identity"
+
+    # Two 3x3 convolutions and two BatchNorms, and nothing else. A 1x1
+    # projection would add 16*32 here and its BatchNorm another 64.
+    assert sum(p.numel() for p in widening.parameters()) == (
+        16 * 32 * 9 + 32 * 32 * 9 + 2 * 2 * 32
+    )
+
+    x = torch.randn(2, 16, 8, 8)
+    with torch.no_grad():
+        assert widening.shortcut(x).shape == (2, 32, 4, 4)
+        # The padding is split evenly across the channel axis, and the surviving
+        # channels are the input's own, untouched.
+        assert torch.equal(widening.shortcut(x)[:, 8:24], x[:, :, ::2, ::2])
+        assert (widening.shortcut(x)[:, :8] == 0).all()
+        assert (widening.shortcut(x)[:, 24:] == 0).all()
+
+
+def test_resnet56_keeps_more_of_a_small_image_than_either_resnet18():
+    """
+    The resolution claim, measured rather than asserted, and the reason a CIFAR
+    network is the right shape for a 64px dataset.
+
+    ResNet-18's ImageNet stem downsamples 4x before any residual block -- 7x7
+    stride 2 then a 3x3 stride-2 maxpool -- which leaves ShapeWorld's 64px
+    images as a 2x2 map for the adaptive pool to average. Colour survives that;
+    shape does not. `ResNet18SmallInput`, which this backbone replaces, reached
+    8x8 by dropping the stem's downsampling. ResNet-56 reaches 16x16, because it
+    downsamples twice rather than four times in total.
+    """
     x = torch.randn(2, 3, *SHAPEWORLD_FEATS[1:])
 
     def pre_pool(model):
@@ -179,16 +226,37 @@ def test_small_input_stem_keeps_more_of_a_small_image():
             return trunk(x).shape[-2:]
 
     assert tuple(pre_pool(vision.ResNet18())) == (2, 2)
-    assert tuple(pre_pool(vision.ResNet18SmallInput())) == (8, 8)
+    assert tuple(pre_pool(vision.ResNet56())) == (16, 16)
 
 
-def test_small_input_stem_is_still_resolution_independent():
+def test_resnet56_is_still_resolution_independent():
     """It is the ShapeWorld backbone, but nothing should pin it to 64px."""
-    model = vision.ResNet18SmallInput().eval()
-    for size in (64, 112, 224):
+    model = vision.ResNet56().eval()
+    for size in (32, 64, 112, 224):
         with torch.no_grad():
             out = model(torch.randn(1, 3, size, size))
         assert out.shape == (1, model.final_feat_dim)
+
+
+def test_resnet56_reset_parameters_reaches_every_block():
+    """
+    The mistake `ResNet.reset_parameters` made, pinned on the new class before
+    it can be made again: walking `self.trunk` and calling `reset_parameters()`
+    on whatever has one skipped every residual block, because a block does not
+    have one. Here that would be 54 convolutions of 55.
+
+    Coverage is asserted per block rather than over the model as a whole, so a
+    reset that reached the stem and stopped cannot pass.
+    """
+    model = vision.ResNet56()
+    _perturb(model)
+    model.reset_parameters()
+
+    for name, block in model.named_modules():
+        if not isinstance(block, vision.CifarBlock):
+            continue
+        stale = _still_perturbed(block)
+        assert not stale, f"{name} kept {stale}"
 
 
 def test_every_backbone_constructs_and_forwards():

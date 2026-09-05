@@ -17,8 +17,11 @@ identical either way (10,319,266 at 64px), because stride does not appear in any
 weight shape.
 
 This script times the candidates against each other and, with
-`--include-resnet`, against `ResNet18SmallInput`, which is the backbone the ViT
-rungs are replacing and so the wall-clock number to beat.
+`--include-resnet`, against `ResNet56`, which is the backbone the ViT rungs are
+replacing on ShapeWorld and so the wall-clock number to beat. It was
+`ResNet18SmallInput` until 2026-09-06; the reference figures below were measured
+against that one and are kept because the ViT geometries they rank are unchanged,
+but the ResNet row a run of this script prints now is a much smaller network.
 
     kernel stride pad   grid  tokens   MACs/img   what it is
     ------ ------ ---   ----  ------   --------   ----------------------------
@@ -27,7 +30,8 @@ rungs are replacing and so the wall-clock number to beat.
        6      6     1   11x11    121   1.30 G     middle, one row of padding
        8      8     0    8x8      64   0.67 G     standard ViT tokenization
 
-`ResNet18SmallInput` at 64px is 2.22 GMAC, for reference. Note the current ViT
+`ResNet18SmallInput` at 64px was 2.22 GMAC, for reference; `ResNet56` is
+smaller again, at 852,368 parameters against 11,168,832. Note the current ViT
 is only ~1.5x the ResNet's arithmetic, so if it is much slower than that in
 practice the gap is throughput rather than work -- which is what the TFLOP/s
 column here is for.
@@ -54,21 +58,25 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
 
 import models.backbone.vision as vision  # noqa: E402
-from models.backbone.vision import ViT2, ResNet18SmallInput  # noqa: E402
+from models.backbone.vision import ViT2, ResNet56  # noqa: E402
 
 
-# [sender_feature_model] in DEFAULT.toml, verbatim. The geometry is *not* here,
-# because it is derived inside `ViT2` rather than configured -- overriding it is
-# what `geometry_override` below exists for.
+# [sender_feature_model] in DEFAULT.toml, which is ShapeWorld's stack: this
+# script runs at 64px and prints a `ResNet56` row beside it, so it has to be the
+# pair the ladder actually compares. It was 320 / 10 / 5 / 576 with SwiGLU until
+# 2026-09-06, which is `[birds.sender_feature_model]` now -- pass those by hand
+# to re-measure the CUB stack. The geometry is *not* here, because it is derived
+# inside `ViT2` rather than configured; overriding it is what
+# `geometry_override` below exists for.
 SPEC = dict(
-    d_model=320,
-    layers=10,
-    heads=5,
+    d_model=128,
+    layers=6,
+    heads=4,
     utility_tokens=0,
-    ff_inner_size=576,
+    ff_inner_size=256,
     stochastic_depth=0.1,
     depthwise_linear_stochastic_depth=True,
-    activation="SwiGLU",
+    activation="GELU",
     relative_position_embedding=True,
     pre_norm=False,
     post_norm=True,
@@ -216,7 +224,7 @@ def main():
     parser.add_argument(
         "--include-resnet",
         action="store_true",
-        help="also time ResNet18SmallInput, the backbone the ViT rungs replace",
+        help="also time ResNet56, the backbone the ViT rungs replace",
     )
     parser.add_argument(
         "--no-compile",
@@ -274,7 +282,7 @@ def main():
     if args.include_resnet:
         print()
         def build_resnet():
-            return ResNet18SmallInput()
+            return ResNet56()
 
         params = sum(p.numel() for p in build_resnet().parameters())
         flops = flops_per_image(build_resnet, args.image_size)
@@ -287,7 +295,7 @@ def main():
             epoch_minutes = seconds * (IMAGES_PER_EPOCH / args.batch_images) / 60
             speedup = baseline[compile_model] / epoch_minutes
             print(
-                f"{'ResNet18SmallInput':>22} {'-':>7} {params:>11,} "
+                f"{'ResNet56':>22} {'-':>7} {params:>11,} "
                 f"{str(compile_model):>8} {seconds * 1e3:>9.1f} {tflops:>9.1f} "
                 f"{peak:>9.2f} {epoch_minutes:>7.1f}m {speedup:>6.2f}x"
             )

@@ -11,7 +11,7 @@ from .model_util import LinearInterface
 
 from torch import nn
 
-from gradboard.optimiser import get_optimiser
+from gradboard.optimiser import EXCLUDE_FROM_WEIGHT_DECAY, get_optimiser
 
 def _regroup(optimiser, selected, lr):
     """
@@ -33,14 +33,37 @@ def _regroup(optimiser, selected, lr):
     """
     identities = {id(p) for p in selected}
 
-    for group in optimiser.param_groups:
-        group["params"] = [p for p in group["params"] if id(p) not in identities]
+    # Each parameter keeps the `weight_decay` `get_optimiser` gave it, so one
+    #     new group is added per decay level the selection spans -- usually one.
+    #
+    # This used to add a single group at `weight_decay = 0.0`, and the
+    #     justification in docs/training.md was that the parameters it moved
+    #     were already undecayed. That was true of the lone scalars
+    #     `split_out_parameter` moves, which are 0-dimensional and so take
+    #     `get_optimiser`'s 0.0 branch whatever their name. It was never true of
+    #     `split_out_module`, which moves whole backbones, and it was inert only
+    #     because `[optimiser] weight_decay` was 0.0. At the 0.1 that key now
+    #     carries, a module given a rate of its own would silently be the one
+    #     module with no decay -- and `experiments/baseline_lr_sweeps/` moves
+    #     exactly the two modules the decay is aimed at, so the sweep would have
+    #     measured the rate with the decay switched off underneath it.
+    moved = {}
 
-    # `weight_decay` 0.0 to match what `get_optimiser` gave all of these; see
-    #     docs/training.md.
-    optimiser.add_param_group(
-        {"params": selected, "lr": lr, "weight_decay": 0.0}
-    )
+    for group in optimiser.param_groups:
+        keep, take = [], []
+
+        for parameter in group["params"]:
+            (take if id(parameter) in identities else keep).append(parameter)
+
+        group["params"] = keep
+
+        if take:
+            moved.setdefault(group["weight_decay"], []).extend(take)
+
+    for weight_decay, params in moved.items():
+        optimiser.add_param_group(
+            {"params": params, "lr": lr, "weight_decay": weight_decay}
+        )
 
     return optimiser
 
@@ -661,12 +684,33 @@ def build_models(dataloaders, config):
     # `eps` is passed rather than left at `get_optimiser`'s 1e-8 default, and
     #     `add_param_group` fills it into every group `split_out_*` adds below.
     #     See `[optimiser] eps` in DEFAULT.toml for why it is far smaller here.
+    #
+    # `exclude_keywords` extends `gradboard`'s own list with `"bn"`, which is
+    #     how this repository's BatchNorm scale parameters are named:
+    #     `SimpleBlock` and `CifarBlock` call theirs `BN1` and `BN2`, so
+    #     `trunk.3.BN1.weight` matches none of "nondecay", "bias", "norm",
+    #     "embedding" or "beta" where the transformers' `post_mlp_norm.weight`
+    #     matches "norm".
+    #
+    # It changes nothing today, and is here to say so deliberately rather than
+    #     to leave it resting on a coincidence. `get_optimiser` assigns a decay
+    #     coefficient of 0.0 to every parameter with fewer than two dimensions,
+    #     and a BatchNorm gain is 1-dimensional, so the gains are already
+    #     undecayed by shape whatever their name -- measured on rung 2 at
+    #     `weight_decay = 0.1`: all forty gains sit in a group with
+    #     `weight_decay` 0.0, with and without this keyword. What the keyword
+    #     buys is that the exclusion stays true if a normalisation parameter
+    #     ever arrives with a second axis, which the shape rule would not catch
+    #     and which would matter: gamma sits *after* the normalisation and is
+    #     not scale-invariant, so decaying it genuinely shrinks the layer's
+    #     output rather than being absorbed.
     optimiser = get_optimiser(
         pair,
         config['sender_language_model']['d_model'],
         lr=config['optimiser']['lr'],
         weight_decay=config['optimiser']['weight_decay'],
         eps=config['optimiser']['eps'],
+        exclude_keywords=EXCLUDE_FROM_WEIGHT_DECAY + ["bn"],
     )
 
     base_lr = config['optimiser']['lr']

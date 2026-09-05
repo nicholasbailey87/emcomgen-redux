@@ -31,7 +31,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "code"))
 from models.backbone.vision import ViT2  # noqa: E402
 
 
-# [sender_feature_model] in DEFAULT.toml, verbatim apart from `ff_inner_size`,
+# `[birds.sender_feature_model]` in DEFAULT.toml, verbatim apart from
+# `ff_inner_size`, which is what this sweeps. It was `[sender_feature_model]`
+# until 2026-09-06, when ShapeWorld's stack narrowed to 128 / 6 / 4 / 256 with
+# GELU to match `ResNet56`; the alignment argument this script measures is about
+# multiples of 64 and holds at either width, and 320 is the wider and so the
+# more informative one to measure it at.
 # which is what the sweep varies.
 SPEC = dict(
     d_model=320,

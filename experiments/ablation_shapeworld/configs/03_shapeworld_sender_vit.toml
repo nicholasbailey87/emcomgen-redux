@@ -1,14 +1,27 @@
 # Rung 3: rung 1 with a Transformer sender vision model.
 #
-# ViT2 at the shared specification comes to 10,317,986 parameters on
-# ShapeWorld's 64px images, against ResNet18SmallInput's 11,168,832 -- 0.92x.
+# ViT2 at ShapeWorld's specification comes to 876,599 parameters on its 64px
+# images, against `ResNet56`'s 852,368 -- 1.03x, and the closest this rung has
+# ever been to the arm it is compared against. It was 10,317,986 against
+# `ResNet18SmallInput`'s 11,168,832 until 2026-09-06, and 10,317,986 against
+# `Conv4`'s 113,088 before that: a 91x mismatch on the rung whose whole claim is
+# that only the architecture moved. See `[sender_feature_model]` in DEFAULT.toml.
+#
+# **The two datasets are no longer the same ViT, and no longer the same size.**
+# ShapeWorld runs 128 / 6 / 4 / 256 with GELU here; CUB runs the 320 / 10 / 5 /
+# 576 SwiGLU stack this file used to describe, pinned in
+# `[birds.sender_feature_model]`. Each dataset is matched to its own baseline
+# backbone -- 0.85M on ShapeWorld, 11.2M on CUB -- because CUB's 224px images do
+# not want a CIFAR network. A rung 3 / rung 4 difference therefore covers the
+# dataset, the image size *and* two different networks, and is not an
+# architecture result. Read each arm against the rung below it, never across.
 #
 # Note the ViT is *not* the same size on both datasets even at identical
 # settings, because its patch tokeniser scales with the image. At 64px the
-# pooling kernel is 8 and each token carries 8*8*3 = 192 channels; at 224px the
-# kernel is 28 and each token carries 2352. Both land on the same 17x17 token
-# grid, so only the tokeniser differs -- but it differs by 1,014,640 parameters.
-# See rung 4 for the birds figure.
+# pooling kernel is 6 and each token carries 6*6*3 = 108 channels; at 224px the
+# kernel is 20 and each token carries 1200. That was true when the two stacks
+# were otherwise identical and is one of the reasons matching them to each other
+# was never quite reachable. See rung 4 for the birds figure.
 #
 # The vision swap comes *before* the prototyper now, where the old ladder took
 # them the other way round. Two reasons. The prototyper pools the backbone's

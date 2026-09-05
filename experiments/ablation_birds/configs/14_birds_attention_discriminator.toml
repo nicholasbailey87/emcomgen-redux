@@ -63,11 +63,23 @@ contrast = true
 language_model = "SenderTransformerLM"
 
 [sender_language_model]
-# Both must equal `sender_feature_model.d_model`: `SenderTransformerLM`
-# layer-norms the incoming prototypes at its own `d_model` and separately
-# rejects `token_embedding_size != referent_embedding_size`. That pinning is
-# why rung 3 has to come before this one -- a Transformer speaker on top of a
-# CNN backbone would inherit whatever width the CNN emits.
+# The two must equal *each other*, and neither has anything to do with the
+# vision model's width. `SenderTransformerLM` layer-norms the incoming
+# prototypes at its own `d_model` and separately rejects
+# `token_embedding_size != referent_embedding_size`, so these two are pinned
+# together -- but the referents arrive already at this `d_model`:
+# `builder.build_models` sets `sender_referent_width` from *this* table and the
+# speaker's adapter brings `final_feat_dim` to it, whatever the backbone emits.
+#
+# The comment this replaces said both keys "must equal
+# `sender_feature_model.d_model`". That was true of the speaker before the
+# adapter landed and has been false since; verified by building rung 13 with a
+# 128-wide vision model under a 320-wide language model. It is worth naming
+# rather than deleting, because ShapeWorld's ViT2 is 128 wide now -- narrowed to
+# match `ResNet56` -- and under the old reading that narrowing would have
+# dragged this stack, and the whole capacity match against the GRU baseline,
+# down with it. Rung 3 still comes before this one, but for the ordering of the
+# ladder rather than for a width constraint.
 token_embedding_size = 320
 d_model = 320
 heads = 5    # head_dim 64, as everywhere
