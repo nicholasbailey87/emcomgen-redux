@@ -31,6 +31,9 @@ feature_model = "Conv4"
 [data]
 silhouette_p_sender = 0.9
 silhouette_p_receiver = 0.0
+augment_flip = true
+augment_affine_degrees = 10.0
+mixup_alpha = 1.0
 
 [scheduler]
 epochs = 100

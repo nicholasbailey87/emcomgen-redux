@@ -19,13 +19,28 @@
 # only thing a message can be about, and every gradient the speaker receives is
 # a clean one about shape.
 #
-# **The known escape is not evidence against this.** The 10 August run at
-# `a496f01` reached 0.859 on `test_acc_md_shape` at `p_sender = 0.0,
-# p_receiver = 0.5` -- the same rates the mixup arm ran and failed at. What
-# differs between them is the augmentations, not the silhouette. That is a
-# separate question and this arm does not address it: `augment_flip` and
-# `augment_affine_degrees` are left at their defaults here for the same reason
-# the silhouette reference leaves them there.
+# **Why the augmentations are on.** They were off in the first version of this
+# arm, and the 2026-09-05 partial run says why they cannot be. Without them the
+# listener memorises the twenty stored images of a game: train accuracy ran to
+# 0.66 by epoch 40 while `train_acc - train_shuffled_message_acc` stayed at
+# zero to four decimals, so the message bought nothing at all, and
+# `train_acc_md_color` reached 0.660 -- level with shape -- even though a
+# speaker silhouetted at 1.0 cannot see colour and no colour information can
+# reach the listener from anywhere. `test_same` stayed flat at ~0.52 while
+# train climbed eight points. That is memorisation, not communication.
+#
+# The two interventions do different jobs and neither is sufficient alone. The
+# augmentations suppress the memorisation and get a message worth something:
+# `conv4_mixup_silhouetting` held train flat at 0.555 and reached
+# `test_acc - test_shuffled_message_acc` of +0.065. The speaker-side silhouette
+# is what stops that message being about colour, which is where that arm
+# failed -- 0.77 on `test_avg_acc_md_color`, shape at chance throughout. This
+# folder runs both at once.
+#
+# It also means these arms are no longer one variable against
+# `conv4_silhouette_reference`. They are one variable against
+# `conv4_mixup_silhouetting`, which carries the same three augmentation keys and
+# differs only in where the silhouette sits.
 #
 # **Read the train-side columns, not just the eval ones.** `shapeworld.py`
 # hard-codes every eval split to `silhouette_p_sender = 0.0` with no key to
@@ -52,6 +67,9 @@ feature_model = "Conv4"
 [data]
 silhouette_p_sender = 1.0
 silhouette_p_receiver = 0.0
+augment_flip = true
+augment_affine_degrees = 10.0
+mixup_alpha = 1.0
 
 [scheduler]
 epochs = 100
