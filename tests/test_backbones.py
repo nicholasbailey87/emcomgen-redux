@@ -340,17 +340,27 @@ def test_agent_reset_parameters_covers_every_parameter():
         assert not stale, f"{name}: {len(stale)} tensors not reset: {stale[:5]}"
 
 
-def test_reset_parameters_clears_the_speakers_measured_survival():
+def test_reset_parameters_clears_the_measured_survival_and_keeps_the_channel_scale():
     """
     `realised_survival` is measured off the logits a particular set of weights
     produced, so it is meaningless for freshly drawn ones and must not be
     carried across a reset into the first epoch of a re-initialised speaker.
+    That half holds on either arm.
 
-    The `logit_scale` it was measured at is deliberately *not* reset: it is a
-    constant resolved from the config and the vocabulary, so it does not depend
-    on the weights and there is nothing about it to restore.
+    The `logit_scale` it was measured at is deliberately *not* reset by
+    `Sender.reset_parameters`. It exists only under `[sender_language_model]
+    normalise_logits`, which stopped being the default on 2026-09-05 -- the
+    parameter is absent from the module rather than frozen when the key is off,
+    so reading the property raises `AttributeError` there. Pinned on below
+    rather than inherited, because the second assertion is the point of the
+    test and an arm without the parameter cannot make it.
     """
-    _, pair = _pair("../data/cub", BIRDS_FEATS, "cub")
+    _, pair = _pair(
+        "../data/cub",
+        BIRDS_FEATS,
+        "cub",
+        extra="\n[sender_language_model]\nnormalise_logits = true\n",
+    )
     speaker = pair.sender.language_model
     speaker.realised_survival = 0.5
     speaker.logit_spread = 0.9

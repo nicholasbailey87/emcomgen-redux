@@ -98,6 +98,21 @@ def _logit_shapes(vocabulary, seed=0):
 
 
 def _language_model_config(**overrides):
+    """
+    `DEFAULT.toml`'s speaker block with `normalise_logits` pinned on.
+
+    Pinned rather than inherited because this file is about the *normalised*
+        channel: `layer_norm_logits`, the `log_logit_scale` parameter in front
+        of it, `MAX_LOGIT_SCALE`, and the four survival columns measured in
+        units of the logits' own standard deviation. None of that exists when
+        the key is off -- the parameter is absent from the module rather than
+        frozen -- so a test here that inherited the default would be silently
+        exercising a different channel the day the default moved. It moved on
+        2026-09-05. The unnormalised arm is `tests/test_score_norms.py`'s.
+
+    An override still wins, so a test that wants the raw arm can ask for it.
+    """
+    overrides.setdefault("normalise_logits", True)
     return config_section("sender_language_model", **overrides)
 
 

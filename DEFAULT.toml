@@ -1191,9 +1191,10 @@ uniform_weight = 0.1
 estimator = "identity"
 
 # Whether the channel is normalised at all: `layer_norm_logits` on the emittable
-# logits, and the learned `log_logit_scale` in front of it. `true` is today's
-# behaviour and is bit-identical to the code before the key existed. `false`
-# removes both.
+# logits, and the learned `log_logit_scale` in front of it. `false` removes both
+# and is the default as of 2026-09-05. `true` is the arithmetic this repo ran
+# from 12 August to that date, and is bit-identical to the code before the key
+# existed.
 #
 # The two go together because the scale has no meaning without the normaliser.
 # It multiplies a quantity pinned to unit variance, which is what makes
@@ -1210,11 +1211,38 @@ estimator = "identity"
 # it is not a control finding an optimum. Its counterpart is
 # `[receiver_discriminator] normalise_score`.
 #
-# **This is not a revert, unlike its counterpart.** `layer_norm_logits` was
-# already present at `ce7d6a5`, having arrived at `1510a55`/`df95063` on 10-12
-# August, so every ShapeWorld run that has ever learned shape ran with it on.
-# `false` goes back past that point, to a channel no successful run has used.
-# That is why these are two keys and not one.
+# **What normalising costs, stated as expressiveness.** Softmax is invariant to
+# a constant shift, so subtracting the mean is free and the operation that bites
+# is the division by each example's own standard deviation. Raw logits carry 13
+# effective degrees of freedom at V = 14: twelve of direction, which name the
+# token, and one of magnitude, which says how sure the speaker is. The
+# normaliser keeps the direction, deletes the per-example magnitude, and hands
+# back one global scalar in its place -- capped at 2.0. Every game is then
+# emitted at the same temperature. That is the move a speaker needs early on:
+# sharp on the handful of concepts it has worked out, flat everywhere else. The
+# normaliser is not a regulariser on that degree of freedom, it removes it.
+#
+# **This was previously described as "not a revert", and that was wrong.**
+# `layer_norm_logits` arrived at `1510a55`/`df95063` on 10-12 August. The 10
+# August escape -- `a496f01`, `silhouette_p_receiver = 0.5`, 0.859 on
+# `test_acc_md_shape`, the only ShapeWorld run this repo has that learned shape
+# -- predates it by a day and ran on raw logits, with the then `[sender_language_model]
+# batch_norm_logits` also `false`. So `false` is not "a channel no successful
+# run has used"; it is the channel the *one* successful run used, and `true` is
+# the setting every failure since has carried. Check that against the commits
+# before trusting either sentence: `git show a496f01:code/models/sender.py`
+# has no `layer_norm_logits` in it.
+#
+# **What flipping this does not fix.** The 2026-09-05
+# `conv4_silhouette_asymmetric` run stalled with `logit_margin` at 0.27-0.72 and
+# `test_unique_message_count` at 1-4 per epoch: one message for every eval game,
+# and the listener at chance because there was nothing to read. The normaliser
+# is the reason the speaker could not buy fidelity by growing its logits, so
+# this is the key most likely to matter -- but the same run silhouettes the
+# *speaker* at 1.0, and five of the eight concept types in `get_metadata` name a
+# colour, so on 5/8 of games its positives and negatives are indistinguishable
+# and no channel arithmetic reaches that. Both are live; do not read a null
+# result here as settling the channel question.
 #
 # **Four columns change meaning when this is off, and stay computable.**
 # `logit_margin`, `logit_prior_share`, `unmixed_survival` and
@@ -1228,7 +1256,7 @@ estimator = "identity"
 # Checkpoints do not cross this key: with it off, `log_logit_scale` is absent
 # from the `state_dict`, so nothing written under one setting loads under the
 # other whatever `resume` says.
-normalise_logits = true
+normalise_logits = false
 
 tau = 1.0                     # Gumbel-softmax tau. Gradient shaping only:
                               # the emitted symbol is an argmax and so is

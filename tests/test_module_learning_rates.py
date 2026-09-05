@@ -71,10 +71,19 @@ SCALAR_OVERRIDES = (
 )
 
 
-def _build(config_file):
-    """A real rung through `models.builder`, with a stub dataloader."""
+def _build(config_file, **section_overrides):
+    """
+    A real rung through `models.builder`, with a stub dataloader.
+
+    `section_overrides` patches whole config sections after `get_config`, for
+        the one test that needs a rung built on an arm the rung's own file does
+        not select. Everything else takes the rung exactly as written.
+    """
     config = parse_config.get_config(rung(config_file))
     config["cuda"] = False
+
+    for section, values in section_overrides.items():
+        config[section].update(values)
 
     class _Dataset:
         n_feats = (
@@ -345,7 +354,9 @@ def test_every_trainable_parameter_is_in_exactly_one_optimiser_group(config_file
 
 
 @pytest.mark.parametrize("config_file", RUNGS)
-def test_the_scalar_overrides_survive_the_module_groups(config_file):
+def test_the_scalar_overrides_survive_the_module_groups_with_the_channel_normalised(
+    config_file
+):
     """
     The disjointness `claimed_separately` buys, read off the built pair. The
         four scaling scalars are held out of their module's group, and the two
@@ -353,11 +364,22 @@ def test_the_scalar_overrides_survive_the_module_groups(config_file):
         out by `split_out_parameter` afterwards, so all six end at the rate
         their own key names whatever their module's rate is.
 
-    `log_logit_scale` is one of the four again, and the one whose module rate
-        differs most from its own on every rung: it sits inside
-        `sender_language_model` at 1e-4 and takes 2e-3, a factor of twenty.
+    `log_logit_scale` is one of the four, and the one whose module rate differs
+        most from its own on every rung: it sits inside `sender_language_model`
+        at 1e-4 and takes 2e-3, a factor of twenty. It only exists under
+        `normalise_logits`, which stopped being the default on 2026-09-05, so
+        this test pins the flag on rather than inheriting it -- the point here
+        is the *partition*, and a rung that quietly contributed one scalar fewer
+        would weaken the test without failing it.
+
+    The unnormalised arm is not left untested by the pin:
+        `test_a_scalar_group_that_applies_matches_a_parameter` runs every rung
+        exactly as written and asserts each scalar group is empty precisely when
+        it does not apply.
     """
-    config, built = _build(config_file)
+    config, built = _build(
+        config_file, sender_language_model={"normalise_logits": True}
+    )
     lr_of = _lr_by_id(built["optimiser"])
     seen = 0
 
@@ -372,9 +394,10 @@ def test_the_scalar_overrides_survive_the_module_groups(config_file):
             f"{suffix} is not at {key}"
         )
 
-    # Every rung has the speaker's channel scale, the listener's volume and its
-    #     offset, so a rung matching fewer than three suffixes would mean the
-    #     table had gone stale rather than that the rung was austere.
+    # With the channel normalised every rung has the speaker's channel scale,
+    #     the listener's volume and its offset, so a rung matching fewer than
+    #     three suffixes would mean the table had gone stale rather than that
+    #     the rung was austere. Without the pin above this floor would be two.
     assert seen >= 3
 
 

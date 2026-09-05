@@ -1368,9 +1368,18 @@ def test_the_volume_still_learns_and_still_wants_to_be_quiet_on_noise():
 # The optimiser wiring.
 # --------------------------------------------------------------------------
 
-def _pair_and_optimiser(config_file):
+def _pair_and_optimiser(config_file, **section_overrides):
+    """
+    A rung built through `models.builder`, with a stub dataloader.
+
+    `section_overrides` patches whole config sections after `get_config`, for a
+        test that needs an arm the rung's own file does not select.
+    """
     config = parse_config.get_config(rung(config_file))
     config["cuda"] = False
+
+    for section, values in section_overrides.items():
+        config[section].update(values)
 
     class _Dataset:
         n_feats = (3, 224, 224)
@@ -1438,7 +1447,7 @@ def test_the_readout_scalars_are_elevated_and_the_weight_that_turns_is_not():
     )
 
 
-def test_an_attention_rung_asks_for_the_mix_weight_rate_and_nothing_else():
+def test_an_attention_rung_with_a_normalised_channel_asks_for_the_mix_weight_rate_and_nothing_else():
     """
     Which parameters are left in an elevated group, on the rung that has the
         most of them. Five of the six keys cannot be told apart by their rate --
@@ -1453,10 +1462,14 @@ def test_an_attention_rung_asks_for_the_mix_weight_rate_and_nothing_else():
         group membership below rather than by looking a group up by its rate.
 
     This rung's `SenderTransformerLM` earns the speaker's two, its contrast
-        stage a third and its channel scale a fourth -- `log_logit_scale` is a
-        parameter again as of 2026-08-31 and takes `score_scale_lr`'s rate,
-        because it is the listener's volume's counterpart at the other end of
-        the channel. The listener contributes three: its volume, its offset,
+        stage a third and its channel scale a fourth -- `log_logit_scale` takes
+        `score_scale_lr`'s rate, because it is the listener's volume's
+        counterpart at the other end of the channel. It exists only under
+        `normalise_logits`, which stopped being the default on 2026-09-05 and
+        which this rung's file does not set, so the flag is pinned on at the
+        call below: the subject here is which parameters land in an elevated
+        group, and dropping one of them silently would weaken the assertion
+        rather than fail it. The listener contributes three: its volume, its offset,
         and the mixing *weight*. They are separate keys because they are
         separate things -- `mix_logit` says what the score is made of,
         `log_score_scale` how loudly it is stated, `score_bias` where it sits
@@ -1470,7 +1483,8 @@ def test_an_attention_rung_asks_for_the_mix_weight_rate_and_nothing_else():
         it used to own itself now comes from `ScoreVolume` like the volume does.
     """
     config, pair, optimiser = _pair_and_optimiser(
-        "16_birds_receiver_cross_attention_lm.toml"
+        "16_birds_receiver_cross_attention_lm.toml",
+        sender_language_model={"normalise_logits": True},
     )
     wanted = config["optimiser"]["mix_logit_lr"]
     assert wanted == config["optimiser"]["score_scale_lr"]
