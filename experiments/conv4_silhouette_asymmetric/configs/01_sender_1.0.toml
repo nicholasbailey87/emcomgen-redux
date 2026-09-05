@@ -1,0 +1,83 @@
+# conv4_silhouette_asymmetric: `conv4_silhouette_reference/01_silhouette_0.5.toml`
+# with the silhouette moved from the listener to the speaker, and made
+# deterministic. One arm, one variable against that reference.
+#
+# **The argument.** Every silhouette arm run so far has degraded colour
+# *stochastically*: `silhouette_p_receiver = 0.5` leaves colour paying on the
+# half of trials where the listener still sees it, so a colour code stays a
+# strictly positive partial solution and the speaker's gradient is a mixture
+# that never fully turns against it. The titration swept that rate and found
+# shape at chance in nine runs of ten. The 2026-09-04 mixup arm
+# (`conv4_mixup_silhouetting`) is the same shape of failure read at higher
+# resolution: colour reaches 0.77 on `test_avg_acc_md_color`, shape sits in
+# 0.48-0.50 for all 100 epochs, and `train_loss` ends at 0.667 against ln 2 =
+# 0.693.
+#
+# Silhouetting the *speaker* deterministically removes the mixture. The speaker
+# never sees colour, so a colour message is not unreliable, it is unproducible.
+# Shape is the only property present on both sides of the game, so it is the
+# only thing a message can be about, and every gradient the speaker receives is
+# a clean one about shape.
+#
+# **The known escape is not evidence against this.** The 10 August run at
+# `a496f01` reached 0.859 on `test_acc_md_shape` at `p_sender = 0.0,
+# p_receiver = 0.5` -- the same rates the mixup arm ran and failed at. What
+# differs between them is the augmentations, not the silhouette. That is a
+# separate question and this arm does not address it: `augment_flip` and
+# `augment_affine_degrees` are left at their defaults here for the same reason
+# the silhouette reference leaves them there.
+#
+# **Read the train-side columns, not just the eval ones.** `shapeworld.py`
+# hard-codes every eval split to `silhouette_p_sender = 0.0` with no key to
+# change it, so at 1.0 the speaker trains exclusively on white silhouettes and
+# is evaluated exclusively on colour images. Its vision stack meets an input
+# distribution at eval that it has never once seen, and `test_acc_md_shape` is
+# read through that shift. `bn_calibration_batches` does not cover this: it
+# re-estimates BatchNorm statistics, not the features themselves.
+#
+# So the question this arm actually answers is the train-side one -- does the
+# message come to carry shape at all -- and `train_acc_md_shape` and
+# `train_acc_md_and_shape_shape` are where to read it, both measured on the
+# silhouetted input the speaker was trained on. `02_sender_0.9.toml` is the
+# companion that keeps the eval numbers interpretable.
+
+name = "conv4_silhouette_asymmetric"
+
+[sender]
+feature_model = "Conv4"
+
+[receiver]
+feature_model = "Conv4"
+
+[data]
+silhouette_p_sender = 1.0
+silhouette_p_receiver = 0.0
+
+[scheduler]
+epochs = 100
+warm_up_epochs = 0
+lr_schedule_shape = "flat"
+
+[optimiser]
+lr = 1e-4
+
+[optimiser.module_lr]
+sender_vision = 1e-4
+sender_adapter = 1e-4
+sender_prototyper = 1e-4
+sender_contrast = 1e-4
+sender_language_model = 1e-4
+receiver_vision = 1e-4
+receiver_adapter = 1e-4
+receiver_token_embedding = 1e-4
+receiver_language_model = 1e-4
+receiver_discriminator = 1e-4
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

@@ -1,0 +1,62 @@
+# conv4_silhouette_asymmetric: the companion to `01_sender_1.0.toml`, and the
+# only difference is the rate. Read that file first; the argument for moving the
+# silhouette to the speaker and making it near-deterministic is all there.
+#
+# **Why 0.9 exists as well as 1.0.** `shapeworld.py` hard-codes every eval split
+# to `silhouette_p_sender = 0.0` and offers no key to change it, so at 1.0 the
+# speaker is trained on white silhouettes and evaluated on colour images it has
+# never seen. `01` accepts that and is read on its train-side columns. This arm
+# buys back the eval reading: one trial in ten shows the speaker a colour image,
+# which is enough to keep its vision stack in contact with the distribution it
+# is scored on, while leaving colour far too unreliable to build a code on.
+#
+# **The cost, stated plainly.** 0.9 is not deterministic, so the mixture this
+# experiment exists to remove is not fully removed -- colour still pays on a
+# tenth of trials. If shape moves at 1.0 and not at 0.9, that tenth is the
+# finding and the eval shift is the price of reading it. If shape moves at
+# neither, the mixture was not what was holding it back and the next question is
+# whether a Conv4 speaker can represent ShapeWorld shape well enough to name it
+# at all.
+#
+# Run both arms. They are one variable at two points, not two experiments.
+
+name = "conv4_silhouette_asymmetric"
+
+[sender]
+feature_model = "Conv4"
+
+[receiver]
+feature_model = "Conv4"
+
+[data]
+silhouette_p_sender = 0.9
+silhouette_p_receiver = 0.0
+
+[scheduler]
+epochs = 100
+warm_up_epochs = 0
+lr_schedule_shape = "flat"
+
+[optimiser]
+lr = 1e-4
+
+[optimiser.module_lr]
+sender_vision = 1e-4
+sender_adapter = 1e-4
+sender_prototyper = 1e-4
+sender_contrast = 1e-4
+sender_language_model = 1e-4
+receiver_vision = 1e-4
+receiver_adapter = 1e-4
+receiver_token_embedding = 1e-4
+receiver_language_model = 1e-4
+receiver_discriminator = 1e-4
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

@@ -1,0 +1,69 @@
+# conv4_silhouette_asymmetric: the backbone control, and the odd one out in this
+# folder. Arms 01 and 02 move the silhouette to the speaker and ask whether the
+# stochastic mixture is what holds shape back. This arm does not move it at all.
+# It asks the other question the mixup post-mortem left open: whether a Conv4
+# speaker can represent ShapeWorld shape well enough to name it.
+#
+# Two things change together here -- the backbone, and the silhouette going back
+# to the listener at 0.5 -- so this is a control against the known escape rather
+# than a third point on 01/02's axis. Stated plainly because the folder name
+# says "asymmetric" and this rung is not.
+#
+# **Why it is not a duplicate of `silhouette_titration_resnet18/05`.** That rung
+# is this exact configuration at *thirty* epochs, because
+# `silhouette_titration_conv4/` set thirty and it followed. Its own header
+# records the durable shape onsets seen so far at epochs 7, 20, 28 and 82. An
+# arm that stops at thirty cannot see the fourth of those, and the titration's
+# "shape at chance in nine runs of ten" was read through that ceiling. A hundred
+# epochs is the same rung given room to show a late onset.
+#
+# `silhouette_p_receiver = 0.5` with `p_sender = 0.0` is also the configuration
+# of the only escape this repo has recorded -- the 10 August run at `a496f01`,
+# 0.859 on `test_acc_md_shape`. So this arm is the escape's own settings on a
+# ResNet, at the escape's own length. If shape moves here and not in 01 or 02,
+# the backbone was the constraint and the mixture was not.
+#
+# Unlike 01, the eval reading is sound: `p_sender` is 0.0, so the speaker sees
+# the same colour images at train and at eval and there is no input shift to
+# read `test_acc_md_shape` through.
+
+name = "conv4_silhouette_asymmetric"
+
+[sender]
+feature_model = "ResNet18SmallInput"
+
+[receiver]
+feature_model = "ResNet18SmallInput"
+
+[data]
+silhouette_p_sender = 0.0
+silhouette_p_receiver = 0.5
+
+[scheduler]
+epochs = 100
+warm_up_epochs = 0
+lr_schedule_shape = "flat"
+
+[optimiser]
+lr = 1e-4
+
+[optimiser.module_lr]
+sender_vision = 1e-4
+sender_adapter = 1e-4
+sender_prototyper = 1e-4
+sender_contrast = 1e-4
+sender_language_model = 1e-4
+receiver_vision = 1e-4
+receiver_adapter = 1e-4
+receiver_token_embedding = 1e-4
+receiver_language_model = 1e-4
+receiver_discriminator = 1e-4
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24
