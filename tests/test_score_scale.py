@@ -1485,6 +1485,16 @@ def test_an_attention_rung_with_a_normalised_channel_asks_for_the_mix_weight_rat
     config, pair, optimiser = _pair_and_optimiser(
         "16_birds_receiver_cross_attention_lm.toml",
         sender_language_model={"normalise_logits": True},
+        # Pinned away from the base rate, which since 2026-09-05 it would
+        #     otherwise equal: DEFAULT's table went flat at 1e-4 and
+        #     `polarity_embedding_lr` is 1e-4, and `build_models` splits a
+        #     scalar out only `if lr != base_lr`. At equality the tag stays
+        #     inside `sender_language_model`'s group -- at exactly the rate its
+        #     key names, so nothing about the run changes -- and the last three
+        #     assertions here, which are about the tag having a group of its
+        #     own, have nothing to find. The separation is what this test is
+        #     for, so the condition for it is set rather than assumed.
+        optimiser={"polarity_embedding_lr": 5e-5},
     )
     wanted = config["optimiser"]["mix_logit_lr"]
     assert wanted == config["optimiser"]["score_scale_lr"]
@@ -1522,9 +1532,10 @@ def test_an_attention_rung_with_a_normalised_channel_asks_for_the_mix_weight_rat
         "receiver.discriminator.score_bias",
     }
 
-    # The tag keeps a group of its own, which is the whole point of it having a
-    #     separate key: turning the listener's volume up must not retune a
-    #     parameter that lives on one speaker only. That
+    # The tag keeps a group of its own whenever its rate differs from base,
+    #     which is the whole point of it having a separate key: turning the
+    #     listener's volume up must not retune a parameter that lives on one
+    #     speaker only. That
     #     is a claim about the partition and not about the number, so it is
     #     asserted by finding the group that holds the tag rather than by
     #     collecting every group at the tag's rate. The two were the same

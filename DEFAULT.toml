@@ -201,8 +201,18 @@ n_workers = 5
 # upwards from 0.25 rather than going straight back to 0.5. Read it on the
 # `test_acc_md_shape` / `test_acc_md_color` breakdown, never on the aggregate,
 # which reads the same for a language with one feature and for one with both.
+# Promoted to the default on 2026-09-05 from `conv4_mixup_silhouetting/01_mixup_1.0.toml`,
+# whose whole non-backbone configuration is now this file's. That arm
+# was the 2026-09-04 attempt at breaking listener memorisation, and it
+# is the closest thing the repo has to the 10 August escape's settings.
+# The rate is 0.5 again, which is the escape's own. The paragraphs above
+# argue down from 0.5 to 0.0 and then sit at 0.1; that argument was made
+# before the augmentations existed and is superseded rather than answered.
+# `silhouette_p_sender` stays 0.0: it is the axis
+# `conv4_silhouette_asymmetric` moves, and moving it here would take that
+# folder's variable away from it.
 silhouette_p_sender = 0.0
-silhouette_p_receiver = 0.1
+silhouette_p_receiver = 0.5
 
 # Geometric augmentation of the referents, train-only and drawn per image.
 #
@@ -226,8 +236,10 @@ silhouette_p_receiver = 0.1
 # docstring's defence -- "C(20,10) = 184,756 speaker/listener divisions" --
 # counts partitions of a fixed set, not distinct images.
 #
-# Both default off, so every run recorded before this key existed is
-# reproducible from its own config.
+# Both were off by default until 2026-09-05 so that every run recorded
+# before the keys existed was reproducible from its own config. They are on
+# now, at 10 degrees, and that reproducibility is bought instead by the keys
+# being written into every config this repo saves alongside a run.
 #
 # What is deliberately absent, and why the transform is pinned rather than
 # configurable. The five shapes are circle, ellipse, rectangle, square and
@@ -237,8 +249,8 @@ silhouette_p_receiver = 0.1
 # outright. `RandomResizedCrop` is out for the same reason: its `ratio`
 # argument is exactly that scaling. Colour jitter is out on its own terms,
 # since colour is a label here rather than a nuisance variable.
-augment_flip = false
-augment_affine_degrees = 0.0
+augment_flip = true
+augment_affine_degrees = 10.0
 
 # Mixup on the listener's candidates: each is replaced by a blend of itself and
 # another drawn from the same set with replacement, weight `lambda` from
@@ -270,7 +282,12 @@ augment_affine_degrees = 0.0
 # dominant source of each blend, so with this on it is no longer the same
 # quantity as `test_acc` and the two should not be differenced. `train_loss` is
 # unaffected. Eval is never mixed, as it is never silhouetted.
-mixup_alpha = 0.0
+#
+# 1.0 by default since 2026-09-05, i.e. `Beta(1, 1)` and a uniform
+# `lambda`. Read the underfitting tell above before reading a flat run as a
+# channel result: train accuracy falling towards eval accuracy is this key,
+# not the speaker.
+mixup_alpha = 1.0
 
 # The colour a lit pixel comes back at, as a per-channel fraction of maximum.
 # Every pixel above half the image's peak luma is repainted to it and every
@@ -405,7 +422,19 @@ mixup_alpha = 0.0
 # repaint identically at 255 of them and differ at exactly one.
 # `test_the_threshold_is_colour_invariant` pins that, including the exception.
 # See docs/data.md and docs/dubious-claims.md.
-silhouette_fill = [0.584313725, 0.584313725, 0.415686275]
+# **White by default since 2026-09-05, and this contradicts the argument
+# above.** The chromatic fill is the palette's own mean object colour and
+# was chosen so that what the transform emits matches the statistics eval
+# gathers; that argument is untouched and was never measured against white,
+# which is exactly what the paragraphs above say -- six single-fit readings
+# between 0.40 and 0.56, none separable from another. What white has that
+# the mean colour does not is a run: `a496f01`, 10 August, the only
+# ShapeWorld run this repo has that learned shape, ran white. Until
+# `diagnostics/silhouette_shape_probe.py` separates the two at five fits an
+# arm, the demonstrated fill wins over the reasoned one. Note the BatchNorm
+# half of the argument only ever bit on `ViT2`, which opens with
+# `nn.BatchNorm2d(3)` over raw RGB; `Conv4` and `ResNet18SmallInput` do not.
+silhouette_fill = [1.0, 1.0, 1.0]
 
 [optimiser]
 class = "AdamW"
@@ -436,7 +465,11 @@ accumulator_steps = 4
 # rung 3 never did. But rung 9 escaped at roughly 30% of base rate, so escape
 # does not need the full one; halved, it should land near epoch 6 and still be
 # clear of the join.
-lr = 5e-5
+#
+# Back to 1e-4 on 2026-09-05, with the listener's five module rates, which
+# undoes the 2026-08-31 halving in both places at once. The whole table is
+# flat at jayelm's own rate again -- see `[optimiser.module_lr]`.
+lr = 1e-4
 # 0.0 for both datasets -- `[birds.optimiser]` does not override it. jayelm uses
 # plain Adam with no decay, and bs6, the only run so far to reach the paper's
 # ShapeWorld numbers, set this to 0.0 explicitly. At 0.0 AdamW and Adam are the
@@ -864,6 +897,16 @@ contrast_gate_lr = 2e-3
 # same table; what is given up is the claim that the bottom of the ladder
 # reproduces jayelm exactly. If a baseline reading has to be comparable to
 # theirs, flatten the table in that rung rather than everywhere.
+#
+# **That paragraph described the file from 2026-08-31 to 2026-09-05 and no
+# longer does.** The listener's five are back at 1e-4 with the base `lr`, so
+# the table is flat at jayelm's rate and every module sits on it. The
+# ordering claim above -- listener slower than speaker -- is therefore
+# argued for here and not currently enforced by any number in this block. It
+# is kept rather than deleted because nothing refuted it; what happened is
+# that the arm this file was promoted from flattened the table, and one
+# untested ordering is not worth carrying into a run that is trying to
+# establish whether the channel starts at all.
 [optimiser.module_lr]
 sender_vision = 1e-4
 # The adapter takes its agent's rate rather than a rate of its own. It is an
@@ -875,11 +918,11 @@ sender_adapter = 1e-4
 sender_prototyper = 1e-4
 sender_contrast = 1e-4
 sender_language_model = 1e-4
-receiver_vision = 5e-5
-receiver_adapter = 5e-5
-receiver_token_embedding = 5e-5
-receiver_language_model = 5e-5
-receiver_discriminator = 5e-5
+receiver_vision = 1e-4
+receiver_adapter = 1e-4
+receiver_token_embedding = 1e-4
+receiver_language_model = 1e-4
+receiver_discriminator = 1e-4
 
 [scheduler]
 epochs = 100
@@ -918,7 +961,13 @@ epochs = 100
 # the floor in the descending cycle rather than in `PASS`, and `warm_up_epochs`
 # does what it says. Traces written before that date ran flat whatever their
 # `[scheduler]` said. See `train.build_lr_schedule` and `tests/test_lr_schedule.py`.
-warm_up_epochs = 10
+#
+# 0 since 2026-09-05, so there is no ramp and the `flat` stage runs from step
+# one. Everything above still describes what a non-zero value does and what
+# it was for; the reason it is off is that the ignition question this file is
+# now pointed at is about the first few epochs, and a ten-epoch ramp is ten
+# epochs of not answering it.
+warm_up_epochs = 0
 
 # `flat` or `cosine` -- an intention, not a curve.
 #
@@ -1719,6 +1768,35 @@ ref_dataset = "../data/cub"
 # destroy texture and pattern, not just colour.
 silhouette_p_sender = 0.0
 silhouette_p_receiver = 0.0
+
+# The three augmentation keys held at off for CUB, where `[data]` turned them on
+#     for ShapeWorld on 2026-09-05. They are pinned here rather than left to
+#     inherit because the argument for each of them is a ShapeWorld argument.
+#
+# `augment_flip` is two independent draws, horizontal *and* vertical. A vertical
+#     flip is label-preserving on ShapeWorld -- five shapes, none of which has an
+#     upside-down counterpart with a name of its own -- and is not obviously so
+#     on photographs of birds, where "upright" is a property of every image in
+#     the set and of nothing the labels distinguish. Turning it on for CUB is a
+#     real claim about the data and wants its own arm.
+#
+# `augment_affine_degrees` reads the same way at 10 degrees, and
+#     `_augment_geometry` pads with zeros, which is ShapeWorld's black
+#     background and is not CUB's.
+#
+# `mixup_alpha` is the one this file is least able to guess at. It exists to
+#     stop the listener memorising the twenty stored images of a ShapeWorld
+#     game; birds draws `games_per_epoch = 5000` fresh games from the species
+#     pool, so the memorisation it targets is a different shape here and
+#     `Beta(1, 1)` is a large intervention to make on that reasoning alone.
+#
+# None of the three is claimed to be wrong for birds. They are unmeasured on it,
+#     and inheriting them would have made every birds rung differ from its own
+#     history in three ways at once without anything asking for it.
+augment_flip = false
+augment_affine_degrees = 0.0
+mixup_alpha = 0.0
+
 batch_size = 16
 n_workers = 4
 n_examples = 10 # number of examples seen by agents, including distractors

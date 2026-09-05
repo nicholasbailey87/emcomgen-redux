@@ -129,38 +129,47 @@ def test_the_group_names_are_the_module_lr_keys():
     }
 
 
-def test_the_default_rates_are_one_factor_of_two():
+def test_the_default_rates_are_flat_at_jayelms_own():
     """
-    DEFAULT's table is not flat and is not eight independent numbers: every rate
-        is the base `lr` times one factor, carrying one claim. The whole listener
-        runs at half the whole speaker, and nothing is split within an agent. See
-        DEFAULT.toml for the argument and for what it costs the baselines.
+    DEFAULT's table is flat: every module sits at the base `lr`, and the base
+        `lr` is jayelm's 1e-4. Ten entries, one number, no split between the
+        agents and none within one.
 
-    Asserted as the grid rather than as eight literals, because the magnitudes
-        are chosen and the structure is the claim. A change that keeps the grid
-        is a retune; one that breaks it is a different position, and this is
-        where a reader is told which happened. It applies to all sixteen rungs
-        at once either way.
+    **It was a two-tier grid from 2026-08-31 to 2026-09-05** -- the whole
+        listener at half the whole speaker, one factor carrying one claim -- and
+        this test asserted that grid. The tiering went when
+        `conv4_mixup_silhouetting/01_mixup_1.0.toml` was promoted to the
+        default, which flattened the table and raised the base to 1e-4 along
+        with everything else in that arm. DEFAULT.toml keeps the ordering
+        argument beside `[optimiser.module_lr]`; what it no longer keeps is a
+        number enforcing it.
+
+    Asserted as the structure rather than as ten literals, for the reason the
+        two-tier version was: the magnitudes are chosen and the shape is the
+        claim. A change that keeps the table flat is a retune; one that
+        re-tiers it is a different position, and this is where a reader is told
+        which happened. It applies to all sixteen rungs at once either way.
+
+    One consequence worth knowing, and it is why `polarity_embedding_lr` is
+        pinned away from base in `tests/test_score_scale.py`: `build_models`
+        splits a scalar into its own optimiser group only `if lr != base_lr`,
+        so every `*_lr` key that happens to equal the base is now inert. The
+        rate each parameter runs at is unchanged either way -- an unsplit
+        parameter sits in its module's group at exactly the rate its key names,
+        because the table is flat -- but the group structure is not.
     """
     config = parse_config.get_config()
     base_lr = config["optimiser"]["lr"]
     rates = config["optimiser"]["module_lr"]
 
-    assert base_lr == 5e-5
-
-    # The grid is pinned at the listener's language model, the module jayelm
-    #     tuned `lr` on. One factor, and no split within an agent: the `vision`
-    #     half of the grid was withdrawn on 2026-08-29, so a backbone taking
-    #     anything other than its own agent's rate is now a broken grid rather
-    #     than a retune.
-    speaker = 2.0
+    assert base_lr == 1e-4
 
     expected = {
-        "sender_vision": base_lr * speaker,
-        "sender_adapter": base_lr * speaker,
-        "sender_prototyper": base_lr * speaker,
-        "sender_contrast": base_lr * speaker,
-        "sender_language_model": base_lr * speaker,
+        "sender_vision": base_lr,
+        "sender_adapter": base_lr,
+        "sender_prototyper": base_lr,
+        "sender_contrast": base_lr,
+        "sender_language_model": base_lr,
         "receiver_vision": base_lr,
         "receiver_adapter": base_lr,
         "receiver_token_embedding": base_lr,
