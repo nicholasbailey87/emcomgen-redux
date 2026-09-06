@@ -1,0 +1,61 @@
+# baseline_lr_sweeps_2 arm: ShapeWorld backbones at 2e-5, silhouette 0.5, for
+# 100 epochs.
+#
+# See `01_birds_5e-6.toml` for what this experiment measures and why.
+#
+# **Why 2e-5 and not the other three rates.** Read on end-of-run snapshots the
+# four ShapeWorld arms look identical and all of them look like the colour
+# shortcut. Read on trajectories they do not, and 2e-5 has a profile none of the
+# others have. `train_acc_md_shape` starts at chance (0.5026 over epochs 1-3),
+# rises, falls back into a trough (0.5064 over epochs 12-17), then steps up and
+# stays up: 0.5312 over epochs 18-30, ending 0.5342 and still trending. No other
+# arm does that. 1e-5 peaks higher (0.5475 at epoch 16) and then decays to
+# 0.5217; 1e-4 and 5e-5 are flat within noise for the whole run. 2e-5 is the only
+# arm holding a shape signal above its own mid-run trough at the end, and the
+# only one whose last-five shape mean (0.5282) leads the set.
+#
+# It leads on generalisation too: `test_acc` last-five mean 0.5907, with epochs
+# 22 and 23 at 0.6145 and 0.6159 -- the highest test accuracy anywhere in the
+# first sweep, on either dataset. The step up arrives around epoch 20 and then
+# holds flat (the epoch 18-30 slope is -0.00006, zero to five decimals), so it is
+# a phase transition followed by a plateau rather than a climb still in progress.
+#
+# The honest caveats, because the argument above is thinner than it reads. Peak
+# shape is actually higher at 5e-5 (0.5519) and 1e-5 (0.5475); 2e-5's advantage
+# is durability, not ceiling. And with n = 1 per arm the between-arm gaps
+# (0.509 to 0.528 on last-five shape) are the same size as within-arm
+# epoch-to-epoch swings. This arm is a hypothesis being tested, not a result
+# being confirmed, and 100 epochs is the cheapest way to find out whether the
+# epoch-18 step-up is the start of a second phase or a wobble that happened to
+# land at the end of a short run.
+#
+# **This arm restates the default silhouette rate**, `[data]
+# silhouette_p_receiver = 0.5`, so it is the control for
+# `04_shapeworld_2e-5_silhouette_0.2.toml` and is directly comparable to the
+# first sweep's 2e-5 arm -- same rate, same silhouette, 100 epochs instead of 30.
+# The key is written out rather than inherited so the pair reads as a pair.
+#
+# `silhouette_p_sender` stays at DEFAULT.toml's 0.0. The speaker's input is not
+# silhouetted on either arm, so the comparison is purely about what the listener
+# sees. Eval is never silhouetted on any arm, which is why the shape and colour
+# breakdowns to read are the train-side `train_acc_md_*` columns.
+
+name = "baseline_lr_sweeps_2"
+
+[data]
+# 0.5, restating DEFAULT.toml. Written out because this arm's only purpose
+# beside arm 04 is to be the other end of a two-point silhouette comparison,
+# and an inherited value would leave that comparison implicit.
+silhouette_p_receiver = 0.5
+
+[optimiser.module_lr]
+# The two vision models, and only them. Every other key in this table
+# stays at DEFAULT.toml's 1e-4.
+sender_vision = 2e-5
+receiver_vision = 2e-5
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1

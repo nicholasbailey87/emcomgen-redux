@@ -1,0 +1,46 @@
+# baseline_lr_sweeps_2 arm: CUB backbones at 1e-5, for 100 epochs.
+#
+# See `01_birds_5e-6.toml` for what this experiment measures and why.
+#
+# This is the first sweep's best birds arm, re-run with the budget it needed. At
+# 30 epochs it led on `test_acc` over the last five epochs (0.5417 against
+# 0.5094 at 2e-5, 0.5205 at 5e-5 and 0.4997 at 1e-4) and it was the only arm
+# still improving when the run stopped -- 0.508 at epoch 26 rising to 0.572 at
+# 30, ending on its own maximum. It also spiked least: two epochs above a
+# `train_clip_sender_vision` of 1e3, against 19 at 2e-5 and 20 at 5e-5.
+#
+# The reason to spend 100 epochs on a rate that has already been run is that the
+# 30-epoch result is ambiguous in a way only length resolves. Every other birds
+# arm rose and then fell back to chance -- 1e-4 peaked at 0.5355 around epoch 15
+# and ended at 0.500 -- so the honest description of 1e-5's lead is that it had
+# not yet reached whatever epoch its own collapse is scheduled for. Two outcomes
+# separate cleanly here: `test_acc` continuing past 0.572 says the rate is right
+# and the first sweep was truncated, while a turnover somewhere around epoch 40
+# to 60 says lower rates buy delay rather than escape, and the collapse is a
+# mechanism to find rather than a rate to tune.
+#
+# The `test_acc` / `train_acc` gap is the other thing to watch, and it is why the
+# collapse question matters. At epoch 30 this arm sat at 0.636 train against
+# 0.573 test. A listener that is memorising the ~47 training images per species
+# will keep the first number climbing while the second stalls, and that would be
+# a different diagnosis from a channel that collapses. The two are separable in
+# the trace: memorisation widens the gap smoothly, collapse drops both.
+#
+# This file differs from `01_birds_5e-6.toml` in `[optimiser.module_lr]` alone.
+
+name = "baseline_lr_sweeps_2"
+
+[data]
+dataset = "../data/cub"
+
+[optimiser.module_lr]
+# The two vision models, and only them. Every other key in this table
+# stays at DEFAULT.toml's 1e-4.
+sender_vision = 1e-5
+receiver_vision = 1e-5
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1

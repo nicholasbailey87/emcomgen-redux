@@ -1,0 +1,49 @@
+# baseline_lr_sweeps_2 arm: ShapeWorld backbones at 2e-5, silhouette 0.2, for
+# 100 epochs.
+#
+# See `01_birds_5e-6.toml` for the experiment and
+# `03_shapeworld_2e-5_silhouette_0.5.toml` for why 2e-5 is the rate. This file
+# differs from arm 03 in `[data] silhouette_p_receiver` alone.
+#
+# **Why the silhouette rate is the confound worth removing.** The
+# `silhouette_titration` experiment ran ten arms and found shape at chance in
+# nine of them, with 0.5 among the rates that leave it there; the one arm that
+# moved went to the mirror-image failure. So a ShapeWorld result read at 0.5 is a
+# result read at a rate already suspected of suppressing the thing being
+# measured, and the shape signal at 2e-5 has to climb out from under that. 0.2 is
+# well inside the range the titration covered and is a materially weaker
+# intervention on the listener's input.
+#
+# The two arms then bracket the question. If the epoch-18 step-up in
+# `train_acc_md_shape` is a property of the learning rate, it should appear on
+# both arms and 0.2 should reach it sooner or higher. If it is an interaction
+# between the rate and the silhouette pressure, the two arms will separate, and
+# which way they separate says whether the silhouette is helping shape or
+# blocking it. If neither arm reproduces the step-up at 100 epochs, the 30-epoch
+# signal was noise and 2e-5 is not special -- which is a cheap and useful thing
+# to learn, since the alternative is building on it.
+#
+# Note this is *not* a re-run of the titration at a new backbone. The titration
+# swept the silhouette rate at a fixed learning rate; this is two points on the
+# silhouette axis at the one learning rate that showed a signal, on `ResNet56`
+# rather than the backbones the titration used. Nothing recorded there pools with
+# anything here.
+
+name = "baseline_lr_sweeps_2"
+
+[data]
+# 0.2 against arm 03's 0.5, which is DEFAULT.toml's value. The listener's input
+# is silhouetted on 20% of games rather than 50%.
+silhouette_p_receiver = 0.2
+
+[optimiser.module_lr]
+# The two vision models, and only them. Every other key in this table
+# stays at DEFAULT.toml's 1e-4.
+sender_vision = 2e-5
+receiver_vision = 2e-5
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1

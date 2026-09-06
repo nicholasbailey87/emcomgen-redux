@@ -1,0 +1,138 @@
+# baseline_lr_sweeps_2: four arms, chosen off what `baseline_lr_sweeps` measured.
+#
+# The first sweep moved `[optimiser.module_lr] sender_vision` and
+# `receiver_vision` together over 1e-5, 2e-5, 5e-5 and 1e-4, on the ShapeWorld
+# baseline (rung 1) and the CUB baseline (rung 2), for 30 epochs and one repeat.
+# It answered two questions and raised two more. This experiment is the two it
+# raised.
+#
+# **What the first sweep settled.**
+#
+# The `1/||W||` hypothesis the whole exercise was built on is dead. Weight norms
+#     barely move: `train_weight_sender_vision` goes 111.73 -> 111.16 on the
+#     birds 2e-5 arm, half a percent over 30 epochs, while
+#     `train_clip_sender_vision` on the same run spans 9 to 5.2e6. Six orders of
+#     magnitude of gradient against half a percent of weight. Whatever spikes
+#     the birds speaker, it is not a collapsing trunk under BatchNorm's scale
+#     invariance, and `[optimiser] weight_decay = 0.1` is pinning `||W||`
+#     successfully and is irrelevant to the spikes. The negative rank
+#     correlations between the two columns are an artefact of both trending with
+#     the epoch counter and should not be read as the mechanism.
+#
+# `ResNet56` did fix the ShapeWorld gradients. No ShapeWorld arm exceeded 1e3 at
+#     any rate; the maximum across all four was 179. The 11.2M backbone's
+#     spikes were a scale problem and the rebuild solved them. The birds
+#     speaker, still on `ResNet18` at 11.2M, still spikes at every rate.
+#
+# **The two questions it raised, which are the two arms below.**
+#
+# *Birds may want a lower rate than the sweep's floor.* 1e-5 was the best birds
+#     arm on the honest statistic -- `test_acc` mean over the last five epochs,
+#     0.5417 against 0.5094 at 2e-5 and 0.4997 at 1e-4 -- but it was also the
+#     grid's edge, and it ended on its own maximum: 0.508 at epoch 26 climbing
+#     to 0.572 at 30, still going up when the run stopped. The other three arms
+#     peaked mid-run and fell back to chance. So the ranking is not "slower
+#     learns better" but "slower has not collapsed yet", and the 30-epoch budget
+#     truncated the only arm that was still working. Arms 01 and 02 run 5e-6 and
+#     1e-5 out to 100 epochs. If 1e-5 keeps climbing, the rate is found and the
+#     first sweep was simply too short. If it turns over around epoch 40 the way
+#     2e-5 turned over at 20, then a lower rate buys delay rather than a fix and
+#     the collapse itself is the thing to chase.
+#
+# *ShapeWorld's 2e-5 arm was learning shape, and the silhouette rate is the
+#     confound.* See `03_shapeworld_2e-5_silhouette_0.5.toml`.
+#
+# **Only the backbone rate moves, and `[optimiser] lr` stays at 1e-4**, as in the
+# first sweep: the adapters, prototyper, language models and discriminator did
+# not change scale, so moving the whole table would confound "the backbone wants
+# a different rate" with "everything does". Both agents' backbones move together,
+# because the speaker learns only through the listener and a one-sided move would
+# measure asymmetry at the same time as rate.
+#
+# **100 epochs rather than 30**, which is the point of the experiment on the
+# birds side and a necessity on the ShapeWorld side: the 2e-5 shape signal did
+# not step up until epoch 18 and the test accuracy did not peak until 22, so 30
+# epochs saw perhaps eight epochs of the phase worth measuring.
+#
+# **The arms stay separated by the rates they are named for, for the whole 100
+# epochs.** An earlier draft of this header warned the opposite -- that the
+# longer schedule would push every arm past the point where
+# `weight_decay = 0.1` reaches equilibrium, at which the effective rate of a
+# scale-invariant layer stops tracking `lr` and goes as `sqrt(lr * lambda)`
+# instead, compressing a 10x nominal spread to about 3.2x. The asymptotic
+# argument is real; it just does not apply on this schedule, and the first
+# sweep's `train_weight_sender_vision` column says so directly.
+#
+# `||W_sender_vision||` falls almost exactly as *unopposed* decay. Against the
+#     pure `(1 - lr * lambda)^n` prediction at 156.25 steps an epoch, the four
+#     ShapeWorld arms observed -0.30% / -0.60% / -1.36% / -2.57% over 30 epochs
+#     where unopposed decay predicts -0.47% / -0.93% / -2.32% / -4.58%. The
+#     ratio is 0.65 / 0.64 / 0.59 / 0.56 -- gradient growth is cancelling about
+#     40% of the decay, and flat across a 10x rate range. At equilibrium that
+#     ratio would be 0. Nothing here is near it.
+#
+# Extrapolating the same ratio to 100 epochs gives -1.0% at 2e-5 and -9.2% at
+#     1e-4. Since the effective rate goes as `lr / ||W||^2`, that is a ~20% shift
+#     on the fastest arm and ~2% on the slowest -- nowhere near enough to merge
+#     even the 2x gap between arms 01 and 02, let alone a 10x one. Read the
+#     separation across the whole run, not just the first half.
+#
+# The correction is recorded rather than deleted because the original claim was
+#     the sort that quietly survives into a later reading of these traces, and
+#     because the arithmetic that kills it is worth having written down: on this
+#     schedule `weight_decay = 0.1` is a slow one-way drift on `||W||`, not a
+#     regime the runs equilibrate into.
+#
+# **One repeat, and that is this experiment's main weakness.** Every claim above
+# rests on n = 1 per arm, and the between-arm gaps on ShapeWorld
+# (`train_acc_md_shape` last-five means of 0.509 to 0.528) are the same size as
+# the epoch-to-epoch wobble inside one arm. Nothing here is a finding until it
+# reproduces across seeds. These four arms are built to test hypotheses cheaply,
+# not to settle them.
+#
+# **What to read.** On birds: `test_acc` against `train_acc`, since the first
+# sweep's best arm reached 0.636 train against 0.573 test and that gap is
+# memorisation rather than communication; and whether `test_acc` is still
+# climbing at epoch 100 or has turned over. On ShapeWorld: `train_acc_md_shape`
+# against `train_acc_md_color`, which is the whole question there. On both, the
+# `weight_*` columns are now diagnostic rather than hypothesis-testing -- the
+# hypothesis they were added for is refuted -- but they cost nothing and a
+# genuine `||W||` collapse would still show in them.
+#
+# `epochs` and `repeats` are restated in every file: `scripts/job_utils.py` reads
+# both straight out of the file rather than out of the merged config. `[slurm]`
+# is read from the *first* config in the folder only, sorted by filename, so the
+# block here governs the whole array. It is sized for the heaviest job in the
+# set, which is a 100-epoch birds arm -- the same 24 hours `ablation_birds` gives
+# its own 100-epoch rungs.
+#
+# ---
+#
+# **This arm: CUB backbones at 5e-6**, half the first sweep's floor. It exists to
+# say whether 1e-5 was an interior optimum or just the edge of the grid. If 5e-6
+# tracks 1e-5 and neither collapses, the rate is not the binding constraint below
+# 1e-5 and the search can stop going down. If 5e-6 is clearly better, the first
+# sweep was bounded in the wrong place.
+
+name = "baseline_lr_sweeps_2"
+
+[data]
+dataset = "../data/cub"
+
+[optimiser.module_lr]
+# The two vision models, and only them. Every other key in this table
+# stays at DEFAULT.toml's 1e-4.
+sender_vision = 5e-6
+receiver_vision = 5e-6
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24
