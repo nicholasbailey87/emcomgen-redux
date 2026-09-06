@@ -388,6 +388,12 @@ permits at all. `logit_margin` (docs/measurement.md) is the column that says
 which of the two routes a run took, and it is not substitutable for
 `logit_scale`.
 
+That 0.9945 is very nearly the whole survival range, which looks like a ceiling
+that barely binds. It is deliberate, and the argument for it is
+[below](#why-2-0-is-high-enough-to-be-safe): the ceiling is not there to keep the
+channel blunt, it is there to keep the gumbel Jacobian's attenuation inside the
+range AdamW can still cancel.
+
 ### The bound that was here, and why it is not restored
 
 Between 2026-08-30 and 2026-08-31 the scale was a constant, solved in closed form
@@ -607,6 +613,53 @@ while survival climbs — therefore **cannot fire on the identity branch**. On t
 gumbel branch it is bounded rather than impossible: `MAX_LOGIT_SCALE` and
 `sharpest_logit_margin` together cap `p` at 0.9945 at V = 14, so the collapse is
 bounded at `(1 − 0.9945)/(1 − p_open)` rather than unbounded.
+
+### Why 2.0 is high enough to be safe
+
+The question that bound has to answer is not "how blunt does the channel stay"
+but "does the attenuation ever reach a depth the optimiser cannot undo". It does
+not, and the margin is wide.
+
+The gumbel Jacobian carries a factor of order `p(1 − p)`, which runs from 0.25 at
+`p = 0.5` to 0.00545 at the ceiling — a 46× attenuation. By itself that is
+harmless: AdamW updates by `m / (√v + ε)`, so a uniform rescaling of the gradient
+cancels. What does not cancel is `√v` falling *under* `ε`, torch's default 1e-8
+and not overridden by `gradboard.optimiser`. Past that point the update is
+`m / ε`, the optimiser degenerates into SGD at a ruinous effective rate, and no
+amount of gradient is recovered by normalisation because normalisation has
+stopped happening.
+
+That crossover sits at a group gradient norm of `ε·√N`:
+
+| trunk | N | ε floor bites below | worst case at the ceiling | margin |
+|---|---|---|---|---|
+| `ResNet18`, birds | 11,176,512 | 3.3e-5 | ~2e-2 | ~650× clear |
+| `ResNet56`, ShapeWorld | 852,368 | 9.2e-6 | ~2e-2 | ~2,400× clear |
+
+So the entire range `MAX_LOGIT_SCALE` = 2.0 permits lies inside the region where
+AdamW cancels the attenuation, and the ceiling buys almost the whole survival
+range at no cost to the gradient. Lowering it to 1.2 would floor the Jacobian
+2.8× below its maximum instead of 46× — a real improvement in a number that is
+not the binding one, paid for with 0.9945 → 0.8904 of reachable fidelity.
+
+**The 2026-08-30 death is the case that crossed the floor**, and it happened with
+no ceiling at all: `MAX_LOGIT_SCALE` arrived the next day in `9409d40`. Those
+runs reached 0.99951 unmixed, which needs a scale of 2.623 and is therefore not
+reachable now, and their ~2e-7 speaker norms are ~6e-11 per element — around 170×
+*below* ε. The mechanism was never the attenuation on its own; it was the
+attenuation carrying the gradient under the floor, which is exactly what the
+ceiling now prevents.
+
+Two limits on the argument. The crossover assumes a norm spread evenly over the
+group, `per_element = norm/√N`, whereas `v` is per element: a layer whose
+gradient is concentrated is safer than the table says and a nearly silent one is
+worse, and the group norms in `metrics.csv` cannot resolve which. And `ε` is only
+the failure AdamW *could* have rescaled away. The rank argument in
+`sample_symbols` is untouched — a direction the Jacobian annihilates is gone at
+any magnitude — which is why the case for `"identity"` rests on rank rather than
+on size, and why `train_unmixed_survival` remains the column to watch rather than
+`realised_survival`, which reads ~0.902 against its own 0.907 mixture ceiling the
+whole way down.
 
 ## Scale the unmasked logits, then re-mask
 

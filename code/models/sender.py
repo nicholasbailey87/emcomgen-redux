@@ -62,6 +62,43 @@ LAYER_NORM_EPS = model_util.LAYER_NORM_EPS
 
 # The speaker's channel scale is bounded above by projection rather than by a
 #     `clamp` in the forward pass. See `GumbelChannel.project_channel`.
+#
+# **Why 2.0 and not lower**, which is a question about the `"gumbel"` branch
+#     alone: `"identity"` returns `I` whatever `p` reads, so no ceiling protects
+#     it and none is needed. Against `sharpest_logit_margin` this value caps the
+#     unmixed winner at 0.9945 at V = 14 -- very nearly the whole survival range
+#     -- and the reason that is safe is that it stays clear of the one place the
+#     optimiser stops being able to undo the attenuation.
+#
+# The gumbel Jacobian carries a factor of order `p(1 - p)`, which falls from
+#     0.25 at `p = 0.5` to 0.00545 at this ceiling: a 46x attenuation. On its own
+#     that is harmless, because AdamW updates by `m / (sqrt(v) + eps)` and is
+#     scale-invariant in the gradient. It stops being scale-invariant when
+#     `sqrt(v)` falls under `eps` -- torch's default 1e-8, and `gradboard`
+#     passes no override -- at which point the update becomes `m / eps` and the
+#     optimiser degenerates into SGD at a ruinous effective rate.
+#
+# That crossover is a gradient norm of `eps * sqrt(N)`: 3.3e-5 for the 11.2M
+#     birds trunk, 9.2e-6 for `ResNet56`'s 852k. A worst case 46x down from a
+#     healthy ~1.0 is ~2e-2, which is ~650x *above* the floor on birds and
+#     ~2,400x above it on ShapeWorld. So the whole range this ceiling permits
+#     sits inside the region where AdamW cancels the attenuation entirely.
+#
+# The 2026-08-30 death this ceiling was written after did not: those runs reached
+#     0.99951 unmixed with the scale unbounded -- it needs a scale of 2.623, so
+#     it is not reachable now -- and their ~2e-7 speaker norms are ~6e-11 per
+#     element, some 170x *below* eps. The mechanism was never the attenuation by
+#     itself; it was the attenuation carrying the gradient under the floor.
+#
+# Two limits on that argument. The crossover assumes the norm spreads evenly
+#     over the group (`per_element = norm / sqrt(N)`), while `v` is per element,
+#     so a layer with concentrated gradients is safer than this and a nearly
+#     silent one is worse; the group norms in `metrics.csv` cannot resolve that.
+#     And `eps` is the only failure the optimiser could have rescaled away. The
+#     rank argument in `sample_symbols` is untouched by all of it -- a direction
+#     the Jacobian annihilates is not recoverable at any magnitude -- which is
+#     why the case for `"identity"` rests on rank rather than on size. See
+#     docs/channel.md.
 MAX_LOGIT_SCALE = 2.0
 
 
