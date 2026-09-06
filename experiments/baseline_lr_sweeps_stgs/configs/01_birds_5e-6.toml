@@ -1,0 +1,165 @@
+# baseline_lr_sweeps_stgs: what backbone learning rate works best under the
+# straight-through Gumbel-softmax estimator.
+#
+# Nine arms. `[optimiser.module_lr] sender_vision` and `receiver_vision` move
+# together over 5e-6, 1e-5, 2e-5, 5e-5 and 1e-4 on the CUB baseline (rung 2) and
+# over 1e-5, 2e-5, 5e-5 and 1e-4 on the ShapeWorld baseline (rung 1), with
+# `[sender_language_model] estimator = "gumbel"` set in every file. Nothing else
+# differs between the arms, and nothing else differs from the rung each one
+# copies.
+#
+# **DEFAULT.toml is not touched.** `estimator` stays `"identity"` there and the
+# ablation ladder is unaffected. DEFAULT.toml:1312-1322 says the A/B has to be
+# made by copying a rung and flipping the key rather than by moving the default,
+# because a ladder whose rungs differ in two things at once stops being
+# readable. This experiment is that A/B. If gumbel wins here, moving the default
+# is a separate decision with its own rebaseline.
+#
+# **Why revisit an estimator that was already rejected.** DEFAULT.toml:1302-1310
+# records that `"gumbel"` was the default for a few hours on 2026-08-30 and was
+# dropped because it killed runs: on `shapeworld-post-silhouette-update.csv` the
+# soft Jacobian took the speaker's four gradient norms to ~2e-7 and the run died
+# at epoch 21.
+#
+# **That exact failure is no longer reachable**, and it is worth knowing why
+# before reading these arms. It happened with the channel scale unbounded:
+# `MAX_LOGIT_SCALE` arrived the next day, in `9409d40`. 0.99951 unmixed survival
+# needs a scale of 2.623, against a ceiling of 0.9945 at the cap. More to the
+# point, those runs' ~2e-7 norms are ~6e-11 per element, about 170x below
+# AdamW's `eps` of 1e-8, which is where `m / (sqrt(v) + eps)` stops cancelling
+# the attenuation and the optimiser degenerates into SGD. The worst case the
+# ceiling now permits is ~2e-2, some 650x *above* that floor on the birds trunk.
+# So the whole reachable range sits inside AdamW's scale-invariant region. See
+# `sender.MAX_LOGIT_SCALE` and docs/channel.md.
+#
+# What has changed is the regime, and the argument for identity was always
+# conditional on it. `sample_symbols` justifies the swap by saying
+# `diag(p) - p pT` "at `p ~ onehot` has rank ~1, so all but one direction is
+# destroyed before any optimiser or clipper sees it". That is an argument about
+# a sharp speaker. The channel is not sharp: across all eight arms of
+# `baseline_lr_sweeps`, `train_unmixed_survival` -- the column that docstring
+# names as the quantity the gumbel branch differentiates through -- starts near
+# 0.20 and ends between 0.41 and 0.60, peaking at 0.6977. At `p_max ~ 0.55` the
+# soft Jacobian is well conditioned, its eigenvalues are order 0.25, and it is
+# the true Jacobian of the relaxation rather than a stand-in for one. The
+# degeneracy that motivated replacing it does not occur at these values.
+#
+# The other half of the case is asymmetry. Every gradient spike in the first
+# sweep is in the *speaker*: the birds listener stayed between 0.06 and 11 while
+# the birds speaker reached 5.2e6. The speaker is the only agent whose gradient
+# crosses the discretisation -- the listener reads the message embedding on a
+# continuous path -- so the estimator is the speaker's unique exposure, and it
+# is the only per-agent asymmetry in the backward pass that could produce a
+# per-agent asymmetry in the norms.
+#
+# **Why a rate sweep and not a single arm.** Gumbel multiplies the speaker's
+# gradient by a factor of order `p(1 - p)`, about 0.16 to 0.24 at the survival
+# these runs reach, so a gumbel arm at a fixed rate is not the same *effective*
+# rate on the speaker's trunk as the identity arm it is compared against. AdamW
+# absorbs most of a slowly varying rescaling -- `gradboard.optimiser` passes no
+# `betas`, so `beta2 = 0.999` averages over ~1000 steps against a drift that
+# takes 30 epochs, or ~4,700 steps on birds -- but a single arm would still
+# confound "gumbel is better conditioned" with "gumbel is effectively a lower
+# rate". Sweeping the rate is what separates them: if gumbel simply rescales,
+# its curve is the identity curve shifted along the rate axis, and if it changes
+# the conditioning, the curve has a different shape.
+#
+# What AdamW cannot absorb either way is the part that is not a scale.
+# `1/sqrt(v)` normalises elementwise over the trunk's parameters, while the
+# Jacobian acts in token space before the gradient reaches the trunk, and a
+# rank-structured transform there does not reduce to a per-parameter factor.
+#
+# **Controls, and why nothing needs re-running to get them.** `[scheduler]
+# lr_schedule_shape` is `"flat"` with `warm_up_epochs = 0`, so a 100-epoch run
+# is epoch-for-epoch identical to a 30-epoch one at the same rate. The eight
+# arms of `baseline_lr_sweeps` are therefore a direct identity control for the
+# first 30 epochs of the eight arms here that share their rates, and
+# `baseline_lr_sweeps_2` arms 01 and 02 are the identity control at 5e-6 and
+# 1e-5 on birds for the full 100. Both branches also sample through the same
+# `_gumbel_sample`, so a same-seed pair emits identical messages and differs in
+# the backward pass alone.
+#
+# **What to read, and it is not only the spikes.**
+#
+# `train_clip_sender_vision` in *both* directions. The spikes are the reason the
+#     estimator came under suspicion -- birds reached 5.2e6 at 2e-5 and spiked
+#     in 19 or 20 epochs of 30 at the middle rates -- but the recorded gumbel
+#     failure is the opposite one, a collapse toward AdamW's `eps` floor. The
+#     ceiling makes that unreachable in the form it took, as above, so an arm
+#     going quiet here would be a *new* result rather than the old one: the
+#     number to check it against is 3.3e-5 on birds and 9.2e-6 on ShapeWorld,
+#     the norms at which `eps` starts to dominate `sqrt(v)`.
+#
+# `train_unmixed_survival`, and not `train_realised_survival`. The uniform
+#     mixture is a constant in the logits, so it contributes nothing to the
+#     Jacobian: the mixed column is capped at 0.9071 and reads ~0.902 even where
+#     the unmixed one is at 0.9945 and the gradient is 46x down. `logit_margin`
+#     against `sharpest_logit_margin`'s 3.883 says whether sharpening was bought
+#     with the shape budget or with the scale.
+#
+# `train_eval_mode_acc` against `train_shuffled_message_acc`. Their gap is the
+#     message and nothing else -- both passes run on the same inputs under the
+#     same conditions -- and it is the honest measure of whether a protocol
+#     exists. In the first sweep birds at 1e-5 carried the largest gap on either
+#     dataset, 0.1383, and it was also the best arm on `test_acc`.
+#
+# `train_shuffled_message_acc` on its own, which sat at chance in every arm of
+#     the first sweep at both ends of training. That rules out image
+#     memorisation, and it is worth confirming it stays ruled out here rather
+#     than assuming it: the whole train-versus-test gap on birds is carried by
+#     the message, so a widening gap means a protocol that fails to transfer to
+#     held-out species, not a listener that has memorised training images.
+#
+# `train_acc_md_shape` against `train_acc_md_color` on the ShapeWorld arms,
+#     which is the standing question there.
+#
+# **100 epochs, one repeat.** 100 because the first sweep's own lesson was that
+# 30 truncated its only working arm -- birds at 1e-5 ended on its own maximum,
+# still climbing -- and because the ShapeWorld shape signal at 2e-5 did not step
+# up until epoch 18. One repeat because nine arms is already the budget; with
+# n = 1 the between-arm gaps are the same size as within-arm epoch-to-epoch
+# wobble, so this experiment ranks candidates and does not settle them.
+#
+# `epochs` and `repeats` are restated in every file: `scripts/job_utils.py` reads
+# both straight out of the file rather than out of the merged config. `[slurm]`
+# is read from the *first* config in the folder only, sorted by filename, so the
+# block here governs the whole array. It is sized for the heaviest job in the
+# set, a 100-epoch birds arm, matching what `ablation_birds` gives its own.
+#
+# ---
+#
+# **This arm: CUB backbones at 5e-6 under gumbel.** Half the first sweep's floor,
+# and the identity run at this rate is `baseline_lr_sweeps_2` arm 01. It is the
+# arm most likely to show the recorded collapse failure if that failure is about
+# rate, and the least likely to spike if the spikes are about rate.
+
+name = "baseline_lr_sweeps_stgs"
+
+[data]
+dataset = "../data/cub"
+
+[sender_language_model]
+# The straight-through Gumbel-softmax backward pass: the hard one-hot goes
+# forward and the soft sample's Jacobian `diag(p) - p pT` comes back, against
+# DEFAULT.toml's `"identity"`, which keeps the same forward pass and returns `I`.
+# The forward pass is bit-identical between the two branches, so this changes
+# what the speaker learns from and not what it says.
+estimator = "gumbel"
+
+[optimiser.module_lr]
+# The two vision models, and only them. Every other key in this table
+# stays at DEFAULT.toml's 1e-4.
+sender_vision = 5e-6
+receiver_vision = 5e-6
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

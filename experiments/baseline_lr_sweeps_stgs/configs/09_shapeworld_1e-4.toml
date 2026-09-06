@@ -1,0 +1,30 @@
+# baseline_lr_sweeps_stgs arm: ShapeWorld backbones at 1e-4 under gumbel.
+#
+# See `01_birds_5e-6.toml` for what this experiment measures and why. This
+# file differs from that one in `[optimiser.module_lr]`, and in carrying no
+# `[data]` block, since ShapeWorld is the default dataset.
+#
+# The identity control at this rate is `baseline_lr_sweeps` arm 04.
+#
+# DEFAULT.toml's base rate. Flat on shape under identity and the clearest
+# colour-shortcut arm of the four, ending at 0.5049 on shape against 0.6094 on
+# colour.
+
+name = "baseline_lr_sweeps_stgs"
+
+[sender_language_model]
+# See `01_birds_5e-6.toml`. The hard one-hot goes forward exactly as it does
+# under `"identity"`; only the backward pass differs.
+estimator = "gumbel"
+
+[optimiser.module_lr]
+# The two vision models, and only them. Every other key in this table
+# stays at DEFAULT.toml's 1e-4.
+sender_vision = 1e-4
+receiver_vision = 1e-4
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1

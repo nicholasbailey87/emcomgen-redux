@@ -1,0 +1,32 @@
+# baseline_lr_sweeps_stgs arm: CUB backbones at 1e-4 under gumbel.
+#
+# See `01_birds_5e-6.toml` for what this experiment measures and why. This
+# file differs from that one in `[optimiser.module_lr]` alone.
+#
+# The identity control at this rate is `baseline_lr_sweeps` arm 08.
+#
+# DEFAULT.toml's base rate, and the rate this whole line of work started by
+# questioning. Under identity it was the worst birds arm, ending at 0.5004 on
+# `test_acc` after peaking at 0.5355 around epoch 15.
+
+name = "baseline_lr_sweeps_stgs"
+
+[data]
+dataset = "../data/cub"
+
+[sender_language_model]
+# See `01_birds_5e-6.toml`. The hard one-hot goes forward exactly as it does
+# under `"identity"`; only the backward pass differs.
+estimator = "gumbel"
+
+[optimiser.module_lr]
+# The two vision models, and only them. Every other key in this table
+# stays at DEFAULT.toml's 1e-4.
+sender_vision = 1e-4
+receiver_vision = 1e-4
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1

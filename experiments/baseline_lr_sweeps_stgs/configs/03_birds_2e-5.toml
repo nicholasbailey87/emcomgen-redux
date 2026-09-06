@@ -1,0 +1,33 @@
+# baseline_lr_sweeps_stgs arm: CUB backbones at 2e-5 under gumbel.
+#
+# See `01_birds_5e-6.toml` for what this experiment measures and why. This
+# file differs from that one in `[optimiser.module_lr]` alone.
+#
+# The identity control at this rate is `baseline_lr_sweeps` arm 06.
+#
+# The worst-spiking birds arm under identity: `clip_sender_vision` spanned 9
+# to 5.2e6 and exceeded 1e3 in 19 epochs of 30. If the spikes are the damping
+# term the identity Jacobian drops, this is the arm where restoring that term
+# should show most clearly.
+
+name = "baseline_lr_sweeps_stgs"
+
+[data]
+dataset = "../data/cub"
+
+[sender_language_model]
+# See `01_birds_5e-6.toml`. The hard one-hot goes forward exactly as it does
+# under `"identity"`; only the backward pass differs.
+estimator = "gumbel"
+
+[optimiser.module_lr]
+# The two vision models, and only them. Every other key in this table
+# stays at DEFAULT.toml's 1e-4.
+sender_vision = 2e-5
+receiver_vision = 2e-5
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
