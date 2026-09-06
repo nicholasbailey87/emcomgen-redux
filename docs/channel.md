@@ -389,10 +389,11 @@ which of the two routes a run took, and it is not substitutable for
 `logit_scale`.
 
 That 0.9945 is very nearly the whole survival range, which looks like a ceiling
-that barely binds. It is deliberate, and the argument for it is
-[below](#why-2-0-is-high-enough-to-be-safe): the ceiling is not there to keep the
-channel blunt, it is there to keep the gumbel Jacobian's attenuation inside the
-range AdamW can still cancel.
+that barely binds. It is deliberate, and the argument is
+[below](#why-the-ceiling-is-2-0): past about 2.0 the scale is no longer what
+limits the channel's fidelity — `uniform_weight` is — so a higher ceiling would
+buy under half a percent. Note 0.9945 is the V = 14 figure; birds runs V = 20 and
+reaches 0.99804.
 
 ### The bound that was here, and why it is not restored
 
@@ -614,52 +615,81 @@ gumbel branch it is bounded rather than impossible: `MAX_LOGIT_SCALE` and
 `sharpest_logit_margin` together cap `p` at 0.9945 at V = 14, so the collapse is
 bounded at `(1 − 0.9945)/(1 − p_open)` rather than unbounded.
 
-### Why 2.0 is high enough to be safe
+### Why the ceiling is 2.0
 
-The question that bound has to answer is not "how blunt does the channel stay"
-but "does the attenuation ever reach a depth the optimiser cannot undo". It does
-not, and the margin is wide.
+The ceiling is chosen on **fidelity**, and the argument is not about gradients at
+all. The scale is not what limits how faithful the channel can be —
+`uniform_weight` is. `realised_survival` can never exceed `(1 − w) + w/V`, which
+is 0.9071 at V = 14 and 0.9050 at V = 20 whatever the scale does, so the question
+a ceiling has to answer is what fraction of *that* it lets a speaker reach:
 
-The gumbel Jacobian carries a factor of order `p(1 − p)`, which runs from 0.25 at
-`p = 0.5` to 0.00545 at the ceiling — a 46× attenuation. By itself that is
-harmless: AdamW updates by `m / (√v + ε)`, so a uniform rescaling of the gradient
-cancels. What does not cancel is `√v` falling *under* `ε`, torch's default 1e-8
-and not overridden by `gradboard.optimiser`. Past that point the update is
-`m / ε`, the optimiser degenerates into SGD at a ruinous effective rate, and no
-amount of gradient is recovered by normalisation because normalisation has
-stopped happening.
+| cap | ShapeWorld (V = 14) | birds (V = 20) |
+|---|---|---|
+| 1.00 | 79.1% | 83.9% |
+| 1.50 | 96.3% | 98.1% |
+| 1.75 | 98.6% | 99.4% |
+| **2.00** | **99.5%** | **99.8%** |
+| 2.50 | 99.9% | 100.0% |
 
-That crossover sits at a group gradient norm of `ε·√N`:
+99% of the mixture's own ceiling needs 1.84 on ShapeWorld and 1.64 on birds, so
+2.0 is the round number just above the tighter of the two. Past it the scale has
+stopped mattering — 2.5 buys another 0.46% on ShapeWorld and 0.18% on birds — and
+below it real fidelity is given away, 3.7% on ShapeWorld at 1.5. **2.0 is the
+point where the scale stops being the binding constraint and the uniform mixture
+becomes it.**
 
-| trunk | N | ε floor bites below | worst case at the ceiling | margin |
-|---|---|---|---|---|
-| `ResNet18`, birds | 11,176,512 | 3.3e-5 | ~2e-2 | ~650× clear |
-| `ResNet56`, ShapeWorld | 852,368 | 9.2e-6 | ~2e-2 | ~2,400× clear |
+That also settles what it means when a run pins at the ceiling, which
+[the section above](#the-ceiling-and-why-projection-and-not-a-clamp) says to
+expect. A pinned speaker is not starved: it is pushing on a dimension with under
+0.5% left in it. If a run genuinely wants more fidelity the lever is
+`uniform_weight` — dropping it from 0.1 to 0.05 lifts birds' message-level
+ceiling from 0.450 to 0.664, far more than any ceiling change can do.
 
-So the entire range `MAX_LOGIT_SCALE` = 2.0 permits lies inside the region where
-AdamW cancels the attenuation, and the ceiling buys almost the whole survival
-range at no cost to the gradient. Lowering it to 1.2 would floor the Jacobian
-2.8× below its maximum instead of 46× — a real improvement in a number that is
-not the binding one, paid for with 0.9945 → 0.8904 of reachable fidelity.
+### The two datasets are not the same, because `vocabulary` is not
 
-**The 2026-08-30 death is the case that crossed the floor**, and it happened with
-no ceiling at all: `MAX_LOGIT_SCALE` arrived the next day in `9409d40`. Those
-runs reached 0.99951 unmixed, which needs a scale of 2.623 and is therefore not
-reachable now, and their ~2e-7 speaker norms are ~6e-11 per element — around 170×
-*below* ε. The mechanism was never the attenuation on its own; it was the
-attenuation carrying the gradient under the floor, which is exactly what the
-ceiling now prevents.
+A larger vocabulary raises `sharpest_logit_margin` (`V/√(V−1)`), so the same
+ceiling buys a sharper channel and a smaller gumbel Jacobian:
 
-Two limits on the argument. The crossover assumes a norm spread evenly over the
-group, `per_element = norm/√N`, whereas `v` is per element: a layer whose
-gradient is concentrated is safer than the table says and a nearly silent one is
-worse, and the group norms in `metrics.csv` cannot resolve which. And `ε` is only
-the failure AdamW *could* have rescaled away. The rank argument in
-`sample_symbols` is untouched — a direction the Jacobian annihilates is gone at
-any magnitude — which is why the case for `"identity"` rests on rank rather than
-on size, and why `train_unmixed_survival` remains the column to watch rather than
-`realised_survival`, which reads ~0.902 against its own 0.907 mixture ceiling the
-whole way down.
+| dataset | V | margin | max unmixed | realised | `p(1−p)` at cap | attenuation |
+|---|---|---|---|---|---|---|
+| ShapeWorld | 14 | 3.883 | 0.99452 | 0.9022 | 0.00545 | 46× |
+| birds | 20 | 4.588 | 0.99804 | 0.9032 | 0.00196 | 128× |
+
+`realised` reads 0.9022 against 0.9032 across a 2.8× difference in the Jacobian.
+The mixed column cannot see this, which is why `record_survival` reports the
+unmixed one and why `train_unmixed_survival` is the column to watch on the gumbel
+branch.
+
+### Why that attenuation is not a gradient risk
+
+AdamW updates by `m / (√v + ε)` and so cancels a uniform factor on the gradient —
+but only while `√v` stays well above `ε`. Below that the update becomes `m / ε`,
+the optimiser degenerates into SGD at a ruinous effective rate, and no amount of
+attenuation is recovered by normalisation because normalisation has stopped
+happening. The crossover is a group gradient norm of about `ε·√N`.
+
+`[optimiser] eps` is **1e-12**, not torch's 1e-8, and DEFAULT.toml sets it there
+for exactly this reason. That puts the crossover at 9.2e-10 for `ResNet56`'s 852k
+parameters and 3.3e-9 for `ResNet18`'s 11.2M, so even a fully saturated channel
+would need the unattenuated gradient below 4.2e-8 (ShapeWorld) or 4.3e-7 (birds)
+to reach it. The quietest epoch of the first gumbel run is 6.0e-4 — some 1,400×
+clear. At torch's default the same thresholds would be 4.2e-4 and 4.3e-3, and
+that run would have crossed them during its seven-epoch flat start.
+
+So the ceiling and `eps` close different halves of the same failure, and the
+2026-08-30 death needed both open. It ran with the scale unbounded —
+`MAX_LOGIT_SCALE` arrived the next day in `9409d40` — and with `eps` still at
+1e-8. Its 0.99951 unmixed survival needs a scale of 2.623 and is not reachable
+now; its ~2e-7 speaker norms sat below the floor `eps` then imposed and are far
+above the one it imposes today.
+
+Two limits on that. The crossover assumes a norm spread evenly over the group,
+`per_element = norm/√N`, whereas `v` is per element: a layer whose gradient is
+concentrated is safer than these figures say and a nearly silent one is worse,
+and the group norms in `metrics.csv` cannot resolve which. And `ε` is only the
+failure AdamW *could* have rescaled away — the rank argument in `sample_symbols`
+is untouched, since a direction the Jacobian annihilates is gone at any
+magnitude.
 
 ## Scale the unmasked logits, then re-mask
 
