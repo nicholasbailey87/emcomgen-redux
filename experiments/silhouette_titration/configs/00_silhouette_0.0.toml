@@ -11,7 +11,7 @@ silhouette_p_receiver = 0.0
 # Note ten of these are warm-up. `warm_up_epochs = 10` is a third of a 30-epoch
 # run rather than the tenth DEFAULT.toml sized it as, which is the same position
 # every rung on the ladder is in.
-epochs = 30
+epochs = 100
 
 [experiment]
 repeats = 1
