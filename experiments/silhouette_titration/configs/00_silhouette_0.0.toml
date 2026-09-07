@@ -4,13 +4,29 @@ name = "silhouette_titration"
 silhouette_p_receiver = 0.0
 
 [scheduler]
-# The ablation's smoke-run length, so a titration arm is readable against a rung
-# 1 trajectory without a schedule difference between them. DEFAULT.toml's 100 is
-# the notional full run and nothing takes it.
+# **100, up from 30 on 2026-09-07, and the length is the point.** Thirty epochs
+# truncates this experiment exactly where its effect starts. Under the corrected
+# backbone rate, ShapeWorld shape does not cross colour until around epoch 20 and
+# then climbs for the rest of the run: `lr_sweep_1_cnn` arm 07 reaches
+# `train_acc_md_shape` 0.879 at epoch 100 and is still rising, while `md_color`
+# saturates near 0.66 by epoch 30 and never moves again. A thirty-epoch arm sees
+# the colour plateau and almost none of the shape.
 #
-# Note ten of these are warm-up. `warm_up_epochs = 10` is a third of a 30-epoch
-# run rather than the tenth DEFAULT.toml sized it as, which is the same position
-# every rung on the ladder is in.
+# That is not a small correction to the earlier titrations, it invalidates them.
+# The 2026-09-02 runs were truncated here *and* ran at 1e-4 *and* ran the
+# withdrawn `"identity"` estimator, so their flat shape columns are
+# uninterpretable rather than a negative result about silhouetting.
+#
+# The old traces are not wasted. `lr_schedule_shape` is `"flat"` with
+# `warm_up_epochs = 0`, so a 100-epoch run is epoch-for-epoch identical to a
+# 30-epoch one at the same rate -- these arms stay directly comparable with
+# anything already recorded, over its first thirty epochs.
+#
+# It also matches the ablation again, which is what the previous note here was
+# reaching for: the ladder's rungs are 100 epochs, so a titration arm is readable
+# against a rung 1 trajectory with no schedule difference between them. (That
+# note also said ten of these are warm-up. They are not -- `warm_up_epochs` has
+# been 0 since the ramp was removed.)
 epochs = 100
 
 [experiment]
