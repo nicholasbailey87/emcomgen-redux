@@ -10,8 +10,8 @@ Speaker models: a GRU language model as in "Emergent Communication of
     overwriting each slot with its symbol as it commits. See
     docs/architecture.md.
 
-The channel -- `layer_norm_logits`, `logit_scale`, `uniform_weight`, the two
-    gradient estimators and their diagnostics -- is documented in
+The channel -- `layer_norm_logits`, `logit_scale`, `uniform_weight`, the
+    straight-through Gumbel estimator and their diagnostics -- is documented in
     docs/channel.md.
 """
 
@@ -125,8 +125,8 @@ LAYER_NORM_EPS = model_util.LAYER_NORM_EPS
 #     resolve that. And `eps` is only the failure the optimiser could have
 #     rescaled away. The rank argument in `sample_symbols` is untouched by any of
 #     it -- a direction the Jacobian annihilates is not recoverable at any
-#     magnitude -- which is why the case for `"identity"` rests on rank rather
-#     than on size. See docs/channel.md.
+#     magnitude -- which is why this ceiling, and not `eps`, is what keeps the
+#     straight-through estimator well conditioned. See docs/channel.md.
 MAX_LOGIT_SCALE = 2.0
 
 
@@ -311,10 +311,12 @@ def mean_logit_margin(logits: torch.Tensor) -> torch.Tensor:
         growing its margin, by growing its scale, or by both, and only the
         product is visible in `unmixed_survival`. `sharpest_logit_margin` is
         where the first stops -- 3.883 at V = 14 -- and `MAX_LOGIT_SCALE` is
-        where the second does. Neither bound is there to protect the backward
-        pass: under `estimator = "identity"` the Jacobian is `I` however sharp
-        the speaker gets, which is why the scale no longer needs solving against
-        a saturation ceiling. See docs/channel.md.
+        where the second does. Both bounds *are* there to protect the backward
+        pass, and `MAX_LOGIT_SCALE` is what makes the straight-through Jacobian
+        safe to differentiate through: `diag(p) - p pT` degenerates as `p`
+        approaches one-hot, so a ceiling on `p` is a floor on the gradient's
+        rank. The unbounded channel is what killed the 2026-08-30 gumbel runs.
+        See docs/channel.md.
 
     Taken on the emittable slice only, and *after* `layer_norm_logits`, so the
         result is already in units of the logits' own standard deviation and
@@ -801,11 +803,10 @@ class GumbelChannel:
         uses for the listener's volume, which is the scalar this one is the
         counterpart of.
 
-    The channel is that one parameter, an estimator name settled at
-        construction, and the per-batch diagnostics.
+    The channel is that one parameter and the per-batch diagnostics.
     """
 
-    def _init_channel(self, estimator, normalise_logits=True):
+    def _init_channel(self, normalise_logits=True):
         """
         Call from `__init__` where the parameter should be created: creation
             order fixes which RNG draw every later parameter gets. `torch.zeros`
@@ -851,8 +852,6 @@ class GumbelChannel:
 
         if self.normalises_logits:
             self.log_logit_scale = nn.Parameter(torch.zeros(()))
-
-        self.estimator = estimator
 
         self.reset_channel_diagnostics()
 
@@ -944,19 +943,17 @@ class GumbelChannel:
 
     def _gumbel_sample(self, normalised):
         """
-        The forward sampler, shared by both estimators so that neither can drift
-            from the other: at the same seed a gumbel run and an identity run
-            emit *identical* messages, which is what makes an A/B between them a
-            control rather than two different runs.
+        The forward sampler, and the whole of `sample_symbols`' training path:
+            the hard one-hot goes forward and `gumbel_softmax` leaves the soft
+            sample's Jacobian behind it for the backward pass.
 
         The order is not interchangeable. Scaling the *masked* logits rather
             than re-masking after the scale sends `-inf` into the arithmetic and
             NaN out of it. See docs/channel.md.
 
         `hard=True` emits `argmax(logits + g)` with `g ~ Gumbel(0, 1)`, so the
-            symbol is invariant to `tau`: `tau` shapes the soft surrogate the
-            gumbel estimator differentiates and nothing else, and on the identity
-            branch -- which discards that surrogate -- it does nothing at all.
+            symbol is invariant to `tau`: `tau` shapes the soft sample the
+            Jacobian is taken at, and nothing the speaker actually says.
 
         Args:
             normalised: (..., vocabulary + 4) from `layer_norm_logits`, reserved
@@ -985,62 +982,63 @@ class GumbelChannel:
 
     def sample_symbols(self, logits):
         """
-        Turn one step's (or one message's) logits into symbols, under whichever
-            gradient estimator `sender_language_model.estimator` names.
+        Turn one step's (or one message's) logits into symbols, through the
+            straight-through Gumbel-softmax estimator.
 
         Returns `(onehot, pre_gain_logits)` -- the masked, normalised, *un*scaled
             logits the survival diagnostic is measured from, or None outside
             training. Callers pool it over positions themselves.
 
-        **`"gumbel"`** is the estimator this model has always used: the hard
-            one-hot forward, and backward through the soft sample
-            `gumbel_softmax` builds on the way, whose Jacobian is
-            `diag(p) - p pT`.
+        The hard one-hot goes forward and the soft sample's Jacobian
+            `diag(p) - p pT` comes back. The sample is faithful either way --
+            `argmax(z + g)` *is* a categorical draw from `softmax(z)` -- so the
+            estimator decides what the speaker learns from and not what it says.
 
-        **`"identity"`** keeps that forward exactly and replaces the backward
-            with `I`:
+        **There used to be a second branch here.** `estimator = "identity"`
+            replaced that Jacobian with `I`, via a surrogate
+            `y = onehot.detach() + (z - z.detach())`, and was the default from
+            2026-08-31 until it was withdrawn on 2026-09-07. The argument for it
+            was *rank*: the per-token gradients are summed into one vector before
+            they reach the language model and the vision trunk, and
+            `diag(p) - p pT` at `p ~ onehot` has rank ~1, so all but one
+            direction is destroyed before any optimiser or clipper sees it.
 
-                y = onehot.detach() + (z - z.detach())
+        **That argument was conditional on a sharp speaker, and the channel is
+            not sharp.** Across every arm of `lr_sweep_1_cnn`,
+            `unmixed_survival` runs from ~0.21 at initialisation to 0.81-0.89,
+            and at `p_max ~ 0.55-0.89` the soft Jacobian's eigenvalues are order
+            0.25 rather than order zero. It is the true Jacobian of the
+            relaxation at those values, not a degenerate stand-in for one.
 
-            The sample is unchanged and still faithful -- `argmax(z + g)` *is* a
-            categorical draw from `softmax(z)` -- so this changes what the
-            speaker learns from, not what it says.
+        **What settled it was the measurement.** `lr_sweep_1_cnn` ran both
+            branches at matched rates, epoch for epoch, and gumbel won every
+            arm on both datasets: the birds speaker's `clip_sender_vision`
+            fell from 5.2e6 under identity to ~3, ShapeWorld learned shape for
+            the first time (`train_acc_md_shape` 0.879 against
+            `train_acc_md_color` 0.661 at 2e-5), and no arm approached the
+            opposite failure -- the lowest speaker norm recorded anywhere was
+            5.5e-5, against the 3.3e-5 and 9.2e-6 at which AdamW's `eps` starts
+            to dominate `sqrt(v)`.
 
-        **Why.** The soft Jacobian's cost is its *rank*, not its size. The
-            per-token gradients are summed into one vector before they reach the
-            language model and the vision trunk, and `diag(p) - p pT` at
-            `p ~ onehot` has rank ~1, so all but one direction is destroyed
-            before any optimiser or clipper sees it and the trunk hears a single
-            token's opinion. Magnitude, by contrast, largely cancels: AdamW
-            updates by `m / sqrt(v)`, and `clip_gradients` renormalises what
-            survives. Only the identity estimator removes the rank collapse.
-            Under it the speaker's gradient is `dL/dy` -- the receiver's
-            per-token embedding sensitivity -- which is full rank and the same
-            size however sharp the speaker has become. That is also why
-            `logit_scale` is free to learn again: with `I` in the backward pass
-            there is no saturation for a climbing scale to shut, so bounding `p`
-            stopped being a gradient safeguard.
+        **Two things make that reachable, and both must stay.**
+            `MAX_LOGIT_SCALE` bounds `p` away from one-hot, which is what keeps
+            the Jacobian's rank up; the 2026-08-30 gumbel runs that died at
+            epoch 21 predate it by a day. And `[optimiser] eps = 1e-12`, far
+            below torch's 1e-8, keeps the whole reachable gradient range inside
+            AdamW's scale-invariant region, so the `p(1 - p)` attenuation
+            cancels in `m / (sqrt(v) + eps)` instead of degenerating the
+            optimiser into SGD. See `MAX_LOGIT_SCALE` and docs/channel.md.
 
-        **The surrogate is built on the emittable slice.** `masked` holds `-inf`
-            in the four reserved columns and `-inf - (-inf)` is NaN. Slicing also
-            stops those columns receiving gradient at all: they are constants
-            from the sampler's point of view, so `outputs2vocab` rows 0-3 and the
-            stack behind them are never trained toward tokens that cannot be
-            emitted.
+        **The reserved columns receive no gradient.** `masked` holds `-inf` in
+            the four of them, and `_gumbel_sample` masks before the softmax, so
+            `outputs2vocab` rows 0-3 and the stack behind them are never trained
+            toward tokens that cannot be emitted.
 
-        **It taps the *scaled* logits**, and has to: `_gumbel_sample` runs
-            under `no_grad` on this branch, so the surrogate is the only path
-            back and an unscaled tap would leave `log_logit_scale` with no
-            gradient at all. The composition is what makes that free. With
-            `d(scaled)/d(normalised) = 1` from `scale_without_attenuating` and
-            `dy/d(scaled) = I` from the estimator:
-
-                dL/dnormalised   = dL/dy
-                dL/dlog_logit_scale = <dL/dy, normalised> * logit_scale
-
-            The first is bit-identical to what the unscaled tap gave, so the
-            speaker's stack sees exactly the gradient it saw before the scale
-            came back; the second is real and nonzero. See docs/channel.md.
+        **`log_logit_scale` takes its gradient inside the sampler**, where
+            `scale_without_attenuating` gives `d(scaled)/d(normalised) = 1` and
+            the scale its own true partial. That is what the identity branch
+            needed its surrogate to reproduce, and here it is simply the graph.
+            See docs/channel.md.
         """
         # `normalised` is the raw logits when `normalise_logits` is off. The
         #     name is kept because everything downstream of here -- the sampler,
@@ -1063,34 +1061,7 @@ class GumbelChannel:
                 None,
             )
 
-        if self.estimator == "identity":
-            # No graph through the sampler at all: the surrogate below is the
-            #     only path back to the speaker.
-            with torch.no_grad():
-                onehot = self._gumbel_sample(normalised)
-
-            # The bracketing is load-bearing. `onehot + z - z.detach()`
-            #     associates left, so it computes `(1 + z) - z`, which in
-            #     float32 is 1.0000001 rather than 1 -- a real perturbation of
-            #     the message, on the winning token, every step. Forming the
-            #     zero first makes the addition exact.
-            emittable = (
-                model_util.scale_without_attenuating(
-                    normalised[..., 4:], self.logit_scale
-                )
-                if self.normalises_logits else normalised[..., 4:]
-            )
-            onehot = torch.cat(
-                [
-                    onehot[..., :4],
-                    onehot[..., 4:] + (emittable - emittable.detach()),
-                ],
-                dim=-1,
-            )
-        else:
-            onehot = self._gumbel_sample(normalised)
-
-        return onehot, masked.detach()
+        return self._gumbel_sample(normalised), masked.detach()
 
     def record_survival(self, pre_gain_logits):
         """
@@ -1098,8 +1069,8 @@ class GumbelChannel:
             mixture applied, the same thing without it, and the two shape
             readings that say what the fidelity was bought with.
 
-        `unmixed_survival` is the quantity `estimator = "gumbel"` differentiates
-            through. That branch takes the soft sample's Jacobian
+        `unmixed_survival` is the quantity the estimator differentiates
+            through. `sample_symbols` takes the soft sample's Jacobian
             `diag(p) - p pT`, and `flatten_logit_distribution` is a convex
             mixture in probability space, so the estimator's Jacobian is
             `(1 - w)(diag(p) - p pT)` in the winner's probability *before* the
@@ -1110,13 +1081,12 @@ class GumbelChannel:
             magnitude, invisible in the mixed column. Same function, same order
             of operations, mixture off.
 
-            Under `estimator = "identity"` it leaves the backward pass
-            altogether: that branch's Jacobian is `I` whatever `p` reads. It is
-            still worth watching there, as the channel's fidelity, but it is no
-            longer a gradient diagnostic -- which is why nothing bounds it any
-            more. `MAX_LOGIT_SCALE` and `sharpest_logit_margin` bound the two
-            things it is bought with, and their product is what this column
-            reads.
+            It is a gradient diagnostic and not only a fidelity one, which is
+            why the two things it is bought with are both bounded: the soft
+            Jacobian's eigenvalues go as `p(1 - p)`, order 0.25 at the ~0.55
+            these runs reach and collapsing toward zero as `p` approaches one.
+            `MAX_LOGIT_SCALE` and `sharpest_logit_margin` are those bounds, and
+            their product is what this column reads.
 
         `logit_margin` and `logit_prior_share` are the shape pair. The first is
             how concentrated the distribution is, the second how much of that
@@ -1158,8 +1128,8 @@ class SenderGRULM(GumbelChannel, nn.Module):
         self.vocabulary = kwargs["vocabulary"]
         self.message_length = kwargs["message_length"]
         # Gradient shaping only: the emitted symbol is an argmax and so is
-        #     invariant to it, and `estimator = "identity"` discards the soft
-        #     sample it shapes. See `sample_symbols`.
+        #     invariant to it. What it shapes is the soft sample the
+        #     straight-through Jacobian is taken at. See `sample_symbols`.
         self.tau = kwargs["tau"]
         self.uniform_weight = kwargs["uniform_weight"]
         self.dropout = kwargs["dropout"]
@@ -1167,9 +1137,7 @@ class SenderGRULM(GumbelChannel, nn.Module):
         self.bidirectional = kwargs["bidirectional"]
         self.directions = 2 if self.bidirectional else 1
 
-        self._init_channel(
-            kwargs["estimator"], kwargs.get("normalise_logits", True)
-        )
+        self._init_channel(kwargs.get("normalise_logits", True))
 
         self.gru = nn.GRU(
             self.token_embedding_size,
@@ -1330,8 +1298,8 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
         self.vocabulary = kwargs["vocabulary"]
         self.message_length = kwargs["message_length"]
         # Gradient shaping only: the emitted symbol is an argmax and so is
-        #     invariant to it, and `estimator = "identity"` discards the soft
-        #     sample it shapes. See `sample_symbols`.
+        #     invariant to it. What it shapes is the soft sample the
+        #     straight-through Jacobian is taken at. See `sample_symbols`.
         self.tau = kwargs["tau"]
         self.uniform_weight = kwargs["uniform_weight"]
         self.dropout = kwargs["dropout"]
@@ -1370,9 +1338,7 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
             decoder=False,
         )
 
-        self._init_channel(
-            kwargs["estimator"], kwargs.get("normalise_logits", True)
-        )
+        self._init_channel(kwargs.get("normalise_logits", True))
 
         if self.referent_embedding_size != self.token_embedding_size:
             raise NotImplementedError(

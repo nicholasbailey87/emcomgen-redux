@@ -370,12 +370,9 @@ it. None of that was legible in the mixed column.
 Expect the two to open close together and separate as the run sharpens. Watch
 `1 − unmixed_survival` on a log scale; it is the quantity with the dynamic range.
 
-**Which estimator is running changes what this column means.** Under
-`estimator = "identity"` the Jacobian is `I`, so this reaches the gradient not at
-all: it is still the channel's fidelity — how much of the message arrives — but a
-run that saturates it is not thereby in trouble, and the saturation signature in
-[training.md](training.md) cannot fire. Under `"gumbel"` it is a gradient
-diagnostic as described, and bounded rather than unbounded: `MAX_LOGIT_SCALE`
+**This is a gradient diagnostic and not only a fidelity reading**, so the
+saturation signature in [training.md](training.md) is live. It is bounded rather
+than unbounded, which is the whole of what the ceilings buy: `MAX_LOGIT_SCALE`
 and `sharpest_logit_margin` cap the two factors that saturate it, so this column
 cannot exceed **0.9945** at V = 14. A run pinned *at* that is at the sharpest
 the channel allows; a run pinned at `realised_survival`'s 0.90714 might be
@@ -486,8 +483,8 @@ is AMP: bit-identical spread across epochs is the tell for skipped steps.
 
 **`sampling_tau`** is the configured `tau`, flat for the whole of any run: the
 coupling in `17ae9f9` was retired in `3b3b857` and its machinery is gone. It carries no information, and is kept so the
-metrics header is stable and so a run records what its `"gumbel"` surrogate was
-shaped by. Under `estimator = "identity"` it does nothing at all.
+metrics header is stable and so a run records what the soft sample its Jacobian
+is taken at was shaped by.
 
 **`pool_effective_examples`** — `1 / Σ p²` over the prototyper's attention
 weights, so it reads in examples. It opens at the number of positive examples,

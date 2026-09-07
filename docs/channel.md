@@ -10,7 +10,6 @@ The pipeline, in order, is:
 outputs2vocab  →  layer_norm_logits  →  mask_reserved_tokens
                →  × logit_scale      →  flatten_logit_distribution
                →  gumbel_softmax(hard=True, tau=tau)
-               →  [estimator: gumbel | identity]
 ```
 
 `logit_scale` is a learned scalar, opening at 1.0 and bounded above at
@@ -144,11 +143,12 @@ constant solved from a `token_max_probability` key; `2026-08-31` put it back.
 Two reasons were given for deleting it, and neither survives.
 
 *"A learned scale climbs until the straight-through estimator is shut."* That is
-a property of the **gumbel** Jacobian `diag(p) − p pᵀ`, which collapses to rank
-~1 as `p → 1`. The same commit added `estimator = "identity"`, whose Jacobian is
-`I` at any sharpness, and `681ef0b` put the whole ladder on it. Saturation now
-costs nothing in the backward pass, so there is nothing for a climbing scale to
-shut.
+a property of the Jacobian `diag(p) − p pᵀ`, which collapses to rank ~1 as
+`p → 1`, and it is true as far as it goes. What it does not justify is *solving*
+the scale in closed form: `MAX_LOGIT_SCALE` bounds the same quantity while
+leaving the parameter free, so the collapse is capped without the scale being
+pinned. A bound and a constant are not the same answer, and the run needs the
+traverse.
 
 *The ratchet is one-way.* It is not. The section below records the scale sliding
 **down** monotonically in failing runs — 0.9094 → 0.6547 on rung 10, 0.8648 →
@@ -182,19 +182,25 @@ underflow to zero before either sees it. That is the failure
 [anecdotes.md](anecdotes.md) records as skipped steps, and it is the reason the
 helper is on both ends of the channel now.
 
-**This is what makes an unfloored scale safe**, and it is the invariant the whole
-design rests on. With `∂scaled/∂normalised = 1` from the helper and `∂y/∂scaled =
-I` from the identity estimator:
+**This is what makes an unfloored scale safe.** With `∂scaled/∂normalised = 1`
+from the helper, the scale's value never multiplies the speaker's stack, while
+the scale keeps a real partial of its own:
 
 ```
-dL/dnormalised       =  dL/dy                        (independent of the scale)
-dL/dlog_logit_scale  =  ⟨dL/dy, normalised⟩ · scale   (real and nonzero)
+d(scaled)/d(normalised)  =  1                          (not logit_scale)
+dL/dlog_logit_scale      =  ⟨dL/dy·J, normalised⟩ · scale   (real and nonzero)
 ```
 
-A scale that slides quiet makes the channel *noisier*, not the stack behind it
-*starved*, so there is nothing to floor. `tests/test_exploration.py` pins the
-first line as a bit-identical equality across the whole range the parameter can
-occupy; it is the assertion most likely to be broken by a later edit.
+A scale that slides quiet therefore makes the channel *noisier*, not the stack
+behind it *starved*, so there is nothing to floor: the small value never
+multiplies the speaker's whole stack, and the parameter still has a true partial
+of its own to learn on.
+
+Note this is a statement about the *helper*, not about the end-to-end gradient,
+which is not scale-free — `J_gumbel` is itself a function of the scaled logits.
+The next paragraph is where that is separated out. Under the withdrawn identity
+branch the two coincided, because `J` was `I`, and the "independent of the scale"
+claim that used to stand here was that branch's rather than the helper's.
 
 **The gain sits between `layer_norm_logits` and `mask_reserved_tokens`,**
 upstream of the sampler; `gumbel_softmax(hard=True)` keeps its own
@@ -406,9 +412,8 @@ form.
 The quantity it bounded is `p`, the winner's probability before the uniform
 mixture — which is the `p` in the gumbel estimator's Jacobian
 `(1 − w)(diag(p) − p pᵀ)`. That Jacobian collapses to rank ~1 as `p → 1`, and
-that collapse was the hazard. The ladder now runs `estimator = "identity"`, whose
-Jacobian is `I` at any sharpness, so `p` no longer reaches the backward pass at
-all. Bounding it would be bounding a diagnostic.
+that collapse is the hazard. It is bounded rather than removed: `p` reaches the
+backward pass on every step, and `MAX_LOGIT_SCALE` is what stops it reaching 1.
 
 What remains true, and is why there are still two survival columns:
 `uniform_weight` mixes in probability space, so `m = (1 − w)·p + w/V` and the
@@ -455,8 +460,8 @@ permanent per-symbol corruption rate training cannot reduce, which is the point.
 
 `uniform_weight` bounds what arrives; `MAX_LOGIT_SCALE` and
 `sharpest_logit_margin` bound the two factors the gradient is written in. Only
-the mixture survives into the message, and under `estimator = "identity"` none
-of the three reaches the backward pass at all.
+the mixture survives into the message; all three reach the backward pass, the
+mixture as a constant `(1 − w)` and the other two through `p`.
 
 Where a run actually lands between the opening and the ceiling is a **finding**,
 reported by `realised_survival`, `unmixed_survival`, `logit_margin` and
@@ -468,10 +473,9 @@ The temperature handed to `gumbel_softmax`, flat at its configured value for the
 whole of any run.
 
 `hard=True` emits `argmax(logits + g)`, which is invariant to any positive `tau`,
-so this shapes the *soft* sample and nothing else. On the `"gumbel"` branch that
-soft sample is what the estimator differentiates, so `tau` is a pure backward
-knob there. On the `"identity"` branch the soft sample is discarded, so `tau`
-does nothing at all.
+so this shapes the *soft* sample and nothing else. That soft sample is what the
+estimator differentiates, so `tau` is a pure backward knob: it moves what the
+speaker learns from and nothing it says.
 
 ### It used to be coupled to the scale, and cannot be again
 
@@ -508,11 +512,12 @@ and the speaker's four gradient norms fell to ~2e-7.
 route that run actually took, at 86% of the shape budget. So a reinstated
 coupling would not have caught it either.
 
-None of this is a live hazard any more. The saturation it was managing is a
-property of the gumbel Jacobian, and `estimator = "identity"` removes it
-outright; `tau` shapes a surrogate that branch discards. Both bounds on
-sharpness — `MAX_LOGIT_SCALE` and `sharpest_logit_margin` — are there to keep
-the channel legible rather than to protect a backward pass.
+The hazard it was managing is live but bounded. The saturation is a property of
+the Jacobian and is reached on every step, so both bounds on sharpness —
+`MAX_LOGIT_SCALE` and `sharpest_logit_margin` — protect the backward pass as
+well as keeping the channel legible. What the coupling added over those two was
+a *second* mechanism aimed at the same quantity, and that is what is not wanted:
+one bound, stated once, in units the metrics report.
 
 The same run says the traverse `logit_scale_lr` was raised to buy was never
 step-limited: `log_logit_scale` moved 0.05–0.09 log-units in epochs 1–4 and
@@ -520,20 +525,28 @@ step-limited: `log_logit_scale` moved 0.05–0.09 log-units in epochs 1–4 and
 was gradient-limited. Worth remembering before reading a flat
 `train_logit_scale` as a rate that is too low.
 
-## The two estimators
+## The estimator
 
-`sender_language_model.estimator` selects what the speaker learns through. The
-forward pass is identical on both branches — one shared `_gumbel_sample`, so at
-the same seed they emit not similar messages but *identical* ones. Any difference
-between two runs is the backward pass and nothing else, which is what makes an
-A/B between them a control rather than two experiments.
+`sample_symbols` runs one estimator: the hard one-hot forward, and backward
+through the soft sample `gumbel_softmax` builds on the way.
 
 ```
-"gumbel"    dy/dz = (1 − w)(diag(p) − p pᵀ)      the soft sample's Jacobian
-"identity"  dy/dz = I                             y = onehot.detach() + (z − z.detach())
+dy/dz = (1 − w)(diag(p) − p pᵀ)      the soft sample's Jacobian
 ```
 
-### The argument is rank, not magnitude
+The `(1 − w)` is `uniform_weight`'s: the mixture is convex in probability space,
+so it contributes a constant and scales the Jacobian without changing its shape.
+The `p` in it is the **unmixed** one, which is why `unmixed_survival` and not
+`realised_survival` is the column this section is written about.
+
+There was a second branch, `estimator = "identity"`, which replaced that Jacobian
+with `I` through a surrogate `y = onehot.detach() + (z − z.detach())`. It was the
+default from 2026-08-30 and was removed on 2026-09-07; `[sender_language_model]
+estimator` no longer exists and `parse_config.validate_config` rejects a config
+that names it. The rest of this section is why it was written and why it went,
+because both halves are load-bearing for the settings that replaced it.
+
+### The argument for it was rank, not magnitude
 
 The soft Jacobian's cost is not that it is small. It is that it is **low rank**.
 
@@ -556,64 +569,67 @@ only scale-free while `sqrt(v) ≫ eps`. At the dead run's ~2e-7 speaker norms
 AdamW's 1e-8 default was already damping the update by about 9%, so the epsilon
 is set to 1e-12 — see DEFAULT.toml for the trade.
 
-### What the identity estimator is
+### Why it went: the rank argument is conditional on a sharp speaker
 
-Sample faithfully, then let the backward pass go straight to the logits:
+Everything above describes `p → 1`. The channel does not go there. Across every
+arm of `experiments/lr_sweep_1_cnn/`, `unmixed_survival` runs from ~0.21 at
+initialisation to 0.81–0.89, and at `p_max` in that range the Jacobian's
+eigenvalues are order 0.25 rather than order zero. It is the true Jacobian of the
+relaxation at those values, not a degenerate stand-in for one.
 
-```python
-with torch.no_grad():
-    onehot = self._gumbel_sample(normalised)
+`lr_sweep_1_cnn` measured the two branches directly — nine gumbel arms against
+the eight identity arms of `experiments/baseline_lr_sweeps/`, matched rates,
+matched seeds, epoch for epoch, identical messages. Gumbel won every arm on both
+datasets:
 
-emittable = normalised[..., 4:]
-onehot = torch.cat(
-    [onehot[..., :4], onehot[..., 4:] + (emittable - emittable.detach())],
-    dim=-1,
-)
-```
+| | identity | gumbel |
+|---|---|---|
+| birds `clip_sender_vision` at 1e-5 / 2e-5 / 1e-4 | 37,961 / 5.2e6 / 97,945 | 3.1 / 2.7 / 1.8 |
+| ShapeWorld `train_acc_md_shape` at 2e-5 | 0.5475, then decaying | 0.879, still climbing |
+| `test_acc` | lower in all eight matched arms | higher in all eight |
 
-The sample is unchanged and still faithful: `argmax(z + g)` *is* a categorical
-draw from `softmax(z)`. The speaker's gradient becomes `dL/dy`, which is the
-receiver's per-token embedding sensitivity `⟨dL/dm, Eᵢ⟩` — full rank, the same
-size at `p = 0.95` as at `p = 0.2`, and completely blind to how sharp the speaker
-has become.
+The gradient spikes that put the estimator under suspicion in the first place are
+a property of the *identity* branch, not of gumbel. And nothing approached the
+opposite failure either: the lowest speaker norm recorded anywhere in the sweep
+was 5.5e-5, against the 3.3e-5 and 9.2e-6 at which `eps` starts to dominate
+`sqrt(v)`.
 
-Three details in that are load-bearing.
+### What keeps it conditioned: the ceiling, and only the ceiling
 
-**The surrogate is built on the emittable slice, not on the masked logits.**
-`masked` holds `−inf` in the four reserved columns and `−inf − (−inf)` is NaN.
-Slicing also stops those columns receiving gradient at all: they are constants
-from the sampler's point of view, so `outputs2vocab` rows 0–3 and the stack
-behind them are never trained toward tokens that cannot be emitted.
+The rank collapse is real; what makes it survivable is that `p` is **bounded**.
+`MAX_LOGIT_SCALE` and `sharpest_logit_margin` together cap `p` at 0.9945 at
+V = 14, so the collapse is bounded at `(1 − 0.9945)/(1 − p_open)` rather than
+unbounded. The 2026-08-30 gumbel runs that died at epoch 21 — the speaker's four
+gradient norms at ~2e-7 on `shapeworld-post-silhouette-update.csv` — ran with the
+scale unbounded, a day before `MAX_LOGIT_SCALE` arrived in `9409d40`.
 
-**It taps the *scaled* logits**, and has to. `_gumbel_sample` runs under
-`no_grad` on this branch, so the surrogate is the only path back to
-`log_logit_scale`; an unscaled tap would leave the parameter with no gradient at
-all. That this costs the speaker's stack nothing is the composition described at
-the top of this file: `scale_without_attenuating` gives `∂scaled/∂normalised = 1`
-and the estimator gives `∂y/∂scaled = I`, so `dL/dnormalised = dL/dy` exactly, as
-it was under the unscaled tap, while `dL/dlog_logit_scale` is
-`⟨dL/dy, normalised⟩ · logit_scale`.
+`tests/test_exploration.py::test_saturation_costs_gradient_and_the_ceiling_bounds_it`
+is where that is asserted as a measurement rather than as prose: the sharpest
+legal shape at the highest legal scale passes under 30% of the flat channel's
+gradient, and more than 0.1% of it. Both halves matter. The first says the cost
+is real, the second says it is finite, and a change that moved either bound would
+break one of them.
 
-**The bracketing is not cosmetic.** `onehot + z - z.detach()` associates left, so
-it computes `(1 + z) − z`, which in float32 is 1.0000001 rather than 1 — a
-perturbation of the winning token on every step, in the one place the estimator
-is supposed to change nothing. Forming the zero first makes the addition exact.
-`test_the_identity_surrogate_forwards_exactly_the_one_hot` pins it against the
-gumbel branch bit for bit.
+**Two keys are therefore load-bearing for this decision**: `MAX_LOGIT_SCALE` in
+`code/models/sender.py`, and `[optimiser] eps` at 1e-12 in DEFAULT.toml. Read
+them together before moving either.
 
-### What to read on each branch
+### What to read
 
-`unmixed_survival` is a gradient diagnostic on `"gumbel"` and a fidelity reading
-on `"identity"`. On the first, `1 − p` is the factor the estimator's Jacobian
-turns on; on the second the Jacobian is `I` and the column reaches the gradient
-not at all. It is still worth watching there — it says how much of the message
-arrives — but a run that saturates it is not thereby in trouble.
+`unmixed_survival` is a gradient diagnostic, not only a fidelity reading: `1 − p`
+is the factor the Jacobian turns on. The saturation signature in
+docs/training.md — the speaker's stack flattening while survival climbs — is live
+and bounded rather than impossible.
 
-The saturation signature in docs/training.md — the speaker's stack flattening
-while survival climbs — therefore **cannot fire on the identity branch**. On the
-gumbel branch it is bounded rather than impossible: `MAX_LOGIT_SCALE` and
-`sharpest_logit_margin` together cap `p` at 0.9945 at V = 14, so the collapse is
-bounded at `(1 − 0.9945)/(1 − p_open)` rather than unbounded.
+`log_logit_scale` takes its gradient inside the sampler, where
+`scale_without_attenuating` gives `∂scaled/∂normalised = 1` and the scale its own
+true partial. The identity branch needed a separate tap on the scaled logits to
+achieve that, because its sampler ran under `no_grad`; here it is simply the
+graph.
+
+`tau` shapes the soft sample the Jacobian is taken at. It moves the backward pass
+and nothing the speaker says — `hard=True` emits `argmax(z + g)`, which is
+invariant to it.
 
 ### Why the ceiling is 2.0
 
@@ -736,8 +752,8 @@ Jacobian is `diag(p) − p pᵀ`, and the `p` there is pre-mixture — so
 with the dynamic range. On `shapeworld-post-silhouette-update.csv` a reported
 0.90670 inverted to 0.99951, a 510× attenuation against epoch 0 that the mixed
 column could not show. Nothing bounds this column directly; `MAX_LOGIT_SCALE`
-and `sharpest_logit_margin` bound the two things it is bought with, and on the
-`"identity"` branch it leaves the gradient altogether.
+and `sharpest_logit_margin` bound the two things it is bought with, which is
+what bounds the attenuation this column is reporting.
 
 By the Gumbel-max identity, the probability that a slot's argmax is unchanged by
 the noise is exactly the winning token's softmax probability. So survival can be

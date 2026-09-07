@@ -394,14 +394,17 @@ rate to cover was never the constraint either: 4% of its travel bound used.
 So `init_energy`, `log_logit_scale` and `logit_scale_lr` were replaced by one
 key, inverted in closed form against the sharpest shape the normaliser permits.
 
-**That lasted a day.** The monotone-incentive argument above is a property of the
-*gumbel* Jacobian, which collapses to rank ~1 as `p → 1`; `681ef0b` put the whole
-ladder on `estimator = "identity"`, whose Jacobian is `I` at any sharpness, so
-there is nothing left for a climbing scale to shut. `log_logit_scale` and
-`logit_scale_lr` came back on 2026-08-31, opening at 1.0 with no floor and a 2.0
-ceiling applied by projection. What is *not* restored is the closed-form bound:
-it was bounding a quantity that is no longer a gradient hazard. See
-docs/channel.md.
+**That lasted a day.** The monotone-incentive argument above is a property of
+the Jacobian `diag(p) − p pᵀ`, which collapses to rank ~1 as `p → 1`. It is
+sound; what does not follow from it is *solving* the scale. `681ef0b` reached
+for `estimator = "identity"` instead, which made the collapse moot by replacing
+the Jacobian with `I` — and that branch was itself withdrawn on 2026-09-07 after
+`experiments/lr_sweep_1_cnn/` beat it on every arm. What answers the argument
+now is `MAX_LOGIT_SCALE`: a ceiling bounds the collapse while leaving the
+parameter free, where a closed form bounded it by pinning the parameter and
+taking the traverse with it. `log_logit_scale` and `logit_scale_lr` came back on
+2026-08-31, opening at 1.0 with no floor and a 2.0 ceiling applied by
+projection. See docs/channel.md.
 
 **One float32 detail nearly went in unnoticed.** The identity surrogate is
 `onehot.detach() + (z − z.detach())`, and the brackets matter: written
@@ -505,6 +508,72 @@ And in the other direction, at scale 0.35: coupling *below* the opening scale
 takes the surrogate from 4.9 effective tokens to 2.0 while the token it favours
 matches the noiseless argmax only 9% of the time — a confident gradient pointing
 at noise. Hence the floor at ratio 1.
+
+## The identity estimator: tried for a real reason, and beaten by measurement
+
+The whole sequence in one place, because it ran over nine days across three
+files and each step is only legible against the one before it.
+
+**1. The gumbel channel shut when the speaker got confident.** The
+straight-through Gumbel estimator differentiates the soft sample, whose Jacobian
+is `diag(p) − p pᵀ`, and that collapses toward rank one as `p → 1`. The section
+above measures the shape of it; on 2026-08-30 it killed a run outright. On
+`shapeworld-post-silhouette-update.csv` the speaker's four gradient norms went to
+~2e-7 and the run died at epoch 21. The failure is not that the gradient is
+small — AdamW divides magnitude out — but that thirteen of fourteen directions
+are gone before any optimiser sees them, and no per-parameter normaliser recovers
+a rank.
+
+**2. So we replaced the Jacobian.** `estimator = "identity"` kept the forward
+pass exactly — same `_gumbel_sample`, same seed, bit-identical messages — and
+returned `I` instead, through a surrogate
+`y = onehot.detach() + (z − z.detach())`. It made the collapse unreachable by
+construction: `I` is full rank at any sharpness. It became the default the same
+day and `681ef0b` put the whole ladder on it. `log_logit_scale` and
+`logit_scale_lr` were given back on 2026-08-31 on the strength of it, because a
+saturating channel no longer cost anything in the backward pass.
+
+**3. It did not learn well, and the reason was visible the whole time.** The
+identity arms spiked. Every gradient spike in `experiments/baseline_lr_sweeps/`
+is in the *speaker* — the birds listener stayed between 0.06 and 11 while the
+speaker reached 5.2e6 — and the speaker is the only agent whose gradient crosses
+the discretisation. `dL/dy` is the receiver's per-token embedding sensitivity
+passed through unmodified, with nothing between it and the trunk; the soft
+Jacobian is not only a rank filter, it is also the thing that had been keeping
+that gradient conditioned.
+
+**4. Two keys had meanwhile made step 1 unreachable, and nobody had noticed.**
+`MAX_LOGIT_SCALE` arrived in `9409d40` on 2026-08-31 — one day after the dead
+run — and caps `p` at 0.9945, which bounds the collapse instead of removing it.
+And `[optimiser] eps` is 1e-12 rather than torch's 1e-8, which keeps the whole
+reachable gradient range inside AdamW's scale-invariant region, so the `p(1 − p)`
+attenuation cancels in `m / (sqrt(v) + eps)` rather than degenerating the
+optimiser into SGD. The argument for identity had been made against an unbounded
+channel and was never re-examined against a bounded one.
+
+**5. The A/B settled it.** `experiments/lr_sweep_1_cnn/` ran gumbel at matched
+rates against the eight identity arms of `baseline_lr_sweeps`, same seeds, same
+messages, epoch for epoch. Gumbel won every arm on both datasets:
+
+- birds `clip_sender_vision` at 1e-5 / 2e-5 / 1e-4 fell from 37,961 / 5.2e6 /
+  97,945 to 3.1 / 2.7 / 1.8;
+- ShapeWorld learned shape for the first time — `train_acc_md_shape` 0.879
+  against `train_acc_md_color` 0.661 at 2e-5, still climbing at epoch 100, where
+  the identity arm peaked at 0.5475 and decayed;
+- `test_acc` was higher in all eight.
+
+And the *old* failure did not reappear: the lowest speaker norm anywhere in the
+sweep was 5.5e-5, against the 3.3e-5 and 9.2e-6 at which `eps` starts to dominate
+`sqrt(v)`. `estimator` was removed on 2026-09-07 and gumbel is unconditional.
+
+**What to take from it.** The identity branch was a correct fix for a real
+failure, and it was still the wrong one — because the failure was a property of
+an *unbounded* channel, and the cheaper answer was to bound the channel. Two
+scalars, `MAX_LOGIT_SCALE` and `eps`, did what an estimator swap had been asked
+to do, and did it without giving up the Jacobian that was conditioning the
+speaker's gradient. The lesson that generalises is the process one: the argument
+for identity was never re-run after the ceiling landed, and a day's gap between
+the two commits is all it took for a live decision to become a stale one.
 
 ## `ln(V)` was the wrong correction
 

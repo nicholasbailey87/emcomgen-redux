@@ -172,7 +172,8 @@ n_workers = 5
 # below is where that is argued; `experiments/silhouette_titration/` is where
 # the rate gets swept under it.
 #
-# What 0.5 did under the constant channel and the identity estimator. Rung 9
+# What 0.5 did under the constant channel, back when the ladder ran the
+# withdrawn `"identity"` estimator. Rung 9
 # learned *shape* better than any ShapeWorld run on record -- 0.758 on shape
 # concepts and 0.829 on `and_shape_shape`, against ~0.52 for every run that had
 # never escaped -- and left colour at exactly chance for all thirty epochs. Eval
@@ -571,11 +572,15 @@ eps = 1e-12
 # traverse from a near-random opening up to a usable channel was the run's
 # bottleneck, and it was bottlenecked on steps. The reason for removing it was
 # that a learned scale climbs until the straight-through estimator is shut. That
-# is a property of the *gumbel* Jacobian `diag(p) - p pT`, which collapses to
-# rank ~1 as p -> 1; the whole ladder now runs `estimator = "identity"`, whose
-# Jacobian is `I` at any sharpness, so saturation costs nothing in the backward
-# pass and there is nothing left for a climbing scale to shut. See
-# docs/channel.md.
+# is a property of the Jacobian `diag(p) - p pT`, which collapses to rank ~1 as
+# p -> 1, and it is a live concern again: the `"identity"` branch that made it
+# moot was withdrawn on 2026-09-07 and the ladder differentiates the soft sample
+# once more. What answers it now is a bound rather than a different Jacobian.
+# `sender.MAX_LOGIT_SCALE` is 2.0, which caps unmixed survival at 0.9945 and so
+# holds the Jacobian's eigenvalues off zero however hard the scale climbs; the
+# rate can stay live because the ceiling, not the rate, is what decides where
+# the scale stops. Every arm of `lr_sweep_1_cnn` ended pinned against it. See
+# `sender.sample_symbols` and docs/channel.md.
 #
 # `polarity_embedding_lr` is deliberately not in this group and sits at the
 # speaker's module rate, 1e-4. It is a 2-d tag rather than a scalar, it has no
@@ -972,6 +977,63 @@ receiver_token_embedding = 1e-4
 receiver_language_model = 1e-4
 receiver_discriminator = 1e-4
 
+# One rate per (module group, implementing class), consulted *before*
+# `[optimiser.module_lr]` above and winning where it names the class the group
+# actually holds. The table above stays flat at 1e-4 and is the fallback: a
+# group whose class is not named here runs at its `module_lr` rate.
+#
+# **Why the rates are keyed by architecture and not by group or by dataset.**
+# The ladder swaps implementations within a group -- rung 1 puts `ResNet56` in
+# `sender_vision`, rung 3 puts `ViT2` there -- so one number per group can hold
+# one architecture's tuned rate or the other's and never both. And a rung that
+# inherits the previous rung's rate differs from it in two things at once, which
+# is the confound every rung comment in this file is written to avoid.
+#
+# Dataset keying would be the wrong axis for the same reason. The two rates
+# below happen to line up with ShapeWorld and birds, but only because each
+# dataset currently runs one backbone; what was measured was the architecture.
+# `[birds.optimiser.module_lr]` exists and would work, and is deliberately not
+# used for this.
+#
+# **Where these two numbers come from.** `experiments/lr_sweep_1_cnn/`, nine
+# arms, 100 epochs, one repeat. `ResNet56` on ShapeWorld: 2e-5, which is the
+# only rate where the shape/colour separation is large and still opening --
+# `train_acc_md_shape` 0.879 against `train_acc_md_color` 0.661 at epoch 100,
+# against 0.790/0.687 at 1e-5 and 0.797/0.686 at 5e-5, with 1e-4 stuck on the
+# colour shortcut at 0.531. The optimum is bracketed: there is a cliff between
+# 5e-5 and 1e-4, not a plateau running off the end.
+#
+# `ResNet18` on birds: 5e-5. `test_acc` over the last ten epochs goes 0.623,
+# 0.668, 0.681, 0.693, 0.692 across 5e-6 to 1e-4, so it is flat from 5e-5 up
+# and the tiebreak is the train-test gap, which rises monotonically -- 0.094,
+# 0.088, 0.113, 0.129, 0.145. Above 5e-5 the extra rate buys fit and not
+# transfer, which is why the sweep was not extended past 1e-4.
+#
+# **These are plateau rates, not argmaxes.** n = 1, and adjacent arms are
+# inside the noise: 1e-5 against 5e-5 on ShapeWorld does not separate, and
+# 5e-5 against 1e-4 on birds separates by 0.001. What the sweep ranks is which
+# region to be in.
+#
+# `ViT2` is absent, and so is every other class the ladder introduces. Each
+# arrives from its own sweep -- `experiments/lr_sweep_2_sender_vit/` onwards,
+# one per rung, each run in the presence of the components below it -- and is
+# written in here before the next sweep is launched. Until a class appears here
+# it runs at `module_lr`'s 1e-4, which is jayelm's rate and an untested guess
+# for anything this repo trains from random init at this scale.
+[optimiser.implementation_lr.sender_vision]
+ResNet56 = 2e-5
+ResNet18 = 5e-5
+
+# The listener's backbone takes the same rates as the speaker's. That is what
+# `lr_sweep_1_cnn` measured -- `sender_vision` and `receiver_vision` moved
+# together in every arm -- so stating them apart here would be claiming a
+# distinction the sweep did not make. The two are separately keyable, and the
+# receiver ViT gets its own sweep at rung 11 rather than inheriting the
+# speaker's, because those two arrive at different rungs.
+[optimiser.implementation_lr.receiver_vision]
+ResNet56 = 2e-5
+ResNet18 = 5e-5
+
 [scheduler]
 epochs = 100
 
@@ -1279,48 +1341,55 @@ uniform_weight = 0.1
 # concentrates on the slots the speaker is unsure about, which is the behaviour
 # wanted.
 
-# Which gradient estimator the speaker learns through. The forward pass is the
-# same either way -- a hard one-hot drawn as `argmax(logits + Gumbel)`, which is
-# a faithful categorical sample -- so this changes what the speaker learns from
-# and not what it says. At the same seed the two branches emit identical
-# messages.
+# The straight-through Gumbel-softmax estimator is unconditional. There was a
+# `[sender_language_model] estimator` key here selecting between it and an
+# `"identity"` backward pass; it is gone as of 2026-09-07, and
+# `parse_config.validate_config` rejects a config that still names it.
 #
-# `"gumbel"` differentiates the soft sample `gumbel_softmax` builds on the way,
-# whose Jacobian is `diag(p) - p pT`. `"identity"` replaces that with I:
+# **What the choice was.** The forward pass is a hard one-hot drawn as
+# `argmax(logits + Gumbel)` on both branches, so the estimator only ever decided
+# what the speaker learns from, not what it says. Gumbel differentiates the soft
+# sample `gumbel_softmax` builds on the way, whose Jacobian is
+# `diag(p) - p pT`; `"identity"` replaced that with `I` via
+# `y = onehot.detach() + (z - z.detach())`.
 #
-#     y = onehot.detach() + (z - z.detach())
+# **Why identity was chosen in August, and why that argument expired.** It was
+# about *rank*. The per-token gradients are summed into one vector before they
+# reach the language model and the vision trunk, and `diag(p) - p pT` at `p`
+# near one-hot has rank ~1, so all but one direction is destroyed before any
+# optimiser or clipper sees it, and no per-parameter normaliser recovers a rank.
+# That is a statement about a *sharp* speaker. The channel is not sharp: across
+# every arm of `lr_sweep_1_cnn`, `unmixed_survival` runs from ~0.21 at
+# initialisation to 0.81-0.89, and at those values the soft Jacobian's
+# eigenvalues are order 0.25. It is the true Jacobian of the relaxation there,
+# not a degenerate stand-in for one.
 #
-# The reason to want the second is *rank*, not magnitude. The per-token gradients
-# are summed into one vector before they reach the language model and the vision
-# trunk, and `diag(p) - p pT` at p near one-hot has rank ~1, so all but one
-# direction is destroyed before any optimiser or clipper sees it. Magnitude
-# largely cancels -- AdamW updates by `m / sqrt(v)`, and `clip_gradients`
-# renormalises what survives -- but no per-parameter normaliser recovers a rank.
-# Bounding the speaker's sharpness bounds that collapse; only this removes it,
-# which is why `logit_scale_lr` could be given back on 2026-08-31.
+# **What settled it.** `lr_sweep_1_cnn` ran gumbel against the eight identity
+# arms of `baseline_lr_sweeps` at matched rates, epoch for epoch, same seeds,
+# same messages. Gumbel won every arm on both datasets:
 #
-# `"identity"` is the default as of 2026-08-30, having been `"gumbel"` for the
-# few hours between the switch being added and the first runs coming back. Two
-# things decided it.
+#   * the birds speaker's `train_clip_sender_vision` fell from 37,961 / 5.2e6 /
+#     97,945 at 1e-5 / 2e-5 / 1e-4 to 3.1 / 2.7 / 1.8 -- the spikes that put the
+#     estimator under suspicion in the first place are simply gone;
+#   * ShapeWorld learned shape for the first time, `train_acc_md_shape` 0.879
+#     against `train_acc_md_color` 0.661 at 2e-5, where the identity arm peaked
+#     at 0.5475 and decayed;
+#   * `test_acc` was higher in all eight matched arms, by as much as 0.164.
 #
-# The failure it was written for is real and was killing rungs. On
-# `shapeworld-post-silhouette-update.csv` the gumbel Jacobian took the speaker's
-# four gradient norms to ~2e-7 and the run died at epoch 21; the first identity
-# runs hold them at 0.3-1.5 against `clip_grad_norm = 1.0`, and birds' six-epoch
-# flat start -- previously the `log_logit_scale` traverse -- is simply gone.
+# **Neither of the recorded failure modes is reachable now, and two keys are
+# why.** The 2026-08-30 collapse -- the gumbel Jacobian taking the speaker's
+# four gradient norms to ~2e-7 on `shapeworld-post-silhouette-update.csv`, dead
+# at epoch 21 -- happened with the channel scale unbounded, a day before
+# `sender.MAX_LOGIT_SCALE` arrived in `9409d40`. The ceiling is what keeps `p`
+# away from one-hot and so keeps the Jacobian's rank up. And `[optimiser] eps`
+# is 1e-12 rather than torch's 1e-8, which puts the whole reachable gradient
+# range inside AdamW's scale-invariant region, so the `p(1 - p)` attenuation
+# cancels in `m / (sqrt(v) + eps)` instead of degenerating the optimiser into
+# SGD. The lowest speaker norm recorded anywhere in the sweep was 5.5e-5,
+# against the 3.3e-5 and 9.2e-6 at which `eps` starts to dominate `sqrt(v)`.
 #
-# And a ladder cannot afford to differ in two things at once. Every rung on the
-# ablation is a single change from the one below it, so an estimator set on some
-# rungs and not others would confound the backward pass with whatever
-# architecture that rung was there to move. One estimator for the whole ladder
-# is the only setting that keeps the steps readable.
-#
-# What that costs is the A/B: nothing on the ladder now runs the gumbel backward
-# pass, so the comparison has to be made deliberately by copying a rung and
-# flipping this key. It is worth doing that way round -- both branches sample
-# through the same `_gumbel_sample`, so a same-seed pair emits identical
-# messages and differs in nothing else. See docs/channel.md.
-estimator = "identity"
+# Both of those keys are load-bearing for this decision. Read them together with
+# `sender.sample_symbols` and docs/channel.md before moving either.
 
 # Whether the channel is normalised at all: `layer_norm_logits` on the emittable
 # logits, and the learned `log_logit_scale` in front of it. `false` removes both
@@ -1411,11 +1480,10 @@ normalise_logits = true
 
 tau = 1.0                     # Gumbel-softmax tau. Gradient shaping only:
                               # the emitted symbol is an argmax and so is
-                              # invariant to it. jayelm's `--tau`. It shapes the
-                              # soft surrogate the `"gumbel"` estimator
-                              # differentiates; the `"identity"` estimator
-                              # discards that surrogate, so on that branch this
-                              # key does nothing at all.
+                              # invariant to it. jayelm's `--tau`. What it
+                              # shapes is the soft sample the straight-through
+                              # Jacobian is taken at, so it moves the backward
+                              # pass and nothing the speaker says.
 dropout = 0.1
 layers = 1
 
@@ -1814,12 +1882,17 @@ beta = "deepnorm"
 # against its `_resnet18` control. The listener half is no longer a single
 # switch, because three of its four parts turned out not to be optional.
 #
-# The gradient argument for the norms was also weaker than it looked.
-# `4248fca` reasoned about the straight-through Gumbel Jacobian, and the ladder
-# has run `estimator = "identity"` since `681ef0b`; Hyperion's GPUs report
+# The gradient argument for the norms was also weaker than it looked, though
+# less weak than it was between August and 2026-09-07. `4248fca` reasoned about
+# the straight-through Gumbel Jacobian, and that Jacobian is back: the
+# `"identity"` branch that had made the reasoning moot since `681ef0b` was
+# withdrawn when `lr_sweep_1_cnn` came in. What still holds is the other half,
+# and it never depended on the estimator -- Hyperion's GPUs report
 # `is_bf16_supported()`, so `model_util.scale_without_attenuating` is inert by
 # its own docstring and where a volume scalar sits relative to the backward pass
-# no longer changes what the optimiser sees.
+# does not change what the optimiser sees. Note this is the *listener's* volume
+# either way, and the listener reads the message embedding on a continuous path:
+# the estimator is the speaker's exposure alone.
 #
 # `[optimiser] score_scale_lr` and `score_bias_lr` stay live and simply have no
 # effect when their key is off; `train_score_scale`, `train_score_bias` and

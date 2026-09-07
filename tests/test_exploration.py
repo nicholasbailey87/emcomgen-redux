@@ -30,17 +30,19 @@ a small scale is a noisy channel rather than a starved one.
 It was briefly a constant. Between 2026-08-30 and 2026-08-31 it was solved in
 closed form from a `token_max_probability` key, against the sharpest shape the
 normaliser permits, on the grounds that a learned scale climbs until the
-straight-through estimator is shut. That is a property of the *gumbel* Jacobian
-`diag(p) - p pT`, which collapses to rank ~1 as `p -> 1`; the ladder now runs
-`estimator = "identity"`, whose Jacobian is `I` at any sharpness, so there is
-nothing left for a climbing scale to shut and the bound stopped being a gradient
-safeguard. Fidelity never depended on the scale in any case: the shape budget
-alone reaches 0.789 at V = 14 with the scale at one.
+straight-through estimator is shut. That is a property of the Jacobian
+`diag(p) - p pT`, which collapses to rank ~1 as `p -> 1`, and it is a real
+effect -- `test_saturation_costs_gradient_and_the_ceiling_bounds_it` measures
+it. What answers it is `MAX_LOGIT_SCALE` rather than a closed form: the ceiling
+caps `p` at 0.9945, which bounds the collapse without pinning the parameter, so
+the scale can learn and the estimator stays conditioned. Fidelity never depended
+on the scale in any case: the shape budget alone reaches 0.789 at V = 14 with
+the scale at one.
 
-`estimator` chooses what the speaker learns through. Both branches emit the same
-hard one-hot, and at the same seed they emit the *same* messages; they differ in
-the backward pass, `"gumbel"` taking the soft sample's `diag(p) - p pT` and
-`"identity"` taking `I`. Only the second removes the rank collapse.
+There is one estimator. `"identity"`, which replaced `diag(p) - p pT` with `I`
+and was the default from 2026-08-30, was withdrawn on 2026-09-07 after
+`lr_sweep_1_cnn` beat it on every arm of both datasets. Section 8 is what is
+left of that.
 
 The rest is unchanged and still has to hold. The Gumbel-max identity, that a
 slot's survival probability is exactly its winning token's softmax probability,
@@ -144,7 +146,7 @@ def _transformer_latent_speaker(**overrides):
     The parallel arm. Built alongside the decoder arm everywhere the exploration
         channel is tested, because the channel is the one thing the two arms
         share exactly -- same normalisation, same scale, same mixture, same
-        estimator -- so a change that breaks it on one and not the other is a
+        sampler -- so a change that breaks it on one and not the other is a
         change that has leaked out of the architecture and into the sampling.
     """
     settings = _language_model_config(
@@ -228,8 +230,8 @@ def test_the_two_bounds_on_sharpness_multiply():
     own ceiling: `MAX_LOGIT_SCALE` bounds the first and `sharpest_logit_margin`
     the second. Their product is the sharpest channel a speaker can present, and
     it is a fact about the design rather than a target -- nothing in the
-    objective aims at it, and under `estimator = "identity"` reaching it costs
-    nothing in the backward pass.
+    objective aims at it. Reaching it is not free -- the Jacobian is at its
+    weakest there -- which is precisely why both factors are bounded.
 
     Pinned because the two bounds are stated in different files and it is their
     *product* that matters: raising either alone moves this number.
@@ -621,7 +623,7 @@ def test_the_scale_reaches_the_gumbel_gradient_only_through_saturation():
     `(diag(p) - p pT) @ 1` is exactly zero -- that objective measures the float
     residual, not the estimator.
     """
-    speaker = _transformer_speaker(estimator="gumbel")
+    speaker = _transformer_speaker()
     vocabulary = speaker.vocabulary
     raw = _logit_shapes(vocabulary)["peaked"]
     upstream = _upstream_gradient(raw.shape)
@@ -762,17 +764,15 @@ def test_unmixed_survival_is_what_the_gumbel_gradient_sees():
     The mixture is a ceiling on the *reported* number and not on the channel, so
     `realised_survival` cannot say how saturated the softmax actually is.
 
-    On the `"gumbel"` branch the gradient runs through the soft sample, whose
-    Jacobian is `diag(p) - p pT`, and the `p` in it is pre-mixture. On the
+    The gradient runs through the soft sample, whose Jacobian is
+    `diag(p) - p pT`, and the `p` in it is pre-mixture. On the
     2026-08-29 ShapeWorld run a reported 0.90670 against a cap of 0.90714 was an
     unmixed 0.99951 -- so `1 - p` was 4.9e-4 where the mixed column suggested
     0.093, a factor of 190 in the gradient that was invisible.
 
-    Named for the branch deliberately. Under `estimator = "identity"` the
-    Jacobian is `I` and this column reaches the gradient not at all; it is still
-    the channel's fidelity there, but it is no longer a gradient diagnostic --
-    which is why nothing bounds it directly. `MAX_LOGIT_SCALE` and
-    `sharpest_logit_margin` bound the two things it is bought with.
+    Nothing bounds this column directly. `MAX_LOGIT_SCALE` and
+    `sharpest_logit_margin` bound the two things it is bought with, and their
+    product is the sharpest channel the design permits.
 
     The two are the same function with the mixture switched off, which is what
     stops them drifting, and the mixture is affine in the model's probability,
@@ -1285,21 +1285,20 @@ def test_layer_norm_is_position_invariant(build):
     assert (normed.std(-1, unbiased=False) - 1.0).abs().max().item() < 1e-3
 
 
-# ------------------------------------------- 8. the two gradient estimators --
+# ------------------------------------------ 8. the gradient estimator --------
 #
-# The forward pass is the same on both branches -- a hard one-hot drawn as
-# `argmax(logits + Gumbel)` -- so everything above applies to both and only the
-# backward pass is at issue here.
+# One estimator since 2026-09-07: the hard one-hot forward, and backward through
+# the soft sample `gumbel_softmax` builds on the way, whose Jacobian is
+# `diag(p) - p pT`. There was an `"identity"` branch here replacing that with
+# `I`; it lost `lr_sweep_1_cnn` on every arm of both datasets and is gone, along
+# with the tests that pinned its surrogate.
 #
-# What `"identity"` is for is *rank*, not magnitude. The per-token gradients are
-# summed into one vector before they reach the language model and the vision
-# trunk, and `diag(p) - p pT` at `p` near one-hot has rank ~1, so all but one
-# direction is gone before any optimiser or clipper sees it. Magnitude largely
-# cancels in AdamW; a rank does not come back.
-
-_ESTIMATOR_BUILDS = [
-    _gru_speaker, _transformer_speaker, _transformer_latent_speaker
-]
+# What is left to assert is what the surviving branch has to keep doing. The
+# Jacobian degrades as `p` approaches one-hot -- that was the whole case for the
+# other branch, and it is real -- so the invariant now is that the *ceiling*
+# bounds the degradation. `MAX_LOGIT_SCALE` is that bound, and
+# `test_saturation_costs_gradient_and_the_ceiling_bounds_it` is where the
+# arithmetic is checked rather than asserted about.
 
 
 def _upstream_gradient(shape, seed=7):
@@ -1309,8 +1308,7 @@ def _upstream_gradient(shape, seed=7):
     Not `onehot.sum()`, which several older tests use: a one-hot's entries sum
     to a constant, so that objective's `dL/dy` is all-ones and
     `(diag(p) - p pT) @ 1` is exactly zero. It measures the residual rather than
-    the estimator, and on the identity branch it measures `layer_norm_logits`
-    alone.
+    the estimator.
     """
     return torch.randn(shape, generator=torch.Generator().manual_seed(seed))
 
@@ -1326,21 +1324,20 @@ def _normalised_and_onehot(speaker, raw, seed=0):
     return logits, onehot
 
 
-@pytest.mark.parametrize("build", _ESTIMATOR_BUILDS)
-def test_the_identity_surrogate_forwards_exactly_the_one_hot(build):
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
+def test_what_the_listener_reads_is_a_hard_one_hot(build):
     """
-    The surrogate changes the backward pass and nothing else. If it moved the
-    forward value the listener would be reading something that is not a message,
-    and every downstream measurement would be measuring the estimator.
+    `hard=True`, and it has to stay that way: the listener embeds the message,
+    so a soft sample leaking forward would mean it is reading something that is
+    not a symbol, and every downstream measurement would be measuring the
+    relaxation instead of the channel.
 
-    Bit-exact, and that is a stronger claim than it looks. `z - z.detach()` is
-    algebraically zero but `onehot + z - z.detach()` associates left, so it
-    computes `(1 + z) - z` and lands on 1.0000001 in float32 -- a perturbation
-    of the winning token on every step. Forming the zero first is what makes the
-    addition exact, so this is pinned against the gumbel branch rather than
-    against a tolerance.
+    Exact rather than tolerant -- integer entries, one per slot, and nothing in
+    the four reserved columns.
     """
-    speaker = build(estimator="identity").train()
+    speaker = build().train()
     raw = _logit_shapes(speaker.vocabulary)["typical"]
 
     _logits, onehot = _normalised_and_onehot(speaker, raw)
@@ -1350,141 +1347,69 @@ def test_the_identity_surrogate_forwards_exactly_the_one_hot(build):
     assert torch.equal(values.sum(-1), torch.ones_like(values.sum(-1)))
     assert values[..., :4].abs().max().item() == 0.0
 
-    # The two branches agree to the last bit, which says the surrogate
-    # contributes exactly nothing to the forward value.
-    gumbel = build(estimator="gumbel").train()
-    _logits, from_gumbel = _normalised_and_onehot(gumbel, raw)
-    assert torch.equal(values, from_gumbel.detach())
-
-    # And it still holds at every scale the parameter can reach, which is not
-    #     free: the surrogate taps the *scaled* logits, so the tensor being
-    #     cancelled is `logit_scale * normalised` rather than `normalised`, and
-    #     the bracketing has to survive that. Compared against the gumbel branch
-    #     at the *same* scale, because the scale moves the sample itself --
-    #     `argmax(scale * z + g)` is not invariant to it, only to `tau`.
+    # And still a hard one-hot at every scale the parameter can reach, which is
+    #     where a badly ordered mask or a leaked soft sample would show up.
     for scale in (0.05, 1.0, S.MAX_LOGIT_SCALE):
         _set_knob(speaker, "logit_scale", scale)
-        _set_knob(gumbel, "logit_scale", scale)
+        _logits, scaled = _normalised_and_onehot(speaker, raw)
+        values = scaled.detach()
+        assert torch.equal(values, values.round()), scale
+        assert torch.equal(
+            values.sum(-1), torch.ones_like(values.sum(-1))
+        ), scale
 
-        _logits, scaled_onehot = _normalised_and_onehot(speaker, raw)
-        _logits, reference = _normalised_and_onehot(gumbel, raw)
-        assert torch.equal(scaled_onehot.detach(), reference.detach()), scale
 
-    # The tap has to be the scaled logits, or the parameter gets no gradient at
-    #     all: `_gumbel_sample` runs under `no_grad` on this branch, so the
-    #     surrogate is the only path back to it.
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
+def test_the_channel_scale_takes_a_real_gradient(build):
+    """
+    `log_logit_scale` is inside the sampler's graph, not hung off a surrogate:
+    `_gumbel_sample` scales the normalised logits through
+    `scale_without_attenuating` before `gumbel_softmax`, so the parameter has
+    its own true partial and the stack behind it does not feel the value.
+
+    The identity branch needed a separate tap on the scaled logits to achieve
+    this, because its sampler ran under `no_grad`. Here it is simply the graph,
+    and this test is what says so.
+    """
+    speaker = build().train()
+    raw = _logit_shapes(speaker.vocabulary)["typical"]
+
+    _logits, onehot = _normalised_and_onehot(speaker, raw)
     upstream = _upstream_gradient(onehot.shape)
-    (scaled_onehot * upstream).sum().backward()
+    (onehot * upstream).sum().backward()
+
     assert speaker.log_logit_scale.grad is not None
     assert speaker.log_logit_scale.grad.item() != 0.0
 
 
-@pytest.mark.parametrize("build", _ESTIMATOR_BUILDS)
-def test_the_identity_gradient_is_the_upstream_gradient(build):
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
+def test_saturation_costs_gradient_and_the_ceiling_bounds_it(build):
     """
-    `dL/dnormalised == dL/dy` exactly on the emittable slice, which is the whole
-    claim: the speaker's gradient becomes the receiver's per-token embedding
-    sensitivity, with nothing in between.
+    **The invariant `MAX_LOGIT_SCALE` exists to hold, stated as a measurement.**
 
-    Taken at the channel rather than through `sample_symbols`, so what is
-    asserted is the surrogate itself and not `layer_norm_logits` composed with
-    it.
-    """
-    speaker = build(estimator="identity").train()
-    vocabulary = speaker.vocabulary
-    raw = _logit_shapes(vocabulary)["typical"]
+    `diag(p) - p pT` collapses toward rank one as `p` approaches one-hot, so a
+    saturating speaker really does lose gradient -- this is the failure that
+    killed the 2026-08-30 gumbel runs and the reason the `"identity"` branch was
+    written. What makes it survivable is that `p` is bounded: at
+    `MAX_LOGIT_SCALE` the sharpest legal shape reaches 0.9945 and no further,
+    and every arm of `lr_sweep_1_cnn` ended pinned there with speaker norms
+    between 0.03 and 10 rather than at the ~2e-7 of the unbounded runs.
 
-    normalised = (
-        S.layer_norm_logits(raw, vocabulary).detach().requires_grad_(True)
-    )
-
-    torch.manual_seed(0)
-    with torch.no_grad():
-        sampled = speaker._gumbel_sample(normalised)
-
-    emittable = normalised[..., 4:]
-    onehot = torch.cat(
-        [sampled[..., :4], sampled[..., 4:] + (emittable - emittable.detach())],
-        dim=-1,
-    )
-
-    upstream = _upstream_gradient(onehot.shape)
-    gradient, = torch.autograd.grad((onehot * upstream).sum(), normalised)
-
-    assert torch.equal(gradient[..., 4:], upstream[..., 4:])
-    assert gradient[..., :4].abs().max().item() == 0.0
-
-
-@pytest.mark.parametrize("build", _ESTIMATOR_BUILDS)
-def test_the_identity_gradient_is_invariant_to_the_scale(build):
-    """
-    **The invariant the whole design rests on, and the one most likely to be
-    broken by a later edit.** The surrogate taps the *scaled* logits, so the
-    scale does get a gradient -- but it arrives through
-    `scale_without_attenuating`, whose `d/dx` is 1, and the estimator's own
-    Jacobian is `I`, so the composition gives
-
-        dL/dnormalised      = dL/dy                        (independent of the scale)
-        dL/dlog_logit_scale = <dL/dy, normalised> * scale   (real and nonzero)
-
-    The first line is bit-identical to what an *unscaled* tap would give, which
-    is what lets the scale learn without the stack behind it ever feeling the
-    value it learned. The same seed therefore gives a bit-identical gradient
-    into the raw logits across the whole range the parameter can occupy, while
-    the scale's own gradient moves with it.
-
-    This is also why there is no floor on the scale. A speaker that slid quiet
-    under a plain product would multiply down the gradients that would have
-    given it something to say; here it does not.
-    """
-    raw = _logit_shapes(_gru_speaker().vocabulary)["typical"]
-    upstream = None
-
-    gradients, on_scale = [], []
-    for scale in (0.05, 1.0, 1.9, 20.0):
-        speaker = build(estimator="identity").train()
-        _set_knob(speaker, "logit_scale", scale)
-
-        logits, onehot = _normalised_and_onehot(speaker, raw)
-        if upstream is None:
-            upstream = _upstream_gradient(onehot.shape)
-        (onehot * upstream).sum().backward()
-        gradients.append(logits.grad.clone())
-        on_scale.append(speaker.log_logit_scale.grad.item())
-
-    # Bit-identical into the stack, at 0.05 and at 1.9 -- the two ends of the
-    #     range a run can actually occupy -- and beyond them.
-    for other in gradients[1:]:
-        assert torch.equal(gradients[0], other)
-
-    # And live on the scale itself, differing with it: `<dL/dy, x> * scale`, so
-    #     the ratio of any two is the ratio of the scales.
-    assert all(value != 0.0 for value in on_scale), on_scale
-    assert on_scale[1] / on_scale[0] == pytest.approx(1.0 / 0.05, rel=1e-3)
-    assert on_scale[2] / on_scale[1] == pytest.approx(1.9, rel=1e-3)
-
-
-@pytest.mark.parametrize("build", _ESTIMATOR_BUILDS)
-def test_the_identity_gradient_survives_saturation(build):
-    """
-    The assertion the whole change exists for.
+    So this asserts two things at once. The cost is real, and it is *finite*:
+    the sharpest channel the design permits still passes a usable fraction of
+    the flat channel's gradient, which is what makes the estimator trainable at
+    all under a scale that is free to climb.
 
     Saturation is a property of the logits' *shape*, not their magnitude --
     `layer_norm_logits` divides magnitude out -- so this interpolates toward the
     sharpest shape the normaliser permits, which is the route the 2026-08-29
-    ShapeWorld run actually took. Run at `MAX_LOGIT_SCALE`, so the far end is
-    the sharpest channel the design permits at all: `p` is 0.9945 there and
-    `diag(p) - p pT` has effectively collapsed to rank one.
-
-    That the far end is *reachable* is the reason the scale could be given back.
-    Under `"gumbel"` a climbing scale walks into this and shuts the estimator;
-    under `"identity"` it costs nothing, which is what the two ratios below say.
-
-    The inputs are normalised *before* being handed to the speaker so that
-    `layer_norm_logits`'s own Jacobian is comparable at the two ends and what is
-    being compared is the estimator alone. Without that the raw magnitude grows
-    with the interpolation and shrinks both branches together, which is a fact
-    about the normaliser and not about the estimator.
+    ShapeWorld run actually took. The inputs are normalised before being handed
+    to the speaker so that `layer_norm_logits`'s own Jacobian is comparable at
+    the two ends and what is compared is the estimator alone.
     """
     vocabulary = _gru_speaker().vocabulary
 
@@ -1495,9 +1420,9 @@ def test_the_identity_gradient_survives_saturation(build):
 
     upstream = _upstream_gradient(noise.shape)
 
-    def gradient_norm(estimator, mixing):
-        speaker = build(estimator=estimator).train()
-        _set_knob(speaker, "logit_scale", S.MAX_LOGIT_SCALE)
+    def gradient_norm(mixing, scale=S.MAX_LOGIT_SCALE):
+        speaker = build().train()
+        _set_knob(speaker, "logit_scale", scale)
         raw = S.layer_norm_logits(
             (1.0 - mixing) * noise + mixing * spike, vocabulary
         ).detach()
@@ -1510,115 +1435,91 @@ def test_the_identity_gradient_survives_saturation(build):
 
     # Confirm the far end really is saturated, so the comparison is about what
     # it claims to be: the sharpest legal shape at the highest legal scale.
-    sharpest = _masked(
-        S.layer_norm_logits(spike, vocabulary).detach()
-    )
+    sharpest = _masked(S.layer_norm_logits(spike, vocabulary).detach())
     assert S.mean_winning_probability(
         sharpest, S.MAX_LOGIT_SCALE, 0.0
     ).item() == pytest.approx(0.9945, abs=1e-4)
 
-    gumbel_ratio = gradient_norm("gumbel", saturated) / gradient_norm(
-        "gumbel", flat
-    )
-    identity_ratio = gradient_norm("identity", saturated) / gradient_norm(
-        "identity", flat
-    )
+    ratio = gradient_norm(saturated) / gradient_norm(flat)
 
-    # The gumbel branch loses most of its gradient to shape alone.
-    assert gumbel_ratio < 0.3, gumbel_ratio
+    # The cost is real -- this is the thing the other branch was written for.
+    assert ratio < 0.3, ratio
 
-    # The identity branch does not notice.
-    assert identity_ratio > 0.95, identity_ratio
+    # And it is bounded, which is the thing the ceiling buys. Well clear of the
+    #     ~2e-7 collapse the unbounded channel produced, which against the
+    #     0.3-1.5 norms of a healthy run is a ratio of order 1e-7.
+    assert ratio > 1e-3, ratio
+
+    # Unbounded, it keeps going: the same shape at ten times the ceiling passes
+    #     strictly less. This is the measurement that says the ceiling, and not
+    #     the estimator, is what is doing the work.
+    beyond = gradient_norm(saturated, scale=10 * S.MAX_LOGIT_SCALE)
+    assert beyond < gradient_norm(saturated), beyond
 
 
-@pytest.mark.parametrize("build", _ESTIMATOR_BUILDS)
-def test_the_surrogate_leaves_the_reserved_slots_alone(build):
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
+def test_the_estimator_leaves_the_reserved_slots_alone(build):
     """
-    The `-inf` trap. `masked` holds `-inf` in the four reserved columns and
-    `-inf - (-inf)` is NaN, so the surrogate is built on the emittable slice
-    instead. That also means the reserved columns take no gradient at all:
-    `outputs2vocab` rows 0-3 and the stack behind them are never trained toward
-    tokens that cannot be emitted.
+    The `-inf` trap. `mask_reserved_tokens` puts `-inf` in the four reserved
+    columns before the softmax, so they take no gradient at all and none of it
+    is NaN: `outputs2vocab` rows 0-3 and the stack behind them are never trained
+    toward tokens that cannot be emitted.
     """
-    for estimator in ("gumbel", "identity"):
-        speaker = build(estimator=estimator).train()
-        raw = _logit_shapes(speaker.vocabulary)["peaked"]
+    speaker = build().train()
+    raw = _logit_shapes(speaker.vocabulary)["peaked"]
 
-        logits, onehot = _normalised_and_onehot(speaker, raw)
-        onehot.sum().backward()
+    logits, onehot = _normalised_and_onehot(speaker, raw)
+    onehot.sum().backward()
 
-        assert not torch.isnan(logits.grad).any(), estimator
-        assert not torch.isinf(logits.grad).any(), estimator
-        assert logits.grad[..., :4].abs().max().item() == 0.0, estimator
+    assert not torch.isnan(logits.grad).any()
+    assert not torch.isinf(logits.grad).any()
+    assert logits.grad[..., :4].abs().max().item() == 0.0
 
 
-@pytest.mark.parametrize("build", _ESTIMATOR_BUILDS)
-def test_both_estimators_emit_the_same_messages(build):
+@pytest.mark.parametrize(
+    "build", [_gru_speaker, _transformer_speaker, _transformer_latent_speaker]
+)
+def test_eval_is_greedy_and_takes_no_sample(build):
     """
-    The control that makes an A/B between the branches worth running. Both go
-    through the same `_gumbel_sample`, and `hard=True` emits
-    `argmax(logits + g)`, which is invariant to `tau` -- so at the same seed the
-    two branches emit not similar messages but identical ones, and any
-    difference in a run is the backward pass and nothing else.
-    """
-    raw = _logit_shapes(_gru_speaker().vocabulary)["typical"]
-
-    messages = {}
-    for estimator in ("gumbel", "identity"):
-        speaker = build(estimator=estimator).train()
-        _logits, onehot = _normalised_and_onehot(speaker, raw)
-        messages[estimator] = onehot.detach().argmax(-1)
-
-    assert torch.equal(messages["gumbel"], messages["identity"])
-
-
-@pytest.mark.parametrize("build", _ESTIMATOR_BUILDS)
-def test_eval_is_the_same_policy_under_both_estimators(build):
-    """
-    `sample_symbols` returns before the branch outside training, so eval is
-    greedy, deterministic and identical on the two. It has to be: the estimator
-    is a training-time choice, and a difference here would mean the two branches
-    were being scored on different policies.
+    `sample_symbols` returns before the sampler outside training, so eval is the
+    argmax of the normalised, masked logits -- deterministic, and measuring the
+    policy rather than a draw from it. `pre_gain_logits` is None there, which is
+    what tells `record_survival` there is nothing to record.
     """
     raw = _logit_shapes(_gru_speaker().vocabulary)["typical"]
 
-    emitted = {}
-    for estimator in ("gumbel", "identity"):
-        speaker = build(estimator=estimator).eval()
-        torch.manual_seed(0)
-        onehot, pre_gain = speaker.sample_symbols(raw)
+    speaker = build().eval()
+    torch.manual_seed(0)
+    onehot, pre_gain = speaker.sample_symbols(raw)
 
-        assert pre_gain is None, estimator
-        emitted[estimator] = onehot.argmax(-1)
-
-        # And still greedy: the argmax of the normalised, masked logits.
-        expected = _masked(raw).argmax(-1)
-        assert torch.equal(emitted[estimator], expected), estimator
-
-    assert torch.equal(emitted["gumbel"], emitted["identity"])
+    assert pre_gain is None
+    assert torch.equal(onehot.argmax(-1), _masked(raw).argmax(-1))
 
 
 # ------------------------------------------------------------ 9. the config --
 
-def test_config_rejects_an_unknown_estimator():
+def test_config_rejects_the_retired_estimator_key():
     """
-    The two branches differ only in the backward pass, so a typo here would run
-    a whole experiment under the wrong estimator and look like a result rather
-    than a mistake. Same reason as the check above, and the same `SafeDict`
-    behaviour behind it.
+    `[sender_language_model] estimator` selected between the two branches and
+    was withdrawn on 2026-09-07 with `"identity"` itself. A config still naming
+    it is describing a choice that no longer exists, so it raises rather than
+    being ignored -- either value, including the one that won, because a config
+    that sets `"gumbel"` is a config written when the alternative was reachable
+    and its author should be told it is not.
     """
     import parse_config
 
-    for bad in (None, "", "gumble", "Identity", "straight-through", True):
+    for value in ("gumbel", "identity", "gumble", None, True):
         config = get_config()
-        config["sender_language_model"]["estimator"] = bad
+        config["sender_language_model"]["estimator"] = value
         with pytest.raises(parse_config.InvalidConfig, match="estimator"):
             parse_config.validate_config(config)
 
-    for good in ("gumbel", "identity"):
-        config = get_config()
-        config["sender_language_model"]["estimator"] = good
-        parse_config.validate_config(config)
+    # And DEFAULT.toml does not carry it, which is what makes the rejection
+    #     reachable rather than a rule every config already breaks.
+    assert "estimator" not in get_config()["sender_language_model"]
 
 
 if __name__ == "__main__":

@@ -35,11 +35,13 @@ missing key rather than raising.
   rejecting the config up front fails in the same cases, but before any work is
   done.
 - Speaker and receiver `message_length` must agree.
-- `sender_language_model.estimator` must be present and one of `"gumbel"` or
-  `"identity"`. A typo would otherwise run a whole experiment under the wrong
-  gradient estimator and look like a result.
+- `sender_language_model.estimator` must be **absent**. It selected between the
+  straight-through Gumbel Jacobian and an `"identity"` backward pass and was
+  removed on 2026-09-07 with the second branch; a config still naming it is
+  describing a choice that no longer exists, so it raises rather than being
+  ignored — either value, including the one that won.
 
-  Both are checked here rather than left to the speaker's constructor, because
+  It is checked here rather than left to the speaker's constructor, because
   `SafeDict` only warns on a missing key and hands back `None`, which would fail
   confusingly deep inside the decode instead of at parse time.
 - `silhouette_p_sender` / `silhouette_p_receiver` in [0, 1]. Both are fractions
@@ -296,8 +298,8 @@ carry. The counterpart of `score_scale_lr` at the other end of the channel, and
 on the same rate for that reason: both are lone scalars in front of a normalised
 quantity, and both reach the loss through
 `model_util.scale_without_attenuating`. It was deleted on 2026-08-30 with the
-parameter and restored on 2026-08-31 — see [channel.md](channel.md) for why the
-argument for deleting it does not survive `estimator = "identity"`.
+parameter and restored on 2026-08-31 — see [channel.md](channel.md) for why a
+ceiling answers the argument for deleting it and a closed form does not.
 
 At 2e-3 and 156.25 optimiser steps an epoch — the figure both datasets run since
 `[birds.optimiser] accumulator_steps` went to 2 — that is 0.3125 log-units an
@@ -532,14 +534,14 @@ Everything on the speaker frozen to four decimals — but at a *high*
 `realised_survival` rather than a low one, and after a run that was
 communicating.
 
-> **Two things have changed since this was written, and both narrow it.** On
-> `estimator = "identity"` this signature **cannot fire**: that branch's Jacobian
-> is `I`, so no amount of sharpening attenuates the speaker's gradient. On
-> `estimator = "gumbel"` it is bounded rather than impossible — `MAX_LOGIT_SCALE`
-> and `sharpest_logit_margin` cap `unmixed_survival` at 0.9945 at V = 14, so the
-> collapse the reference run suffered is bounded at roughly 100x rather than
-> unbounded. Read what follows as the failure being guarded against, and a
-> `logit_scale` of 3.046 as a number the projection no longer permits.
+> **One thing has changed since this was written, and it narrows the signature
+> without removing it.** `MAX_LOGIT_SCALE` and `sharpest_logit_margin` cap
+> `unmixed_survival` at 0.9945 at V = 14, so the collapse the reference run
+> suffered is bounded at roughly 100x rather than unbounded. It can still fire.
+> (Between 2026-08-30 and 2026-09-07 the ladder ran `estimator = "identity"`,
+> whose `I` Jacobian made it genuinely unreachable; that branch is gone.) Read
+> what follows as the failure being guarded against, and a `logit_scale` of
+> 3.046 as a number the projection no longer permits.
 
 `shapeworld-post-silhouette-update.csv` is the reference:
 `logit_scale` at 3.046, survival at 0.90670 against its 0.90714 cap,

@@ -865,12 +865,17 @@ that is actually sampled, so it sets the channel's fidelity budget, and
 `logit_scale` only means anything because it multiplies a unit-variance
 quantity. See [channel.md](channel.md).
 
-The gradient argument above is also weaker than it was. `4248fca` reasoned about
-the straight-through Gumbel Jacobian, and the ladder has run
-`estimator = "identity"` since `681ef0b`; Hyperion's GPUs report
-`is_bf16_supported()`, so `model_util.scale_without_attenuating` is inert by its
-own docstring and where a volume scalar sits relative to the backward pass no
-longer changes what the optimiser sees.
+The gradient argument above is weaker than it looks, though less weak than it
+was between August and 2026-09-07. `4248fca` reasoned about the straight-through
+Gumbel Jacobian, and that Jacobian is back: the `estimator = "identity"` branch
+that had made the reasoning moot since `681ef0b` was withdrawn when
+`experiments/lr_sweep_1_cnn/` came in. What still holds is the other half, which
+never depended on the estimator — Hyperion's GPUs report `is_bf16_supported()`,
+so `model_util.scale_without_attenuating` is inert by its own docstring and where
+a volume scalar sits relative to the backward pass does not change what the
+optimiser sees. Note this is the *listener's* volume either way, and the listener
+reads the message embedding on a continuous path: the estimator is the speaker's
+exposure alone.
 
 **What they do not touch.** `AttentionDiscriminator`'s input and memory norms
 stay under every setting, as they always have — but they are `Receiver`'s

@@ -107,17 +107,6 @@ def validate_config(config: dict) -> bool:
             "`receiver_language_model` message length."
         )
     
-    # Checked here rather than in the speaker's constructor: `SafeDict` only
-    # warns on a missing key and hands back None. A typo would otherwise
-    # silently run the other gradient estimator for a whole experiment rather
-    # than failing.
-    estimator = config['sender_language_model'].get('estimator')
-    if estimator not in ("gumbel", "identity"):
-        raise InvalidConfig(
-            "`sender_language_model.estimator` must be present and one of "
-            f'"gumbel" or "identity" — got {estimator!r}.'
-        )
-
     # The channel and readout flags, checked here for the same reason and in
     # the same style. All three default to today's behaviour in the modules that
     # read them, so a missing key would run the default arm silently rather than
@@ -166,6 +155,15 @@ def validate_config(config: dict) -> bool:
             "`scale_score` and `bias_score` -- one per scalar. There is no "
             "setting that removes the calibration",
         ),
+        (
+            'sender_language_model',
+            'estimator',
+            "the straight-through Gumbel-softmax estimator is unconditional "
+            'since 2026-09-07. `"identity"` lost `lr_sweep_1_cnn` on every arm '
+            "of both datasets and the branch is gone, so a config naming "
+            "either value would be describing a choice that no longer exists. "
+            "See `sender.sample_symbols`",
+        ),
     ):
         if key in config.get(table, {}):
             raise InvalidConfig(
@@ -182,7 +180,7 @@ def validate_config(config: dict) -> bool:
     #
     # Imported here rather than at module scope so that parsing a config does
     # not pull in torch by way of `models`.
-    from models.builder import MODULE_GROUPS
+    from models.builder import GROUP_IMPLEMENTATION, MODULE_GROUPS
 
     group_names = {name for name, _ in MODULE_GROUPS}
     module_lr = config['optimiser'].get('module_lr') or {}
@@ -210,6 +208,62 @@ def validate_config(config: dict) -> bool:
                 f"`optimiser.module_lr.{key}` must be a positive number, got "
                 f"{rate}."
             )
+
+    # `[optimiser.implementation_lr]`, one rate per (module group, implementing
+    # class). Checked in the same place and for the same reason as `module_lr`
+    # above, with one extra failure to catch: a group named here that has no
+    # choice of implementation. Setting
+    # `implementation_lr.sender_adapter.LinearInterface` would look like a
+    # setting and do nothing, because `resolve_module_learning_rates` only
+    # consults this table for the six groups `GROUP_IMPLEMENTATION` covers.
+    #
+    # Class names are deliberately *not* checked. There is no registry to check
+    # against -- `build_models` resolves them with `getattr` on the module -- and
+    # the table's whole purpose is to hold rates for classes that no current
+    # rung runs, so "unused" cannot mean "wrong" here. See
+    # `models.builder.GROUP_IMPLEMENTATION`.
+    implementation_lr = config['optimiser'].get('implementation_lr') or {}
+
+    if not isinstance(implementation_lr, dict):
+        raise InvalidConfig(
+            "`optimiser.implementation_lr` must be a table of group name -> "
+            "class name -> learning rate, got "
+            f"{type(implementation_lr).__name__}."
+        )
+
+    for group, rates_by_class in implementation_lr.items():
+        if group not in GROUP_IMPLEMENTATION:
+            detail = (
+                "it names a clip group, but one whose implementation is not "
+                "chosen in the config, so a rate here could never be found"
+                if group in group_names
+                else "it names no clip group at all"
+            )
+            raise InvalidConfig(
+                f"`optimiser.implementation_lr.{group}` is not keyable: "
+                f"{detail}. The keyable groups are "
+                f"{', '.join(sorted(GROUP_IMPLEMENTATION))} — see "
+                "`models.builder.GROUP_IMPLEMENTATION`. Groups without a "
+                "choice take their rate from `optimiser.module_lr`."
+            )
+
+        if not isinstance(rates_by_class, dict):
+            raise InvalidConfig(
+                f"`optimiser.implementation_lr.{group}` must be a table of "
+                f"class name -> learning rate, got "
+                f"{type(rates_by_class).__name__}."
+            )
+
+        for implementation, rate in rates_by_class.items():
+            if (
+                not isinstance(rate, (int, float))
+                or isinstance(rate, bool)
+                or rate <= 0
+            ):
+                raise InvalidConfig(
+                    f"`optimiser.implementation_lr.{group}.{implementation}` "
+                    f"must be a positive number, got {rate}."
+                )
 
     # `[scheduler]`. The shape is a sentinel rather than a `FN_LIBRARY` name --
     # see `LR_SCHEDULE_SHAPES` for why the surface is this narrow -- and the

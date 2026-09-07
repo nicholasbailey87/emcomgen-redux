@@ -144,8 +144,9 @@ either way.
 **And on 2026-08-31 the speaker's scale came back to meet it.** `44767b2` had
 deleted `log_logit_scale` in favour of a constant, on the grounds that a learned
 scale climbs until the straight-through estimator is shut; that is a property of
-the gumbel Jacobian, and the ladder now runs `estimator = "identity"`, whose
-Jacobian is `I` at any sharpness. So both ends of the channel are learned lone
+the Jacobian `diag(p) - p pT` and it is real, but `MAX_LOGIT_SCALE` bounds it,
+so the parameter can learn under a ceiling instead of being solved away. So both
+ends of the channel are learned lone
 scalars again, both go through `scale_without_attenuating`, and both take the
 same rate -- `logit_scale_lr` and `score_scale_lr`, 6e-3 apiece. They are not
 symmetric in one respect: the speaker's is bounded above at 2.0 by a projection
