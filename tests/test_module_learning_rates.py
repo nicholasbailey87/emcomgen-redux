@@ -108,6 +108,31 @@ def _trainable(pair):
     return [(n, p) for n, p in pair.named_parameters() if p.requires_grad]
 
 
+def _expected_rate(config, group):
+    """
+    The rate `[optimiser]` names for `group`, by the order
+        `resolve_module_learning_rates` documents: the implementing class's
+        rate if one is stated for it, else the group's, else base.
+
+    Written out here rather than imported from `builder` so that the two say
+        the same thing independently. A test that called the function under
+        test would assert only that it is self-consistent.
+    """
+    base_lr = config["optimiser"]["lr"]
+    lr = config["optimiser"]["module_lr"].get(group, base_lr)
+
+    implementation = builder.implementation_of(config, group)
+    if implementation is None:
+        return lr
+
+    return (
+        config["optimiser"]
+        .get("implementation_lr", {})
+        .get(group, {})
+        .get(implementation, lr)
+    )
+
+
 def _selector(module_name):
     return dict(builder.MODULE_GROUPS)[module_name]
 
@@ -131,9 +156,18 @@ def test_the_group_names_are_the_module_lr_keys():
 
 def test_the_default_rates_are_flat_at_jayelms_own():
     """
-    DEFAULT's table is flat: every module sits at the base `lr`, and the base
-        `lr` is jayelm's 1e-4. Ten entries, one number, no split between the
-        agents and none within one.
+    DEFAULT's `[optimiser.module_lr]` is flat: ten entries, one number, no
+        split between the agents and none within one, and that number is
+        jayelm's 1e-4.
+
+    **This is now a claim about the fallback, not about what every module runs
+        at.** `[optimiser.implementation_lr]` sits in front of it since
+        2026-09-07 and moves the two CNN backbones -- `ResNet56` to 2e-5,
+        `ResNet18` to 5e-5, from `experiments/lr_sweep_1_cnn/`. Flat here means
+        that a group whose class carries no measured rate falls back to one
+        number rather than to a grid, which is the property the paragraphs
+        below are about. `test_the_measured_backbone_rates_are_the_ones_the_
+        sweep_found` is where the overrides themselves are pinned.
 
     **It was a two-tier grid from 2026-08-31 to 2026-09-05** -- the whole
         listener at half the whole speaker, one factor carrying one claim -- and
@@ -155,8 +189,9 @@ def test_the_default_rates_are_flat_at_jayelms_own():
         splits a scalar into its own optimiser group only `if lr != base_lr`,
         so every `*_lr` key that happens to equal the base is now inert. The
         rate each parameter runs at is unchanged either way -- an unsplit
-        parameter sits in its module's group at exactly the rate its key names,
-        because the table is flat -- but the group structure is not.
+        parameter sits in its module's group at exactly the rate resolved for
+        it -- but the group structure is not. Note the two backbones *are*
+        split out now, because `implementation_lr` moves them off base.
     """
     config = parse_config.get_config()
     base_lr = config["optimiser"]["lr"]
@@ -178,6 +213,135 @@ def test_the_default_rates_are_flat_at_jayelms_own():
     }
 
     assert rates == pytest.approx(expected)
+
+
+def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
+    """
+    The two numbers `experiments/lr_sweep_1_cnn/` produced, pinned as literals
+        because they are *measurements* rather than structure -- unlike the flat
+        table above, where the shape is the claim and the magnitude is not.
+
+    2e-5 for `ResNet56` on ShapeWorld and 5e-5 for `ResNet18` on birds, on both
+        agents, because the sweep moved `sender_vision` and `receiver_vision`
+        together in every arm and stating them apart would claim a distinction
+        it did not make.
+
+    A retune replaces these and edits this test in the same commit, which is
+        the point: a rate arrived at by measurement should not be able to drift
+        without someone saying so. DEFAULT.toml carries the evidence.
+    """
+    config = parse_config.get_config()
+    rates = config["optimiser"]["implementation_lr"]
+
+    assert rates == {
+        "sender_vision": {"ResNet56": 2e-5, "ResNet18": 5e-5},
+        "receiver_vision": {"ResNet56": 2e-5, "ResNet18": 5e-5},
+    }
+
+
+def test_the_implementation_rate_beats_the_group_rate_for_the_class_in_use():
+    """
+    The resolution order, asserted on a real pair rather than on the config.
+        `implementation_lr` is the more specific claim and wins; `module_lr`
+        holds the group's fallback for every class not named.
+
+    Both directions matter. A rate stated for the class in use must reach the
+        parameters, and a rate stated for one that is *not* in use must reach
+        nothing -- that second half is what lets DEFAULT.toml carry a rate for
+        every architecture the ladder will ever run while each rung picks up
+        only its own.
+    """
+    flat = dict(parse_config.get_config()["optimiser"]["module_lr"])
+
+    config, built = _build(
+        "01_shapeworld_baseline.toml",
+        optimiser={
+            "module_lr": {**flat, "sender_vision": 7e-4},
+            "implementation_lr": {
+                "sender_vision": {
+                    # The class this rung actually runs.
+                    "ResNet56": 3e-6,
+                    # One it does not, which must stay inert.
+                    "ViT2": 9e-9,
+                },
+            },
+        },
+    )
+
+    resolved = config["optimiser"]["resolved_module_lrs"]
+
+    assert resolved["sender_vision"] == 3e-6
+    # No entry for the listener's backbone, so it falls through to `module_lr`,
+    #     which this override left at the flat 1e-4.
+    assert resolved["receiver_vision"] == 1e-4
+
+    lr_of = _lr_by_id(built["optimiser"])
+    rates = {
+        lr_of[id(p)]
+        for p in built["pair"].sender.feat_model.parameters()
+        if p.requires_grad
+    }
+    assert rates == {3e-6}
+
+
+@pytest.mark.parametrize(
+    "group",
+    [
+        # Names no clip group at all.
+        "sender_langauge_model",
+        # Names a real group, but one whose implementation is not chosen in the
+        #     config, so a rate under it could never be found.
+        "sender_adapter",
+        "receiver_token_embedding",
+    ],
+)
+def test_an_implementation_lr_group_that_is_not_keyable_is_rejected(group):
+    """
+    Same guard as `module_lr`'s, with the extra case the second table adds. A
+        rate under `sender_adapter` would look like a setting and do nothing,
+        because `resolve_module_learning_rates` only consults this table for the
+        six groups `GROUP_IMPLEMENTATION` covers -- there is no `[sender]` key
+        naming the adapter's class, so there is nothing to match against.
+    """
+    config = parse_config.get_config()
+    config["optimiser"]["implementation_lr"][group] = {"Whatever": 1e-4}
+
+    with pytest.raises(parse_config.InvalidConfig, match=group):
+        parse_config.validate_config(config)
+
+
+@pytest.mark.parametrize("bad", [0, -1e-4, "1e-4", True])
+def test_an_implementation_lr_that_is_not_a_positive_number_is_rejected(bad):
+    config = parse_config.get_config()
+    config["optimiser"]["implementation_lr"]["sender_vision"]["ViT2"] = bad
+
+    with pytest.raises(parse_config.InvalidConfig):
+        parse_config.validate_config(config)
+
+
+def test_every_keyable_group_names_a_config_key_that_exists():
+    """
+    `GROUP_IMPLEMENTATION` maps a group to the `(table, key)` naming its class,
+        and a stale entry there would make `implementation_of` raise at build
+        time on every rung at once. Checked against DEFAULT.toml, and that the
+        groups it names are module groups in the first place.
+    """
+    config = parse_config.get_config()
+    group_names = {name for name, _ in builder.MODULE_GROUPS}
+
+    for group, (table, key) in builder.GROUP_IMPLEMENTATION.items():
+        assert group in group_names, group
+        assert key in config[table], f"{table}.{key}"
+        assert isinstance(config[table][key], str), f"{table}.{key}"
+
+    # And the mapping resolves for every rung, which is what `build_models`
+    #     relies on.
+    for config_file in RUNGS:
+        rung_config = parse_config.get_config(rung(config_file))
+        for group in builder.GROUP_IMPLEMENTATION:
+            assert isinstance(
+                builder.implementation_of(rung_config, group), str
+            ), f"{config_file}: {group}"
 
 
 def test_a_module_lr_key_naming_no_group_is_rejected():
@@ -223,7 +387,6 @@ def test_each_module_group_gets_the_rate_its_config_names(config_file):
     config, built = _build(config_file)
     pair = built["pair"]
     lr_of = _lr_by_id(built["optimiser"])
-    base_lr = config["optimiser"]["lr"]
 
     # `score_bias` and `polarity_embedding` clip with their module but take
     #     their rate from their own key, so they are strays here by design.
@@ -235,7 +398,7 @@ def test_each_module_group_gets_the_rate_its_config_names(config_file):
         if module is None:
             continue
 
-        expected = config["optimiser"]["module_lr"].get(name, base_lr)
+        expected = _expected_rate(config, name)
 
         rates = {
             lr_of[id(p)] for n, p in module.named_parameters()
@@ -266,9 +429,8 @@ def test_the_resolved_rates_are_written_back_for_save_args(config_file):
     assert set(resolved) == built_groups
     assert all(isinstance(v, float) and v > 0 for v in resolved.values())
 
-    base_lr = config["optimiser"]["lr"]
     for name, lr in resolved.items():
-        assert lr == config["optimiser"]["module_lr"].get(name, base_lr)
+        assert lr == _expected_rate(config, name), name
 
 
 # --------------------------------------------------------------------------

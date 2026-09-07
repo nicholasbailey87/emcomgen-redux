@@ -19,6 +19,7 @@ Counts are exact rather than banded. A band wide enough to be robust to a real
 architectural change is too wide to catch the thing this file exists to catch.
 """
 
+import glob
 import os
 
 import pytest
@@ -30,7 +31,7 @@ import broccoli.transformer
 import models.builder
 import parse_config
 
-from _bootstrap import CONFIG_DIRS, all_rungs, rung
+from _bootstrap import CONFIG_DIRS, EXPERIMENTS_DIR, all_rungs, rung
 
 SHAPEWORLD_FEATS = (3, 64, 64)
 BIRDS_FEATS = (3, 224, 224)
@@ -107,6 +108,76 @@ def test_every_rung_found_can_be_opened():
 
     for config_file in RUNGS:
         assert parse_config.get_config(rung(config_file))
+
+
+# Experiment folders whose configs are known not to parse, with the key that
+#     retired them. They are finished experiments and their configs are the
+#     record of runs that happened, not instructions for runs that will; a
+#     config naming a retired key cannot be re-run as written, and rewriting one
+#     to parse would be inventing a setting for a run that never used it.
+#
+#     `silhouette_titration_norms` sets `[receiver_discriminator]
+#     normalise_score`, which `parse_config.validate_config` retired when the
+#     flag was split into `scale_score` and `bias_score`. There is deliberately
+#     no translation: the old `false` also removed the `1/sqrt(d)` calibration,
+#     and no current setting does that, so the arm is unreachable rather than
+#     renamed. See DEFAULT.toml beside those two keys.
+STALE_EXPERIMENTS = ("silhouette_titration_norms",)
+
+
+def test_every_experiment_config_parses():
+    """
+    Every queued config in the repository, not just the ladder's.
+
+    `all_rungs` scans `ablation_shapeworld` and `ablation_birds` alone, which is
+        right for the tests above -- they *build* each rung, and building the
+        whole of `experiments/` would be minutes of model construction to
+        re-assert a property the ladder already covers. But it leaves the other
+        experiment folders with no check at all, and there are eighty-odd config
+        files in `experiments/lr_sweep_*/` whose only failure mode is a config
+        that does not parse.
+
+    Parse only, therefore, and no `build_models`: this catches a retired key, a
+        malformed table, a rate that is not a positive number, a `[data]
+        dataset` naming neither dataset -- everything `validate_config` knows
+        about -- in well under a second. It is the check that the seventy sweep
+        arms were generated correctly, and it would have caught the
+        `estimator` removal against the nine `lr_sweep_1_cnn` arms that still
+        carried the key.
+
+    Failures are collected rather than raised one at a time, because a
+        generated set of configs tends to be wrong all together or not at all,
+        and one name out of eighty is not a useful error message.
+
+    **`STALE_EXPERIMENTS` is the one exclusion, and it is a statement rather
+        than a convenience.** Those folders hold finished experiments whose
+        configs name keys that have since been retired, so they no longer parse
+        and cannot be re-run as written. That is a real fact about them and
+        this test would otherwise be red for a reason nobody intends to fix;
+        naming them here says which ones and why, where scoping the glob to the
+        live folders would have hidden it. Remove a name from that tuple by
+        making its configs parse, not by narrowing the scan.
+    """
+    pattern = os.path.join(EXPERIMENTS_DIR, "*", "configs", "*.toml")
+    configs = sorted(
+        path for path in glob.glob(pattern)
+        if os.path.basename(os.path.dirname(os.path.dirname(path)))
+        not in STALE_EXPERIMENTS
+    )
+
+    assert configs, f"no configs found under {pattern}"
+
+    failures = []
+    for path in configs:
+        try:
+            parse_config.get_config(path)
+        except Exception as error:
+            failures.append(
+                f"{os.path.relpath(path, EXPERIMENTS_DIR)}: "
+                f"{type(error).__name__}: {error}"
+            )
+
+    assert not failures, "\n".join([""] + failures)
 
 
 @pytest.mark.parametrize("config_file", RUNGS)
@@ -412,15 +483,24 @@ def test_nothing_that_should_be_undecayed_is_decayed(config_file):
     Second, a module moved to a rate of its own must *keep* its decay.
     `_regroup` used to add every new group at `weight_decay = 0.0`, which was
     inert while the base was 0.0 and would have switched the decay off under
-    exactly the two modules `experiments/baseline_lr_sweeps/` moves.
+    exactly the two modules the learning-rate sweeps move.
+
+    The rate is moved through `[optimiser.implementation_lr]` rather than
+    `[optimiser.module_lr]`, because that is the table a sweep result lands in
+    and it is the one that wins: a `module_lr.sender_vision` set here would be
+    silently outranked by DEFAULT.toml's rate for whichever backbone the rung
+    runs, and this would then be asserting the default rather than its own
+    override. Keyed off `builder.implementation_of` so it follows the rung
+    rather than naming `ResNet56` and `ResNet18` here as well.
     """
     config = parse_config.get_config(rung(config_file))
     config["cuda"] = False
     config["optimiser"]["weight_decay"] = 0.1
-    # As the sweep does: both backbones off the base rate, so both are split
-    # into groups of their own on the way through `split_out_module`.
-    config["optimiser"]["module_lr"]["sender_vision"] = 1e-5
-    config["optimiser"]["module_lr"]["receiver_vision"] = 1e-5
+    # As a sweep does: both backbones off the base rate, so both are split into
+    # groups of their own on the way through `split_out_module`.
+    for group in ("sender_vision", "receiver_vision"):
+        implementation = models.builder.implementation_of(config, group)
+        config["optimiser"]["implementation_lr"][group] = {implementation: 1e-5}
 
     class _Dataset:
         n_feats = _feats(config_file)

@@ -146,6 +146,55 @@ MODULE_GROUPS = (
 )
 
 
+# For each module group whose implementation the config *chooses*, the
+#     `(table, key)` naming the class in use. This is what makes
+#     `[optimiser.implementation_lr]` addressable: a rate stated for `ViT2` has
+#     to find the group that `ViT2` currently occupies, and a group can hold a
+#     different class on every rung.
+#
+# Why a rate cannot simply live in `[optimiser.module_lr]`. The ladder swaps
+#     implementations *within* a group -- rung 1 puts `ResNet56` in
+#     `sender_vision` and rung 3 puts `ViT2` there -- so one number per group
+#     can hold one architecture's tuned rate or the other's and never both. A
+#     ladder whose backbone rung inherits the previous rung's rate differs from
+#     it in two things at once, which is the confound every rung comment in
+#     DEFAULT.toml is written to avoid. Keying by implementation is what lets
+#     each rate be measured once, recorded once, and picked up by whichever
+#     rungs run that class. See `experiments/lr_sweep_*/`.
+#
+# Only these six. `sender_contrast` is a boolean over one class
+#     (`sender.ExampleContrast`), and the two adapter groups and the listener's
+#     embedding table are `LinearInterface` and `nn.Embedding` unconditionally
+#     -- there is no choice to key on, so those groups take their rate from
+#     `[optimiser.module_lr]` alone and naming them here raises.
+#
+# The value is read from the config rather than from `type(module).__name__`
+#     deliberately: `vision.ResNet18` and `vision.ResNet18SmallInput` are
+#     factory functions that both return a `ResNet`, so the class object cannot
+#     tell them apart and the config string can. It is also the name the user
+#     wrote, which is the name they will state a rate for.
+GROUP_IMPLEMENTATION = {
+    "sender_vision": ("sender", "feature_model"),
+    "sender_prototyper": ("sender", "prototyper"),
+    "sender_language_model": ("sender", "language_model"),
+    "receiver_vision": ("receiver", "feature_model"),
+    "receiver_language_model": ("receiver", "language_model"),
+    "receiver_discriminator": ("receiver", "discriminator"),
+}
+
+
+def implementation_of(config, group):
+    """
+    The class name occupying `group` in `config`, or None where the group has
+        no choice of implementation.
+    """
+    if group not in GROUP_IMPLEMENTATION:
+        return None
+
+    table, key = GROUP_IMPLEMENTATION[group]
+    return config[table][key]
+
+
 # `(name, applies to)` for the scaling scalars, each of which is a clipping
 #     group to itself. The name is also the `named_parameters` suffix: there is
 #     one tensor per name, it is 0-d, and the group is that one tensor.
@@ -500,7 +549,8 @@ SPLIT_LEARNING_RATES = (
 
 def resolve_module_learning_rates(config, pair, base_lr):
     """
-    Read one learning rate per module group out of `[optimiser.module_lr]`.
+    Read one learning rate per module group out of `[optimiser.module_lr]` and
+        `[optimiser.implementation_lr]`.
 
     Rates are stated rather than computed. The rule that used to compute them
         multiplied `base_lr` by `reference_width / d_model / layers`; the width
@@ -511,13 +561,32 @@ def resolve_module_learning_rates(config, pair, base_lr):
         different rates. That is worth keeping; the derivation was not. See
         docs/training.md.
 
-    Absent key means `base_lr`, and `parse_config.validate_config` rejects a key
-        that names no group -- so a typo raises rather than quietly leaving a
-        module at base, which is the failure `split_out_parameter` already
-        guards against for the scalars.
+    Two tables, consulted in order. `[optimiser.implementation_lr].<group>`
+        states a rate per implementing class and wins where it names the class
+        the group actually holds; `[optimiser.module_lr].<group>` is the
+        fallback, one rate for the group whatever occupies it. An absent key on
+        both means `base_lr`.
+
+    The order is that way round because the implementation is the more specific
+        claim. `module_lr` says "the speaker's backbone runs at X" and
+        `implementation_lr` says "`ViT2` runs at X wherever it appears" -- and a
+        rate measured against an architecture travels with that architecture
+        across the rungs, which is what `experiments/lr_sweep_*/` produce one at
+        a time. See `GROUP_IMPLEMENTATION`.
+
+    `parse_config.validate_config` rejects a key naming no group in either
+        table -- so a typo raises rather than quietly leaving a module at base,
+        which is the failure `split_out_parameter` already guards against for
+        the scalars. What it cannot check is a *class* name: there is no
+        registry to check against (`build_models` resolves them by `getattr`),
+        and the table is meant to hold rates for classes no current rung runs.
+        A misspelled class name is therefore silently inert, which is the one
+        hole here; the resolved rate reaches `args.json` on every run, so it is
+        visible after the fact.
 
     Args:
-        config: the parsed config, for `[optimiser] module_lr`
+        config: the parsed config, for `[optimiser] module_lr` and
+            `[optimiser] implementation_lr`
         pair: the constructed `base.Pair`
         base_lr: `[optimiser] lr`
 
@@ -530,6 +599,7 @@ def resolve_module_learning_rates(config, pair, base_lr):
             parameters are trained at.
     """
     rates = config['optimiser'].get('module_lr') or {}
+    by_implementation = config['optimiser'].get('implementation_lr') or {}
 
     to_split = []
     resolved = {}
@@ -541,6 +611,11 @@ def resolve_module_learning_rates(config, pair, base_lr):
             continue
 
         lr = rates.get(name, base_lr)
+
+        implementation = implementation_of(config, name)
+        if implementation is not None:
+            lr = by_implementation.get(name, {}).get(implementation, lr)
+
         resolved[name] = lr
 
         if lr != base_lr:
