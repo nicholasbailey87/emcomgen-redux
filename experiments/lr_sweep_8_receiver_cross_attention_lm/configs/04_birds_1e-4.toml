@@ -1,0 +1,56 @@
+# lr_sweep_8_receiver_cross_attention_lm arm: `ReceiverCrossAttentionLM` at 1e-4 on CUB.
+#
+# See `01_birds_1e-5.toml` for what this experiment measures and why.
+# This file differs from that one in the swept rate.
+#
+# ---
+#
+# **This arm: `ReceiverCrossAttentionLM` at 1e-4 on CUB**, copying ablation rung 16.
+
+name = "lr_sweep_8_receiver_cross_attention_lm"
+
+[data]
+dataset = "../data/cub"
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+contrast = true
+language_model = "SenderTransformerLM"
+
+[sender_language_model]
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+layers = 7
+bidirectional = false
+
+[receiver]
+feature_model = "ViT2"
+language_model = "ReceiverCrossAttentionLM"
+discriminator = "AttentionDiscriminator"
+
+[receiver_discriminator]
+d_model = 256
+heads = 4
+ff_inner_size = 320
+layers = 3
+
+[receiver_language_model]
+d_model = 256
+heads = 4
+ff_inner_size = 320
+token_embedding_size = 256
+layers = 6
+bidirectional = true
+
+[optimiser.implementation_lr.receiver_language_model]
+# The one key this sweep moves. Every other rate is DEFAULT.toml's,
+# including the ones earlier sweeps in this set have already settled.
+ReceiverCrossAttentionLM = 1e-4
+
+[scheduler]
+epochs = 60
+
+[experiment]
+repeats = 1

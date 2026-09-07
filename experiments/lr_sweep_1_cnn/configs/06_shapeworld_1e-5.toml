@@ -1,4 +1,4 @@
-# baseline_lr_sweeps_stgs arm: ShapeWorld backbones at 1e-5 under gumbel.
+# lr_sweep_1_cnn arm: ShapeWorld backbones at 1e-5 under gumbel.
 #
 # See `01_birds_5e-6.toml` for what this experiment measures and why. This
 # file differs from that one in `[optimiser.module_lr]`, and in carrying no
@@ -10,12 +10,14 @@
 # sweep, 0.5475 around epoch 16, and then decayed to 0.5217. A peak that is
 # not held.
 
-name = "baseline_lr_sweeps_stgs"
+name = "lr_sweep_1_cnn"
 
 [sender_language_model]
-# See `01_birds_5e-6.toml`. The hard one-hot goes forward exactly as it does
-# under `"identity"`; only the backward pass differs.
-estimator = "gumbel"
+# This arm ran the straight-through Gumbel-softmax estimator against a
+# `DEFAULT.toml` that was still on `"identity"`, which is what the sweep was
+# for. It won, and `estimator` was removed on 2026-09-07 -- gumbel is now
+# unconditional and the key raises if set. The block is kept as the record of
+# what this arm carried; nothing sets it any more.
 
 [optimiser.module_lr]
 # The two vision models, and only them. Every other key in this table

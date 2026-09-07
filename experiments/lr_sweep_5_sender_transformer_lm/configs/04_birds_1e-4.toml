@@ -1,0 +1,37 @@
+# lr_sweep_5_sender_transformer_lm arm: `SenderTransformerLM` at 1e-4 on CUB.
+#
+# See `01_birds_1e-5.toml` for what this experiment measures and why.
+# This file differs from that one in the swept rate.
+#
+# ---
+#
+# **This arm: `SenderTransformerLM` at 1e-4 on CUB**, copying ablation rung 10.
+
+name = "lr_sweep_5_sender_transformer_lm"
+
+[data]
+dataset = "../data/cub"
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+contrast = true
+language_model = "SenderTransformerLM"
+
+[sender_language_model]
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+layers = 7
+bidirectional = false
+
+[optimiser.implementation_lr.sender_language_model]
+# The one key this sweep moves. Every other rate is DEFAULT.toml's,
+# including the ones earlier sweeps in this set have already settled.
+SenderTransformerLM = 1e-4
+
+[scheduler]
+epochs = 60
+
+[experiment]
+repeats = 1

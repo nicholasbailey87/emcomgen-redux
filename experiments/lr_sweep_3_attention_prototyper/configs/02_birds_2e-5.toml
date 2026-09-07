@@ -1,0 +1,28 @@
+# lr_sweep_3_attention_prototyper arm: `AttentionPrototyper` at 2e-5 on CUB.
+#
+# See `01_birds_1e-5.toml` for what this experiment measures and why.
+# This file differs from that one in the swept rate.
+#
+# ---
+#
+# **This arm: `AttentionPrototyper` at 2e-5 on CUB**, copying ablation rung 06.
+
+name = "lr_sweep_3_attention_prototyper"
+
+[data]
+dataset = "../data/cub"
+
+[sender]
+feature_model = "ViT2"
+prototyper = "AttentionPrototyper"
+
+[optimiser.implementation_lr.sender_prototyper]
+# The one key this sweep moves. Every other rate is DEFAULT.toml's,
+# including the ones earlier sweeps in this set have already settled.
+AttentionPrototyper = 2e-5
+
+[scheduler]
+epochs = 60
+
+[experiment]
+repeats = 1

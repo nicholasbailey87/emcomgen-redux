@@ -28,6 +28,62 @@ for a day in August 2026. `test_there_are_sixteen_rungs` is the backstop.
 
 The rest of this file is a reference for the columns of that `metrics.csv`.
 
+## The learning-rate sweeps are a serial chain
+
+**`lr_sweep_1_cnn` through `lr_sweep_8_receiver_cross_attention_lm`**, one
+folder per rung of the ladder, each measuring the learning rate of the one
+component that rung introduces. They must be run **in order**, and DEFAULT.toml
+must be updated with each result before the next is launched.
+
+| sweep | rungs | what it tunes | key |
+|---|---|---|---|
+| `lr_sweep_1_cnn` | 1 / 2 | `ResNet56`, `ResNet18` | `implementation_lr.{sender,receiver}_vision` |
+| `lr_sweep_2_sender_vit` | 3 / 4 | the speaker's `ViT2` | `implementation_lr.sender_vision.ViT2` |
+| `lr_sweep_3_attention_prototyper` | 5 / 6 | `AttentionPrototyper` | `implementation_lr.sender_prototyper.AttentionPrototyper` |
+| `lr_sweep_4_sender_contrast` | 7 / 8 | `ExampleContrast` | `module_lr.sender_contrast` |
+| `lr_sweep_5_sender_transformer_lm` | 9 / 10 | `SenderTransformerLM` | `implementation_lr.sender_language_model.SenderTransformerLM` |
+| `lr_sweep_6_receiver_vit` | 11 / 12 | the listener's `ViT2` | `implementation_lr.receiver_vision.ViT2` |
+| `lr_sweep_7_attention_discriminator` | 13 / 14 | `AttentionDiscriminator` | `implementation_lr.receiver_discriminator.AttentionDiscriminator` |
+| `lr_sweep_8_receiver_cross_attention_lm` | 15 / 16 | `ReceiverCrossAttentionLM` | `implementation_lr.receiver_language_model.ReceiverCrossAttentionLM` |
+
+Ten arms each -- 1e-5, 2e-5, 5e-5, 1e-4 and 2e-4 on both datasets, `01`-`05`
+birds and `06`-`10` ShapeWorld -- at 60 epochs and one repeat. Sweep 1 is the
+exception: nine arms at 100 epochs, and it also settled the gradient estimator.
+
+**Why serial, and what goes wrong if it is not.** Each sweep runs at whatever
+rates DEFAULT.toml currently holds, and restates none of them. Sweep 3 tunes
+`AttentionPrototyper` in the presence of the ViT backbone sweep 2 measured, so
+if sweep 2's result has not been written into DEFAULT.toml first, sweep 3
+measures its component against an untuned trunk instead. That does not fail and
+it does not warn -- it returns a number that looks like an answer. The protocol
+is: run a sweep, read it, write the winning rate into
+`[optimiser.implementation_lr]` in DEFAULT.toml with the evidence beside it,
+then launch the next.
+
+```
+scripts/run_experiment.sh lr_sweep_2_sender_vit
+# read the results, update DEFAULT.toml, then:
+scripts/run_experiment.sh lr_sweep_3_attention_prototyper
+```
+
+**Why the rates are keyed by implementation.** `[optimiser.module_lr]` holds one
+rate per module group, and the ladder swaps implementations *within* a group --
+rung 1 puts `ResNet56` in `sender_vision`, rung 3 puts `ViT2` there. One number
+per group can hold one architecture's rate or the other's, never both, so a
+backbone rung would inherit the previous rung's rate and differ from it in two
+things at once. `[optimiser.implementation_lr]` is keyed by group and then by
+class name and is consulted first; see `models.builder.GROUP_IMPLEMENTATION` for
+the six groups whose implementation the config chooses, and DEFAULT.toml beside
+the table for the rates themselves. `sender_contrast` is the one component in
+this set with no choice of class, which is why sweep 4 moves a `module_lr` key.
+
+**Why 60 epochs.** On sweep 1's own traces the two leading ShapeWorld rates are
+*inverted* at epoch 40 and cross at 47, so a 40-epoch sweep returns the wrong
+answer; at 60 the winner leads by 0.032 on `train_acc_md_shape`. What 60 does
+not buy is the argmax within the winning region -- sweep 1 took 98 epochs to
+separate its top two birds arms, and then by 0.001. These sweeps pick a
+plateau.
+
 ## The ablation ladder is two experiments
 
 The ladder runs as **`ablation_shapeworld` and `ablation_birds`**, one folder

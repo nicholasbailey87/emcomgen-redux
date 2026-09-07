@@ -1,0 +1,23 @@
+name = "silhouette_titration"
+
+[data]
+silhouette_p_receiver = 0.0
+
+[scheduler]
+# The ablation's smoke-run length, so a titration arm is readable against a rung
+# 1 trajectory without a schedule difference between them. DEFAULT.toml's 100 is
+# the notional full run and nothing takes it.
+#
+# Note ten of these are warm-up. `warm_up_epochs = 10` is a third of a 30-epoch
+# run rather than the tenth DEFAULT.toml sized it as, which is the same position
+# every rung on the ladder is in.
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

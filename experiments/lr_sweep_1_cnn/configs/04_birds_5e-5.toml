@@ -1,4 +1,4 @@
-# baseline_lr_sweeps_stgs arm: CUB backbones at 5e-5 under gumbel.
+# lr_sweep_1_cnn arm: CUB backbones at 5e-5 under gumbel.
 #
 # See `01_birds_5e-6.toml` for what this experiment measures and why. This
 # file differs from that one in `[optimiser.module_lr]` alone.
@@ -9,15 +9,17 @@
 # a `test_acc` that never left chance. Included so the rate axis is covered
 # above the working region and not only inside it.
 
-name = "baseline_lr_sweeps_stgs"
+name = "lr_sweep_1_cnn"
 
 [data]
 dataset = "../data/cub"
 
 [sender_language_model]
-# See `01_birds_5e-6.toml`. The hard one-hot goes forward exactly as it does
-# under `"identity"`; only the backward pass differs.
-estimator = "gumbel"
+# This arm ran the straight-through Gumbel-softmax estimator against a
+# `DEFAULT.toml` that was still on `"identity"`, which is what the sweep was
+# for. It won, and `estimator` was removed on 2026-09-07 -- gumbel is now
+# unconditional and the key raises if set. The block is kept as the record of
+# what this arm carried; nothing sets it any more.
 
 [optimiser.module_lr]
 # The two vision models, and only them. Every other key in this table

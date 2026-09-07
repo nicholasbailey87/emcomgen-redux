@@ -1,5 +1,45 @@
-# baseline_lr_sweeps_stgs: what backbone learning rate works best under the
+# lr_sweep_1_cnn: what backbone learning rate works best under the
 # straight-through Gumbel-softmax estimator.
+#
+# ==========================================================================
+# **RESULT, 2026-09-07. Everything below this block was written before the
+# runs came back and is kept as the reasoning at the time; read it as a
+# proposal, not as a description of the repo.** Two things it says are no
+# longer true: DEFAULT.toml *was* touched, and `estimator` no longer exists.
+#
+# Gumbel won every arm. Against the eight identity arms of
+# `baseline_lr_sweeps` at matched rates, epoch for epoch:
+#
+#   * the birds speaker's `train_clip_sender_vision` fell from 37,961 / 5.2e6
+#     / 97,945 at 1e-5 / 2e-5 / 1e-4 to 3.1 / 2.7 / 1.8. The spikes this
+#     experiment was written to explain are simply gone, and nothing went
+#     quiet either -- the lowest speaker norm anywhere was 5.5e-5, against the
+#     3.3e-5 and 9.2e-6 floors named further down;
+#   * ShapeWorld learned shape for the first time. `train_acc_md_shape`
+#     reached 0.879 against `train_acc_md_color` 0.661 at 2e-5 and was still
+#     climbing at epoch 100, where the identity arm peaked at 0.5475 and
+#     decayed;
+#   * `test_acc` was higher in all eight matched arms.
+#
+# `estimator` was removed on the strength of it and gumbel is unconditional;
+# see `[sender_language_model]` in DEFAULT.toml.
+#
+# **The rates: 2e-5 for `ResNet56`, 5e-5 for `ResNet18`.** ShapeWorld 2e-5 is
+# the only arm where the shape/colour separation is large and still opening
+# (0.879/0.661, against 0.790/0.687 at 1e-5 and 0.797/0.686 at 5e-5), and the
+# optimum is bracketed -- 1e-4 sits at 0.531 shape, pure colour shortcut. On
+# birds `test_acc` is flat from 5e-5 up (0.693 against 1e-4's 0.692) while the
+# train-test gap keeps widening (0.129 against 0.145), so the extra rate buys
+# fit and not transfer and the sweep was not extended past 1e-4. Both rates
+# are now in `[optimiser.implementation_lr]` in DEFAULT.toml, keyed by
+# architecture rather than by dataset.
+#
+# **This is sweep 1 of eight.** Each rung of the ablation introduces a
+# component whose rate is an untested guess, so `lr_sweep_2_sender_vit`
+# onwards repeat this one rung at a time, in the presence of the components
+# below them, with DEFAULT.toml updated from each before the next is
+# launched. See `experiments/README.md`.
+# ==========================================================================
 #
 # Nine arms. `[optimiser.module_lr] sender_vision` and `receiver_vision` move
 # together over 5e-6, 1e-5, 2e-5, 5e-5 and 1e-4 on the CUB baseline (rung 2) and
@@ -133,18 +173,17 @@
 # arm most likely to show the recorded collapse failure if that failure is about
 # rate, and the least likely to spike if the spikes are about rate.
 
-name = "baseline_lr_sweeps_stgs"
+name = "lr_sweep_1_cnn"
 
 [data]
 dataset = "../data/cub"
 
 [sender_language_model]
-# The straight-through Gumbel-softmax backward pass: the hard one-hot goes
-# forward and the soft sample's Jacobian `diag(p) - p pT` comes back, against
-# DEFAULT.toml's `"identity"`, which keeps the same forward pass and returns `I`.
-# The forward pass is bit-identical between the two branches, so this changes
-# what the speaker learns from and not what it says.
-estimator = "gumbel"
+# This arm ran the straight-through Gumbel-softmax estimator against a
+# `DEFAULT.toml` that was still on `"identity"`, which is what the sweep was
+# for. It won, and `estimator` was removed on 2026-09-07 -- gumbel is now
+# unconditional and the key raises if set. The block is kept as the record of
+# what this arm carried; nothing sets it any more.
 
 [optimiser.module_lr]
 # The two vision models, and only them. Every other key in this table
