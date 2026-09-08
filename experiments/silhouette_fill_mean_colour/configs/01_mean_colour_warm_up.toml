@@ -1,12 +1,20 @@
 # silhouette_fill_mean_colour: the defaults, with the old chromatic fill back
 # and the ten-epoch warm-up back. One arm, three repeats.
 #
-# Two keys move from `DEFAULT.toml` and nothing else does, so this is the
+# Two keys move from `DEFAULT.toml`, plus the run length, so this is the
 # current default configuration -- rate 0.2, white fill, no ramp, mixup and the
 # geometric augmentations on, `ResNet56` on both agents at 5e-5 -- with:
 #
 #     silhouette_fill    [1, 1, 1]  ->  (149, 149, 106) of 255
 #     warm_up_epochs             0  ->  10
+#     epochs                   100  ->  30
+#
+# Thirty epochs is a screen, not a verdict. It is where a fill difference would
+# have to show up to be worth a hundred, and it is three arms' worth of GPU
+# time for the price of one long one. What it cannot do is settle a question
+# that turns on late behaviour: the 2026-09-03 baseline's shape gap opened
+# after epoch 20, and `lr_sweep_1`'s two leading ShapeWorld rates were still
+# inverted at 40. A flat reading here means "not visible in 30", not "no".
 #
 # **The fill.** (149, 149, 106) is ShapeWorld's own mean object colour under a
 # uniform palette, and it was the default from 2026-09-01 to 2026-09-05. It was
@@ -61,6 +69,10 @@ name = "silhouette_fill_mean_colour"
 silhouette_fill = [0.584313725, 0.584313725, 0.415686275]
 
 [scheduler]
+# Thirty rather than the default hundred. The warm-up is a third of it, which
+# is the ratio rungs 9 and 10 ran at and is a long ramp for a short run; the
+# comparison it is being read against is at the same 30, so both arms pay it.
+epochs = 30
 warm_up_epochs = 10
 
 [experiment]
