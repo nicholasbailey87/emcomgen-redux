@@ -14,6 +14,13 @@ Here are some utils for that.
 
 Configs are TOML, and a job is "complete" when its ``metrics.csv`` exists with
 at least ``[scheduler].epochs`` rows (emcomgen writes one row per epoch).
+
+``epochs`` is read the way ``train.py`` reads it: from the experiment config if
+it sets one, and from ``DEFAULT.toml`` otherwise. An experiment config is a
+*diff* against the defaults and is not obliged to restate a key it does not
+move -- every config in ``experiments/`` happened to restate this one until
+``silhouette_fill_mean_colour``, which did not, and this module raised
+``KeyError: 'epochs'`` at submission time rather than running.
 """
 
 import argparse
@@ -22,6 +29,13 @@ from pathlib import Path
 from typing import List, Tuple
 
 import toml
+
+DEFAULTS_PATH = Path(__file__).resolve().parents[1] / "DEFAULT.toml"
+
+
+def default_epochs() -> int:
+    """``[scheduler].epochs`` from ``DEFAULT.toml``."""
+    return toml.load(DEFAULTS_PATH)["scheduler"]["epochs"]
 
 
 def enumerate_jobs(experiment: str) -> list:
@@ -52,7 +66,9 @@ def get_incomplete_jobs(experiment: str, output_root: str) -> List[int]:
     for i, (config_file, seed) in enumerate(jobs):
         config_path = Path("experiments") / experiment / "configs" / config_file
         config = toml.load(config_path)
-        expected_epochs = config["scheduler"]["epochs"]
+        expected_epochs = config.get("scheduler", {}).get(
+            "epochs", default_epochs()
+        )
         config_stem = Path(config_file).stem
         results_path = (
             Path(output_root).expanduser()
