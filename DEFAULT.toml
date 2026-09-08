@@ -449,7 +449,33 @@ mixup_alpha = 1.0
 # arm, the demonstrated fill wins over the reasoned one. Note the BatchNorm
 # half of the argument only ever bit on `ViT2`, which opens with
 # `nn.BatchNorm2d(3)` over raw RGB; `Conv4` and `ResNet18SmallInput` do not.
-silhouette_fill = [1.0, 1.0, 1.0]
+#
+# **Back to the mean colour on 2026-09-09, and this time on a run.** With this
+# fill, `silhouette_p_receiver = 0.2` and `warm_up_epochs = 10`, on top of
+# everything else here and with the paper's baseline CNN, ShapeWorld ignites
+# within 30 epochs and does so stably across repeats
+# (`experiments/silhouette_fill_mean_colour/`). That is the thing white had
+# that the mean colour did not -- a run -- and it is no longer white's alone.
+#
+# The mechanism is the BatchNorm one above, read the way round the paragraphs
+# above did not quite put it. It is not only that the running statistics are
+# gathered on a mixture and applied to clean images at eval; it is that within
+# training, a batch carrying white silhouettes pulls the batch statistics up,
+# so the *unsilhouetted* images in that same batch normalise to a dimmer
+# value than they otherwise would. The silhouette is meant to be a per-game
+# intervention on the games that receive it, and under a bright fill it leaks
+# through the normaliser into the games that do not, cramping their gradient.
+# A fill sitting at the palette's own mean does not move the statistics it
+# shares a batch with. Note this is an argument about batch statistics rather
+# than running ones, so unlike the eval-time version it does not need a
+# `BatchNorm2d(3)` on raw RGB to bite -- any normalisation downstream of the
+# pixels will do, which is why it survives the switch of backbone.
+#
+# This is reasoning fitted to a result, not a measurement that separated the
+# two: three keys moved together to get here. The measurement that would
+# separate them is still `diagnostics/silhouette_shape_probe.py` at five fits
+# an arm.
+silhouette_fill = [0.584313725, 0.584313725, 0.415686275]
 
 [optimiser]
 class = "AdamW"
@@ -1091,7 +1117,26 @@ epochs = 100
 # it was for; the reason it is off is that the ignition question this file is
 # now pointed at is about the first few epochs, and a ten-epoch ramp is ten
 # epochs of not answering it.
-warm_up_epochs = 0
+#
+# **10 again since 2026-09-09.** The ignition question above got its answer
+# with the ramp in place rather than without it: at `silhouette_fill`'s mean
+# colour and `silhouette_p_receiver = 0.2`, with the paper's baseline CNN,
+# ShapeWorld ignites within 30 epochs and repeats. The objection that ten
+# epochs of ramp is ten epochs of not answering the question assumed the answer
+# would arrive earlier without it; it did not.
+#
+# The reason to expect a ramp to help here is the paper's own: concept games
+# are less stable than reference games, because the referent is a set drawn
+# per game rather than a fixed image, so the early gradient is noisier for the
+# same architecture and the same rate. That is an argument for arriving at the
+# full rates slowly, and it is independent of the scaling-scalar argument the
+# paragraphs above make. Both point the same way.
+#
+# Ten of 100 is what this was originally sized as; the run that justified it
+# was 30 epochs, where ten is a third. Which of the two the value is really
+# tracking is untested -- see the note above about revisiting it as a fraction
+# rather than a count.
+warm_up_epochs = 10
 
 # `flat` or `cosine` -- an intention, not a curve.
 #
