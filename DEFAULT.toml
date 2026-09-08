@@ -212,8 +212,22 @@ n_workers = 5
 # `silhouette_p_sender` stays 0.0: it is the axis
 # `conv4_silhouette_asymmetric` moves, and moving it here would take that
 # folder's variable away from it.
+#
+# **0.2 since 2026-09-08**, down from 0.5. This is the lowest rate at which a
+# run has been seen to learn shape, and it is chosen for that reason: the
+# argument above for 0.5 is that it is the 10 August escape's own rate, which
+# says the rate is *sufficient* and nothing about how much of it is needed. The
+# suppression cost is real and is paid per game -- at 0.5 half the receiver's
+# games contain nothing worth decoding, which is the `unmixed_survival` ~0.28
+# and `logit_margin` ~0.40 reading recorded above -- so the least rate that
+# still escapes is the one to hold, and 0.2 is where that has been observed.
+# Nothing here rules out 0.1: `silhouette_titration_conv4` swept 0.1-0.5 and
+# the arms below 0.2 are what would have to be re-read to move further down.
+# The tell that this has gone too far is the one the whole key exists for --
+# shape falling back to ~0.52 on `test_acc_md_shape` while colour sits near
+# 0.80 -- and the response to it is to go back up, not to change the fill.
 silhouette_p_sender = 0.0
-silhouette_p_receiver = 0.5
+silhouette_p_receiver = 0.2
 
 # Geometric augmentation of the referents, train-only and drawn per image.
 #

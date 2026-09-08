@@ -1,0 +1,73 @@
+# silhouette_fill_mean_colour: the defaults, with the old chromatic fill back
+# and the ten-epoch warm-up back. One arm, three repeats.
+#
+# Two keys move from `DEFAULT.toml` and nothing else does, so this is the
+# current default configuration -- rate 0.2, white fill, no ramp, mixup and the
+# geometric augmentations on, `ResNet56` on both agents at 5e-5 -- with:
+#
+#     silhouette_fill    [1, 1, 1]  ->  (149, 149, 106) of 255
+#     warm_up_epochs             0  ->  10
+#
+# **The fill.** (149, 149, 106) is ShapeWorld's own mean object colour under a
+# uniform palette, and it was the default from 2026-09-01 to 2026-09-05. It was
+# displaced by white on one argument only: `a496f01`, 10 August, the sole
+# ShapeWorld run on record that learned shape, ran white, and a demonstrated
+# fill beat a reasoned one. The reasoning was never answered, and it is the
+# BatchNorm one -- eval is never silhouetted, so a fill's channel means land in
+# running statistics that are then applied to clean images, and white sits at
+# 1.36x, 1.36x and 1.70x the eval distribution where the mean colour sits
+# within 0.3% on all three. Note the qualification `DEFAULT.toml` records
+# beside that argument: it bites on `ViT2`, which opens with
+# `nn.BatchNorm2d(3)` over raw RGB. The default backbone here is `ResNet56`,
+# which does not, so if this arm beats white the BatchNorm story is not why.
+#
+# `diagnostics/silhouette_shape_probe.py` cannot settle this on its own -- six
+# single-fit readings between 0.40 and 0.56, none separable -- which is exactly
+# why it is being asked of a real run instead.
+#
+# **The warm-up.** Ten epochs of linear ascent to the configured rates, the
+# setting from 2026-08-28 to 2026-09-05. It was turned off because the ignition
+# question is about the first few epochs and a ramp spends ten of them not
+# answering it; that reason does not apply to a fill comparison, which is read
+# at the end. What the ramp buys is the thing it was added for: the elevated
+# scaling scalars cross their useful range in a few hundred steps, and a
+# listener that calibrates before the speaker's argmax is input-dependent
+# co-adapts to a degenerate code. `PASS` scales every group from its own base
+# rate, so the ratio between the scalar groups and the module groups is held
+# constant through the ramp.
+#
+# **Two changes at once, deliberately.** This is not a clean ablation of either
+# key and is not meant to be read as one: it asks whether the pre-2026-09-05
+# silhouette regime, both halves of it, produces shape under the augmentations
+# that arrived after it. If it does, the fill and the ramp then need separating
+# -- that is a second folder, not this one. If it does not, one arm has ruled
+# out the pair.
+#
+# **Read `test_acc_md_shape` against `test_acc_md_color`, never the aggregate**,
+# which reads the same for a one-feature language as for a two-feature one. The
+# comparison run is the current default at white; ~0.52 shape with colour near
+# 0.80 is the colour-only minimum and means this changed nothing.
+#
+# Three repeats because the quantity in question has never survived a repeat:
+# the probe read `white_threshold` at 0.560 and then 0.403 at the same seed on
+# the same GPU. A single run here would be one more unreplicated number.
+
+name = "silhouette_fill_mean_colour"
+
+[data]
+# Nine decimal places on purpose: `0.584313725 * 255` is 148.999999875 and
+# `0.415686275 * 255` is 106.000000125, both of which round to the integer
+# stored level they name. `tests/test_silhouette.py` fails a sloppier literal.
+silhouette_fill = [0.584313725, 0.584313725, 0.415686275]
+
+[scheduler]
+warm_up_epochs = 10
+
+[experiment]
+repeats = 3
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24
