@@ -30,7 +30,55 @@ silhouette_p_receiver = 0.0
 epochs = 100
 
 [experiment]
-repeats = 1
+# **3, up from 1 on 2026-09-08, and the count is now part of what this
+# experiment measures.** One seed per rate cannot answer the question in the
+# heading. The immediate prompt: under the current defaults 0.2 produced a run
+# better than anything the learning-rate sweep reached, and 0.3 -- one step
+# along the same axis -- produced a poor one. A single trajectory at each rate
+# cannot distinguish an effect of the rate from the run-to-run spread at a fixed
+# rate, and the honest reading of that pair is that some runs simply do not get
+# going.
+#
+# That failure mode is documented rather than suspected. Mu & Goodman
+# (`emergent_generalization_neurips21.tex`, appendix) report concept-game
+# training as "less stable" and, in some channel regimes, "often unable to
+# learn", and plot every run individually rather than only the mean; every
+# number they publish is over 5 runs. They never say whether those 5 are all
+# runs or 5 that worked, so the paper is a reason to expect run-level failure
+# here, not a licence to drop one.
+#
+# Three is the smallest count that separates rate from seed. It gives a scatter
+# at each rate to read the between-rate differences against. It is not enough
+# for a test, and nothing here should be reported as one.
+#
+# The sweep now stops at 0.3. Arms at 0.4 and 0.5 were deleted on 2026-09-08
+# rather than kept at one seed: the top of the axis is already on the record as
+# the mirror-image failure -- 0.5 ended its last five epochs at shape 0.606
+# against colour 0.528, having crossed over around epoch 26 -- and it is the end
+# where the spread is expected to be worst, `unmixed_survival` sitting at ~0.28
+# there against ~0.45 at 0.0. Seeds spent there would buy a wide spread around a
+# conclusion already reached. That puts the sweep at 12 jobs, all of them where
+# they can change the answer. If these four make 0.3 look like the boundary
+# rather than 0.2, 0.4 is the arm to write back.
+#
+# **How to read it.** Compare rates only where the gap between them is larger
+# than the spread within each. A rate whose three seeds disagree with each other
+# is a rate about which this experiment says nothing, and that is a result: it
+# means the shape/colour outcome at that setting is not determined by the
+# setting. Read each seed's `test_acc_md_shape` / `test_acc_md_color` breakdown
+# separately before averaging anything -- a mean over one colour-only run and
+# one shape-only run looks exactly like a language with both, which is the
+# failure the README's "How to read the result" section exists to prevent.
+#
+# **Mechanics.** The repeat index is passed straight through as `--seed`
+# (`scripts/job_utils.py` -> `scripts/slurm_request.sh`), so an arm's three runs
+# are seeds 0, 1 and 2 and differ in nothing else; results land in
+# `<arm>_seed0/1/2`. Jobs are enumerated repeat-major, and arms with fewer
+# so indices 0-3 are the four rates at seed 0, 4-7 the same at seed 1, and 8-11
+# at seed 2. An array that is cut short therefore still leaves a complete sweep
+# at the seeds that finished, rather than three seeds of the low rates and none
+# of the high ones.
+repeats = 3
 
 [slurm]
 time = "24:00:00"
