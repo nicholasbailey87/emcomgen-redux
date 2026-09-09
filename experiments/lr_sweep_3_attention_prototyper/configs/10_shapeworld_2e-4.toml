@@ -11,7 +11,7 @@
 name = "lr_sweep_3_attention_prototyper"
 
 [sender]
-feature_model = "ViT2"
+feature_model = "ShapeWorldViT"
 prototyper = "AttentionPrototyper"
 
 [optimiser.implementation_lr.sender_prototyper]

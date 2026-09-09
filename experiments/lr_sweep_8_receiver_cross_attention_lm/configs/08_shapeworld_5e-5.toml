@@ -11,7 +11,7 @@
 name = "lr_sweep_8_receiver_cross_attention_lm"
 
 [sender]
-feature_model = "ViT2"
+feature_model = "ShapeWorldViT"
 prototyper = "AttentionPrototyper"
 contrast = true
 language_model = "SenderTransformerLM"
@@ -24,7 +24,7 @@ layers = 7
 bidirectional = false
 
 [receiver]
-feature_model = "ViT2"
+feature_model = "ShapeWorldViT"
 language_model = "ReceiverCrossAttentionLM"
 discriminator = "AttentionDiscriminator"
 

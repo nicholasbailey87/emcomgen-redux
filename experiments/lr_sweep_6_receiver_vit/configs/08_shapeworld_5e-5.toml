@@ -11,7 +11,7 @@
 name = "lr_sweep_6_receiver_vit"
 
 [sender]
-feature_model = "ViT2"
+feature_model = "ShapeWorldViT"
 prototyper = "AttentionPrototyper"
 contrast = true
 language_model = "SenderTransformerLM"
@@ -24,12 +24,12 @@ layers = 7
 bidirectional = false
 
 [receiver]
-feature_model = "ViT2"
+feature_model = "ShapeWorldViT"
 
 [optimiser.implementation_lr.receiver_vision]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-ViT2 = 5e-5
+ShapeWorldViT = 5e-5
 
 [scheduler]
 epochs = 60

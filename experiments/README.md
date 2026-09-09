@@ -38,11 +38,11 @@ must be updated with each result before the next is launched.
 | sweep | rungs | what it tunes | key |
 |---|---|---|---|
 | `lr_sweep_1_cnn` | 1 / 2 | `ResNet56`, `ResNet18` | `implementation_lr.{sender,receiver}_vision` |
-| `lr_sweep_2_sender_vit` | 3 / 4 | the speaker's `ViT2` | `implementation_lr.sender_vision.ViT2` |
+| `lr_sweep_2_sender_vit` | 3 / 4 | the speaker's ViT | `implementation_lr.sender_vision.{ShapeWorldViT,BirdsViT}` |
 | `lr_sweep_3_attention_prototyper` | 5 / 6 | `AttentionPrototyper` | `implementation_lr.sender_prototyper.AttentionPrototyper` |
 | `lr_sweep_4_sender_contrast` | 7 / 8 | `ExampleContrast` | `module_lr.sender_contrast` |
 | `lr_sweep_5_sender_transformer_lm` | 9 / 10 | `SenderTransformerLM` | `implementation_lr.sender_language_model.SenderTransformerLM` |
-| `lr_sweep_6_receiver_vit` | 11 / 12 | the listener's `ViT2` | `implementation_lr.receiver_vision.ViT2` |
+| `lr_sweep_6_receiver_vit` | 11 / 12 | the listener's ViT | `implementation_lr.receiver_vision.{ShapeWorldViT,BirdsViT}` |
 | `lr_sweep_7_attention_discriminator` | 13 / 14 | `AttentionDiscriminator` | `implementation_lr.receiver_discriminator.AttentionDiscriminator` |
 | `lr_sweep_8_receiver_cross_attention_lm` | 15 / 16 | `ReceiverCrossAttentionLM` | `implementation_lr.receiver_language_model.ReceiverCrossAttentionLM` |
 
@@ -68,11 +68,11 @@ scripts/run_experiment.sh lr_sweep_3_attention_prototyper
 
 **Why the rates are keyed by implementation.** `[optimiser.module_lr]` holds one
 rate per module group, and the ladder swaps implementations *within* a group --
-rung 1 puts `ResNet56` in `sender_vision`, rung 3 puts `ViT2` there. One number
-per group can hold one architecture's rate or the other's, never both, so a
-backbone rung would inherit the previous rung's rate and differ from it in two
-things at once. `[optimiser.implementation_lr]` is keyed by group and then by
-class name and is consulted first; see `models.builder.GROUP_IMPLEMENTATION` for
+rung 1 puts `ResNet56` in `sender_vision`, rung 3 puts `ShapeWorldViT` there.
+One number per group can hold one architecture's rate or the other's, never
+both, so a backbone rung would inherit the previous rung's rate and differ from
+it in two things at once. `[optimiser.implementation_lr]` is keyed by group and
+then by class name and is consulted first; see `models.builder.GROUP_IMPLEMENTATION` for
 the six groups whose implementation the config chooses, and DEFAULT.toml beside
 the table for the rates themselves. `sender_contrast` is the one component in
 this set with no choice of class, which is why sweep 4 moves a `module_lr` key.

@@ -36,7 +36,7 @@ name = "ablation_birds"
 dataset = "../data/cub"
 
 [sender]
-feature_model = "ViT2"
+feature_model = "BirdsViT"
 prototyper = "AttentionPrototyper"
 contrast = true
 language_model = "SenderTransformerLM"

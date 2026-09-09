@@ -65,39 +65,64 @@ BIRDS_FEATS = (3, 224, 224)
 PERTURBATION = 100.0
 
 
+def _config_for(dataset, extra=""):
+    """`get_config` for one dataset, so the `[birds.*]` overlay is applied."""
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+        f.write(f'name = "test"\n[data]\ndataset = "{dataset}"\n{extra}')
+        path = f.name
+    try:
+        return parse_config.get_config(path)
+    finally:
+        os.unlink(path)
+
+
 def _backbones():
     """
     One instance of each vision backbone, with the feature size it advertises
-    and an input shape it is valid at. `ViT2` takes its whole argument list from
-    the config, so it is built the way `models.builder` builds it.
+    and an input shape it is valid at. The ViTs take their whole argument list
+    from the config, so they are built the way `models.builder` builds them.
+
+    Both live ViT stacks appear, because `ShapeWorldViT` and `BirdsViT` are one
+    class at two sizes and a reset or an init that only holds at one of them is
+    not a property of the code. The sizes come from the two blocks that pin
+    them, which is where a config gets them.
     """
     config = parse_config.get_config()  # plain defaults, i.e. ShapeWorld
-    # DEFAULT.toml now carries a runnable ViT -- 320 wide, 5 heads, head_dim 64
-    # -- so this no longer has to repair it. Only `layers` is overridden, and
-    # only to keep the test cheap: a 10-layer stack is built and forwarded in
-    # every one of these cases and none of them is about depth.
+    # DEFAULT.toml carries a runnable ViT for each dataset, so this no longer
+    # has to repair either. Only `layers` is overridden, and only to keep the
+    # test cheap: the full stack is built and forwarded in every one of these
+    # cases and none of them is about depth.
     config["sender_feature_model"].update(layers=2)
+
+    # CUB's block through `get_config`, so the overlay is selected the way a
+    # run selects it -- by dataset name -- rather than restated here.
+    birds_config = _config_for("cub")
+    birds_config["sender_feature_model"].update(layers=2)
+
     return [
         ("Conv4", vision.Conv4(), SHAPEWORLD_FEATS),
         ("ResNet18", vision.ResNet18(), BIRDS_FEATS),
         ("ResNet56", vision.ResNet56(), SHAPEWORLD_FEATS),
         (
-            "ViT2",
-            vision.ViT2(n_feats=SHAPEWORLD_FEATS, **config["sender_feature_model"]),
+            "ShapeWorldViT",
+            vision.ShapeWorldViT(
+                n_feats=SHAPEWORLD_FEATS, **config["sender_feature_model"]
+            ),
             SHAPEWORLD_FEATS,
+        ),
+        (
+            "BirdsViT",
+            vision.BirdsViT(
+                n_feats=BIRDS_FEATS, **birds_config["sender_feature_model"]
+            ),
+            BIRDS_FEATS,
         ),
     ]
 
 
 def _pair(dataset, n_feats, name, extra=""):
     """A sender/receiver pair built through `models.builder`, as training does."""
-    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
-        f.write(f'name = "test"\n[data]\ndataset = "{dataset}"\n{extra}')
-        path = f.name
-    try:
-        config = parse_config.get_config(path)
-    finally:
-        os.unlink(path)
+    config = _config_for(dataset, extra)
     config["cuda"] = False
 
     class _Dataset:
@@ -323,7 +348,7 @@ def test_reset_parameters_restores_every_backbone():
         # (requires_grad=False) that it does not recompute on reset. Nothing
         # downstream reads them as learned state.
         stale = [n for n in stale if "rotary_embedding" not in n]
-        if name == "ViT2":
+        if name in ("ShapeWorldViT", "BirdsViT"):
             # broccoli does not restore these two, which is an upstream gap
             # rather than one this repository can fix from here.
             stale = [
@@ -642,6 +667,80 @@ def test_a_lone_scalar_is_not_clipped_by_its_modules_norm():
     assert max(
         p.grad.norm().item() for p in module if p is not scale
     ) < largest
+
+
+def test_the_two_vit_names_are_one_class_at_two_sizes():
+    """
+    `ShapeWorldViT` and `BirdsViT` return `ViT2` instances, and they are two
+        distinct names rather than one aliased twice.
+
+    The distinctness is the whole point. `[optimiser.implementation_lr]` is
+        keyed by the string the config names, so a single `ViT2` key would hold
+        one rate for two architectures sized against two different baseline
+        CNNs -- and sweep 2 says they want different rates. `ResNet18` and
+        `ResNet18SmallInput` are the same trick over one `ResNet` class.
+    """
+    shapeworld_config = _config_for("shapeworld")
+    shapeworld_config["sender_feature_model"].update(layers=2)
+    birds_config = _config_for("cub")
+    birds_config["sender_feature_model"].update(layers=2)
+
+    shapeworld = vision.ShapeWorldViT(
+        n_feats=SHAPEWORLD_FEATS, **shapeworld_config["sender_feature_model"]
+    )
+    birds = vision.BirdsViT(
+        n_feats=BIRDS_FEATS, **birds_config["sender_feature_model"]
+    )
+
+    assert isinstance(shapeworld, vision.ViT2)
+    assert isinstance(birds, vision.ViT2)
+
+    assert vision.ShapeWorldViT is not vision.BirdsViT
+    assert vision.ShapeWorldViT.__name__ == "ShapeWorldViT"
+    assert vision.BirdsViT.__name__ == "BirdsViT"
+
+    # Two sizes, which is why two names: the widths come from
+    #     `[sender_feature_model]` and `[birds.sender_feature_model]`.
+    assert shapeworld.d_model != birds.d_model
+
+
+@pytest.mark.parametrize("agent", ["sender", "receiver"])
+def test_a_config_naming_vit2_as_a_backbone_is_rejected(agent):
+    """
+    `ViT2` is the class and no longer a config name.
+
+    Rejected by name for the same reason the retired keys are: `build_models`
+        resolves a backbone with `getattr`, so a config left naming `ViT2`
+        would build and run at the group's fallback rate under a filename
+        saying it ran the swept one.
+    """
+    config = parse_config.get_config()
+    config[agent]["feature_model"] = "ViT2"
+
+    with pytest.raises(parse_config.InvalidConfig, match="ShapeWorldViT"):
+        parse_config.validate_config(config)
+
+
+@pytest.mark.parametrize("agent", ["sender", "receiver"])
+@pytest.mark.parametrize(
+    "dataset, name",
+    [("cub", "ShapeWorldViT"), ("shapeworld", "BirdsViT")],
+)
+def test_a_vit_name_crossed_with_the_other_dataset_is_rejected(
+    dataset, name, agent
+):
+    """
+    The name is what keeps the label honest while the sizes stay in config.
+
+    `get_config` picks the `[birds.*]` overlay by dataset name, so a crossed
+        pairing would run one dataset's name at the other's size -- and take
+        the other's learning rate with it.
+    """
+    config = _config_for(dataset)
+    config[agent]["feature_model"] = name
+
+    with pytest.raises(parse_config.InvalidConfig, match=name):
+        parse_config.validate_config(config)
 
 
 if __name__ == "__main__":

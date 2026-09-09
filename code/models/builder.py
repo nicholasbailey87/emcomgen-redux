@@ -148,13 +148,20 @@ MODULE_GROUPS = (
 
 # For each module group whose implementation the config *chooses*, the
 #     `(table, key)` naming the class in use. This is what makes
-#     `[optimiser.implementation_lr]` addressable: a rate stated for `ViT2` has
-#     to find the group that `ViT2` currently occupies, and a group can hold a
-#     different class on every rung.
+#     `[optimiser.implementation_lr]` addressable: a rate stated for
+#     `ShapeWorldViT` has to find the group that `ShapeWorldViT` currently
+#     occupies, and a group can hold a different class on every rung.
+#
+# It reads the *config string* rather than `type(module).__name__`, which is
+#     what lets two names over one class be told apart. `ResNet18` and
+#     `ResNet18SmallInput` are both a `ResNet`; `ShapeWorldViT` and `BirdsViT`
+#     are both a `ViT2`, at the sizes their own datasets' baseline CNNs set. In
+#     each pair the two want their own rate, and the name is where that rate is
+#     hung.
 #
 # Why a rate cannot simply live in `[optimiser.module_lr]`. The ladder swaps
 #     implementations *within* a group -- rung 1 puts `ResNet56` in
-#     `sender_vision` and rung 3 puts `ViT2` there -- so one number per group
+#     `sender_vision` and rung 3 puts `ShapeWorldViT` there -- so one per group
 #     can hold one architecture's tuned rate or the other's and never both. A
 #     ladder whose backbone rung inherits the previous rung's rate differs from
 #     it in two things at once, which is the confound every rung comment in
@@ -569,7 +576,8 @@ def resolve_module_learning_rates(config, pair, base_lr):
 
     The order is that way round because the implementation is the more specific
         claim. `module_lr` says "the speaker's backbone runs at X" and
-        `implementation_lr` says "`ViT2` runs at X wherever it appears" -- and a
+        `implementation_lr` says "`BirdsViT` runs at X wherever it appears" --
+        and a
         rate measured against an architecture travels with that architecture
         across the rungs, which is what `experiments/lr_sweep_*/` produce one at
         a time. See `GROUP_IMPLEMENTATION`.

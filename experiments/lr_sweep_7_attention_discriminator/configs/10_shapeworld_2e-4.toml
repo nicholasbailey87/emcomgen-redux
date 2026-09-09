@@ -11,7 +11,7 @@
 name = "lr_sweep_7_attention_discriminator"
 
 [sender]
-feature_model = "ViT2"
+feature_model = "ShapeWorldViT"
 prototyper = "AttentionPrototyper"
 contrast = true
 language_model = "SenderTransformerLM"
@@ -24,7 +24,7 @@ layers = 7
 bidirectional = false
 
 [receiver]
-feature_model = "ViT2"
+feature_model = "ShapeWorldViT"
 discriminator = "AttentionDiscriminator"
 
 [receiver_discriminator]

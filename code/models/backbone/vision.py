@@ -184,6 +184,46 @@ class ViT2(nn.Module):
         self.backbone.reset_parameters()
 
 
+def ShapeWorldViT(*args, **kwargs):
+    """
+    `ViT2` under ShapeWorld's name: 128 wide, 6 layers, 4 heads, feedforward
+        inner 256, GELU -- 876,599 parameters against `ResNet56`'s 852,368.
+
+    The size is not here. It is in `[sender_feature_model]` and
+        `[receiver_feature_model]`, which is where every backbone's
+        hyperparameters live; this factory swallows its arguments and returns
+        the class, exactly as `ResNet56` and `ResNet18` do.
+
+    What the name buys is a key. `[optimiser.implementation_lr]` is keyed by
+        the class named in the config, and both datasets run the same `ViT2`
+        code at sizes chosen against their own baseline CNNs -- so one name
+        could hold one rate for two architectures that have no reason to want
+        the same one. `ResNet18` and `ResNet18SmallInput` are the precedent:
+        two factories over one `ResNet` class, told apart because
+        `GROUP_IMPLEMENTATION` reads the config string rather than
+        `type(module).__name__`.
+
+    `parse_config.validate_config` refuses a `ShapeWorldViT` on a `cub`
+        dataset, so the label cannot drift from the block that sizes it.
+    """
+    return ViT2(*args, **kwargs)
+
+
+def BirdsViT(*args, **kwargs):
+    """
+    `ViT2` under CUB's name: 320 wide, 10 layers, 5 heads at head_dim 64,
+        feedforward inner 576, SwiGLU -- 10,626,990 parameters against
+        `ResNet18`'s 11,176,512.
+
+    Sized by `[birds.sender_feature_model]` and
+        `[birds.receiver_feature_model]`, which the dataset name selects. See
+        `ShapeWorldViT` for why the two stacks have two names when they are one
+        class: the learning-rate table is keyed by name, and the birds arm of
+        `experiments/lr_sweep_2_sender_vit/` chose 2e-5 for this one alone.
+    """
+    return ViT2(*args, **kwargs)
+
+
 # Basic ResNet model
 def init_layer(L):
     # Initialization using fan-in

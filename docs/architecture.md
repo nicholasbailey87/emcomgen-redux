@@ -1191,10 +1191,37 @@ factory swallows its arguments, because `builder.py` splats the entire
 `[*_feature_model]` config section into them and most of it applies to only one
 backbone.
 
-### `ViT2`
+### `ViT2`, `ShapeWorldViT` and `BirdsViT`
 
-A thin wrapper over broccoli's `ViT`. The patch-grid geometry is derived from the
-image size rather than configured:
+A thin wrapper over broccoli's `ViT`.
+
+**Two names over one class.** A config never says `ViT2`; it says
+`ShapeWorldViT` or `BirdsViT`, two factories in `models/backbone/vision.py` that
+swallow their arguments and return the class, exactly as `ResNet56` and
+`ResNet18` do. The two are the same code at different sizes — 128/6/4/256 GELU
+against `ResNet56`'s 852,368 parameters, and 320/10/5/576 SwiGLU against
+`ResNet18`'s 11,176,512 — because each dataset's ViT is matched to that
+dataset's own baseline CNN rather than to the other dataset.
+
+The reason for two names is `[optimiser.implementation_lr]`, which is keyed by
+the class named in the config, so one name could hold one rate for two
+architectures with no reason to want the same one. Sweep 2 says they do not:
+the birds arm turned over inside the swept range and chose 2e-5, while on
+ShapeWorld the ignition epoch was monotonic in rate across the whole range
+(`train_acc` past 0.55 at epoch 6, 9, 12, 14, 18 from 2e-4 down to 1e-5) with no
+turnover — a rate-starved arm rather than a bracketed optimum. `ResNet18` and
+`ResNet18SmallInput` are the same trick over one `ResNet` class, and
+`GROUP_IMPLEMENTATION` reads the config string rather than
+`type(module).__name__` precisely so that such pairs can be told apart.
+
+The sizes stay in config — `[sender_feature_model]` and
+`[birds.sender_feature_model]`, with the overlay chosen by dataset name — and
+`parse_config.validate_config` rejects a crossed pairing, so the name cannot
+drift from the block that sizes it. It also rejects `feature_model = "ViT2"` by
+name, since `build_models` resolves classes with `getattr` and a config left
+naming it would build and run at the group's fallback rate.
+
+The patch-grid geometry is derived from the image size rather than configured:
 
 ```
 pooling_kernel_size   = ceil(max_side / 16)

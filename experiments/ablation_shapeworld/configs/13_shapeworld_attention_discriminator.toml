@@ -54,7 +54,7 @@
 name = "ablation_shapeworld"
 
 [sender]
-feature_model = "ViT2"
+feature_model = "ShapeWorldViT"
 prototyper = "AttentionPrototyper"
 contrast = true
 language_model = "SenderTransformerLM"
@@ -109,7 +109,7 @@ layers = 7
 bidirectional = false
 
 [receiver]
-feature_model = "ViT2"
+feature_model = "ShapeWorldViT"
 discriminator = "AttentionDiscriminator"
 
 [receiver_discriminator]

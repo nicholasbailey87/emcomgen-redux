@@ -13,7 +13,7 @@
 name = "ablation_shapeworld"
 
 [sender]
-feature_model = "ViT2"
+feature_model = "ShapeWorldViT"
 prototyper = "AttentionPrototyper"
 
 [scheduler]

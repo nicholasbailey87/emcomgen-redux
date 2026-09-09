@@ -11,7 +11,7 @@
 name = "lr_sweep_4_sender_contrast"
 
 [sender]
-feature_model = "ViT2"
+feature_model = "ShapeWorldViT"
 prototyper = "AttentionPrototyper"
 contrast = true
 

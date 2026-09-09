@@ -34,7 +34,7 @@ name = "ablation_birds"
 dataset = "../data/cub"
 
 [sender]
-feature_model = "ViT2"
+feature_model = "BirdsViT"
 prototyper = "AttentionPrototyper"
 contrast = true
 language_model = "SenderTransformerLM"
@@ -89,7 +89,7 @@ layers = 7
 bidirectional = false
 
 [receiver]
-feature_model = "ViT2"
+feature_model = "BirdsViT"
 language_model = "ReceiverCrossAttentionLM"
 discriminator = "AttentionDiscriminator"
 

@@ -1,10 +1,13 @@
 # lr_sweep_6_receiver_vit: what learning rate the listener's ViT backbone wants, in
 # the presence of everything below it on the ladder.
 #
-# Ten arms. `[optimiser.implementation_lr.receiver_vision] ViT2` moves over 1e-5,
-# 2e-5, 5e-5, 1e-4 and 2e-4 on both datasets -- five ShapeWorld arms copying
-# ablation rung 11 and five birds arms copying rung 12. Nothing else differs
-# between the arms, and nothing else differs from the rung each one copies.
+# Ten arms. The listener's ViT rate moves over 1e-5, 2e-5, 5e-5, 1e-4 and 2e-4 on
+# both datasets -- `[optimiser.implementation_lr.receiver_vision] BirdsViT` on the
+# birds arms and `ShapeWorldViT` on the ShapeWorld ones, the two names one
+# class carries so that a rate can be keyed per dataset's stack. Five
+# ShapeWorld arms copy ablation rung 11 and five birds arms copy rung 12.
+# Nothing else differs between the arms, and nothing else differs from the
+# rung each one copies.
 #
 # **Sweep 6 of eight.** `lr_sweep_1_cnn` did the two CNN backbones and is
 # where the reasoning for the whole set is written down. The short version:
@@ -83,7 +86,7 @@ name = "lr_sweep_6_receiver_vit"
 dataset = "../data/cub"
 
 [sender]
-feature_model = "ViT2"
+feature_model = "BirdsViT"
 prototyper = "AttentionPrototyper"
 contrast = true
 language_model = "SenderTransformerLM"
@@ -96,12 +99,12 @@ layers = 7
 bidirectional = false
 
 [receiver]
-feature_model = "ViT2"
+feature_model = "BirdsViT"
 
 [optimiser.implementation_lr.receiver_vision]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-ViT2 = 1e-5
+BirdsViT = 1e-5
 
 [scheduler]
 epochs = 60

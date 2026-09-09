@@ -1093,7 +1093,7 @@ receiver_discriminator = 1e-4
 [optimiser.implementation_lr.sender_vision]
 ResNet56 = 2e-5
 ResNet18 = 5e-5
-# `ViT2` at 2e-5, from `experiments/lr_sweep_2_sender_vit/`, five arms from
+# `BirdsViT` at 2e-5, from `experiments/lr_sweep_2_sender_vit/`, five arms from
 # 1e-5 to 2e-4, 60 epochs, one repeat, run 2026-09-09 under the ignition
 # defaults (mean-colour fill, `silhouette_p_receiver` 0.2, ten-epoch warm-up).
 #
@@ -1126,7 +1126,20 @@ ResNet18 = 5e-5
 # So this number rests on the birds arm alone. Nothing here licenses it for
 # ShapeWorld beyond "the sweep found no rate that helps there", and rung 3 is
 # owed an explanation before it is read as a working rung.
-ViT2 = 2e-5
+#
+# **`ShapeWorldViT` is deliberately absent, and that is what the two names are
+# for.** Until 2026-09-09 both datasets ran a backbone called `ViT2`, so this
+# one key would have set the rate for both stacks -- 2e-5 for a number only
+# the birds arm produced. The ShapeWorld arms sat in the colour-only minimum at
+# all five rates, and the one thing that did move with rate there was ignition
+# timing, monotonic across the whole swept range (`train_acc` past 0.55 at
+# epoch 6, 9, 12, 14, 18 from 2e-4 down to 1e-5) with the top of the range
+# fastest and no turnover. That is a rate-starved arm rather than a bracketed
+# optimum, and the expectation is that ShapeWorld's ViT wants a rate well above
+# CUB's -- which re-running sweep 2 with the two names apart is what will
+# settle. Absent means `module_lr`'s base rate, which is what it effectively
+# had.
+BirdsViT = 2e-5
 
 # The listener's backbone takes the same rates as the speaker's. That is what
 # `lr_sweep_1_cnn` measured -- `sender_vision` and `receiver_vision` moved
@@ -1299,6 +1312,13 @@ heads = 5 # head_dim 64
 self_attention_dropout = 0.0
 
 [sender_feature_model]
+# The block that sizes **`ShapeWorldViT`** -- `models/backbone/vision.py`'s
+# factory over `ViT2`, and the name a ShapeWorld config asks for. The name is
+# what lets `[optimiser.implementation_lr]` hold a rate for this stack and a
+# different one for `BirdsViT`; the size stays here, and
+# `parse_config.validate_config` refuses the name on a `cub` dataset so the two
+# cannot drift apart.
+#
 # **ShapeWorld's ViT specification.** `[birds.sender_feature_model]` and
 # `[birds.receiver_feature_model]` pin CUB's, which is the 320/10/5/576 SwiGLU
 # stack this block used to hold for both datasets. The two are no longer the
@@ -2262,6 +2282,11 @@ accumulator_steps = 1
 feature_model = "ResNet18"
 
 [birds.sender_feature_model]
+# The block that sizes **`BirdsViT`**, the other of the two factories over
+# `ViT2`. This overlay is selected by dataset name, and the backbone name is
+# checked against that same name -- see `[sender_feature_model]` for why the
+# one class has two.
+#
 # **CUB's ViT specification, pinned rather than inherited.** These five keys
 # are exactly what `[sender_feature_model]` held before ShapeWorld's ViT was
 # narrowed to match `ResNet56`: 320 wide, 10 layers, 5 heads at head_dim 64,

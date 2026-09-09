@@ -226,13 +226,19 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
         together in every arm and stating them apart would claim a distinction
         it did not make.
 
-    `ViT2` at 2e-5 on the speaker alone, from `lr_sweep_2_sender_vit`. It is on
-        `sender_vision` only because the listener's ViT arrives eight rungs
+    `BirdsViT` at 2e-5 on the speaker alone, from `lr_sweep_2_sender_vit`. It is
+        on `sender_vision` only because the listener's ViT arrives eight rungs
         later, in a different surrounding stack, and gets its own sweep -- which
         is also why the two are keyed separately. The birds arm chose the number
         (test accuracy 0.658, 0.661, 0.645, 0.646, 0.638 from 1e-5 to 2e-4, with
-        the train-test gap stepping up where the accuracy turns); the ShapeWorld
-        arm sat in the colour-only minimum at every rate and chose nothing.
+        the train-test gap stepping up where the accuracy turns).
+
+    `ShapeWorldViT` is absent, and its absence is the reason the two stacks have
+        two names. The ShapeWorld arm sat in the colour-only minimum at every
+        rate and chose nothing, and under one shared `ViT2` key the birds
+        number would have applied to it anyway. Absent means the group's base
+        rate, which is what it effectively had; a rate for it is what re-running
+        sweep 2 is for.
 
     A retune replaces these and edits this test in the same commit, which is
         the point: a rate arrived at by measurement should not be able to drift
@@ -242,7 +248,7 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
     rates = config["optimiser"]["implementation_lr"]
 
     assert rates == {
-        "sender_vision": {"ResNet56": 2e-5, "ResNet18": 5e-5, "ViT2": 2e-5},
+        "sender_vision": {"ResNet56": 2e-5, "ResNet18": 5e-5, "BirdsViT": 2e-5},
         "receiver_vision": {"ResNet56": 2e-5, "ResNet18": 5e-5},
     }
 
@@ -270,7 +276,7 @@ def test_the_implementation_rate_beats_the_group_rate_for_the_class_in_use():
                     # The class this rung actually runs.
                     "ResNet56": 3e-6,
                     # One it does not, which must stay inert.
-                    "ViT2": 9e-9,
+                    "BirdsViT": 9e-9,
                 },
             },
         },
@@ -321,7 +327,7 @@ def test_an_implementation_lr_group_that_is_not_keyable_is_rejected(group):
 @pytest.mark.parametrize("bad", [0, -1e-4, "1e-4", True])
 def test_an_implementation_lr_that_is_not_a_positive_number_is_rejected(bad):
     config = parse_config.get_config()
-    config["optimiser"]["implementation_lr"]["sender_vision"]["ViT2"] = bad
+    config["optimiser"]["implementation_lr"]["sender_vision"]["BirdsViT"] = bad
 
     with pytest.raises(parse_config.InvalidConfig):
         parse_config.validate_config(config)

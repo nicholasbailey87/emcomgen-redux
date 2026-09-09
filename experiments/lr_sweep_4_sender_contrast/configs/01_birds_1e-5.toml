@@ -77,7 +77,7 @@ name = "lr_sweep_4_sender_contrast"
 dataset = "../data/cub"
 
 [sender]
-feature_model = "ViT2"
+feature_model = "BirdsViT"
 prototyper = "AttentionPrototyper"
 contrast = true
 

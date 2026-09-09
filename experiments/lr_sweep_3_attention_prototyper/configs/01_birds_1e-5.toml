@@ -73,7 +73,7 @@ name = "lr_sweep_3_attention_prototyper"
 dataset = "../data/cub"
 
 [sender]
-feature_model = "ViT2"
+feature_model = "BirdsViT"
 prototyper = "AttentionPrototyper"
 
 [optimiser.implementation_lr.sender_prototyper]

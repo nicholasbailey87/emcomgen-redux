@@ -187,6 +187,56 @@ def validate_config(config: dict) -> bool:
                 "DEFAULT.toml beside the keys that replaced it."
             )
 
+    # `ViT2` named as a backbone, rejected for the same reason as a retired key
+    # and in the same place. The two ViT stacks now have two names --
+    # `ShapeWorldViT` at 128/6/4/256 GELU and `BirdsViT` at 320/10/5/576
+    # SwiGLU, each sized against its own dataset's baseline CNN -- so that
+    # `[optimiser.implementation_lr]` can hold a rate for each. The table above
+    # notes that a class name is the one thing this file cannot validate,
+    # because `build_models` resolves it with `getattr`; that is exactly why
+    # this one needs saying by hand. A config left naming `ViT2` would still
+    # build, at whatever rate the group's fallback gives, under a filename
+    # saying it ran the swept rate.
+    for agent in ('sender', 'receiver'):
+        if config.get(agent, {}).get('feature_model') == 'ViT2':
+            raise InvalidConfig(
+                f"`{agent}.feature_model = \"ViT2\"` is no longer a backbone "
+                'name. Use `"ShapeWorldViT"` or `"BirdsViT"` -- one class, two '
+                "names, so that `optimiser.implementation_lr` can hold a rate "
+                "for each of the two sizes. `ViT2` is still the class the two "
+                "factories return; it is only the config name that is gone."
+            )
+
+    # A ViT name crossed with the other dataset, rejected because the name is
+    # the only thing keeping the label honest while the sizes stay in config.
+    # The two stacks are sized by `[sender_feature_model]` and
+    # `[birds.sender_feature_model]`, and `get_config` picks between those by
+    # dataset name -- so `ShapeWorldViT` on `cub` would run ShapeWorld's name
+    # at CUB's size, take CUB's rate, and validate.
+    #
+    # The dataset is read the way `get_config` reads it, by `Path(...).name`,
+    # because `train.py` later rewrites this to a fast-storage path.
+    dataset_name = Path(config['data']['dataset']).name
+    for name, wants in (('ShapeWorldViT', 'shapeworld'), ('BirdsViT', 'cub')):
+        if wants == 'cub':
+            matches = dataset_name == 'cub'
+        else:
+            matches = dataset_name.startswith('shapeworld')
+
+        if matches:
+            continue
+
+        for agent in ('sender', 'receiver'):
+            if config.get(agent, {}).get('feature_model') == name:
+                raise InvalidConfig(
+                    f"`{agent}.feature_model = \"{name}\"` is "
+                    f"{wants}'s ViT, but the dataset is '{dataset_name}'. The "
+                    "two stacks are the same class at different sizes, and the "
+                    "size comes from the `[birds.*]` overlay that the dataset "
+                    "name selects -- so this pairing would run one dataset's "
+                    "name at the other's size."
+                )
+
     # `[optimiser.module_lr]`, one rate per module clip group. Checked here
     # rather than in `build_models` because the whole point of the check is that
     # a key naming no group must *raise*: an unknown key would otherwise sit in

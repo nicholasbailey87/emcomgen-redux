@@ -11,7 +11,7 @@
 name = "lr_sweep_5_sender_transformer_lm"
 
 [sender]
-feature_model = "ViT2"
+feature_model = "ShapeWorldViT"
 prototyper = "AttentionPrototyper"
 contrast = true
 language_model = "SenderTransformerLM"
