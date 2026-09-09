@@ -3,18 +3,22 @@ Wall-clock cost of the ViT patch geometry, on a real GPU.
 
 `ViT2` derives its patch grid from the image size rather than from config:
 
-    pooling_kernel_size   = largest even number <= (max_side / 32) x 4
-    pooling_kernel_stride = kernel_size / 2
-    pooling_padding       = stride
+    pooling_kernel_size   = ceil(max_side / 16)
+    pooling_kernel_stride = kernel_size
+    pooling_padding       = enough to cover the image, split symmetrically
 
-At 64px that is kernel 8, stride 4, padding 4 -- a 2x-overlapping tiling giving
-a 17x17 grid, so 289 tokens. Since `pooling_type` is `"concat"`, the tokenizer
+That is a 16x16 grid -- 256 tokens -- on every image size: kernel 4 at 64px and
+14 at 224px. The grid is the fixed quantity since 2026-09-09 and the patch size
+the derived one; two earlier rules fixed the patch instead, giving an 11x11 grid
+of 6px patches at 64px, and before that kernel 8 stride 4, a 2x-overlapping
+17x17 grid of 289 tokens. Since `pooling_type` is `"concat"`, the tokenizer
 is a space-to-depth: at stride = kernel it is an exact tiling and every pixel
 reaches the transformer exactly once, so the overlap is duplicating each pixel
-four times rather than adding information. Dropping it takes the sequence to 64
-tokens, and nothing else about the model changes -- the parameter count is
-identical either way (10,319,266 at 64px), because stride does not appear in any
-weight shape.
+four times rather than adding information. Dropping it at the same kernel takes
+the sequence to 64 tokens, and nothing else about the model changes, because
+stride does not appear in any weight shape. Kernel does, above `d_model`: at
+64px the ShapeWorld stack is 876,599 parameters at any of these geometries,
+where at 224px CUB's moves with the patch size.
 
 This script times the candidates against each other and, with
 `--include-resnet`, against `ResNet56`, which is the backbone the ViT rungs are
@@ -25,9 +29,9 @@ but the ResNet row a run of this script prints now is a much smaller network.
 
     kernel stride pad   grid  tokens   MACs/img   what it is
     ------ ------ ---   ----  ------   --------   ----------------------------
-       8      4     4   17x17    289   3.43 G     current
-       4      4     0   16x16    256   2.95 G     fine patches, no overlap
-       6      6     1   11x11    121   1.30 G     middle, one row of padding
+       8      4     4   17x17    289   3.43 G     the overlapping rule
+       4      4     0   16x16    256   2.95 G     current
+       6      6     1   11x11    121   1.30 G     the previous rule
        8      8     0    8x8      64   0.67 G     standard ViT tokenization
 
 `ResNet18SmallInput` at 64px was 2.22 GMAC, for reference; `ResNet56` is

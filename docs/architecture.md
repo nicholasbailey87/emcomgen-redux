@@ -1197,18 +1197,42 @@ A thin wrapper over broccoli's `ViT`. The patch-grid geometry is derived from th
 image size rather than configured:
 
 ```
-pooling_kernel_size   = largest even number ≤ (max_side / 32) × 3
+pooling_kernel_size   = ceil(max_side / 16)
 pooling_kernel_stride = kernel_size
 pooling_padding       = enough to cover the image, split symmetrically
 ```
 
-That is 6px patches on an 11×11 grid at ShapeWorld's 64px, and 20px patches on a
-12×12 grid at CUB's 224px.
+That is a **16×16 grid, 256 tokens, on every dataset**: 4px patches at
+ShapeWorld's 64px and 14px at CUB's 224px, with no padding at either, since both
+divide by 16.
+
+**The grid became the fixed quantity on 2026-09-09.** The rule used to fix the
+patch size — three 32nds of the image, largest even number — and let the token
+count fall out, which gave 6px patches on an 11×11 grid at 64px and 20px on a
+12×12 grid at 224px. The reason for inverting it is ShapeWorld: its concepts are
+shapes, a shape's identity is in its outline, and the CNN the ViT rung is
+compared against is a `CifarResNet` whose stem is 3×3 stride-1 at full
+resolution — a 3px window moving one pixel at a time. A 6px non-overlapping
+patch is the opposite; a boundary falling inside one is never seen against its
+neighbourhood. `lr_sweep_2_sender_vit` sat in the colour-only minimum at all
+five rates while the CNN under the same recipe learned shape, and colour is the
+feature that survives any tiling. That is the hypothesis, not a measurement of
+it.
+
+Tokens go 121 → 256 at 64px and the attention term is quadratic in them, but at
+`d_model` 128 that term is a minority of the arithmetic: per token per layer the
+projections are 4d² and the feedforward 4·d·ff against a score/AV pair of 2·n·d,
+so ~14% at 121 tokens and ~25% at 256. `vit_geometry_sweep.py` puts the 16×16
+geometry at 2.95 GMAC/img against 1.30 at 11×11.
+
+ShapeWorld's parameter count is unchanged at 876,599, because at 64px the patch
+still fits under `d_model`. CUB's moves to **10,626,990**, or 0.95× `ResNet18`,
+since a 14px patch is 588 values where a 20px one was 1,200.
 
 **The two datasets no longer run the same ViT.** `[sender_feature_model]` is
 ShapeWorld's — 128 wide, 6 layers, 4 heads, `ff_inner_size` 256, GELU, 876,599
 parameters — and `[birds.sender_feature_model]` pins CUB's, which is the 320 /
-10 / 5 / 576 SwiGLU stack both used to share, at 11,332,626. Each is matched to
+10 / 5 / 576 SwiGLU stack both used to share, at 10,626,990. Each is matched to
 its own baseline backbone rather than to the other dataset's: `ResNet56` at
 852,368 on ShapeWorld and `ResNet18` at 11,176,512 on CUB. See
 [the CIFAR ResNet](#resnet56-the-cifar-resnet) below for why the ShapeWorld
@@ -1219,13 +1243,14 @@ is double width because it produces the gate alongside the value, so a block's
 feedforward costs `3·d·f` where GELU's costs `2·d·f`; at 128 / 6 / 256 that is
 1,107,774 against 876,599, and only the second is within 3% of the CNN.
 
-**The tiling does not overlap, and used to.** The old rule ran stride at half the
-kernel with a matching pad, which put both datasets on a 17×17 grid of 289
-tokens. Because `pooling_type` is `"concat"` the tokenizer is a space-to-depth,
+**The tiling does not overlap, and used to.** An older rule still ran stride at
+half the kernel with a matching pad, which put both datasets on a 17×17 grid of
+289 tokens. Because `pooling_type` is `"concat"` the tokenizer is a space-to-depth,
 so at stride = kernel it is an exact tiling and every pixel still reaches the
 transformer exactly once — the overlap was duplicating each pixel four times
 rather than adding information. What it bought was a locality prior and a finer
-positional grid; what it cost was 289 tokens against 121.
+positional grid; what it cost was 289 tokens against 121. The 16×16 grid buys
+that locality back, at 256 tokens and without the duplication.
 
 On an A100 at 640 images of 64px, fwd+bwd in bf16 and compiled, that is 303ms
 against 118ms, where the `ResNet18SmallInput` these backbones were compared
@@ -1235,12 +1260,12 @@ the *geometries*, which is what they are for; ShapeWorld's ViT is much smaller
 now and the ResNet it is compared against smaller again.
 `scripts/vit_geometry_sweep.py` is the harness and can re-derive them.
 
-Stride appears in no weight shape, so a geometry change moves ShapeWorld's
+Stride appears in no weight shape, so a stride change moves ShapeWorld's
 parameter count not at all — which matters, because the fairness claim the
-ablation rests on is stated in parameters. CUB's does move, since a 20px patch is
-1,200 values against a 28px one's 2,352 and above `d_model` that difference is
-carried by `ResizeAndPadPatches`. It moves the right way: 101% of `ResNet18`
-where the old geometry was 113%.
+ablation rests on is stated in parameters. A change of *kernel* moves CUB's,
+since the patch it carries into `d_model` through `ResizeAndPadPatches` changes
+size: 588 values at 14px against 1,200 at 20px and 2,352 at 28px, which is 95%
+of `ResNet18` where the 20px geometry was 101% and the 28px one 113%.
 
 The padding is what makes the tiling cover the image. Without it the final
 partial patch is silently cropped, which is a strip of the image the model cannot

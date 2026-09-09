@@ -362,7 +362,16 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # CUB: the top of the ladder. Only the two vision-dependent counts differ
         # from ShapeWorld's -- the ViT's patch tokeniser scales with image size,
         # and the speaker's language model carries a longer message.
-        ("16_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 11_332_626),
+        #
+        # **The CUB ViT reads 10,626,990 since 2026-09-09**, down from
+        # 11,332,626, and none of `[birds.sender_feature_model]`'s five keys
+        # moved. The patch grid is fixed at 16x16 on every dataset now, so CUB's
+        # patch is 14px rather than 20px and `ResizeAndPadPatches` carries 588
+        # values into `d_model` where it carried 1,200. Against `ResNet18`'s
+        # 11,176,512 that is 0.95x where it was 1.01x -- a looser match, in the
+        # direction that understates the ViT. ShapeWorld's count is untouched at
+        # 876,599, which is where the change was aimed; see `ViT2.__init__`.
+        ("16_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 10_626_990),
         ("16_birds_receiver_cross_attention_lm.toml", "sender.language_model", 6_764_120),
         ("16_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
         ("16_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_198),
@@ -409,7 +418,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # The two intermediate vision swaps, so a rung that stopped inheriting
         # the shared ViT specification shows up here rather than in a run.
         ("03_shapeworld_sender_vit.toml", "sender.feat_model", 876_599),
-        ("04_birds_sender_vit.toml", "sender.feat_model", 11_332_626),
+        ("04_birds_sender_vit.toml", "sender.feat_model", 10_626_990),
         # And the prototyper, which is one scoring direction and a bias per
         # polarity, where rung 3's is nothing at all. 2,050 rather than the 642
         # it was: it sizes off the referents, which the adapter now delivers at

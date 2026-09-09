@@ -2265,9 +2265,17 @@ feature_model = "ResNet18"
 # **CUB's ViT specification, pinned rather than inherited.** These five keys
 # are exactly what `[sender_feature_model]` held before ShapeWorld's ViT was
 # narrowed to match `ResNet56`: 320 wide, 10 layers, 5 heads at head_dim 64,
-# feedforward inner 576, SwiGLU. They come to 11,332,626 parameters on CUB's
+# feedforward inner 576, SwiGLU. They came to 11,332,626 parameters on CUB's
 # 224px images against `ResNet18`'s 11,176,512 -- 1.01x, which is the match the
 # birds rungs were built on.
+#
+# **10,626,990 since 2026-09-09, or 0.95x**, and none of these five keys moved.
+# The patch grid did: it is fixed at 16x16 on every dataset now, so CUB's patch
+# is 14px rather than 20px and `ResizeAndPadPatches` carries 588 values into
+# `d_model` where it carried 1,200. The match is looser than it was and in the
+# direction that understates the ViT rather than flattering it. See
+# `models/backbone/vision.ViT2` for why the grid became the fixed quantity;
+# the reason is ShapeWorld's and CUB pays for it here.
 #
 # Without this block the ShapeWorld narrowing would have dragged the birds ViT
 # rungs down to 128 wide as well, matching them to a backbone the birds arm does

@@ -11,6 +11,12 @@ from broccoli.vit import ViT, SequencePoolClassificationHead
 
 from ..model_util import get_activation, resolve_residual_scaling
 
+# The ViT's patch grid is this many patches on a side, whatever the image size,
+#     so every dataset runs the same sequence length. See `ViT2.__init__` for
+#     why the grid is the fixed quantity and the patch size the derived one.
+PATCH_GRID = 16
+
+
 class ViT2(nn.Module):
     def __init__(
             self,
@@ -28,46 +34,57 @@ class ViT2(nn.Module):
 
         self.image_max_side = max(n_feats[1:])
 
-        def close_even_number(x):
-            return int(x) if int(x) % 2 == 0 else int(x) - 1
-
-        # The patch grid, derived from the image size rather than configured.
+        # The patch grid, fixed at 16x16 and derived from the image size.
         #
-        # The tiling is non-overlapping: `pooling_type` is `"concat"`, so the
-        #     tokenizer is a space-to-depth, and at stride = kernel it is an
-        #     exact tiling in which every pixel reaches the transformer exactly
-        #     once. The previous geometry ran stride = kernel/2, which does not
-        #     add information -- it duplicates each pixel four times. What the
-        #     overlap bought was a locality prior and a finer positional grid,
-        #     and it cost 289 tokens against 121 here.
+        # **256 tokens on every dataset since 2026-09-09**, where the rule used
+        #     to fix the patch *size* at three 32nds of the image and let the
+        #     token count fall out: 6px patches on an 11x11 grid at
+        #     ShapeWorld's 64px, 20px on a 12x12 grid at CUB's 224px. Fixing
+        #     the grid instead makes the sequence the constant and the patch
+        #     the consequence -- 4px patches at 64px, 14px at 224px.
         #
-        # It cost more than the arithmetic suggests. Measured on an A100 at 640
-        #     images of 64px, fwd+bwd, bf16, compiled: 303ms at the old
-        #     geometry against 118ms at this one, where the
-        #     `ResNet18SmallInput` these backbones were compared against ran
-        #     in 81ms; ShapeWorld's backbone is `ResNet56` now, which is
-        #     smaller again. The ViT was 3.75x the baseline's wall clock and is now
-        #     1.46x. See `scripts/vit_geometry_sweep.py`, which is the harness
-        #     those numbers came from and can re-derive them.
+        # Why. ShapeWorld's concepts are shapes, and a shape's identity is in
+        #     its outline. The CNN the ViT rung is compared against is a
+        #     `CifarResNet`: a 3x3 stride-1 stem at full resolution, so its
+        #     first look at a boundary is a 3px window moving one pixel at a
+        #     time. A 6px non-overlapping patch is the opposite -- an edge
+        #     falling inside one is never seen against its neighbourhood, and
+        #     the model has to put the outline back together from the
+        #     positional grid. `lr_sweep_2_sender_vit` sat in the colour-only
+        #     minimum at all five rates while the CNN under the same recipe
+        #     learned shape, and colour is the feature that survives any
+        #     tiling. This is a hypothesis about that result, not a measurement
+        #     of it.
         #
-        # The `x 3` was `x 4`. Together with the stride it puts ShapeWorld's
-        #     64px on an 11x11 grid of 6px patches and CUB's 224px on a 12x12
-        #     grid of 20px ones. Stride appears in no weight shape, so the
-        #     ShapeWorld parameter count is untouched at 10,319,266, or 92% of
-        #     ResNet18's; CUB's moves, because a 20px patch is 1,200 values and
-        #     a 28px one 2,352, and above `d_model` that difference is carried
-        #     by `ResizeAndPadPatches`. It moves the right way -- 101% of
-        #     ResNet18 where the old geometry was 113%.
+        # The tiling still does not overlap. `pooling_type` is `"concat"`, so
+        #     the tokenizer is a space-to-depth and at stride = kernel every
+        #     pixel reaches the transformer exactly once; the old stride =
+        #     kernel/2 duplicated each pixel four times rather than adding
+        #     information. Finer patches buy the locality that overlap was
+        #     bought for, and buy it without the duplication.
+        #
+        # What it costs. Tokens go 121 -> 256 at 64px, and the attention term
+        #     is quadratic in them -- but at `d_model` 128 that term is a
+        #     minority of the arithmetic: per token per layer the projections
+        #     are 4d^2 and the feedforward 4*d*ff against a score/AV pair of
+        #     2*n*d, so ~14% at 121 tokens and ~25% at 256. Per-token cost
+        #     rises about 1.15x and the sequence 2.1x. `scripts/vit_geometry_
+        #     sweep.py` puts 16x16 at 2.95 GMAC/img against 1.30 at 11x11, and
+        #     it is the harness for timing rather than counting them.
+        #
+        # Stride and kernel appear in no weight shape at 64px, so ShapeWorld's
+        #     876,599 parameters are untouched and the ablation's
+        #     size-matching claim against `ResNet56` still holds. CUB's moves,
+        #     because `ResizeAndPadPatches` carries a patch of 14*14*3 = 588
+        #     values where it carried 20*20*3 = 1,200.
         #
         # `pooling_padding` is whatever makes the tiling cover the image, split
-        #     symmetrically: 1 each side at 64px, 8 at 224px. Without it the
-        #     final partial patch is silently cropped, which is a strip of the
-        #     image the model cannot see.
-        self.pooling_kernel_size = close_even_number((self.image_max_side / 32) * 3)
+        #     symmetrically. It is 0 at both live sizes, which divide by 16
+        #     exactly; the formula is kept for a size that does not.
+        self.pooling_kernel_size = math.ceil(self.image_max_side / PATCH_GRID)
         self.pooling_kernel_stride = self.pooling_kernel_size
-        patch_grid = math.ceil(self.image_max_side / self.pooling_kernel_size)
         self.pooling_padding = (
-            patch_grid * self.pooling_kernel_size - self.image_max_side + 1
+            PATCH_GRID * self.pooling_kernel_size - self.image_max_side + 1
         ) // 2
 
         # Every broccoli argument is set explicitly, including the inert ones.
