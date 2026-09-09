@@ -367,6 +367,53 @@ In the reference game, `percent_novel = 0.0` hands back the *same* tensor for
 both agents; `silhouette` returns a new one, so an independent roll per agent is
 still safe there.
 
+## Every augmentation is the receiver's
+
+Since 2026-09-09 the sender's view is not augmented at all. The silhouette was
+already asymmetric — `silhouette_p_sender` has been 0.0 throughout — and mixup
+has only ever touched the listener's candidates; what moved is the geometry,
+which until then applied one pair of keys to both views. It is now four:
+`augment_flip_sender` / `augment_flip_receiver` and
+`augment_affine_degrees_sender` / `augment_affine_degrees_receiver`, defaulting
+to `false`/`true` and `0.0`/`10.0`.
+
+The argument is that the augmentations exist to stop *memorisation*, and
+memorisation only pays for the agent that can act on it without the channel.
+The listener can pick a game's positives out of the pixels and ignore the
+message entirely. The speaker cannot: everything it knows has to cross a noisy
+discrete bottleneck to reach the loss — `unmixed_survival` has sat at 0.28–0.45
+and a tenth of tokens are drawn uniformly on top of that — and a stored game
+comes round about once an epoch, so there are only a few dozen noisy exposures
+in which to fix an arbitrary per-game code. What that many exposures *can*
+reinforce is a feature recurring across games, which is the colour shortcut, and
+the silhouette rather than the geometry is what attacks it.
+
+The speaker also gets the property second-hand. Its gradient arrives only
+through the listener's discrimination, so a listener that has to decode a
+flipped, rotated, mixed referent already pressures the message towards something
+transform-stable. Augmenting the speaker buys that twice and charges for it:
+input noise on the side that has to emit a symbol early, in a regime whose open
+question is ignition, and a train/eval mismatch on the encoder that produces the
+message, since eval is never augmented.
+
+This is reasoning rather than a measurement. The arm that would test it is the
+old symmetric setting — all four keys on — against the current one.
+
+**CUB is the same property by a different mechanism.** Its augmentation is
+`image_util.TransformLoader`'s torchvision pipeline applied per image *before*
+the speaker/listener split, so there is nothing downstream to turn off. Instead
+`CUBDataset` holds both pipelines: `augment_transform` is the train one and
+`transform` the eval one, and `_transform_by_agent` routes by position, since
+`split_spk_lis` deals the first `n_examples // 2` of each polarity to the
+speaker and the next to the listener. Eval splits are given no
+`augment_transform` and every image takes the eval pipeline, as before. The
+birds `augment_*` keys stay off and would do nothing if they were not: they are
+`ConceptDataset`'s, and CUB is not one.
+
+In the reference game there are not two views to make differ — `percent_novel`
+is 0.0 and `split_spk_lis` hands the speaker's tensor to both agents — so every
+CUB image there takes the train pipeline, which is what that path did before.
+
 ## Copy-on-write and in-place mutation
 
 `ConceptDataset.__getitem__` copies the row (`img = np.array(img)`) before any
@@ -402,6 +449,10 @@ the target followed by `CenterCrop` for eval, `RandomResizedCrop` +
 `ImageJitter` + `RandomHorizontalFlip` for training, ImageNet normalisation
 either way. `ImageJitter` applies Brightness/Contrast/Color enhancement factors
 drawn uniformly in `1 ± alpha`.
+
+Both stacks are live on a CUB training split: the listener's half of each game
+takes the training one and the speaker's the eval one. See *Every augmentation
+is the receiver's* above.
 
 CUB images are stored per species as `img.npz` under
 `CUB_200_2011/images/<class>/`, built by `save_cub_np.py`. Metadata is either

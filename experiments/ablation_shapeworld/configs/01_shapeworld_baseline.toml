@@ -69,7 +69,7 @@
 #     [sender_language_model] normalise_logits true  -> false  both halves
 #     [data] silhouette_p_receiver            0.1   -> 0.5    ShapeWorld only
 #     [data] silhouette_fill                  mean  -> white  ShapeWorld only
-#     [data] augment_flip / affine / mixup    off   -> on     ShapeWorld only
+#     [data] flip / affine / mixup            off   -> on     ShapeWorld only
 #
 # `[birds.data]` pins the three augmentations back off, so the birds half takes
 # the rate, the warm-up and the channel only. The listener's five module rates

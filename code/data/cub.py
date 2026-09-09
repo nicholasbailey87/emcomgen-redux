@@ -227,7 +227,11 @@ def load(config):
         return CUBDataset(
             subset,
             md,
-            transform=train_transform if split == "train" else test_transform,
+            # Both pipelines on `train`, and `sample_game` chooses between them
+            #     per image by which agent it is bound for. Eval gets the
+            #     un-augmented one for every image, as it always has.
+            transform=test_transform,
+            augment_transform=train_transform if split == "train" else None,
             n_examples=config['data']['n_examples'],
             # `len(subset)` rather than the class range, so the eval size follows
             #     the species actually present on disk.
@@ -270,6 +274,7 @@ class CUBDataset:
         metadata,
         n_examples=None,
         transform=None,
+        augment_transform=None,
         length=1000,
         reference_game=False,
         percent_novel=1.0,
@@ -280,6 +285,7 @@ class CUBDataset:
         self.img_names = {c: list(i.keys()) for c, i in self.imgs.items()}
         self.length = length
         self.transform = transform
+        self.augment_transform = augment_transform
         self.reference_game = reference_game
         self.n_feats = (3, IMAGE_SIZE, IMAGE_SIZE)
         if n_examples is None:
@@ -310,6 +316,45 @@ class CUBDataset:
             neg_imgs.append(neg_img)
         return neg_imgs
 
+    def _transform_by_agent(self, imgs):
+        """
+        Augment the listener's share of one polarity and not the speaker's.
+
+        `split_spk_lis` deals a polarity out by position -- the first
+        `n_examples // 2` go to the speaker and the next `n_examples // 2` to
+        the listener -- so which agent an image is bound for is known here,
+        before it is transformed. That is what makes the split possible at all
+        on this dataset: CUB's augmentation is a torchvision pipeline applied
+        per image rather than a tensor operation applied per view, so there is
+        nothing downstream of the split to turn off.
+
+        `augment_transform` is the train pipeline -- `RandomResizedCrop`,
+        `ImageJitter`, `RandomHorizontalFlip` -- and `transform` the eval one,
+        resize and centre crop. Eval splits pass no `augment_transform` and
+        every image takes the eval pipeline, which is what they did before.
+
+        Why only the listener: see `DEFAULT.toml` beside `augment_flip_*`. The
+        short form is that memorisation only pays for the agent that can act on
+        it without the channel, and the speaker's gradient arrives through the
+        listener anyway.
+
+        A reference game is the exception. It sets `percent_novel = 0.0`, and
+        `split_spk_lis` then hands the speaker's tensor to both agents, so
+        there are not two views to make differ; everything takes the train
+        pipeline, which is what this path did before the split existed.
+        """
+        if self.augment_transform is None:
+            return [self.transform(img) for img in imgs]
+
+        if self.reference_game:
+            return [self.augment_transform(img) for img in imgs]
+
+        n_spk = self.n_examples // 2
+        return [
+            self.transform(img) if i < n_spk else self.augment_transform(img)
+            for i, img in enumerate(imgs)
+        ]
+
     def sample_game(self):
         # Randomly choose a class
         cl = np.random.choice(self.classes)
@@ -329,12 +374,12 @@ class CUBDataset:
 
         neg_imgs = self.sample_negatives(self.n_examples, cl)
 
-        if self.transform is not None:
-            pos_imgs = [self.transform(img) for img in pos_imgs]
-            neg_imgs = [self.transform(img) for img in neg_imgs]
-        else:
+        if self.transform is None:
             # Convert to tensor
             raise NotImplementedError
+
+        pos_imgs = self._transform_by_agent(pos_imgs)
+        neg_imgs = self._transform_by_agent(neg_imgs)
 
         imgs, y = util.stack_pos_neg(pos_imgs, neg_imgs)
 

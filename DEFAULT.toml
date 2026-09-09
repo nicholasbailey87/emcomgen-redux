@@ -231,19 +231,47 @@ silhouette_p_receiver = 0.2
 
 # Geometric augmentation of the referents, train-only and drawn per image.
 #
-# `augment_flip` gives each image an independent 50% horizontal flip and an
+# `augment_flip_*` gives each image an independent 50% horizontal flip and an
 # independent 50% vertical flip, so a quarter of images get both.
-# `augment_affine_degrees` rotates every image by a uniform draw from
+# `augment_affine_degrees_*` rotates every image by a uniform draw from
 # +/- that many degrees; 0.0 leaves the rotation out entirely.
+#
+# **One pair of keys per agent since 2026-09-09, receiver-only by default.**
+# Until then a single pair applied to both views. The keys are split the way
+# `silhouette_p_sender` / `silhouette_p_receiver` are split, and for the same
+# reason: the asymmetry is the treatment, and a folder that wants the symmetric
+# regime back can still ask for it.
 #
 # Why they exist. The store holds 20 positives and 20 negatives per game, and
 # `ConceptDataset.__getitem__`'s permutation only decides which agent sees
 # which -- the image *set* a game presents never changes. A hundred epochs of
 # the same twenty images is what a listener memorises, and the 2026-09-03 Conv4
 # baseline is what that looks like: shape at 0.880 on train and 0.484 on both
-# eval splits, with colour transferring and shape not at all. These are drawn
-# separately for each agent, so the two views of a shared stored image diverge
-# and the listener never sees the same pixel array twice.
+# eval splits, with colour transferring and shape not at all. The draws are
+# per image and per agent, so the listener never sees the same pixel array
+# twice.
+#
+# **Why the receiver alone.** Memorisation only pays for the agent that can use
+# it without the channel. The listener can pick the positives out of a game
+# from pixels and ignore the message entirely; the speaker has no equivalent
+# move, because everything it knows has to cross a noisy discrete bottleneck to
+# reach the loss -- `unmixed_survival` has sat at 0.28-0.45, and 10% of tokens
+# are drawn uniformly on top of that. A stored game comes round about once an
+# epoch, which is a few dozen noisy exposures: enough to reinforce a feature
+# that recurs across games, which is the colour shortcut, and not enough to fix
+# an arbitrary per-game code.
+#
+# So the speaker's gradient arrives only through the listener's discrimination,
+# and a listener that has to decode a flipped, rotated, mixed referent already
+# pressures the message towards something transform-stable. Augmenting the
+# speaker buys that property a second time and charges twice for it: input
+# noise on the side that must emit a symbol early, in a regime whose open
+# question is ignition; and a train/eval mismatch on the encoder that produces
+# the message, since eval is never augmented. That second cost is the same
+# shape as the one `silhouette_fill` was moved for.
+#
+# This is reasoning, not a measurement. The arm that would test it is the old
+# symmetric setting -- all four keys on -- against this one.
 #
 # Note the original ShapeWorld store had 40-50 positives per game and
 # `split_spk_lis` read 20 of them, so a fresh subset arrived every epoch;
@@ -264,8 +292,10 @@ silhouette_p_receiver = 0.2
 # outright. `RandomResizedCrop` is out for the same reason: its `ratio`
 # argument is exactly that scaling. Colour jitter is out on its own terms,
 # since colour is a label here rather than a nuisance variable.
-augment_flip = true
-augment_affine_degrees = 10.0
+augment_flip_sender = false
+augment_flip_receiver = true
+augment_affine_degrees_sender = 0.0
+augment_affine_degrees_receiver = 10.0
 
 # Mixup on the listener's candidates: each is replaced by a blend of itself and
 # another drawn from the same set with replacement, weight `lambda` from
@@ -1063,6 +1093,40 @@ receiver_discriminator = 1e-4
 [optimiser.implementation_lr.sender_vision]
 ResNet56 = 2e-5
 ResNet18 = 5e-5
+# `ViT2` at 2e-5, from `experiments/lr_sweep_2_sender_vit/`, five arms from
+# 1e-5 to 2e-4, 60 epochs, one repeat, run 2026-09-09 under the ignition
+# defaults (mean-colour fill, `silhouette_p_receiver` 0.2, ten-epoch warm-up).
+#
+# **The birds half chose it.** `test_acc` over the last ten epochs runs 0.658,
+# 0.661, 0.645, 0.646, 0.638 across 1e-5 to 2e-4 -- flat over the bottom two
+# and falling above them -- and the tiebreak is sweep 1's, the train-test gap,
+# which steps from 0.103 and 0.105 to 0.119, 0.118, 0.120 at exactly the point
+# the accuracy turns. Above 2e-5 the extra rate buys fit and not transfer.
+# 1e-5 is inside the noise of 2e-5 and the pair is not separated; what is
+# separated is the pair from the three above them.
+#
+# **The transformer wants less rate than the CNN it replaces, on the same
+# data.** Birds runs `ResNet18` at 5e-5 and this ViT at 2e-5, and it is the
+# larger network of the two -- `d_model` 320 over 10 layers, sized to match the
+# CNN's parameter count. That is the reason the rates are keyed by class and
+# not by group: rung 3 inheriting rung 1's 5e-5 would have run the speaker's
+# backbone at 2.5x the rate this sweep picked, and would have differed from
+# rung 1 in the architecture and the rate at once.
+#
+# **The ShapeWorld half chose nothing, and says something worse.** Every arm
+# sat in the colour-only minimum: `train_acc_md_shape` never exceeds 0.537 at
+# any rate in any epoch, `train_acc_md_color` ends at 0.77-0.80, and
+# `test_acc_md_shape` reads 0.47, below chance. The same recipe with the
+# paper's baseline CNN ignites *and* learns shape, so this is the speaker's
+# backbone losing the shape rather than a rate being wrong -- five colour-only
+# runs have no argmax worth taking. The one thing that does move with rate
+# there is ignition timing (`train_acc` past 0.55 at epoch 6 for 2e-4 against
+# 18 for 1e-5), which is not what the sweep ranks.
+#
+# So this number rests on the birds arm alone. Nothing here licenses it for
+# ShapeWorld beyond "the sweep found no rate that helps there", and rung 3 is
+# owed an explanation before it is read as a working rung.
+ViT2 = 2e-5
 
 # The listener's backbone takes the same rates as the speaker's. That is what
 # `lr_sweep_1_cnn` measured -- `sender_vision` and `receiver_vision` moved
@@ -2071,8 +2135,16 @@ silhouette_p_receiver = 0.0
 # None of the three is claimed to be wrong for birds. They are unmeasured on it,
 #     and inheriting them would have made every birds rung differ from its own
 #     history in three ways at once without anything asking for it.
-augment_flip = false
-augment_affine_degrees = 0.0
+# All four off, and they would do nothing if they were not: CUB's augmentation
+# is `cub.py`'s torchvision pipeline -- `RandomResizedCrop`, `ImageJitter`,
+# `RandomHorizontalFlip` -- and not this repo's keys. That pipeline is
+# receiver-only too since 2026-09-09, by handing the listener's half of each
+# game the train transform and the speaker's the eval one, which is a property
+# of `CUBDataset.sample_game` rather than something a config selects.
+augment_flip_sender = false
+augment_flip_receiver = false
+augment_affine_degrees_sender = 0.0
+augment_affine_degrees_receiver = 0.0
 mixup_alpha = 0.0
 
 # 32, with `[birds.optimiser] accumulator_steps` back to 1. The effective batch

@@ -224,8 +224,10 @@ class ConceptDataset:
         silhouette_p_sender=0.0,
         silhouette_p_receiver=0.0,
         silhouette_fill=DEFAULT_SILHOUETTE_FILL,
-        augment_flip=False,
-        augment_affine_degrees=0.0,
+        augment_flip_sender=False,
+        augment_flip_receiver=False,
+        augment_affine_degrees_sender=0.0,
+        augment_affine_degrees_receiver=0.0,
         mixup_alpha=0.0,
         **kwargs,
     ):
@@ -251,8 +253,10 @@ class ConceptDataset:
         self.silhouette_p_sender = silhouette_p_sender
         self.silhouette_p_receiver = silhouette_p_receiver
         self.silhouette_fill = silhouette_fill
-        self.augment_flip = augment_flip
-        self.augment_affine_degrees = augment_affine_degrees
+        self.augment_flip_sender = augment_flip_sender
+        self.augment_flip_receiver = augment_flip_receiver
+        self.augment_affine_degrees_sender = augment_affine_degrees_sender
+        self.augment_affine_degrees_receiver = augment_affine_degrees_receiver
         self.mixup_alpha = mixup_alpha
         assert self.n_examples % 2 == 0
         # Assign the rest of the kwargs
@@ -275,18 +279,29 @@ class ConceptDataset:
             lis_inp = silhouette(lis_inp, self.silhouette_fill)
         return spk_inp, lis_inp
 
-    def _augment_geometry(self, imgs):
+    def _augment_geometry(self, imgs, flip, degrees):
         """
         Flip and rotate each of one agent's referents, independently.
 
+        `flip` and `degrees` are the calling agent's settings and arrive as
+        arguments rather than off `self`, because the two agents no longer
+        share them: since 2026-09-09 the defaults augment the receiver and
+        leave the sender's view alone. The argument is in `DEFAULT.toml` beside
+        the keys; the short form is that the augmentation exists to stop
+        *memorisation*, and only the listener can memorise profitably -- it can
+        pick the positives from pixels and ignore the message, where everything
+        the speaker knows has to cross the channel to matter.
+
         Per *image* and not per game, and called once per agent rather than
         once on the whole row. Both matter. A single draw applied to the whole
-        tensor would leave every referent in the game -- and both agents' views
-        of the shared stored image -- under the same transform, which varies
-        the epoch but not the game. Drawing per image means the listener never
-        sees the same pixel array twice, which is the point: the store holds 20
-        positives per game and a hundred epochs of the same twenty is what a
-        listener memorises. See docs/data.md.
+        tensor would leave every referent in the game under the same transform,
+        which varies the epoch but not the game. Drawing per image means the
+        listener never sees the same pixel array twice, which is the point: the
+        store holds 20 positives per game and a hundred epochs of the same
+        twenty is what a listener memorises. See docs/data.md.
+
+        A both-off call returns `imgs` itself, so calling this for the sender
+        under the default settings costs nothing and needs no branch upstream.
 
         Safe against this dataset's five shapes -- circle, ellipse, rectangle,
         square, triangle -- which is not a property of affine transforms in
@@ -320,7 +335,7 @@ class ConceptDataset:
         stored pixel values, and interpolation would blur exactly the edges that
         threshold reads.
         """
-        if not (self.augment_flip or self.augment_affine_degrees):
+        if not (flip or degrees):
             return imgs
 
         n = imgs.shape[0]
@@ -328,7 +343,7 @@ class ConceptDataset:
         #     may be a view onto the shared store.
         out = imgs.clone()
 
-        if self.augment_flip:
+        if flip:
             # Two independent masks over the batch, so a quarter of images get
             #     both -- the per-image draw the loop used to make, in one
             #     call. A flip is a permutation of pixels and introduces no new
@@ -340,15 +355,11 @@ class ConceptDataset:
             out[horizontal] = out[horizontal].flip(-1)
             out[vertical] = out[vertical].flip(-2)
 
-        if self.augment_affine_degrees:
+        if degrees:
             # Every image, not a fraction of them: a rotation of zero is
             #     already in the range, so a probability here would only
             #     concentrate mass on the identity.
-            angles = np.random.uniform(
-                -self.augment_affine_degrees,
-                self.augment_affine_degrees,
-                size=n,
-            )
+            angles = np.random.uniform(-degrees, degrees, size=n)
 
             # `affine_grid` works in coordinates normalised to [-1, 1] on both
             #     axes, so the matrix is a rotation only on a square image.
@@ -518,12 +529,24 @@ class ConceptDataset:
         )
         spk_inp, lis_inp = self._apply_silhouette(spk_inp, lis_inp)
 
-        # Train only, like the permutation above and the silhouette, and drawn
-        #     separately for each agent so that the two views of a shared stored
-        #     image diverge.
+        # Train only, like the permutation above and the silhouette, and each
+        #     agent's own settings: the defaults augment the receiver's view and
+        #     leave the sender's untouched, which makes the sender call a
+        #     passthrough. The draws are independent either way, so a config
+        #     that turns the sender's keys back on gets two different views of
+        #     a stored image the two agents share -- which only happens below
+        #     `percent_novel = 1.0`.
         if self.augment:
-            spk_inp = self._augment_geometry(spk_inp)
-            lis_inp = self._augment_geometry(lis_inp)
+            spk_inp = self._augment_geometry(
+                spk_inp,
+                self.augment_flip_sender,
+                self.augment_affine_degrees_sender,
+            )
+            lis_inp = self._augment_geometry(
+                lis_inp,
+                self.augment_flip_receiver,
+                self.augment_affine_degrees_receiver,
+            )
             # After the geometry, so that a blend is of two images the listener
             #     could actually have been shown, and after the silhouette for
             #     the same reason the geometry is: the silhouette thresholds at

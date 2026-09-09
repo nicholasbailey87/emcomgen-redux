@@ -164,6 +164,22 @@ def validate_config(config: dict) -> bool:
             "either value would be describing a choice that no longer exists. "
             "See `sender.sample_symbols`",
         ),
+        (
+            'data',
+            'augment_flip',
+            "the geometry is set per agent since 2026-09-09. Use "
+            "`augment_flip_sender` and `augment_flip_receiver`; the defaults "
+            "are `false` and `true`, which is the regime that key used to "
+            "apply to both views at once",
+        ),
+        (
+            'data',
+            'augment_affine_degrees',
+            "the geometry is set per agent since 2026-09-09. Use "
+            "`augment_affine_degrees_sender` and "
+            "`augment_affine_degrees_receiver`; the defaults are `0.0` and "
+            "`10.0`, where this key used to give both views the same rotation",
+        ),
     ):
         if key in config.get(table, {}):
             raise InvalidConfig(
@@ -324,25 +340,27 @@ def validate_config(config: dict) -> bool:
         if not 0.0 <= p <= 1.0:
             raise InvalidConfig(f"`{key}` must be in [0, 1], got {p}.")
 
-    degrees = config['data']['augment_affine_degrees']
-    if not isinstance(degrees, (int, float)) or isinstance(degrees, bool):
-        raise InvalidConfig(
-            f"`augment_affine_degrees` must be a number, got {degrees!r}."
-        )
-    if not 0.0 <= degrees <= 45.0:
-        # 45 is where a rotated square becomes a diamond. Nothing in this
-        #     dataset labels one, but a rotation that large is a config error
-        #     rather than an experiment, and the ceiling says where the
-        #     transform stops being label-preserving in principle.
-        raise InvalidConfig(
-            f"`augment_affine_degrees` must be in [0, 45], got {degrees}."
-        )
+    # Four keys and two checks: the geometry is set per agent, so each check
+    #     runs over both. The sender's are off by default and the receiver's
+    #     are not -- see DEFAULT.toml for why the augmentation sits on the
+    #     agent that can memorise.
+    for agent in ('sender', 'receiver'):
+        name = f'augment_affine_degrees_{agent}'
+        degrees = config['data'][name]
+        if not isinstance(degrees, (int, float)) or isinstance(degrees, bool):
+            raise InvalidConfig(f"`{name}` must be a number, got {degrees!r}.")
+        if not 0.0 <= degrees <= 45.0:
+            # 45 is where a rotated square becomes a diamond. Nothing in this
+            #     dataset labels one, but a rotation that large is a config
+            #     error rather than an experiment, and the ceiling says where
+            #     the transform stops being label-preserving in principle.
+            raise InvalidConfig(f"`{name}` must be in [0, 45], got {degrees}.")
 
-    if not isinstance(config['data']['augment_flip'], bool):
-        raise InvalidConfig(
-            "`augment_flip` must be a boolean, got "
-            f"{config['data']['augment_flip']!r}."
-        )
+        name = f'augment_flip_{agent}'
+        if not isinstance(config['data'][name], bool):
+            raise InvalidConfig(
+                f"`{name}` must be a boolean, got {config['data'][name]!r}."
+            )
 
     alpha = config['data']['mixup_alpha']
     if not isinstance(alpha, (int, float)) or isinstance(alpha, bool):

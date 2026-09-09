@@ -387,6 +387,96 @@ def test_debug_shrinks_every_split_but_never_to_zero():
     assert cub.n_games("test", 1, config) == 1
 
 
+# --------------------------------------------------------------------------
+# Which agent is augmented
+# --------------------------------------------------------------------------
+
+def _agent_marked_dataset(reference_game=False):
+    """
+    A dataset whose two transforms are distinguishable in the pixels.
+
+    Neither is a real torchvision pipeline: `transform` marks its output 1 and
+        `augment_transform` marks it 2, so a game's views say which pipeline
+        each image went through. What is under test is the routing, and the
+        pipelines themselves are `image_util.TransformLoader`'s and unchanged.
+    """
+    classes = range(1, 4)
+    imgs, _ = _imgs(classes, lambda cl: 20)
+    metadata = {
+        name: np.zeros(312, dtype=np.uint8)
+        for cl in classes for name in imgs[cl]
+    }
+    return cub.CUBDataset(
+        imgs,
+        metadata,
+        n_examples=N_EXAMPLES,
+        transform=lambda img: torch.ones(3, 4, 4, dtype=torch.uint8),
+        augment_transform=lambda img: torch.full((3, 4, 4), 2, dtype=torch.uint8),
+        length=10,
+        reference_game=reference_game,
+        percent_novel=1.0,
+    )
+
+
+def test_the_listener_is_augmented_and_the_speaker_is_not():
+    """
+    CUB augments before the speaker/listener split, so the split has to happen
+        in `sample_game` or not at all: there is no per-view tensor operation
+        downstream to turn off, only a torchvision pipeline already applied.
+
+    `split_spk_lis` deals each polarity out by position -- the first
+        `n_examples // 2` to the speaker, the next to the listener -- which is
+        what makes the destination knowable before the transform runs. Both
+        polarities are checked: the negatives are dealt the same way and would
+        be easy to route as a block.
+    """
+    np.random.seed(0)
+    spk_inp, spk_label, lis_inp, lis_label, _, _ = (
+        _agent_marked_dataset().sample_game()
+    )
+    assert int(spk_inp.min()) == 1 and int(spk_inp.max()) == 1
+    assert int(lis_inp.min()) == 2 and int(lis_inp.max()) == 2
+    # Both polarities present, so the assertions above are not about positives
+    #     alone.
+    for label in (spk_label, lis_label):
+        assert set(label.tolist()) == {0, 1}
+
+
+def test_a_reference_game_augments_everything():
+    """
+    `percent_novel = 0.0` there, so `split_spk_lis` hands the speaker's tensor
+        to both agents and there are not two views to make differ. Everything
+        takes the train pipeline, which is what this path did before the split.
+    """
+    np.random.seed(0)
+    spk_inp, _, lis_inp, _, _, _ = (
+        _agent_marked_dataset(reference_game=True).sample_game()
+    )
+    assert int(spk_inp.min()) == 2 and int(spk_inp.max()) == 2
+    assert torch.equal(spk_inp, lis_inp)
+
+
+def test_an_eval_split_augments_nothing():
+    """No `augment_transform`, so every image takes the eval pipeline."""
+    classes = range(1, 4)
+    imgs, _ = _imgs(classes, lambda cl: 20)
+    metadata = {
+        name: np.zeros(312, dtype=np.uint8)
+        for cl in classes for name in imgs[cl]
+    }
+    dataset = cub.CUBDataset(
+        imgs,
+        metadata,
+        n_examples=N_EXAMPLES,
+        transform=lambda img: torch.ones(3, 4, 4, dtype=torch.uint8),
+        length=10,
+        percent_novel=1.0,
+    )
+    np.random.seed(0)
+    spk_inp, _, lis_inp, _, _, _ = dataset.sample_game()
+    assert int(spk_inp.max()) == 1 and int(lis_inp.max()) == 1
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

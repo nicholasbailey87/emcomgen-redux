@@ -13,9 +13,10 @@
 # still winning on train by recognising individual images, the rolled-message
 # column stays near the live train accuracy instead of falling to chance.
 #
-# `augment_flip` and `augment_affine_degrees` are deliberately left at their
-# defaults. They attack the same memorisation from the other side and would
-# confound this arm.
+# The geometry keys -- `augment_flip_*` and `augment_affine_degrees_*`, one pair
+# per agent since 2026-09-09, a single pair when this arm ran -- are deliberately
+# left at their defaults. They attack the same memorisation from the other side
+# and would confound this arm.
 
 name = "conv4_silhouette_reference"
 

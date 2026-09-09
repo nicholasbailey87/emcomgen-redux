@@ -349,8 +349,14 @@ def test_train_clean_returns_the_stored_images_and_train_does_not():
             directory,
             silhouette_p_sender=1.0,
             silhouette_p_receiver=1.0,
-            augment_flip=True,
-            augment_affine_degrees=15.0,
+            # Both agents, so that `train`'s two views are both moved and
+            #     the assertions below are symmetric. The defaults augment the
+            #     receiver only; what this test is about is that `train_clean`
+            #     turns off whatever `train` has on.
+            augment_flip_sender=True,
+            augment_flip_receiver=True,
+            augment_affine_degrees_sender=15.0,
+            augment_affine_degrees_receiver=15.0,
             mixup_alpha=1.0,
         )
 

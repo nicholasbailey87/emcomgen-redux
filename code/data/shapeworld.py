@@ -134,8 +134,14 @@ def load(config, fast=False):
             silhouette_fill=config['data']['silhouette_fill'],
             # Gated on `augment` inside the dataset, so these are train-only
             #     too and are passed unconditionally.
-            augment_flip=config['data']['augment_flip'],
-            augment_affine_degrees=config['data']['augment_affine_degrees'],
+            augment_flip_sender=config['data']['augment_flip_sender'],
+            augment_flip_receiver=config['data']['augment_flip_receiver'],
+            augment_affine_degrees_sender=(
+                config['data']['augment_affine_degrees_sender']
+            ),
+            augment_affine_degrees_receiver=(
+                config['data']['augment_affine_degrees_receiver']
+            ),
             mixup_alpha=config['data']['mixup_alpha'],
             shapes=datas[split]["shapes"],
             metadata_vocab=md_vocab,
@@ -170,8 +176,10 @@ def load(config, fast=False):
                 silhouette_p_sender=0.0,
                 silhouette_p_receiver=0.0,
                 silhouette_fill=config['data']['silhouette_fill'],
-                augment_flip=False,
-                augment_affine_degrees=0.0,
+                augment_flip_sender=False,
+                augment_flip_receiver=False,
+                augment_affine_degrees_sender=0.0,
+                augment_affine_degrees_receiver=0.0,
                 mixup_alpha=0.0,
                 shapes=datas[split]["shapes"],
                 metadata_vocab=md_vocab,

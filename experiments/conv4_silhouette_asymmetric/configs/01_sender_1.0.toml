@@ -67,8 +67,13 @@ feature_model = "Conv4"
 [data]
 silhouette_p_sender = 1.0
 silhouette_p_receiver = 0.0
-augment_flip = true
-augment_affine_degrees = 10.0
+# Both agents, which is what this run did: the geometry keys were one pair
+# applied to both views until 2026-09-09, and the rename preserves it rather
+# than quietly converting a finished run to the receiver-only default.
+augment_flip_sender = true
+augment_flip_receiver = true
+augment_affine_degrees_sender = 10.0
+augment_affine_degrees_receiver = 10.0
 mixup_alpha = 1.0
 
 [scheduler]
