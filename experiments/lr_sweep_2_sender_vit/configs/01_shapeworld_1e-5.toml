@@ -2,12 +2,15 @@
 # the presence of everything below it on the ladder.
 #
 # Ten arms. The speaker's ViT rate moves over 1e-5, 2e-5, 5e-5, 1e-4 and 2e-4 on
-# both datasets -- `[optimiser.implementation_lr.sender_vision] BirdsViT` on the
-# birds arms and `ShapeWorldViT` on the ShapeWorld ones, the two names one
-# class carries so that a rate can be keyed per dataset's stack. Five
-# ShapeWorld arms copy ablation rung 03 and five birds arms copy rung 04.
-# Nothing else differs between the arms, and nothing else differs from the
-# rung each one copies.
+# both datasets -- `[optimiser.implementation_lr.sender_vision] ShapeWorldViT`
+# on the ShapeWorld arms and `BirdsViT` on the birds ones, the two names one
+# class carries so that a rate can be keyed per dataset's stack. `01`-`05` are
+# the five ShapeWorld arms, copying ablation rung 03, and `06`-`10` the five
+# birds arms, copying rung 04 -- the reverse of the other sweeps in the set,
+# whose birds arms come first. ShapeWorld leads here because it is the arm
+# this re-run is for: the first pass found no rate that helped there and left
+# `ShapeWorldViT` without one. Nothing else differs between the arms, and
+# nothing else differs from the rung each one copies.
 #
 # **Sweep 2 of eight.** `lr_sweep_1_cnn` did the two CNN backbones and is
 # where the reasoning for the whole set is written down. The short version:
@@ -71,20 +74,17 @@
 #
 # ---
 #
-# **This arm: the speaker's ViT backbone at 1e-5 on CUB**, copying ablation rung 04.
+# **This arm: the speaker's ViT backbone at 1e-5 on ShapeWorld**, copying ablation rung 03.
 
 name = "lr_sweep_2_sender_vit"
 
-[data]
-dataset = "../data/cub"
-
 [sender]
-feature_model = "BirdsViT"
+feature_model = "ShapeWorldViT"
 
 [optimiser.implementation_lr.sender_vision]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-BirdsViT = 1e-5
+ShapeWorldViT = 1e-5
 
 [scheduler]
 epochs = 60
@@ -95,7 +95,9 @@ repeats = 1
 [slurm]
 # Sized for the heaviest job in the set, a 60-epoch birds arm on a ViT trunk,
 # and read from the first config by filename only -- so this block governs the
-# whole array and belongs here and nowhere else. Generous against the ~3.4
+# whole array and belongs here and nowhere else. It sits in a ShapeWorld file
+# and is sized for a birds one, because the array is one submission and the
+# ceiling has to clear its slowest member. Generous against the ~3.4
 # min/epoch `lr_sweep_1_cnn` measured on the CNN trunks; a ViT arm is slower and
 # has not been timed at this length.
 time = "24:00:00"

@@ -1,12 +1,12 @@
-# lr_sweep_2_sender_vit arm: the speaker's ViT backbone at 5e-5 on ShapeWorld.
+# lr_sweep_2_sender_vit arm: the speaker's ViT backbone at 2e-5 on ShapeWorld.
 #
-# See `01_birds_1e-5.toml` for what this experiment measures and why.
+# See `01_shapeworld_1e-5.toml` for what this experiment measures and why.
 # This file differs from that one in the swept rate, and in carrying no
 # `[data]` block, since ShapeWorld is the default dataset.
 #
 # ---
 #
-# **This arm: the speaker's ViT backbone at 5e-5 on ShapeWorld**, copying ablation rung 03.
+# **This arm: the speaker's ViT backbone at 2e-5 on ShapeWorld**, copying ablation rung 03.
 
 name = "lr_sweep_2_sender_vit"
 
@@ -16,7 +16,7 @@ feature_model = "ShapeWorldViT"
 [optimiser.implementation_lr.sender_vision]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-ShapeWorldViT = 5e-5
+ShapeWorldViT = 2e-5
 
 [scheduler]
 epochs = 60

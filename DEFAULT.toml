@@ -487,6 +487,15 @@ mixup_alpha = 1.0
 # (`experiments/silhouette_fill_mean_colour/`). That is the thing white had
 # that the mean colour did not -- a run -- and it is no longer white's alone.
 #
+# **That run changed two things at once.** `warm_up_epochs` went from 0 to 10
+# on the same day as this fill, so ignition is attributable to either and the
+# trace does not separate them. The fill is the half with a mechanism -- the
+# BatchNorm argument above -- and it is the half that was kept: the ramp is
+# back to 0 as of the same date, so the defaults in this file no longer
+# reproduce that run exactly. See `[scheduler] warm_up_epochs`. If the fill
+# alone does not reproduce the ignition, that attribution was wrong and the
+# ramp goes back.
+#
 # The mechanism is the BatchNorm one above, read the way round the paragraphs
 # above did not quite put it. It is not only that the running statistics are
 # gathered on a mixture and applied to clean images at eval; it is that within
@@ -1213,7 +1222,27 @@ epochs = 100
 # was 30 epochs, where ten is a third. Which of the two the value is really
 # tracking is untested -- see the note above about revisiting it as a fraction
 # rather than a count.
-warm_up_epochs = 10
+#
+# **0 again since 2026-09-09**, on the same day it went back to 10, because
+# the run that put it back cannot carry the claim. The mean-colour fill and the
+# ten-epoch ramp were turned on together, so
+# `experiments/silhouette_fill_mean_colour/` is one arm with two treatments and
+# ignition is attributable to either. The reading here is that the fill is what
+# stabilised it -- that is where the mechanism is written down, the BatchNorm
+# argument in `[data] silhouette_fill`, and the ramp has no comparable account
+# of why it would matter to the first thirty epochs specifically.
+#
+# So the ramp comes off as the cheaper half of the confound to drop, not
+# because it was shown not to work. Everything above still describes what a
+# non-zero value does and what it was for, and if the fill alone turns out not
+# to reproduce the ignition, the ramp is the first thing to put back. Splitting
+# the two properly is a two-arm run at the mean-colour fill, ramp on and off,
+# which nothing has yet paid for.
+#
+# A run that wants the ramp asks for it in its own `[scheduler]` block, and any
+# comparison against a trace written between 2026-08-28 and today differs in
+# this as well as in whatever it was meant to test.
+warm_up_epochs = 0
 
 # `flat` or `cosine` -- an intention, not a curve.
 #
