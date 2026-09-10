@@ -49,6 +49,61 @@ logging.basicConfig(
 _PROFILER = None
 _PROFILE_UNTIL = 0
 
+# The margin `loss = "hinge"` scores against, in units of the listener's score.
+#
+# Fixed rather than configurable, because it is not independent of anything
+#     else the config can ask for: `ScoreVolume`'s `score_scale` multiplies the
+#     score in front of this constant, so a learned volume beside a chosen
+#     margin is one degree of freedom written down twice and the two drift
+#     against each other. An arm that wants a different margin wants
+#     `[receiver_discriminator] scale_score = false` and this constant changed
+#     in one place, which is a code change and should read as one.
+#
+# 1.0 against `BilinearDiscriminator`'s calibrated opening score of
+#     `1 / sqrt(3)` = 0.577: every candidate opens *inside* the margin, so every
+#     candidate returns gradient at epoch 0 and the objective has nothing to
+#     bootstrap. See `models.receiver.ScoreVolume` for why the opening score is
+#     a stated number rather than a backbone-dependent one.
+HINGE_MARGIN = 1.0
+
+
+def hinge_loss(scores, labels, margin=HINGE_MARGIN):
+    """
+    `mean(relu(margin - t * scores))` at `t = 2 * labels - 1`.
+
+    The counterpart of `BCEWithLogitsLoss` on the same tensors and the same
+        decision threshold -- `train.py` decides on `lis_scores > 0` either way,
+        so `per_game_accuracy` is untouched by which of the two ran.
+
+    **What it is here for.** BCE is strictly minimised at `scores = 0` when the
+        message carries nothing, so a listener with nothing to read has a
+        downhill path to `ln 2` and takes it. Inside this margin the loss is
+        `margin - mean(t * scores)`, which is `margin` exactly whenever `t` and
+        `scores` are uncorrelated *and does not depend on their scale*: going
+        quiet is flat rather than rewarded. Push the scores up while still
+        uncorrelated and the wrong half grows linearly where the right half
+        clips at zero, so the loss settles around `|score| ~ margin` instead of
+        collapsing to the origin.
+
+    **Hard labels only**, which is why `validate_config` rejects this beside
+        class-blending mixup. `t` is `+/-1` by construction there. A continuous
+        label would come through as a `t` of intermediate magnitude, which reads
+        as a *softer push to the same full-confidence target* rather than as a
+        target of its own -- a hinge has no target score to move. Weighting by
+        `|t|` would be arithmetic, not meaning.
+
+    Args:
+        scores: `(batch, candidates)` raw listener scores, pre-threshold
+        labels: `(batch, candidates)` in `{0, 1}`, the convention
+            `BCEWithLogitsLoss` takes
+        margin: how far past zero a candidate must sit to stop contributing
+
+    Returns:
+        a scalar, the mean over every candidate of every game
+    """
+    targets = 2.0 * labels - 1.0
+    return torch.clamp(margin - targets * scores, min=0.0).mean()
+
 
 def get_true_lang(batch, dataset, join=True):
     spk_inp, spk_y, lis_inp, lis_y, true_lang, md, idx = batch
@@ -582,7 +637,13 @@ def run(
         Metrics from this run; keys are statistics and values are their average
         values across the batches
     """
-    bce_criterion = nn.BCEWithLogitsLoss()
+    # Indexed without a fallback: `validate_config` has already rejected every
+    #     name that is not here, and a `.get` with a default would put the
+    #     choice of objective back in two places.
+    lis_criterion = {
+        "bce": nn.BCEWithLogitsLoss(),
+        "hinge": hinge_loss,
+    }[config['loss']]
     xent_criterion = nn.CrossEntropyLoss()
     training = split == "train"
     dataloader = dataloaders[split]
@@ -696,7 +757,7 @@ def run(
                 zeros = torch.zeros(batch_size, dtype=torch.int64, device=lis_scores.device)
                 this_loss = xent_criterion(lis_scores_xent, zeros)
             else:
-                this_loss = bce_criterion(lis_scores, lis_y)
+                this_loss = lis_criterion(lis_scores, lis_y)
 
             per_game_acc = per_game_accuracy(
                 lis_scores, lis_y, config['reference_game_xent']

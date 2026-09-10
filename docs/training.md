@@ -30,6 +30,25 @@ missing key rather than raising.
 - `use_lang` must be false if `copy_receiver` or `receiver_only` is true.
 - `copy_receiver` and `receiver_only` are mutually exclusive.
 - `reference_game_xent` requires `reference_game`.
+- `loss` must be `"bce"` or `"hinge"` — see `parse_config.LOSSES`. It selects
+  the criterion the listener's per-candidate scores are read with, on the branch
+  `reference_game_xent` does not take, so `loss = "hinge"` beside
+  `reference_game_xent = true` is rejected rather than left unread.
+
+  `"hinge"` also requires hard labels, so it is rejected beside
+  `[data] mixup_alpha > 0` with `mixup_blends_classes = true`. A hinge has a
+  direction and a minimum magnitude and no target score, so a candidate labelled
+  0.7 has no reading under it.
+
+  The margin is `train.HINGE_MARGIN = 1.0`, fixed rather than configurable:
+  `[receiver_discriminator] scale_score` multiplies the score in front of it, so
+  a learned volume beside a chosen margin is one degree of freedom written twice.
+  An arm asking for a hinge should be turning that scalar off. Note also that
+  `train_loss` then reads against 1.0 rather than against `ln 2` = 0.6931, so
+  every `ln 2` reference in these docs is a statement about the BCE arm alone.
+  `train_acc` and topsim are unaffected — the decision threshold is
+  `lis_scores > 0` under either objective.
+- `mixup_blends_classes` must be present and a boolean. See docs/data.md.
 - `joint_training` must be false — there is no joint-training objective in this
   codebase. This used to be checked once per batch inside the training loop;
   rejecting the config up front fails in the same cases, but before any work is

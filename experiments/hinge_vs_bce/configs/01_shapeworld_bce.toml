@@ -1,0 +1,58 @@
+# hinge_vs_bce: does a margin loss break the colour shortcut, and the ln 2 sit?
+#
+# Two arms on ShapeWorld at the settled speaker-backbone rate, copied from
+# `lr_sweep_2_sender_vit/configs/02_shapeworld_2e-5.toml` — `ShapeWorldViT`
+# speaker, `sender_vision` at 2e-5 — and differing only in the objective and in
+# the two listener scalars the objective makes degenerate.
+#
+# **What prompted it.** A ShapeWorld run sits at `ln 2` for tens of epochs
+# before igniting. The traverse through that flat stretch is
+# `train_referent_spread` 0.029 -> 0.114, the speaker's backbone slowly ceasing
+# to collapse every image onto one point; `train_logit_scale` does not move at
+# all until the loss does, so the channel is not the bottleneck. What *does*
+# move is the listener's volume, `train_score_scale` 0.998 -> 0.199 over thirty
+# epochs, against `bilinear_weight_norm` moving only 18.5 -> 18.2. That slide is
+# not a pathology: with an uninformative message, scoring every candidate at
+# zero is BCE's strict minimum, and the listener is descending into it.
+#
+# **The hypothesis.** A hinge has no such basin — inside the margin its loss is
+# `1 - mean(t * score)`, exactly 1 when scores and labels are uncorrelated and
+# independent of their scale — and, more speculatively, it is automatic
+# hard-example mining: a candidate already right by a full margin contributes
+# exactly zero, so once the colour-solvable games are solved the gradient
+# concentrates on the ones colour cannot do.
+#
+# **What to read.** `train_acc_md_shape` against `train_acc_md_color` at 100
+# epochs, per arm and per seed — *not* the ignition epoch. Shape crosses colour
+# around epoch 20 and climbs to 100, so nothing here is judgeable at 30. The
+# loss columns are not comparable across the two arms: `train_loss` reads
+# against `ln 2` = 0.6931 on this arm and against 1.0 on the other.
+#
+# Note both arms run under `[data] mixup_blends_classes = false`, the default
+# since 2026-09-10, so neither is comparable to a ShapeWorld run recorded before
+# that date. Mixup blends within polarity now, which is what leaves the labels
+# hard enough for a hinge to read at all.
+#
+# ---
+#
+# **This arm: `BCEWithLogitsLoss`**, i.e. DEFAULT.toml's objective and the one
+# every run in this repo's history used. The reference.
+
+name = "hinge_vs_bce"
+
+loss = "bce"
+
+[sender]
+feature_model = "ShapeWorldViT"
+
+[optimiser.implementation_lr.sender_vision]
+# Sweep 2's choice, unchanged. This experiment moves the objective, not a rate.
+ShapeWorldViT = 2e-5
+
+[scheduler]
+epochs = 100
+
+[experiment]
+# Two seeds. `scripts/job_utils.py` reads this key and `[scheduler] epochs` from
+# the raw file rather than from the merged config, so both must be restated here.
+repeats = 2

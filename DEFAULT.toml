@@ -42,6 +42,45 @@ reference_game_xent = false
 debug = false
 vis = false
 
+# The objective the listener's scores are read with, on the branch
+# `reference_game_xent` does not take. `"bce"` or `"hinge"`.
+#
+# `"bce"` is `BCEWithLogitsLoss`, what every run in this repo's history used.
+#
+# `"hinge"` is `mean(relu(1 - t * score))` at `t = 2y - 1`, and it is here
+# because BCE has a trivial optimum the listener keeps finding. With an
+# uninformative message, scoring every candidate at zero is *strictly* minimal,
+# and the 2026-09-10 ShapeWorld ViT run spent thirty epochs sliding
+# `train_score_scale` 0.998 -> 0.199 to get there while `bilinear_weight_norm`
+# moved only 18.5 -> 18.2: the collapse is one scalar, and it is the loss asking
+# for it. In hinge's linear region the loss is `1 - mean(t * score)`, exactly 1
+# when scores and labels are uncorrelated *whatever their scale*, so going quiet
+# is flat rather than downhill and every candidate at zero still returns a
+# constant gradient. The speculative half is that anything already right by a
+# full margin contributes exactly nothing, so once the colour-solvable games are
+# solved the gradient concentrates on the ones colour cannot do.
+#
+# **What it costs.** `train_loss` no longer reads against `ln 2` = 0.6931 but
+# against `mean(w)`, which is 1.0 on hard labels -- so every `ln 2` reference in
+# `docs/` and in `models/receiver.py` is a statement about the `"bce"` arm and
+# nothing else. Nor is the column comparable to jayelm's or to any run recorded
+# here. `train_acc` and topsim are unaffected: the decision threshold is
+# `lis_scores > 0` either way.
+#
+# The margin is fixed at `train.HINGE_MARGIN = 1.0` rather than configurable.
+# The listener's `[receiver_discriminator] scale_score` is the same degree of
+# freedom seen from the other end -- a volume in front of a fixed margin is a
+# margin -- so an arm that sets this should be turning that off, not sweeping
+# both. Note the direction its failure runs in: BCE's volume goes quiet, and a
+# hinge rewards a volume that grows until only errors are inside the margin,
+# which is the perceptron loss arriving without saying so.
+#
+# `"hinge"` requires hard labels, so `[data] mixup_blends_classes` must be
+# false wherever mixup is on. `validate_config` rejects the pair rather than
+# guessing at a target score for a candidate labelled 0.7. See
+# `parse_config.LOSSES`.
+loss = "bce"
+
 # Score the listener a second and third time on every training batch, in eval
 # mode, once with the real message and once with the batch's messages rolled by
 # one. Emits `train_eval_mode_acc` and `train_shuffled_message_acc` beside the
@@ -386,6 +425,46 @@ augment_sender = true
 # channel result: train accuracy falling towards eval accuracy is this key,
 # not the speaker.
 mixup_alpha = 1.0
+
+# Whether a mixup partner may come from the other polarity. `true` is Zhang et
+# al.'s mixup as written and as this repo ran it until 2026-09-10; `false`, the
+# default since, draws each candidate's partner from its own polarity, so
+# positives blend with positives and negatives with negatives.
+#
+# **Why the default moved.** Cross-polarity blending is what makes the target
+# continuous, and a continuous target is readable by `BCEWithLogitsLoss` and by
+# nothing else. `[top level] loss = "hinge"` has a direction and a minimum
+# magnitude and no target score at all, so it has no answer for a candidate
+# labelled 0.7. Within polarity the blended label is `lambda * 1 + (1 - lambda)
+# * 1`, i.e. hard, and every objective can read it.
+#
+# **What is kept and what is given up.** Kept is the memorisation argument,
+# which is the one this key was added for: the candidates are still novel pixels
+# every epoch, so the listener still cannot learn a game's twenty stored images.
+# Given up is Zhang et al.'s actual mechanism, which is interpolation *between*
+# classes -- a linearity prior on the score across the boundary, and a label
+# smoothing. Within polarity is the weaker regulariser and is closer to
+# smoothing along the class manifold.
+#
+# **What it buys back, in this dataset.** The blend is the more defensible
+# image. Both parents satisfy the concept, so the property that defines it
+# survives the blend and only the incidental ones ghost -- a red circle over a
+# red triangle is still red, where a red circle over a blue square is two
+# half-lit ghosts about which "is the object red" has no answer. The `true`
+# branch has to carry a paragraph explaining that its label describes how the
+# image was built rather than what it shows; this one does not.
+#
+# The negatives are the interesting half. Under a conjunction like
+# `and(red, circle)` a game's negatives can include a red square and a blue
+# circle, whose blend contains red and contains a circle while staying labelled
+# negative. That is not a corrupted label: neither ghost *is* a red circle, and
+# a listener that binds colour to location answers negative correctly. It is
+# corrupting only for a listener reading the image as a bag of features -- which
+# is what the colour shortcut is a special case of, so it is pressure in the
+# direction this repo has been applying from outside with silhouetting.
+#
+# Inert on birds, where `[birds.data] mixup_alpha = 0.0`.
+mixup_blends_classes = false
 
 # The colour a lit pixel comes back at, as a per-channel fraction of maximum.
 # Every pixel above half the image's peak luma is repainted to it and every

@@ -37,6 +37,36 @@ LR_SCHEDULE_SHAPES = {
     "cosine": ("half_cosine", True),
 }
 
+# `loss` -> the objective `train.py` scores the listener with, on the branch
+#     `reference_game_xent` does not take.
+#
+# A sentinel rather than a boolean for the reason `lr_schedule_shape` is one:
+#     the key names what is being optimised, and a third objective would be a
+#     third name here rather than a second flag beside the first.
+#
+# `bce` is `BCEWithLogitsLoss` on the raw scores, which is what every run in
+#     this repo's history used and what every `ln 2` reference in `docs/` is
+#     written against.
+#
+# `hinge` is `mean(relu(HINGE_MARGIN - t * score))` with `t = 2y - 1`. It is
+#     here because BCE has a trivial optimum the listener keeps finding: with an
+#     uninformative message, scoring every candidate at zero is *strictly*
+#     minimal, and `score_scale` slides 0.998 -> 0.199 over thirty epochs
+#     getting there while `bilinear_weight_norm` moves 18.5 -> 18.2. In hinge's
+#     linear region the loss is `1 - mean(t * score)`, which is exactly 1
+#     whenever scores and labels are uncorrelated *whatever their scale*, so
+#     going quiet is flat rather than downhill and the gradient at zero is a
+#     constant per candidate. Its second property is the speculative one:
+#     anything already right by a full margin contributes exactly zero, so the
+#     gradient concentrates on the games colour alone cannot solve.
+#
+# `hinge` requires hard labels and therefore `[data] mixup_blends_classes =
+#     false` wherever mixup is on -- see `validate_config` and
+#     `data.generic.ConceptDataset._apply_mixup`. It has no notion of a target
+#     score, only a direction and a minimum magnitude, so there is nothing for
+#     it to do with a candidate labelled 0.7.
+LOSSES = ("bce", "hinge")
+
 def recursive_update(store: dict, items: dict) -> dict:
     """
     Update `store` in place with `items`, merging recursively where both hold a
@@ -89,6 +119,40 @@ def validate_config(config: dict) -> bool:
     if config['reference_game_xent'] and not config['reference_game']:
         raise InvalidConfig(
             "reference_game_xent=true requires reference_game=true"
+        )
+
+    # `loss`. A sentinel, checked the way `lr_schedule_shape` is, with the two
+    # couplings that would otherwise be silent: an objective the branch never
+    # reaches, and an objective whose labels it cannot read.
+    loss = config.get('loss')
+
+    if loss not in LOSSES:
+        raise InvalidConfig(
+            f"`loss` must be one of {', '.join(LOSSES)}, got {loss!r}. See "
+            "`parse_config.LOSSES`."
+        )
+
+    if loss == "hinge" and config['reference_game_xent']:
+        raise InvalidConfig(
+            '`loss = "hinge"` and `reference_game_xent = true` cannot both be '
+            "set: the cross-entropy branch scores a single target and never "
+            "reaches the per-candidate criterion `loss` selects, so the key "
+            "would sit there unread."
+        )
+
+    if (
+        loss == "hinge"
+        and config['data']['mixup_alpha']
+        and config['data']['mixup_blends_classes']
+    ):
+        raise InvalidConfig(
+            '`loss = "hinge"` needs hard labels, but `[data] mixup_alpha = '
+            f"{config['data']['mixup_alpha']}` with `mixup_blends_classes = "
+            "true` blends positives with negatives and makes the target "
+            "continuous. A hinge has a direction and a minimum magnitude and "
+            "no target score, so there is nothing for it to do with a "
+            "candidate labelled 0.7. Set `mixup_blends_classes = false` -- the "
+            "default -- to blend within polarity, or turn mixup off."
         )
 
     # There is no joint-training objective in this codebase.
@@ -430,6 +494,18 @@ def validate_config(config: dict) -> bool:
         # No upper bound to give. `Beta(a, a)` concentrates on 0.5 as `a`
         #     grows, which is a weaker augmentation rather than an invalid one.
         raise InvalidConfig(f"`mixup_alpha` must be >= 0, got {alpha}.")
+
+    # Required and boolean for the reason `scale_score` and `bias_score` are:
+    #     the module reading it defaults to today's behaviour, so a missing key
+    #     would run an arm silently rather than failing. The pairing with
+    #     `loss` is checked at the top of this function, where both keys are in
+    #     scope.
+    blends = config['data']['mixup_blends_classes']
+    if not isinstance(blends, bool):
+        raise InvalidConfig(
+            f"`mixup_blends_classes` must be present and a boolean — got "
+            f"{blends!r}."
+        )
 
     # A scalar is broadcast to three channels by `silhouette`, so both forms
     #     are accepted; anything else is a config that will not paint a colour.

@@ -143,6 +143,7 @@ def load(config, fast=False):
                 config['data']['augment_affine_degrees_receiver']
             ),
             mixup_alpha=config['data']['mixup_alpha'],
+            mixup_blends_classes=config['data']['mixup_blends_classes'],
             shapes=datas[split]["shapes"],
             metadata_vocab=md_vocab,
             **dataset_kwargs,
@@ -181,6 +182,7 @@ def load(config, fast=False):
                 augment_affine_degrees_sender=0.0,
                 augment_affine_degrees_receiver=0.0,
                 mixup_alpha=0.0,
+                mixup_blends_classes=False,
                 shapes=datas[split]["shapes"],
                 metadata_vocab=md_vocab,
                 **dataset_kwargs,

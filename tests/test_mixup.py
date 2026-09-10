@@ -5,8 +5,14 @@ Runnable without pytest:  python tests/test_mixup.py
 
 Each of the listener's candidates is replaced by a blend of itself and another
 drawn from the same set with replacement, and its label by the same blend --
-Zhang et al. 2018 (arXiv:1710.09412), unchanged. Positives and negatives mix
-together, so the target becomes continuous.
+Zhang et al. 2018 (arXiv:1710.09412).
+
+`[data] mixup_blends_classes` decides where that partner comes from. Set, the
+whole set: positives and negatives mix together and the target goes continuous,
+which is Zhang et al. as written and what this repo ran until 2026-09-10. Clear,
+the default since: the partner shares the candidate's polarity, the blended
+label is hard, and `loss = "hinge"` -- which has no target score to hand a
+candidate labelled 0.7 -- can read it.
 
 The label states how the image was *built*, not what it depicts, and that
 distinction is why there is no test here asserting anything about the picture's
@@ -42,8 +48,9 @@ LIT = 200.0
 class _Probe(ConceptDataset):
     """The transform alone, without a store or a game behind it."""
 
-    def __init__(self, mixup_alpha=0.0):
+    def __init__(self, mixup_alpha=0.0, mixup_blends_classes=False):
         self.mixup_alpha = mixup_alpha
+        self.mixup_blends_classes = mixup_blends_classes
 
 
 def _candidates(dtype=torch.uint8):
@@ -59,6 +66,12 @@ def test_it_is_off_by_default():
     assert inspect.signature(ConceptDataset.__init__).parameters[
         "mixup_alpha"
     ].default == 0.0
+
+
+def test_the_partner_stays_within_polarity_by_default():
+    assert inspect.signature(ConceptDataset.__init__).parameters[
+        "mixup_blends_classes"
+    ].default is False
 
 
 def test_off_is_a_passthrough_for_images_and_labels():
@@ -84,15 +97,92 @@ def test_the_image_and_the_label_share_a_weight():
 
 
 def test_the_labels_go_continuous_and_stay_in_range():
+    """The `mixup_blends_classes = True` branch, which is what makes them soft."""
     imgs, labels = _candidates()
     np.random.seed(0)
-    _, y = _Probe(ALPHA)._apply_mixup(imgs, labels)
+    _, y = _Probe(ALPHA, mixup_blends_classes=True)._apply_mixup(imgs, labels)
 
     assert y.dtype == torch.float32
     assert float(y.min()) >= 0.0 and float(y.max()) <= 1.0
     # A blend of two candidates with the same label lands back on it, so only
     #     the cross-label pairs go soft -- roughly half of them at 10 and 10.
     assert ((y > 0.01) & (y < 0.99)).any(), "no soft labels at all"
+
+
+def test_within_polarity_leaves_the_labels_hard():
+    """
+    The default branch, and the property `loss = "hinge"` depends on: a blend of
+        two positives is `lambda * 1 + (1 - lambda) * 1`, so nothing lands
+        between 0 and 1 whatever `lambda` was drawn. Over many draws, because
+        one seed could miss a cross-polarity partner by luck.
+    """
+    imgs, labels = _candidates()
+
+    for seed in range(50):
+        np.random.seed(seed)
+        _, y = _Probe(ALPHA)._apply_mixup(imgs, labels)
+
+        assert y.dtype == torch.float32
+        assert torch.equal(y, labels.to(torch.float32)), (
+            f"seed {seed} moved a label off its polarity: {y}"
+        )
+
+
+def test_within_polarity_partners_never_cross_the_boundary():
+    """
+    Read off the images rather than the labels, since within polarity the labels
+        cannot show it. Each candidate is a constant image at its own index, so
+        a blend of two positives stays inside the positives' value range and a
+        negative that borrowed from a positive would leave the negatives'.
+    """
+    imgs, labels = _candidates(dtype=torch.float32)
+    imgs[:] = torch.arange(20).reshape(20, 1, 1, 1).to(torch.float32)
+
+    for seed in range(50):
+        np.random.seed(seed)
+        out, _ = _Probe(ALPHA)._apply_mixup(imgs, labels)
+        blended = out[:, 0, 0, 0]
+
+        # Positives are indices 0-9, negatives 10-19, so a blend that stayed
+        #     within polarity cannot cross 9.5 in either direction.
+        assert (blended[:10] <= 9.0 + 1e-5).all(), f"seed {seed}: {blended}"
+        assert (blended[10:] >= 10.0 - 1e-5).all(), f"seed {seed}: {blended}"
+
+
+def test_blending_classes_does_cross_the_boundary():
+    """
+    The counterpart, so the test above is pinning the branch and not the arithmetic.
+    """
+    imgs, labels = _candidates(dtype=torch.float32)
+    imgs[:] = torch.arange(20).reshape(20, 1, 1, 1).to(torch.float32)
+
+    crossed = False
+    for seed in range(50):
+        np.random.seed(seed)
+        out, _ = _Probe(ALPHA, mixup_blends_classes=True)._apply_mixup(
+            imgs, labels
+        )
+        blended = out[:, 0, 0, 0]
+        crossed |= bool((blended[:10] > 9.0 + 1e-5).any())
+
+    assert crossed, "no candidate ever took a partner from the other polarity"
+
+
+def test_a_group_of_one_blends_with_itself():
+    """
+    `percent_novel < 1.0` rewrites candidates one at a time, so the two groups
+        are not guaranteed to be ten and ten, and a group of one has only itself
+        to draw from. That must be a passthrough rather than an index error.
+    """
+    imgs, labels = _candidates(dtype=torch.float32)
+    labels[:] = 0
+    labels[3] = 1
+
+    np.random.seed(0)
+    out, y = _Probe(ALPHA)._apply_mixup(imgs, labels)
+
+    assert torch.equal(out[3], imgs[3])
+    assert float(y[3]) == 1.0
 
 
 def test_the_callers_tensors_are_not_written_through():

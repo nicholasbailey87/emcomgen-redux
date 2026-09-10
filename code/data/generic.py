@@ -233,6 +233,7 @@ class ConceptDataset:
         augment_affine_degrees_sender=0.0,
         augment_affine_degrees_receiver=0.0,
         mixup_alpha=0.0,
+        mixup_blends_classes=False,
         **kwargs,
     ):
         self.x = data["x"]
@@ -262,6 +263,7 @@ class ConceptDataset:
         self.augment_affine_degrees_sender = augment_affine_degrees_sender
         self.augment_affine_degrees_receiver = augment_affine_degrees_receiver
         self.mixup_alpha = mixup_alpha
+        self.mixup_blends_classes = mixup_blends_classes
         assert self.n_examples % 2 == 0
         # Assign the rest of the kwargs
         for name, val in kwargs.items():
@@ -407,21 +409,54 @@ class ConceptDataset:
             another drawn from the same set, and its label by the same blend.
 
         `lambda ~ Beta(alpha, alpha)`, one draw per candidate, partners sampled
-            with replacement across the whole set -- positives and negatives
-            together, which is the point. The label that comes back is
-            `lambda * y_i + (1 - lambda) * y_j`, so a candidate built from 0.7
-            of a satisfying image and 0.3 of an unsatisfying one is labelled
-            0.7 and the listener has to return a score reflecting it.
-            `BCEWithLogitsLoss` takes that natively; it is cross-entropy
-            against a Bernoulli of that parameter.
+            with replacement. The label that comes back is
+            `lambda * y_i + (1 - lambda) * y_j`.
+
+        **`mixup_blends_classes` decides where the partner comes from**, and it
+            is the difference between a continuous target and a hard one.
+
+        Set (Zhang et al. as written, and what this repo ran until 2026-09-10):
+            the partner is drawn from the whole set, positives and negatives
+            together, so a candidate built from 0.7 of a satisfying image and
+            0.3 of an unsatisfying one is labelled 0.7 and the listener has to
+            return a score reflecting it. `BCEWithLogitsLoss` takes that
+            natively; it is cross-entropy against a Bernoulli of that parameter.
+            No other objective in this repo can read it -- see
+            `parse_config.LOSSES`, which rejects the pairing with a hinge rather
+            than inventing a target score for a candidate labelled 0.7.
+
+        Clear (the default): the partner is drawn from the candidates sharing
+            this one's polarity, so the blended label is `lambda * 1 +
+            (1 - lambda) * 1` and stays hard. The memorisation argument this
+            transform exists for is untouched -- the candidates are still novel
+            pixels every epoch -- and what is given up is the between-class
+            interpolation that is Zhang et al.'s actual mechanism: a linearity
+            prior across the decision boundary, and a label smoothing. This is
+            the weaker regulariser, and closer to smoothing along the class
+            manifold than to their vicinal risk.
+
+            It is also the more defensible picture *here*, which the paragraph
+            below is the counterpart of. Both parents satisfy the concept, so
+            the property defining it survives the blend and only the incidental
+            ones ghost: a red circle over a red triangle is still red.
+
+            The negatives are the interesting half. Under `and(red, circle)` a
+            game's negatives can include a red square and a blue circle, and
+            their blend contains red and contains a circle while staying
+            labelled negative. That is not a corrupted label -- neither ghost
+            *is* a red circle, and a listener that binds colour to location
+            answers negative correctly. It misleads only a listener reading the
+            image as a bag of features, which is what the colour shortcut is a
+            special case of.
 
         **The label is the mixing weight, not a claim about the picture.**
-            Worth being clear about, because the picture does not support the
-            claim: a ShapeWorld world holds exactly one object, so blending a
-            red circle with a blue square gives two half-lit ghosts rather than
-            an object that is 70% red, and "is the object red" has no answer
-            for it. What is well defined is how the image was *built*, and that
-            is what the target states. This is Zhang et al. 2018
+            True of the set branch, and worth being clear about because the
+            picture does not support the claim: a ShapeWorld world holds exactly
+            one object, so blending a red circle with a blue square gives two
+            half-lit ghosts rather than an object that is 70% red, and "is the
+            object red" has no answer for it. What is well defined is how the
+            image was *built*, and that is what the target states. This is
+            Zhang et al. 2018
             (arXiv:1710.09412) unchanged, including its justification: the
             target imposes a linearity prior on the listener's score between
             training points rather than supplying extra supervision. Their
@@ -454,7 +489,28 @@ class ConceptDataset:
             return imgs, labels
 
         n = imgs.shape[0]
-        partner = torch.as_tensor(np.random.randint(n, size=n))
+
+        if self.mixup_blends_classes:
+            partner = torch.as_tensor(np.random.randint(n, size=n))
+        else:
+            # Grouped by the label rather than by the halves `split_spk_lis`
+            #     happens to hand back. The layout is that function's to change
+            #     and `percent_novel < 1.0` already rewrites it candidate by
+            #     candidate; the polarity is what this branch is about, so the
+            #     polarity is what it reads. `> 0.5` rather than `== 1` because
+            #     the labels arrive as `uint8` here and as floats after
+            #     `train.py` has been at them.
+            positive = np.asarray(labels) > 0.5
+            partner = np.empty(n, dtype=np.int64)
+
+            for group in (np.flatnonzero(positive), np.flatnonzero(~positive)):
+                if group.size:
+                    partner[group] = group[
+                        np.random.randint(group.size, size=group.size)
+                    ]
+
+            partner = torch.as_tensor(partner)
+
         weight = torch.as_tensor(
             np.random.beta(self.mixup_alpha, self.mixup_alpha, size=n),
             dtype=torch.float32,

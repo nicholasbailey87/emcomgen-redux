@@ -367,6 +367,45 @@ In the reference game, `percent_novel = 0.0` hands back the *same* tensor for
 both agents; `silhouette` returns a new one, so an independent roll per agent is
 still safe there.
 
+## Where a mixup partner comes from
+
+`mixup_blends_classes` decides whether a candidate may blend with one of the
+other polarity. It is `false` by default since 2026-09-10, so positives blend
+with positives and negatives with negatives.
+
+The reason is the objective, not the picture. Cross-polarity blending is what
+makes the target continuous — a candidate built from 0.7 of a satisfying image
+and 0.3 of an unsatisfying one is labelled 0.7 — and a continuous target is
+readable by `BCEWithLogitsLoss` and by nothing else. The top-level `loss` key
+took a second value on the same date, and a hinge has a direction and a minimum
+magnitude and no target score at all, so it has no answer for a candidate
+labelled 0.7. `validate_config` rejects the pairing rather than inventing one.
+
+What the default keeps is the memorisation argument this transform exists for:
+the candidates are still novel pixels every epoch, so the listener still cannot
+learn a game's twenty stored images. What it gives up is Zhang et al.'s actual
+mechanism, which is interpolation *between* classes — a linearity prior on the
+score across the decision boundary, and a label smoothing. Within polarity is
+the weaker regulariser and is closer to smoothing along the class manifold.
+
+It is also the more defensible image in this dataset. Both parents satisfy the
+concept, so the property that defines it survives the blend and only the
+incidental ones ghost: a red circle over a red triangle is still red, where the
+cross-polarity blend has to be explained as a statement about how the image was
+built rather than about what it shows.
+
+The negatives are the interesting half. Under a conjunction like
+`and(red, circle)` a game's negatives can include a red square and a blue
+circle, whose blend contains red and contains a circle while staying labelled
+negative. That is not a corrupted label — neither ghost *is* a red circle, and a
+listener that binds colour to location answers negative correctly. It misleads
+only a listener reading the image as a bag of features, which is what the colour
+shortcut is a special case of, so it is pressure in the direction silhouetting
+applies from outside.
+
+Unmeasured. Nothing has yet run the two arms against each other; the default
+moved because `experiments/hinge_vs_bce/` cannot be asked for without it.
+
 ## Which agent is augmented
 
 The silhouette is asymmetric and always has been — `silhouette_p_sender` has

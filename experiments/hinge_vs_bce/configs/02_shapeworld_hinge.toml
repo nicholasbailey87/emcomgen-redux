@@ -1,0 +1,60 @@
+# hinge_vs_bce arm: the margin loss, with the listener's readout scalars off.
+#
+# See `01_shapeworld_bce.toml` for what this experiment measures and why. This
+# file differs from that one in the objective and in the two scalars that
+# objective makes degenerate, and in nothing else.
+#
+# ---
+#
+# **This arm: `loss = "hinge"`**, `mean(relu(1 - t * score))` at `t = 2y - 1`
+# and the margin fixed at `train.HINGE_MARGIN`. The listener's score opens at
+# the calibrated `1 / sqrt(3)` = 0.577, so every candidate starts inside the
+# margin and returns gradient from epoch 0.
+#
+# **Why the readout scalars come off with it.** `score_scale` multiplies the
+# score in front of a fixed margin, so a learned volume beside a chosen margin
+# is one degree of freedom written twice. Worse, the direction of its failure
+# inverts: under BCE the volume goes quiet, and under a hinge the reward is to
+# grow it until every correct candidate sits past the margin and only errors
+# contribute — the perceptron loss, arriving without saying so. `score_bias` is
+# the offset half of the same readout and is not earning its place on either
+# arm: games are balanced 10/10, so the loss-optimal global offset is near zero,
+# and the 2026-09-10 run has it at 0.004 against a score of 0.577. With both
+# gates clear `ScoreVolume.readout` is the identity and neither parameter is
+# created — absent rather than frozen, so `split_out_parameter` and
+# `SCALAR_GROUPS` see the truth. `train_score_scale` and `train_score_bias` come
+# back as NaN in this arm's `metrics.csv`; the columns stay.
+#
+# So this arm differs from `01` in three keys and the difference is not
+# attributable to the loss alone. That is deliberate: the alternative is a hinge
+# run in a configuration the argument says it should not be run in.
+#
+# **The failure to watch for**, and the mirror of the one that prompted all
+# this: a hinge stops pushing a candidate that is right by a full margin, so a
+# comfortable listener sends the speaker nothing. If this arm ignites and then
+# stalls, that is the first thing to check, and the answer is a larger
+# `HINGE_MARGIN` rather than a different objective.
+
+name = "hinge_vs_bce"
+
+loss = "hinge"
+
+[sender]
+feature_model = "ShapeWorldViT"
+
+[receiver_discriminator]
+# Both off, for the reasons in the header. `readout` is then the identity.
+scale_score = false
+bias_score = false
+
+[optimiser.implementation_lr.sender_vision]
+# Sweep 2's choice, unchanged. This experiment moves the objective, not a rate.
+ShapeWorldViT = 2e-5
+
+[scheduler]
+epochs = 100
+
+[experiment]
+# Two seeds. `scripts/job_utils.py` reads this key and `[scheduler] epochs` from
+# the raw file rather than from the merged config, so both must be restated here.
+repeats = 2
