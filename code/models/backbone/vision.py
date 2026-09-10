@@ -21,6 +21,7 @@ class ViT2(nn.Module):
     def __init__(
             self,
             n_feats=(3, 64, 64),
+            initial_batch_norm=True,
             **kwargs
         ):
         super().__init__()
@@ -93,7 +94,11 @@ class ViT2(nn.Module):
             input_size=n_feats[1:],
             image_classes=self.d_model, # Just return an overall embedding
             in_channels=n_feats[0],
-            initial_batch_norm=True,
+            # A `BatchNorm2d(3)` over the raw image, and the only BatchNorm in
+            #     this stack. Set by the factory rather than by config: False
+            #     for `ShapeWorldViT` and True for `BirdsViT`, for the reasons
+            #     in those two docstrings.
+            initial_batch_norm=initial_batch_norm,
             # The whole `cnn_*` group is inert while `cnn` is False, and pinned
             #     so that flipping `cnn` on is a deliberate act.
             cnn=False,
@@ -186,13 +191,43 @@ class ViT2(nn.Module):
 
 def ShapeWorldViT(*args, **kwargs):
     """
-    `ViT2` under ShapeWorld's name: 128 wide, 6 layers, 4 heads, feedforward
-        inner 256, GELU -- 876,599 parameters against `ResNet56`'s 852,368.
+    `ViT2` under ShapeWorld's name, with no initial BatchNorm: 128 wide, 6
+        layers, 4 heads, feedforward inner 256, GELU -- 876,593 parameters
+        against `ResNet56`'s 852,368.
 
     The size is not here. It is in `[sender_feature_model]` and
         `[receiver_feature_model]`, which is where every backbone's
-        hyperparameters live; this factory swallows its arguments and returns
-        the class, exactly as `ResNet56` and `ResNet18` do.
+        hyperparameters live. What *is* here is `initial_batch_norm=False`,
+        which is the one thing this factory does beyond naming the class --
+        so it is not a pure alias the way `ResNet56` and `ResNet18` are over
+        `ResNet`, and the 6 parameters between 876,593 and 876,599 are that
+        layer's weight and bias.
+
+    **Why it is off here and on for birds.** `ViT2` opened with an
+        `nn.BatchNorm2d(3)` over the raw image on both datasets until
+        2026-09-10, and it is the only BatchNorm in this stack. ShapeWorld's
+        images arrive as [0, 1] with a black background at exactly 0.0
+        (`train.prepare_batch` divides the uint8 store by 255), so that layer
+        was doing two things at once: standing in for the input normalisation
+        ShapeWorld has none of, and making the background nonzero.
+
+    The second is the problem. `CifarResNet` opens with a bias-free 3x3
+        convolution on the same [0, 1] tensor, and a conv's weight gradient is
+        `sum(x * dL/dy)` -- so a pixel at exactly 0.0 contributes nothing, and
+        roughly 94% of a ShapeWorld image is background. Under a BatchNorm the
+        background is mapped to `-mean_c/sd_c` instead, which is nonzero,
+        channel-selective, and a function of the batch's colour composition.
+        That gives colour a route into the transformer's first layer, across
+        the whole image area, that the CNN it is size-matched against does not
+        have; shape has no equivalent, since no per-channel batch statistic
+        encodes an outline. On ShapeWorld, where the standing failure is a
+        colour-only minimum, that is worth removing.
+
+    CUB keeps it, and the asymmetry is the point rather than an oversight.
+        `image_util.TransformLoader`'s pipeline ends in a torchvision
+        normalise, so a birds tensor is already centred when it arrives and
+        `BatchNorm2d(3)` is close to inert on it -- there is nothing to remove
+        and no black background for it to lift. See `BirdsViT`.
 
     What the name buys is a key. `[optimiser.implementation_lr]` is keyed by
         the class named in the config, and both datasets run the same `ViT2`
@@ -204,9 +239,10 @@ def ShapeWorldViT(*args, **kwargs):
         `type(module).__name__`.
 
     `parse_config.validate_config` refuses a `ShapeWorldViT` on a `cub`
-        dataset, so the label cannot drift from the block that sizes it.
+        dataset. That check guarded a label when the two names were aliases;
+        it guards an architecture now.
     """
-    return ViT2(*args, **kwargs)
+    return ViT2(*args, initial_batch_norm=False, **kwargs)
 
 
 def BirdsViT(*args, **kwargs):
@@ -220,8 +256,15 @@ def BirdsViT(*args, **kwargs):
         `ShapeWorldViT` for why the two stacks have two names when they are one
         class: the learning-rate table is keyed by name, and the birds arm of
         `experiments/lr_sweep_2_sender_vit/` chose 2e-5 for this one alone.
+
+    `initial_batch_norm=True`, stated rather than defaulted, because since
+        2026-09-10 it is the thing the two names differ in. CUB's images reach
+        the model already normalised by `image_util.TransformLoader`, so the
+        layer has little left to do and no black background to lift off zero;
+        the argument that took it off ShapeWorld does not reach here. See
+        `ShapeWorldViT`.
     """
-    return ViT2(*args, **kwargs)
+    return ViT2(*args, initial_batch_norm=True, **kwargs)
 
 
 # Basic ResNet model

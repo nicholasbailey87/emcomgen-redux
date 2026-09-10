@@ -123,11 +123,15 @@ def silhouette(imgs, fill=DEFAULT_SILHOUETTE_FILL):
 
     Chromatic, and an integer number of levels. The default is the palette's own
     mean object colour, (149, 149, 106), and the argument for it is untouched by
-    the edge treatment. The receiver's `ViT2` opens with `nn.BatchNorm2d(3)` over
-    raw RGB and ShapeWorld gets no other input normalisation, so what this
-    function emits lands directly on that layer's statistics -- and eval is never
-    silhouetted, so the running stats are gathered on a mixture and then used on
-    clean images. The palette is blue-deficient (blue appears in two of six
+    the edge treatment. `ViT2` opened with `nn.BatchNorm2d(3)` over raw RGB, and
+    ShapeWorld gets no other input normalisation beyond `prepare_batch`'s divide
+    by 255, so what this function emits landed directly on that layer's
+    statistics -- and eval is never silhouetted, so the running stats were
+    gathered on a mixture and then used on clean images. That is history on
+    ShapeWorld since 2026-09-10, when `ShapeWorldViT` stopped building the layer
+    (`BirdsViT` still does); the fill's other argument, about *batch* rather than
+    running statistics, needs no BatchNorm on raw RGB and is unaffected. See
+    DEFAULT.toml and `vision.ShapeWorldViT`. The palette is blue-deficient (blue appears in two of six
     colours where red and green appear in three), so its mean is (148.83, 148.83,
     106.33) and no achromatic constant can match all three channels: 0.5 ran
     -14.3% / -14.3% / +19.9% against eval, where this fill runs +0.1% / +0.1% /
@@ -530,12 +534,12 @@ class ConceptDataset:
         spk_inp, lis_inp = self._apply_silhouette(spk_inp, lis_inp)
 
         # Train only, like the permutation above and the silhouette, and each
-        #     agent's own settings: the defaults augment the receiver's view and
-        #     leave the sender's untouched, which makes the sender call a
-        #     passthrough. The draws are independent either way, so a config
-        #     that turns the sender's keys back on gets two different views of
-        #     a stored image the two agents share -- which only happens below
-        #     `percent_novel = 1.0`.
+        #     agent's own settings. The defaults augment both views since
+        #     2026-09-10; between 2026-09-09 and then they augmented the
+        #     receiver's alone, which made the sender call a passthrough. The
+        #     draws are independent either way, so the two agents get two
+        #     different views of a stored image they share -- which only
+        #     happens below `percent_novel = 1.0`.
         if self.augment:
             spk_inp = self._augment_geometry(
                 spk_inp,

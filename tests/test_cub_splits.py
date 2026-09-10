@@ -391,7 +391,7 @@ def test_debug_shrinks_every_split_but_never_to_zero():
 # Which agent is augmented
 # --------------------------------------------------------------------------
 
-def _agent_marked_dataset(reference_game=False):
+def _agent_marked_dataset(reference_game=False, augment_sender=False):
     """
     A dataset whose two transforms are distinguishable in the pixels.
 
@@ -415,6 +415,7 @@ def _agent_marked_dataset(reference_game=False):
         length=10,
         reference_game=reference_game,
         percent_novel=1.0,
+        augment_sender=augment_sender,
     )
 
 
@@ -429,6 +430,10 @@ def test_the_listener_is_augmented_and_the_speaker_is_not():
         what makes the destination knowable before the transform runs. Both
         polarities are checked: the negatives are dealt the same way and would
         be easy to route as a block.
+
+    This is the `augment_sender = False` arm, which is not the default. The
+        helper asks for it by name; `test_augment_sender_gives_both_agents_the_train_pipeline`
+        covers the default.
     """
     np.random.seed(0)
     spk_inp, spk_label, lis_inp, lis_label, _, _ = (
@@ -440,6 +445,40 @@ def test_the_listener_is_augmented_and_the_speaker_is_not():
     #     alone.
     for label in (spk_label, lis_label):
         assert set(label.tolist()) == {0, 1}
+
+
+def test_augment_sender_gives_both_agents_the_train_pipeline():
+    """
+    The default since 2026-09-10, and what CUB did before the split existed.
+
+    `augment_sender` is `load`'s reading of `[data] augment_flip_sender`, which
+        is the key that makes the same decision on ShapeWorld. True means there
+        is nothing to route: every image of both polarities takes the train
+        pipeline, speaker's half included.
+    """
+    np.random.seed(0)
+    spk_inp, spk_label, lis_inp, lis_label, _, _ = (
+        _agent_marked_dataset(augment_sender=True).sample_game()
+    )
+    assert int(spk_inp.min()) == 2 and int(spk_inp.max()) == 2
+    assert int(lis_inp.min()) == 2 and int(lis_inp.max()) == 2
+    for label in (spk_label, lis_label):
+        assert set(label.tolist()) == {0, 1}
+
+
+def test_an_eval_split_augments_nothing_whatever_augment_sender_says():
+    """
+    `augment_transform` is `None` on an eval split, and that check comes first,
+        so the eval pipeline runs for every image at either setting. Eval has
+        never been augmented and this key does not change that.
+    """
+    for augment_sender in (True, False):
+        np.random.seed(0)
+        dataset = _agent_marked_dataset(augment_sender=augment_sender)
+        dataset.augment_transform = None
+        spk_inp, _, lis_inp, _, _, _ = dataset.sample_game()
+        assert int(spk_inp.min()) == 1 and int(spk_inp.max()) == 1
+        assert int(lis_inp.min()) == 1 and int(lis_inp.max()) == 1
 
 
 def test_a_reference_game_augments_everything():

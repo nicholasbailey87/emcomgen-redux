@@ -236,11 +236,12 @@ silhouette_p_receiver = 0.2
 # `augment_affine_degrees_*` rotates every image by a uniform draw from
 # +/- that many degrees; 0.0 leaves the rotation out entirely.
 #
-# **One pair of keys per agent since 2026-09-09, receiver-only by default.**
-# Until then a single pair applied to both views. The keys are split the way
-# `silhouette_p_sender` / `silhouette_p_receiver` are split, and for the same
-# reason: the asymmetry is the treatment, and a folder that wants the symmetric
-# regime back can still ask for it.
+# **One pair of keys per agent since 2026-09-09; symmetric again since
+# 2026-09-10.** Until 2026-09-09 a single pair applied to both views. The keys
+# are split the way `silhouette_p_sender` / `silhouette_p_receiver` are split,
+# and for the same reason: the asymmetry is the treatment, and a folder that
+# wants either regime can ask for it by name. The split stays; what has moved
+# back is which side of it the defaults sit on.
 #
 # Why they exist. The store holds 20 positives and 20 negatives per game, and
 # `ConceptDataset.__getitem__`'s permutation only decides which agent sees
@@ -273,6 +274,32 @@ silhouette_p_receiver = 0.2
 # This is reasoning, not a measurement. The arm that would test it is the old
 # symmetric setting -- all four keys on -- against this one.
 #
+# **And the defaults are back on the symmetric side since 2026-09-10.** The
+# argument above is unrefuted and is left standing in full, because what moved
+# is not the argument. The first ShapeWorld ViT run under the receiver-only
+# defaults spent 48 epochs with `train_loss` at 0.6931 -- ln 2 to four places --
+# `train_referent_spread` at 0.029, and `score_scale` decaying 0.95 -> 0.26
+# under weight decay with no signal to hold it up, then ignited at epoch 49 on
+# colour alone: `train_acc_md_color` to 0.74, `train_acc_md_shape` back to
+# 0.500, `unique_message_fraction` collapsing 0.81 -> 0.24. The five first-pass
+# arms of `lr_sweep_2_sender_vit` ignited between epoch 6 and epoch 18.
+#
+# That is a dead zone eight times longer than any arm of the sweep it is meant
+# to re-run, and it is not attributable to this key. Three things changed
+# between the two passes -- the patch grid went to 16x16 (`78ac5cd`), the
+# geometry went receiver-only (`7a838d2`), and `warm_up_epochs` went to 0
+# (`ba89064`) -- and one run cannot rank three treatments. So this is a return
+# to the last configuration observed to ignite rather than a finding against
+# receiver-only augmentation, and it is taken together with the warm-up going
+# back to 10 for exactly that reason: the two are being put back as the pair
+# they were removed as. See `[scheduler] warm_up_epochs`.
+#
+# What that costs is the ignition argument above -- input noise on the side
+# that must emit a symbol early -- and it is charged knowingly, because the
+# alternative is a re-run of the sweep from a state whose ignition has never
+# been seen. The arm that separates them is still the same one: all four keys
+# on against `_sender` off, at one rate, with everything else held.
+#
 # Note the original ShapeWorld store had 40-50 positives per game and
 # `split_spk_lis` read 20 of them, so a fresh subset arrived every epoch;
 # `data/shrink_shapeworld.py` kept 20 and that variation went with it. Its
@@ -292,10 +319,36 @@ silhouette_p_receiver = 0.2
 # outright. `RandomResizedCrop` is out for the same reason: its `ratio`
 # argument is exactly that scaling. Colour jitter is out on its own terms,
 # since colour is a label here rather than a nuisance variable.
-augment_flip_sender = false
+augment_flip_sender = true
 augment_flip_receiver = true
-augment_affine_degrees_sender = 0.0
+augment_affine_degrees_sender = 10.0
 augment_affine_degrees_receiver = 10.0
+
+# CUB's version of the same decision, and CUB's alone.
+#
+# The four keys above are ShapeWorld's, because ShapeWorld's augmentation is a
+# pair of tensor operations applied per view, downstream of the speaker/
+# listener split and individually switchable. CUB's is one torchvision pipeline
+# -- `RandomResizedCrop`, `ImageJitter`, `RandomHorizontalFlip` -- applied per
+# image *before* the split, so there is nothing per-view to turn off and no
+# per-transform key to turn it off with. What there is instead is the position
+# `split_spk_lis` deals from, which is known before the transform runs, so the
+# choice CUB can make is the whole pipeline or none of it, per agent. That is
+# one boolean.
+#
+# `true` gives both agents the train pipeline, which is what CUB did before
+# 2026-09-09 and does again since 2026-09-10. `false` is the receiver-only arm:
+# the speaker's half of each polarity takes the eval pipeline instead. Eval
+# splits pass no train pipeline at all and are unaffected either way.
+#
+# Nothing in `generic.py` reads this, so on a ShapeWorld config it is inert
+# rather than an error -- `augment_flip_sender` and
+# `augment_affine_degrees_sender` are what say it there. The two are moved
+# together by hand; they are not linked in code, because they are keys of
+# different shapes over different pipelines and pretending otherwise would hide
+# that a birds arm and a ShapeWorld arm at the same setting are not running the
+# same transform.
+augment_sender = true
 
 # Mixup on the listener's candidates: each is replaced by a blend of itself and
 # another drawn from the same set with replacement, weight `lambda` from
@@ -416,9 +469,22 @@ mixup_alpha = 1.0
 # `tests/test_silhouette.py::test_the_fill_is_an_integer_number_of_levels` exists
 # to make a sloppy literal fail loudly.
 #
-# **Why chromatic and not simply another integer grey.** The receiver's `ViT2`
-# opens with `nn.BatchNorm2d(3)` over raw RGB (`initial_batch_norm=True`, and
-# broccoli's `vit.py` puts it at `preprocess[0]`), and ShapeWorld gets no other
+# **Why chromatic and not simply another integer grey.** This argument was
+# written when `ViT2` opened with `nn.BatchNorm2d(3)` over raw RGB on both
+# datasets. Since 2026-09-10 it does not on ShapeWorld -- `ShapeWorldViT`
+# passes `initial_batch_norm=False` -- so read the next two paragraphs as
+# birds' and as ShapeWorld's history. What replaces them for ShapeWorld is the
+# batch-statistics argument further down, which needs no BatchNorm on raw RGB
+# and survives the change; the eval-time running-statistics half does not, and
+# on a ShapeWorld ViT rung there is now no BatchNorm in the speaker's backbone
+# at all for `calibrate_batch_norm` to re-estimate. The fill is unchanged: it
+# was chosen on a run as well as on this reasoning, and the reasoning that
+# outlived the layer is the half that was doing the work. See
+# `vision.ShapeWorldViT`.
+#
+# The receiver's `ViT2` opens with `nn.BatchNorm2d(3)` over raw RGB
+# (`initial_batch_norm=True`, and broccoli's `vit.py` puts it at
+# `preprocess[0]`), and ShapeWorld gets no other
 # input normalisation, so whatever `silhouette` emits lands directly on that
 # layer's statistics. Eval is never silhouetted, so those running statistics are
 # gathered on a mixture and then applied to clean images: any gap is a fixed
@@ -477,8 +543,10 @@ mixup_alpha = 1.0
 # ShapeWorld run this repo has that learned shape, ran white. Until
 # `diagnostics/silhouette_shape_probe.py` separates the two at five fits an
 # arm, the demonstrated fill wins over the reasoned one. Note the BatchNorm
-# half of the argument only ever bit on `ViT2`, which opens with
-# `nn.BatchNorm2d(3)` over raw RGB; `Conv4` and `ResNet18SmallInput` do not.
+# half of the argument only ever bit on `ViT2`, which opened with
+# `nn.BatchNorm2d(3)` over raw RGB where `Conv4` and `ResNet18SmallInput` do
+# not -- and since 2026-09-10 it does not on ShapeWorld either, so on this
+# dataset that half is now history on every backbone.
 #
 # **Back to the mean colour on 2026-09-09, and this time on a run.** With this
 # fill, `silhouette_p_receiver = 0.2` and `warm_up_epochs = 10`, on top of
@@ -490,11 +558,17 @@ mixup_alpha = 1.0
 # **That run changed two things at once.** `warm_up_epochs` went from 0 to 10
 # on the same day as this fill, so ignition is attributable to either and the
 # trace does not separate them. The fill is the half with a mechanism -- the
-# BatchNorm argument above -- and it is the half that was kept: the ramp is
-# back to 0 as of the same date, so the defaults in this file no longer
-# reproduce that run exactly. See `[scheduler] warm_up_epochs`. If the fill
-# alone does not reproduce the ignition, that attribution was wrong and the
-# ramp goes back.
+# BatchNorm argument above -- and it was the half kept on 2026-09-09, the ramp
+# going back to 0 the same day.
+#
+# **That was tried and undone on 2026-09-10.** The ramp is back at 10. The
+# first ShapeWorld ViT run under the fill without the ramp sat at ln 2 for 48
+# epochs and then ignited on colour alone, where the arms it was re-running
+# ignited between epoch 6 and 18 -- which is the condition the paragraph above
+# named for putting the ramp back. So the defaults reproduce that run again,
+# and the confound is back with them: the fill and the ramp remain two
+# treatments in one arm, and this file states no ranking between them. See
+# `[scheduler] warm_up_epochs`.
 #
 # The mechanism is the BatchNorm one above, read the way round the paragraphs
 # above did not quite put it. It is not only that the running statistics are
@@ -1136,19 +1210,32 @@ ResNet18 = 5e-5
 # ShapeWorld beyond "the sweep found no rate that helps there", and rung 3 is
 # owed an explanation before it is read as a working rung.
 #
-# **`ShapeWorldViT` is deliberately absent, and that is what the two names are
-# for.** Until 2026-09-09 both datasets ran a backbone called `ViT2`, so this
-# one key would have set the rate for both stacks -- 2e-5 for a number only
-# the birds arm produced. The ShapeWorld arms sat in the colour-only minimum at
-# all five rates, and the one thing that did move with rate there was ignition
-# timing, monotonic across the whole swept range (`train_acc` past 0.55 at
-# epoch 6, 9, 12, 14, 18 from 2e-4 down to 1e-5) with the top of the range
-# fastest and no turnover. That is a rate-starved arm rather than a bracketed
-# optimum, and the expectation is that ShapeWorld's ViT wants a rate well above
-# CUB's -- which re-running sweep 2 with the two names apart is what will
-# settle. Absent means `module_lr`'s base rate, which is what it effectively
-# had.
+# **`ShapeWorldViT` is here at 2e-5 as a placeholder, not as a measurement.**
+# Until 2026-09-09 both datasets ran a backbone called `ViT2` and this one key
+# would have set the rate for both stacks; the two names exist so it need not.
+# What the names have not yet bought is a second number. The ShapeWorld half of
+# the sweep sat in the colour-only minimum at all five rates -- no argmax to
+# take -- and the one thing that did move with rate was ignition timing,
+# monotonic across the whole swept range (`train_acc` past 0.55 at epoch 6, 9,
+# 12, 14, 18 from 2e-4 down to 1e-5), fastest at the top and with no turnover.
+# That is a rate-starved arm rather than a bracketed optimum, and it argues for
+# a rate *above* CUB's rather than equal to it.
+#
+# So why 2e-5. Because the alternative was absence, and absence means
+# `module_lr`'s 1e-4 -- jayelm's `Conv4` default, which is the one number in
+# range with a positive reason to be wrong here. 2e-5 is the only rate this
+# repo has measured for a ViT of any size, on birds, and stating it makes every
+# folder downstream of this line run the ShapeWorld ViT at a rate that was
+# chosen rather than inherited. Set 2026-09-10 so that
+# `silhouette_titration_sender_vit/` has one to titrate against.
+#
+# What it is not: it is not sweep 2's answer, and sweep 2 is still owed. When
+# that folder returns a ShapeWorld rate this number is replaced by it, and any
+# trace written against 2e-5 in the meantime differs from a later one in the
+# rate as well as in whatever it was testing. The monotonic timing above is a
+# standing reason to expect the replacement to be larger.
 BirdsViT = 2e-5
+ShapeWorldViT = 2e-5
 
 # The listener's backbone takes the same rates as the speaker's. That is what
 # `lr_sweep_1_cnn` measured -- `sender_vision` and `receiver_vision` moved
@@ -1242,7 +1329,28 @@ epochs = 100
 # A run that wants the ramp asks for it in its own `[scheduler]` block, and any
 # comparison against a trace written between 2026-08-28 and today differs in
 # this as well as in whatever it was meant to test.
-warm_up_epochs = 0
+#
+# **10 again since 2026-09-10**, on the condition the paragraph above set: "if
+# the fill alone turns out not to reproduce the ignition, the ramp is the first
+# thing to put back." It did not. The first ShapeWorld ViT run with the ramp off
+# held `train_loss` at ln 2 for 48 epochs -- `train_referent_spread` 0.029,
+# `score_scale` decaying 0.95 -> 0.26 with nothing to hold it up -- and then
+# ignited on colour alone at epoch 49, where the five first-pass arms of
+# `lr_sweep_2_sender_vit` ignited between epoch 6 and 18. That is the symptom
+# the ramp was there for: a listener calibrating against a code that is still
+# close to input-independent, with the scaling scalars arriving before the
+# representations they are meant to score.
+#
+# It is still not a clean attribution, and it is not claimed as one. That run
+# also carried the 16x16 patch grid and receiver-only geometry, so three
+# treatments moved between the two passes and one trace ranks none of them. The
+# ramp goes back alongside the symmetric geometry -- see `[data]
+# augment_flip_sender` -- because the two came off together and the point of
+# putting them back is to stand on a configuration that has been seen to
+# ignite, not to have decided between them. The two-arm run at the mean-colour
+# fill, ramp on and off, is still unpaid for and still the thing that would
+# settle it.
+warm_up_epochs = 10
 
 # `flat` or `cosine` -- an intention, not a curve.
 #
@@ -1355,7 +1463,11 @@ self_attention_dropout = 0.0
 # baseline backbone rather than to the other dataset.
 #
 # 128 wide, 6 layers, 4 heads, feedforward inner 256 comes to **876,599**
-# parameters against `ResNet56`'s 852,368 -- 1.03x. That is the whole point of
+# parameters against `ResNet56`'s 852,368 -- 1.03x. As built it is 876,593
+# since 2026-09-10, because `ShapeWorldViT` passes `initial_batch_norm=False`
+# and that layer's weight and bias are six of them; the sizing argument below
+# is about the transformer body and is unmoved by it. See
+# `vision.ShapeWorldViT`. That is the whole point of
 # the number: a ViT rung against a CNN rung is a comparison of architectures
 # only if the two are the same size, and until this change the ShapeWorld pair
 # was 0.11M of `Conv4` against 10.3M of ViT2, then 11.2M of
@@ -2186,10 +2298,13 @@ silhouette_p_receiver = 0.0
 #     history in three ways at once without anything asking for it.
 # All four off, and they would do nothing if they were not: CUB's augmentation
 # is `cub.py`'s torchvision pipeline -- `RandomResizedCrop`, `ImageJitter`,
-# `RandomHorizontalFlip` -- and not this repo's keys. That pipeline is
-# receiver-only too since 2026-09-09, by handing the listener's half of each
-# game the train transform and the speaker's the eval one, which is a property
-# of `CUBDataset.sample_game` rather than something a config selects.
+# `RandomHorizontalFlip` -- and not this repo's keys. The key that does govern
+# that pipeline's speaker/listener split is `[data] augment_sender`, which this
+# overlay does not restate and therefore inherits at `true`: both agents get
+# the train pipeline, as they did before 2026-09-09. Between then and
+# 2026-09-10 the split was receiver-only and unconditional, a property of
+# `CUBDataset` rather than anything a config could select; it is a key now, and
+# it is set to the symmetric side.
 augment_flip_sender = false
 augment_flip_receiver = false
 augment_affine_degrees_sender = 0.0

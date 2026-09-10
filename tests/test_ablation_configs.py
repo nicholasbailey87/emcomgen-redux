@@ -274,7 +274,8 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # **Every ShapeWorld vision count below moved on 2026-09-06**, when the
         # backbone became `ResNet56` -- He et al.'s CIFAR network at 852,368
         # parameters -- and the ShapeWorld ViT2 was narrowed to 876,599 to match
-        # it. It was `ResNet18SmallInput` at 11,168,832 against a 320-wide ViT at
+        # it, and 876,593 since `ShapeWorldViT` dropped its initial BatchNorm.
+        # It was `ResNet18SmallInput` at 11,168,832 against a 320-wide ViT at
         # 10,317,986, and `Conv4` at 113,088 against the same ViT before that:
         # 91x. Neither arrangement was a comparison of architectures at a fixed
         # size, which is what the ladder claims to be making. The birds counts
@@ -340,8 +341,8 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # ShapeWorld: the top of the ladder. The speaker's language model is the
         # causal arm at seven blocks -- see rung 9's `layers` for why seven, and
         # for the two depths before it.
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 876_599),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.feature_model", 876_599),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 876_593),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.feature_model", 876_593),
         ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 6_758_354),
         ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
         ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_198),
@@ -369,8 +370,15 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # patch is 14px rather than 20px and `ResizeAndPadPatches` carries 588
         # values into `d_model` where it carried 1,200. Against `ResNet18`'s
         # 11,176,512 that is 0.95x where it was 1.01x -- a looser match, in the
-        # direction that understates the ViT. ShapeWorld's count is untouched at
-        # 876,599, which is where the change was aimed; see `ViT2.__init__`.
+        # direction that understates the ViT. ShapeWorld's count was untouched
+        # by the grid at 876,599, which is where that change was aimed; see
+        # `ViT2.__init__`.
+        #
+        # **876,593 since 2026-09-10.** `ShapeWorldViT` passes
+        # `initial_batch_norm=False`, and the six parameters that went are that
+        # layer's weight and bias -- it is the only BatchNorm in the stack, so
+        # this count is also the assertion that it is gone. `BirdsViT` keeps it
+        # and is unchanged. See `vision.ShapeWorldViT` for why.
         ("16_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 10_626_990),
         ("16_birds_receiver_cross_attention_lm.toml", "sender.language_model", 6_764_120),
         ("16_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
@@ -417,7 +425,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         ("14_birds_attention_discriminator.toml", "receiver.interfaces", 344_320),
         # The two intermediate vision swaps, so a rung that stopped inheriting
         # the shared ViT specification shows up here rather than in a run.
-        ("03_shapeworld_sender_vit.toml", "sender.feat_model", 876_599),
+        ("03_shapeworld_sender_vit.toml", "sender.feat_model", 876_593),
         ("04_birds_sender_vit.toml", "sender.feat_model", 10_626_990),
         # And the prototyper, which is one scoring direction and a bias per
         # polarity, where rung 3's is nothing at all. 2,050 rather than the 642
@@ -445,8 +453,9 @@ def test_the_shapeworld_backbones_are_matched():
     Both numbers are stated in DEFAULT.toml as the reason for the sizes chosen
     there, so both are pinned here: 852,368 for the CNN, which is `6n + 2` at
     n = 9 and is within 1% of the 0.85M the architecture is known by, and
-    876,599 for the ViT, which is what 128 / 6 / 4 / 256 with GELU comes to. The
-    ratio is the point -- a ViT rung against a CNN rung measures architecture
+    876,593 for the ViT, which is what 128 / 6 / 4 / 256 with GELU comes to less
+    the six parameters of the initial BatchNorm `ShapeWorldViT` no longer builds.
+    The ratio is the point -- a ViT rung against a CNN rung measures architecture
     only if the two are the same size -- and 3% is the band the feedforward
     width can be tuned to at this depth.
 
@@ -461,7 +470,7 @@ def test_the_shapeworld_backbones_are_matched():
 
     assert cnn == 852_368
     assert abs(cnn - 850_000) / 850_000 < 0.01, f"{cnn:,} is not 0.85M"
-    assert vit == 876_599
+    assert vit == 876_593
 
     assert abs(vit / cnn - 1.0) < 0.03, f"{vit / cnn:.3f}x"
 

@@ -1,0 +1,29 @@
+# silhouette_titration_sender_vit arm: `silhouette_p_receiver` at 0.5.
+#
+# See `00_silhouette_0.0.toml` for what this folder measures and why -- the
+# short version is that 0.2 was titrated on CNNs, and `ViT2`'s `BatchNorm2d(3)`
+# stem and its capacity both argue the transformer wants its own number. This
+# file differs from that one in the swept rate and in carrying no `[slurm]`
+# block, which is read from `00_silhouette_0.0.toml` alone.
+#
+# ---
+#
+# **This arm: `silhouette_p_receiver = 0.5`.**
+#
+# The top of the grid, and the 10 August escape's own rate. If capacity is what
+# puts a backbone in the colour-only minimum, this is the arm the hypothesis in
+# `00_silhouette_0.0.toml` expects to win.
+
+name = "silhouette_titration_sender_vit"
+
+[sender]
+feature_model = "ShapeWorldViT"
+
+[data]
+silhouette_p_receiver = 0.5
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 3

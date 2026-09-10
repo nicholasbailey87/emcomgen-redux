@@ -44,17 +44,27 @@
 # than the trunks this repo runs, so there is no prior reason to think the
 # optimum is beneath it.
 #
-# **60 epochs, one repeat.** 60 rather than 100 because the sweeps are serial
-# and the chain is what costs, and rather than 40 because 40 is not enough:
-# on `lr_sweep_1_cnn`'s own traces the ShapeWorld arms at 2e-5 and 5e-5 are
-# *inverted* at epoch 40 and cross at 47, so a 40-epoch sweep would have
-# returned the wrong rate. At 60 the winner leads by 0.032 on `md_shape` and
-# the birds top pair is clear of the rest by 0.045.
+# **100 epochs, one repeat.** 60 was the original figure and the reasoning for
+# it still holds as far as it goes: the sweeps are serial and the chain is what
+# costs, and 40 is definitely too short, because on `lr_sweep_1_cnn`'s own
+# traces the ShapeWorld arms at 2e-5 and 5e-5 are *inverted* at epoch 40 and
+# cross at 47. What 60 assumed is that ignition happens early enough for the
+# forty epochs after it to be the measurement. The 2026-09-10 ShapeWorld ViT
+# run is the counter-example: `train_loss` at ln 2 until epoch 48, ignition at
+# 49, and eleven epochs of protocol at the end of a sixty-epoch budget. A rate
+# comparison over eleven epochs of a code that is still moving is not a rate
+# comparison.
 #
-# What 60 epochs buys is the plateau, not the argmax within it. `lr_sweep_1_cnn`
-# took 98 epochs to separate its top two birds arms and then separated them by
-# 0.001, which is the size of the question this cannot answer and does not need
-# to. One repeat because n = 1 at eight sweeps is already the budget; between-arm
+# So 100, which is the ablation's own length -- rungs 03 and 04 are what these
+# arms copy, and matching it means an arm here and the rung it copies differ in
+# the swept rate and nothing else, including the budget. It costs the serial
+# chain 40 epochs x 10 arms; the `[slurm]` block below already carries the
+# ablation's 24-hour ceiling for the same work, so nothing there moves.
+#
+# What the extra epochs do not buy is the argmax. `lr_sweep_1_cnn` took 98
+# epochs to separate its top two birds arms and then separated them by 0.001,
+# which is the size of the question this cannot answer and does not need to.
+# One repeat because n = 1 at eight sweeps is already the budget; between-arm
 # gaps here are the same size as within-arm epoch-to-epoch wobble, so this ranks
 # candidates and does not settle them.
 #
@@ -87,19 +97,22 @@ feature_model = "ShapeWorldViT"
 ShapeWorldViT = 1e-5
 
 [scheduler]
-epochs = 60
+epochs = 100
 
 [experiment]
 repeats = 1
 
 [slurm]
-# Sized for the heaviest job in the set, a 60-epoch birds arm on a ViT trunk,
+# Sized for the heaviest job in the set, a 100-epoch birds arm on a ViT trunk,
 # and read from the first config by filename only -- so this block governs the
 # whole array and belongs here and nowhere else. It sits in a ShapeWorld file
 # and is sized for a birds one, because the array is one submission and the
-# ceiling has to clear its slowest member. Generous against the ~3.4
-# min/epoch `lr_sweep_1_cnn` measured on the CNN trunks; a ViT arm is slower and
-# has not been timed at this length.
+# ceiling has to clear its slowest member. Unchanged when the arms went from 60
+# epochs to 100: this is the same allowance `ablation_birds/04_birds_sender_vit`
+# carries for a 100-epoch birds ViT run, which is the job these arms copy. It
+# leaves ~14 min/epoch against the ~3.4 min/epoch `lr_sweep_1_cnn` measured on
+# the CNN trunks; a ViT arm is slower and still has not been timed at this
+# length, so the margin is the untested part.
 time = "24:00:00"
 cpus_per_task = 6
 gpus_per_task = 1

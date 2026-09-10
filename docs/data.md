@@ -367,15 +367,31 @@ In the reference game, `percent_novel = 0.0` hands back the *same* tensor for
 both agents; `silhouette` returns a new one, so an independent roll per agent is
 still safe there.
 
-## Every augmentation is the receiver's
+## Which agent is augmented
 
-Since 2026-09-09 the sender's view is not augmented at all. The silhouette was
-already asymmetric — `silhouette_p_sender` has been 0.0 throughout — and mixup
-has only ever touched the listener's candidates; what moved is the geometry,
-which until then applied one pair of keys to both views. It is now four:
-`augment_flip_sender` / `augment_flip_receiver` and
-`augment_affine_degrees_sender` / `augment_affine_degrees_receiver`, defaulting
-to `false`/`true` and `0.0`/`10.0`.
+The silhouette is asymmetric and always has been — `silhouette_p_sender` has
+been 0.0 throughout — and mixup has only ever touched the listener's
+candidates. The geometry is the part that has moved, twice.
+
+Until 2026-09-09 one pair of keys applied to both views. On that date it became
+four — `augment_flip_sender` / `augment_flip_receiver` and
+`augment_affine_degrees_sender` / `augment_affine_degrees_receiver` — with the
+sender's pair off, so that no augmentation reached the speaker at all. On
+2026-09-10 the defaults went back to symmetric: `true`/`true` and `10.0`/`10.0`.
+The keys stay four, because the asymmetry is a treatment and both arms should be
+askable for by name.
+
+**Why they went back.** Not because the argument below was answered. The first
+ShapeWorld ViT run under the receiver-only defaults held `train_loss` at ln 2
+for 48 epochs, with `train_referent_spread` at 0.029 and `score_scale` decaying
+0.95 → 0.26, then ignited at epoch 49 on colour alone — `train_acc_md_color` to
+0.74, `train_acc_md_shape` back to 0.500, `unique_message_fraction` collapsing
+0.81 → 0.24. The five arms of the sweep it was re-running had ignited between
+epoch 6 and 18. Three things changed between those two passes — the 16×16 patch
+grid, this key, and `warm_up_epochs` going to 0 — so one trace ranks none of
+them, and the response was to go back to the last configuration observed to
+ignite rather than to rule any of the three out. The warm-up went back with it,
+as the pair they came off as.
 
 The argument is that the augmentations exist to stop *memorisation*, and
 memorisation only pays for the agent that can act on it without the channel.
@@ -396,19 +412,32 @@ input noise on the side that has to emit a symbol early, in a regime whose open
 question is ignition, and a train/eval mismatch on the encoder that produces the
 message, since eval is never augmented.
 
-This is reasoning rather than a measurement. The arm that would test it is the
-old symmetric setting — all four keys on — against the current one.
+This is reasoning rather than a measurement, and it stands unmeasured. The arm
+that would test it is the symmetric setting — all four keys on, which is now the
+default — against the receiver-only one, at one rate with everything else held.
 
-**CUB is the same property by a different mechanism.** Its augmentation is
-`image_util.TransformLoader`'s torchvision pipeline applied per image *before*
-the speaker/listener split, so there is nothing downstream to turn off. Instead
-`CUBDataset` holds both pipelines: `augment_transform` is the train one and
-`transform` the eval one, and `_transform_by_agent` routes by position, since
-`split_spk_lis` deals the first `n_examples // 2` of each polarity to the
-speaker and the next to the listener. Eval splits are given no
-`augment_transform` and every image takes the eval pipeline, as before. The
-birds `augment_*` keys stay off and would do nothing if they were not: they are
-`ConceptDataset`'s, and CUB is not one.
+**CUB reaches the same choice by a different mechanism, and a different key.**
+Its augmentation is `image_util.TransformLoader`'s torchvision pipeline applied
+per image *before* the speaker/listener split, so there is nothing downstream to
+turn off and no per-transform key to turn it off with. Instead `CUBDataset`
+holds both pipelines — `augment_transform` is the train one and `transform` the
+eval one — and `_transform_by_agent` routes by position, since `split_spk_lis`
+deals the first `n_examples // 2` of each polarity to the speaker and the next
+to the listener. The choice CUB can make is therefore the whole pipeline or none
+of it, per agent, which is one boolean: `[data] augment_sender`, `true` by
+default. At `true` the routing does nothing and both agents take the train
+pipeline; at `false` the speaker's half takes the eval one. Eval splits are
+given no `augment_transform` and every image takes the eval pipeline at either
+setting, as before.
+
+Between 2026-09-09 and 2026-09-10 the split was unconditional — a property of
+`CUBDataset` that no config could select. The key exists so that the two
+datasets can be moved onto the same side of this question deliberately, which is
+also why they are not linked in code: a birds arm and a ShapeWorld arm at the
+same setting are not running the same transform, and hiding that behind one key
+would invite reading them as one arm. The birds `augment_flip_*` and
+`augment_affine_degrees_*` keys stay off and would do nothing if they were not:
+they are `ConceptDataset`'s, and CUB is not one.
 
 In the reference game there are not two views to make differ — `percent_novel`
 is 0.0 and `split_spk_lis` hands the speaker's tensor to both agents — so every

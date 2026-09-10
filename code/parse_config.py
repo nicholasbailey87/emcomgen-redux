@@ -391,9 +391,9 @@ def validate_config(config: dict) -> bool:
             raise InvalidConfig(f"`{key}` must be in [0, 1], got {p}.")
 
     # Four keys and two checks: the geometry is set per agent, so each check
-    #     runs over both. The sender's are off by default and the receiver's
-    #     are not -- see DEFAULT.toml for why the augmentation sits on the
-    #     agent that can memorise.
+    #     runs over both. Both sides are on by default -- see DEFAULT.toml for
+    #     the argument for putting the augmentation on the listener alone, and
+    #     for why the defaults are not on that side.
     for agent in ('sender', 'receiver'):
         name = f'augment_affine_degrees_{agent}'
         degrees = config['data'][name]
@@ -411,6 +411,17 @@ def validate_config(config: dict) -> bool:
             raise InvalidConfig(
                 f"`{name}` must be a boolean, got {config['data'][name]!r}."
             )
+
+    # CUB's own switch for the same decision the four keys above make on
+    #     ShapeWorld. It is a single boolean because CUB's augmentation is a
+    #     single torchvision pipeline -- see `cub.CUBDataset._transform_by_agent`
+    #     -- and it is read only there, so setting it on a ShapeWorld config is
+    #     inert rather than an error.
+    if not isinstance(config['data']['augment_sender'], bool):
+        raise InvalidConfig(
+            "`augment_sender` must be a boolean, got "
+            f"{config['data']['augment_sender']!r}."
+        )
 
     alpha = config['data']['mixup_alpha']
     if not isinstance(alpha, (int, float)) or isinstance(alpha, bool):

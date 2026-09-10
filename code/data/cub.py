@@ -232,6 +232,15 @@ def load(config):
             #     un-augmented one for every image, as it always has.
             transform=test_transform,
             augment_transform=train_transform if split == "train" else None,
+            # CUB has no per-transform keys of its own -- its augmentation is
+            #     one torchvision pipeline, not the individually switchable
+            #     tensor operations ShapeWorld applies -- so it gets one
+            #     boolean instead. True, the default, gives both agents the
+            #     train pipeline; False gives the speaker the eval one and is
+            #     the receiver-only arm. `augment_flip_*` and
+            #     `augment_affine_degrees_*` do nothing on this dataset at
+            #     either setting.
+            augment_sender=config['data']['augment_sender'],
             n_examples=config['data']['n_examples'],
             # `len(subset)` rather than the class range, so the eval size follows
             #     the species actually present on disk.
@@ -275,6 +284,7 @@ class CUBDataset:
         n_examples=None,
         transform=None,
         augment_transform=None,
+        augment_sender=True,
         length=1000,
         reference_game=False,
         percent_novel=1.0,
@@ -286,6 +296,7 @@ class CUBDataset:
         self.length = length
         self.transform = transform
         self.augment_transform = augment_transform
+        self.augment_sender = augment_sender
         self.reference_game = reference_game
         self.n_feats = (3, IMAGE_SIZE, IMAGE_SIZE)
         if n_examples is None:
@@ -318,7 +329,7 @@ class CUBDataset:
 
     def _transform_by_agent(self, imgs):
         """
-        Augment the listener's share of one polarity and not the speaker's.
+        Route one polarity's images to the train or the eval pipeline.
 
         `split_spk_lis` deals a polarity out by position -- the first
         `n_examples // 2` go to the speaker and the next `n_examples // 2` to
@@ -333,10 +344,20 @@ class CUBDataset:
         resize and centre crop. Eval splits pass no `augment_transform` and
         every image takes the eval pipeline, which is what they did before.
 
-        Why only the listener: see `DEFAULT.toml` beside `augment_flip_*`. The
-        short form is that memorisation only pays for the agent that can act on
-        it without the channel, and the speaker's gradient arrives through the
-        listener anyway.
+        `[data] augment_sender` decides whether the split happens at all. True,
+        the default, gives every image the train pipeline and this method
+        routes nothing -- the symmetric regime this dataset had before the
+        split existed. False is the receiver-only arm: the speaker's half of
+        each polarity takes the eval pipeline. The key is CUB's alone; nothing
+        in `generic.py` reads it, because ShapeWorld says the same thing with
+        `augment_flip_sender` and `augment_affine_degrees_sender`.
+
+        The case for False, and why it is not the default: see `DEFAULT.toml`
+        beside `augment_flip_*`. The short form is that memorisation only pays
+        for the agent that can act on it without the channel, and the speaker's
+        gradient arrives through the listener anyway -- unrefuted, but the one
+        ShapeWorld run under it did not ignite until epoch 49, so the defaults
+        are back on the side that has.
 
         A reference game is the exception. It sets `percent_novel = 0.0`, and
         `split_spk_lis` then hands the speaker's tensor to both agents, so
@@ -346,7 +367,7 @@ class CUBDataset:
         if self.augment_transform is None:
             return [self.transform(img) for img in imgs]
 
-        if self.reference_game:
+        if self.reference_game or self.augment_sender:
             return [self.augment_transform(img) for img in imgs]
 
         n_spk = self.n_examples // 2

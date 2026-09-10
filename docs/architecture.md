@@ -1196,12 +1196,42 @@ backbone.
 A thin wrapper over broccoli's `ViT`.
 
 **Two names over one class.** A config never says `ViT2`; it says
-`ShapeWorldViT` or `BirdsViT`, two factories in `models/backbone/vision.py` that
-swallow their arguments and return the class, exactly as `ResNet56` and
-`ResNet18` do. The two are the same code at different sizes — 128/6/4/256 GELU
-against `ResNet56`'s 852,368 parameters, and 320/10/5/576 SwiGLU against
-`ResNet18`'s 11,176,512 — because each dataset's ViT is matched to that
-dataset's own baseline CNN rather than to the other dataset.
+`ShapeWorldViT` or `BirdsViT`, two factories in `models/backbone/vision.py`. The
+two are the same code at different sizes — 128/6/4/256 GELU against `ResNet56`'s
+852,368 parameters, and 320/10/5/576 SwiGLU against `ResNet18`'s 11,176,512 —
+because each dataset's ViT is matched to that dataset's own baseline CNN rather
+than to the other dataset.
+
+**And since 2026-09-10 they are not pure aliases.** `ShapeWorldViT` passes
+`initial_batch_norm=False` and `BirdsViT` passes `True`, which is the one thing
+either factory does beyond naming the class — so unlike `ResNet56` and
+`ResNet18` over `ResNet`, choosing the name now chooses an architecture. The
+layer is a `BatchNorm2d(3)` over the raw image and the only BatchNorm in the
+stack, so ShapeWorld's count is 876,593 where birds keeps its own unchanged, and
+`test_the_arms_are_the_sizes_they_claim` is what asserts the layer is gone.
+
+Why it comes off ShapeWorld. `prepare_batch` divides the uint8 store by 255, so
+a ShapeWorld image reaches the model as [0, 1] with its black background at
+exactly 0.0. `CifarResNet` opens with a bias-free 3×3 convolution on that same
+tensor, and a convolution's weight gradient is `Σ x · dL/dy` — so a pixel at
+exactly 0.0 contributes nothing at all, and roughly 94% of a ShapeWorld image is
+background. A `BatchNorm2d(3)` in front maps that background to `−μ_c/σ_c`
+instead: nonzero, channel-selective, and a function of the batch's colour
+composition. Measured on a synthetic batch, background lands at
+`(−0.258, 0, 0)` with a red object and `(0, −0.258, 0)` with a green one. That
+is a route for colour into the transformer's first layer, across the whole image
+area, which the CNN it is size-matched against does not have — and shape has no
+equivalent, since no per-channel batch statistic encodes an outline. On a
+dataset whose standing failure is a colour-only minimum, that is worth removing.
+
+Why it stays on birds. `image_util.TransformLoader`'s pipeline ends in a
+torchvision normalise, so a CUB tensor is already centred on arrival and there is
+no black background for the layer to lift off zero. The argument above does not
+reach it.
+
+One consequence: on a ShapeWorld ViT rung the speaker's backbone now contains no
+BatchNorm at all, so `calibrate_batch_norm` has nothing to re-estimate on that
+side. The listener still runs `ResNet56` until rung 11.
 
 The reason for two names is `[optimiser.implementation_lr]`, which is keyed by
 the class named in the config, so one name could hold one rate for two
@@ -1252,12 +1282,13 @@ projections are 4d² and the feedforward 4·d·ff against a score/AV pair of 2·
 so ~14% at 121 tokens and ~25% at 256. `vit_geometry_sweep.py` puts the 16×16
 geometry at 2.95 GMAC/img against 1.30 at 11×11.
 
-ShapeWorld's parameter count is unchanged at 876,599, because at 64px the patch
-still fits under `d_model`. CUB's moves to **10,626,990**, or 0.95× `ResNet18`,
+ShapeWorld's parameter count was unchanged by the grid at 876,599, because at
+64px the patch still fits under `d_model`; it is 876,593 since `ShapeWorldViT`
+dropped its initial BatchNorm. CUB's moves to **10,626,990**, or 0.95× `ResNet18`,
 since a 14px patch is 588 values where a 20px one was 1,200.
 
 **The two datasets no longer run the same ViT.** `[sender_feature_model]` is
-ShapeWorld's — 128 wide, 6 layers, 4 heads, `ff_inner_size` 256, GELU, 876,599
+ShapeWorld's — 128 wide, 6 layers, 4 heads, `ff_inner_size` 256, GELU, 876,593
 parameters — and `[birds.sender_feature_model]` pins CUB's, which is the 320 /
 10 / 5 / 576 SwiGLU stack both used to share, at 10,626,990. Each is matched to
 its own baseline backbone rather than to the other dataset's: `ResNet56` at

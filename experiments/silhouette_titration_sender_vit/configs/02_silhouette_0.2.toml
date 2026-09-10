@@ -1,0 +1,30 @@
+# silhouette_titration_sender_vit arm: `silhouette_p_receiver` at 0.2.
+#
+# See `00_silhouette_0.0.toml` for what this folder measures and why -- the
+# short version is that 0.2 was titrated on CNNs, and `ViT2`'s `BatchNorm2d(3)`
+# stem and its capacity both argue the transformer wants its own number. This
+# file differs from that one in the swept rate and in carrying no `[slurm]`
+# block, which is read from `00_silhouette_0.0.toml` alone.
+#
+# ---
+#
+# **This arm: `silhouette_p_receiver = 0.2`.**
+#
+# This is `DEFAULT.toml`'s live rate, so this arm is the folder's tie to
+# everything else the repo has run lately -- and to the 2026-09-10 trace that
+# motivated the folder, which differs from it in the warm-up and the geometry
+# and not in this key.
+
+name = "silhouette_titration_sender_vit"
+
+[sender]
+feature_model = "ShapeWorldViT"
+
+[data]
+silhouette_p_receiver = 0.2
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 3

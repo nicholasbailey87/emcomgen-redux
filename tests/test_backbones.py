@@ -83,9 +83,10 @@ def _backbones():
     from the config, so they are built the way `models.builder` builds them.
 
     Both live ViT stacks appear, because `ShapeWorldViT` and `BirdsViT` are one
-    class at two sizes and a reset or an init that only holds at one of them is
-    not a property of the code. The sizes come from the two blocks that pin
-    them, which is where a config gets them.
+    class at two sizes and two stems -- ShapeWorld's drops the initial
+    BatchNorm -- and a reset or an init that only holds at one of them is not a
+    property of the code. The sizes come from the two blocks that pin them,
+    which is where a config gets them; the stem comes from the factory.
     """
     config = parse_config.get_config()  # plain defaults, i.e. ShapeWorld
     # DEFAULT.toml carries a runnable ViT for each dataset, so this no longer

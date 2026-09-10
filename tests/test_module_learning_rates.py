@@ -233,12 +233,15 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
         (test accuracy 0.658, 0.661, 0.645, 0.646, 0.638 from 1e-5 to 2e-4, with
         the train-test gap stepping up where the accuracy turns).
 
-    `ShapeWorldViT` is absent, and its absence is the reason the two stacks have
-        two names. The ShapeWorld arm sat in the colour-only minimum at every
-        rate and chose nothing, and under one shared `ViT2` key the birds
-        number would have applied to it anyway. Absent means the group's base
-        rate, which is what it effectively had; a rate for it is what re-running
-        sweep 2 is for.
+    `ShapeWorldViT` at 2e-5 is the exception to the paragraph above: it is not a
+        measurement, and it is pinned here for the opposite reason -- so that a
+        placeholder cannot quietly become the record. The ShapeWorld arm of
+        sweep 2 sat in the colour-only minimum at every rate and chose nothing.
+        The number is birds' own, borrowed on 2026-09-10 because the
+        alternative was `module_lr`'s 1e-4, which is jayelm's `Conv4` default
+        and the one rate in range with a positive reason to be wrong here.
+        Sweep 2 is still owed a ShapeWorld rate and DEFAULT.toml says the
+        replacement is expected to be larger.
 
     A retune replaces these and edits this test in the same commit, which is
         the point: a rate arrived at by measurement should not be able to drift
@@ -248,7 +251,12 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
     rates = config["optimiser"]["implementation_lr"]
 
     assert rates == {
-        "sender_vision": {"ResNet56": 2e-5, "ResNet18": 5e-5, "BirdsViT": 2e-5},
+        "sender_vision": {
+            "ResNet56": 2e-5,
+            "ResNet18": 5e-5,
+            "BirdsViT": 2e-5,
+            "ShapeWorldViT": 2e-5,
+        },
         "receiver_vision": {"ResNet56": 2e-5, "ResNet18": 5e-5},
     }
 

@@ -1,0 +1,105 @@
+# silhouette_titration_sender_vit: what suppression rate the speaker's ViT
+# wants, at the chromatic fill, on ShapeWorld.
+#
+# Six arms. `[data] silhouette_p_receiver` moves over 0.0, 0.1, 0.2, 0.3, 0.4
+# and 0.5, three repeats each, and nothing else differs between them or from
+# ablation rung 03 as `DEFAULT.toml` leaves it. That means the mean-colour
+# fill, the ten-epoch warm-up, symmetric geometric augmentation, mixup on the
+# listener's candidates, and `ShapeWorldViT` on the speaker at 2e-5.
+#
+# **Why this folder exists.** 0.2 is the live default and it was titrated on a
+# CNN. `silhouette_titration_conv4/` swept this key with the 113k-parameter
+# `Conv4` the paper used; `silhouette_titration_resnet18/` swept it with
+# `ResNet18SmallInput`; `silhouette_titration/` swept it with an earlier fill
+# again. None of them had a transformer on the speaker, and the rate that comes
+# out of a titration is a property of the suppression *and* of what is being
+# suppressed.
+#
+# There are two specific reasons to expect the transformer to want a different
+# number rather than merely a noisier version of the same one.
+#
+# The first is `nn.BatchNorm2d(3)`. `ViT2` opens with one, over raw RGB, and
+# `Conv4` and `ResNet18SmallInput` do not. That is exactly the half of the fill
+# argument `[data] silhouette_fill` says only bites on this backbone: a
+# silhouetted batch shifts the channel statistics that every image in it is
+# normalised by, so the rate does not only decide how often colour is removed,
+# it decides how far the encoder's input distribution moves. On a CNN the same
+# rate is doing strictly less.
+#
+# The second is capacity. The record on ShapeWorld is that the more capable the
+# backbone, the more reliably it lands in the colour-only minimum -- `Conv4` at
+# 113k learns shape under this recipe where `ResNet18SmallInput` at 11.2M did
+# not, across two fills and nine of ten runs. If that holds, a
+# capacity-matched-to-`ResNet56` transformer is on the wrong side of it and
+# needs *more* suppression than the CNN titration found, not the same amount.
+# That is the hypothesis this folder is shaped to test, and 0.5 is in the grid
+# for it.
+#
+# **The 0.0 arm is the control and is not a formality.** Every claim in this
+# folder is of the form "this rate does something the absence of it does not",
+# and the absence has never been run under the current recipe with this
+# backbone. It also reads directly against the 2026-09-10 trace that motivated
+# the folder -- 48 epochs at ln 2 and then ignition on colour alone at 0.2 --
+# by saying whether the suppression was implicated in the dead zone at all.
+#
+# **100 epochs, three repeats.** 100 because 30 is what the CNN titrations used
+# and 30 is now known to be too short here: the ShapeWorld ViT has been seen to
+# hold `train_loss` at ln 2 for 48 epochs before igniting, so a 30-epoch arm
+# would have reported a dead run and a 60-epoch one eleven epochs of protocol.
+# 100 is also ablation rung 03's length, which is the run each arm otherwise
+# copies.
+#
+# Three repeats because the quantity in question has never survived a repeat.
+# What is being read here is whether an arm escapes the colour shortcut at all,
+# which is close to a binary outcome on a trace that has flipped between seeds
+# before; a single run per rate returns a pattern that cannot be told from
+# noise, and this folder would then have to be run again to find that out.
+# `job_utils.py` makes each repeat its own array task, so this is 18 tasks of
+# one run and not six tasks of three, and the `[slurm]` ceiling below is per
+# run.
+#
+# **What to read.** `train_acc_md_shape` against `train_acc_md_color` first --
+# that is the whole question, and the failure signature is shape at ~0.52 while
+# colour sits near 0.80. Then the ignition epoch, which is where the 0.0 arm
+# earns its place: if suppression is buying shape at the cost of lighting at
+# all, the two columns move in opposite directions across the grid and the
+# choice is a trade rather than an optimum. `test_acc_md_shape` is the one that
+# has to move for any of it to count -- it read 0.47, below chance, on every
+# arm of the first ViT sweep -- and `train_eval_mode_acc` against
+# `train_shuffled_message_acc` says whether there is a protocol to attribute
+# anything to.
+#
+# `epochs` and `repeats` are restated in every file: `scripts/job_utils.py`
+# reads both straight out of the file rather than out of the merged config.
+# `[slurm]` is read from the *first* config in the folder only, sorted by
+# filename, so the block below governs the whole array.
+#
+# ---
+#
+# **This arm: no silhouetting at all.** The control.
+
+name = "silhouette_titration_sender_vit"
+
+[sender]
+feature_model = "ShapeWorldViT"
+
+[data]
+silhouette_p_receiver = 0.0
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 3
+
+[slurm]
+# Sized for one 100-epoch ShapeWorld run on a ViT trunk, and read from the
+# first config by filename only, so this block governs all 18 array tasks. It
+# is the same allowance `ablation_shapeworld/03_shapeworld_sender_vit` carries
+# for the job these arms copy. Generous against the ~3.4 min/epoch
+# `lr_sweep_1_cnn` measured on the CNN trunks; the ViT is slower and has not
+# been timed at this length, which is the untested part of the margin.
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24
