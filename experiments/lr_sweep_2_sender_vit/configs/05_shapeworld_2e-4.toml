@@ -19,7 +19,7 @@ feature_model = "ShapeWorldViT"
 ShapeWorldViT = 2e-4
 
 [scheduler]
-epochs = 100
+epochs = 60
 
 [experiment]
 repeats = 1
