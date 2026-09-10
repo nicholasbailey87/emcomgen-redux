@@ -1,4 +1,4 @@
-# lr_sweep_2_sender_vit arm: the speaker's ViT backbone at 5e-5 on ShapeWorld.
+# lr_sweep_4_sender_contrast arm: `ExampleContrast` at 2e-5 on ShapeWorld.
 #
 # See `01_shapeworld_1e-5.toml` for what this experiment measures and why.
 # This file differs from that one in the swept rate, and in carrying no
@@ -6,17 +6,19 @@
 #
 # ---
 #
-# **This arm: the speaker's ViT backbone at 5e-5 on ShapeWorld**, copying ablation rung 03.
+# **This arm: `ExampleContrast` at 2e-5 on ShapeWorld**, copying ablation rung 07.
 
-name = "lr_sweep_2_sender_vit"
+name = "lr_sweep_4_sender_contrast"
 
 [sender]
 feature_model = "ShapeWorldViT"
+prototyper = "AttentionPrototyper"
+contrast = true
 
-[optimiser.implementation_lr.sender_vision]
+[optimiser.module_lr]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-ShapeWorldViT = 5e-5
+sender_contrast = 2e-5
 
 [scheduler]
 epochs = 100

@@ -1,0 +1,38 @@
+# lr_sweep_1_cnn arm: CUB backbones at 1e-5 under gumbel.
+#
+# See `01_shapeworld_1e-5.toml` for what this experiment measures and why. This
+# file differs from that one in `[optimiser.module_lr]` alone.
+#
+# The identity control at this rate is `baseline_lr_sweeps` arm 05 for the
+# first 30 epochs, and `baseline_lr_sweeps_2` arm 02 for the full 100.
+#
+# The first sweep's best birds arm under identity: last-five-epoch `test_acc`
+# 0.5417, the largest message gap on either dataset at 0.1383, and only two
+# epochs above a `clip_sender_vision` of 1e3 against 19 and 20 at the middle
+# rates. It is the rate gumbel has to beat, and the one where a conditioning
+# difference should be easiest to read, because the identity arm there is
+# working rather than failing.
+
+name = "lr_sweep_1_cnn"
+
+[data]
+dataset = "../data/cub"
+
+[sender_language_model]
+# This arm ran the straight-through Gumbel-softmax estimator against a
+# `DEFAULT.toml` that was still on `"identity"`, which is what the sweep was
+# for. It won, and `estimator` was removed on 2026-09-07 -- gumbel is now
+# unconditional and the key raises if set. The block is kept as the record of
+# what this arm carried; nothing sets it any more.
+
+[optimiser.module_lr]
+# The two vision models, and only them. Every other key in this table
+# stays at DEFAULT.toml's 1e-4.
+sender_vision = 1e-5
+receiver_vision = 1e-5
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1

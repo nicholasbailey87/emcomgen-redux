@@ -1,0 +1,38 @@
+# lr_sweep_6_receiver_vit arm: the listener's ViT backbone at 5e-5 on ShapeWorld.
+#
+# See `01_shapeworld_1e-5.toml` for what this experiment measures and why.
+# This file differs from that one in the swept rate, and in carrying no
+# `[data]` block, since ShapeWorld is the default dataset.
+#
+# ---
+#
+# **This arm: the listener's ViT backbone at 5e-5 on ShapeWorld**, copying ablation rung 11.
+
+name = "lr_sweep_6_receiver_vit"
+
+[sender]
+feature_model = "ShapeWorldViT"
+prototyper = "AttentionPrototyper"
+contrast = true
+language_model = "SenderTransformerLM"
+
+[sender_language_model]
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+layers = 7
+bidirectional = false
+
+[receiver]
+feature_model = "ShapeWorldViT"
+
+[optimiser.implementation_lr.receiver_vision]
+# The one key this sweep moves. Every other rate is DEFAULT.toml's,
+# including the ones earlier sweeps in this set have already settled.
+ShapeWorldViT = 5e-5
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1

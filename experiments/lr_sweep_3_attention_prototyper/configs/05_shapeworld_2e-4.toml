@@ -1,4 +1,4 @@
-# lr_sweep_2_sender_vit arm: the speaker's ViT backbone at 5e-5 on ShapeWorld.
+# lr_sweep_3_attention_prototyper arm: `AttentionPrototyper` at 2e-4 on ShapeWorld.
 #
 # See `01_shapeworld_1e-5.toml` for what this experiment measures and why.
 # This file differs from that one in the swept rate, and in carrying no
@@ -6,17 +6,18 @@
 #
 # ---
 #
-# **This arm: the speaker's ViT backbone at 5e-5 on ShapeWorld**, copying ablation rung 03.
+# **This arm: `AttentionPrototyper` at 2e-4 on ShapeWorld**, copying ablation rung 05.
 
-name = "lr_sweep_2_sender_vit"
+name = "lr_sweep_3_attention_prototyper"
 
 [sender]
 feature_model = "ShapeWorldViT"
+prototyper = "AttentionPrototyper"
 
-[optimiser.implementation_lr.sender_vision]
+[optimiser.implementation_lr.sender_prototyper]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-ShapeWorldViT = 5e-5
+AttentionPrototyper = 2e-4
 
 [scheduler]
 epochs = 100

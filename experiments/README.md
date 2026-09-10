@@ -46,15 +46,26 @@ must be updated with each result before the next is launched.
 | `lr_sweep_7_attention_discriminator` | 13 / 14 | `AttentionDiscriminator` | `implementation_lr.receiver_discriminator.AttentionDiscriminator` |
 | `lr_sweep_8_receiver_cross_attention_lm` | 15 / 16 | `ReceiverCrossAttentionLM` | `implementation_lr.receiver_language_model.ReceiverCrossAttentionLM` |
 
-Ten arms each -- 1e-5, 2e-5, 5e-5, 1e-4 and 2e-4 on both datasets, `01`-`05`
-birds and `06`-`10` ShapeWorld -- at 60 epochs and one repeat. Sweep 1 is the
-exception: nine arms at 100 epochs, and it also settled the gradient estimator.
+Ten arms each -- 1e-5, 2e-5, 5e-5, 1e-4 and 2e-4 on both datasets -- at 100
+epochs and one repeat. 100 is the ablation's own length, so an arm and the rung
+it copies differ in the swept rate and nothing else, the budget included; sweeps
+2-8 were briefly at 60 on 2026-09-10 and each folder's preamble records why they
+are not. Sweep 1 is the exception, in arm count and in grid: nine arms, over
+1e-5 to 1e-4 on ShapeWorld and 5e-6 to 1e-4 on birds, and it also settled the
+gradient estimator.
 
-Sweep 2 is the other exception, and only in ordering: its ShapeWorld arms are
-`01`-`05` and its birds arms `06`-`10`. That is the arm the re-run is for, and
-the order matters beyond reading, because `scripts/job_utils.py` reads
-`[slurm]` from the first config by filename alone — so sweep 2's block lives in
-a ShapeWorld file while still being sized for the slower birds arms.
+**ShapeWorld comes first in every sweep**, with no exceptions: `01`-`05` are
+the ShapeWorld arms and `06`-`10` the birds ones (`01`-`04` and `05`-`09` in
+sweep 1). That matches the ablation's own numbering, where the ShapeWorld rung
+of each pair is the odd one and the birds rung the even one, so a sweep runs
+its two datasets in the same order as the rungs it copies. It also puts the
+dataset with the open question at the front of a serial array, where it is read
+first rather than killed first.
+
+The order matters beyond reading, because `scripts/job_utils.py` reads
+`[slurm]` from the first config by filename alone -- so each folder's block
+lives in a ShapeWorld file while still being sized for the slower birds arms.
+The array is one submission and the ceiling has to clear its slowest member.
 
 **Why serial, and what goes wrong if it is not.** Each sweep runs at whatever
 rates DEFAULT.toml currently holds, and restates none of them. Sweep 3 tunes

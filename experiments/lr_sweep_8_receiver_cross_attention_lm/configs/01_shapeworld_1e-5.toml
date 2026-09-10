@@ -1,18 +1,13 @@
-# lr_sweep_2_sender_vit: what learning rate the speaker's ViT backbone wants, in
+# lr_sweep_8_receiver_cross_attention_lm: what learning rate `ReceiverCrossAttentionLM` wants, in
 # the presence of everything below it on the ladder.
 #
-# Ten arms. The speaker's ViT rate moves over 1e-5, 2e-5, 5e-5, 1e-4 and 2e-4 on
-# both datasets -- `[optimiser.implementation_lr.sender_vision] ShapeWorldViT`
-# on the ShapeWorld arms and `BirdsViT` on the birds ones, the two names one
-# class carries so that a rate can be keyed per dataset's stack. `01`-`05` are
-# the five ShapeWorld arms, copying ablation rung 03, and `06`-`10` the five
-# birds arms, copying rung 04, which is the order every sweep in the set now
-# runs in. ShapeWorld led here first, because it is the arm this re-run is
-# for: the first pass found no rate that helped there and left `ShapeWorldViT`
-# without one. Nothing else differs between the arms, and nothing else differs
-# from the rung each one copies.
+# Ten arms. `[optimiser.implementation_lr.receiver_language_model] ReceiverCrossAttentionLM` moves over 1e-5,
+# 2e-5, 5e-5, 1e-4 and 2e-4 on both datasets -- `01`-`05` are the five
+# ShapeWorld arms, copying ablation rung 15, and `06`-`10` the five birds
+# arms, copying rung 16. Nothing else differs between the arms, and nothing
+# else differs from the rung each one copies.
 #
-# **Sweep 2 of eight.** `lr_sweep_1_cnn` did the two CNN backbones and is
+# **Sweep 8 of eight.** `lr_sweep_1_cnn` did the two CNN backbones and is
 # where the reasoning for the whole set is written down. The short version:
 # every rung of the ablation introduces a component whose learning rate has
 # never been measured, `[optimiser] lr`'s 1e-4 is jayelm's default tuned on a
@@ -23,18 +18,16 @@
 # through.
 #
 # **This sweep takes its rates from DEFAULT.toml and restates none of them.**
-# It inherits the two CNN rates from `lr_sweep_1_cnn`. That is
+# It inherits every rate the first seven sweeps found. That is
 # deliberate and it is also a constraint on when this can run: the sweeps are
-# serial, and DEFAULT.toml must already carry sweep 1's result before this one
+# serial, and DEFAULT.toml must already carry sweep 7's result before this one
 # is launched. Launching out of order does not fail, it silently measures this
 # component against an untuned stack. See `experiments/README.md`.
 #
-# The listener still runs `ResNet56` on ShapeWorld and `ResNet18` on
-# birds, at the rates `lr_sweep_1_cnn` measured, so this arm moves one
-# backbone and not both. That is the rung, and it is why the rate has to
-# be keyed by class: a `[optimiser.module_lr] sender_vision` would move
-# the speaker's trunk at every rung including the ones that hold a CNN
-# there.
+# The last rung, and the only one whose old ablation runs did not finish:
+# rung 15 stopped at 19 epochs and rung 16 at 12. Whatever ended them
+# predates every change since August, so this sweep is also the first
+# clean look at the full stack.
 #
 # **The grid, and why it is this one.** 1e-5 to 2e-4, five arms, roughly
 # log-spaced. The bottom is where `lr_sweep_1_cnn`'s ShapeWorld arm found its
@@ -49,31 +42,17 @@
 # costs, and 40 is definitely too short, because on `lr_sweep_1_cnn`'s own
 # traces the ShapeWorld arms at 2e-5 and 5e-5 are *inverted* at epoch 40 and
 # cross at 47. What 60 assumed is that ignition happens early enough for the
-# forty epochs after it to be the measurement. The 2026-09-10 ShapeWorld ViT
-# run is the counter-example: `train_loss` at ln 2 until epoch 48, ignition at
-# 49, and eleven epochs of protocol at the end of a sixty-epoch budget. A rate
+# epochs after it to be the measurement. The 2026-09-10 ShapeWorld ViT run is
+# the counter-example: `train_loss` at ln 2 until epoch 48, ignition at 49, and
+# eleven epochs of protocol at the end of a sixty-epoch budget. A rate
 # comparison over eleven epochs of a code that is still moving is not a rate
 # comparison.
 #
-# **This went 60 -> 100 -> 60 -> 100 over 2026-09-10**, and the middle of that
-# is worth recording rather than quietly dropping. The case for going back to
-# 60 was that the run which motivated 100 predates `ShapeWorldViT` dropping its
-# initial `BatchNorm2d(3)` -- the change aimed at exactly that dead zone, since
-# it is what put a colour-dependent value on 94% of the image and into the
-# transformer's first layer -- so the failure 100 was sized for should no longer
-# be reachable, and sizing for that bet is the cheaper way round on a serial
-# chain. What settled it the other way is the cost of losing the bet: a null
-# ShapeWorld result at 60 is ambiguous between "no rate helps" and "60 was short
-# again", and an ambiguous null on the arm this whole re-run is for is not worth
-# the forty epochs it saves.
-#
-# So 100, which is also the ablation's own length -- rungs 03 and 04 are what
+# So 100, which is also the ablation's own length -- rungs 15 and 16 are what
 # these arms copy, and matching it means an arm here and the rung it copies
 # differ in the swept rate and nothing else, including the budget. It costs the
 # serial chain 40 epochs x 10 arms; the `[slurm]` block below already carries
 # the ablation's 24-hour ceiling for the same work, so nothing there moves.
-# `experiments/silhouette_titration_sender_vit/` is at 100 for the same reason,
-# so the two folders are now read at the same length.
 #
 # What the extra epochs do not buy is the argmax. `lr_sweep_1_cnn` took 98
 # epochs to separate its top two birds arms and then separated them by 0.001,
@@ -82,7 +61,7 @@
 # gaps here are the same size as within-arm epoch-to-epoch wobble, so this ranks
 # candidates and does not settle them.
 #
-# **What to read.** `train_clip_sender_vision` first, in both directions: a
+# **What to read.** `train_clip_receiver_language_model` first, in both directions: a
 # spike says the rate is too high and a decay toward AdamW's `eps` floor says
 # it is too low, and both are visible per-module because the clip groups and the
 # rate groups are the same table. Then `train_eval_mode_acc` against
@@ -98,17 +77,46 @@
 #
 # ---
 #
-# **This arm: the speaker's ViT backbone at 1e-5 on ShapeWorld**, copying ablation rung 03.
+# **This arm: `ReceiverCrossAttentionLM` at 1e-5 on ShapeWorld**, copying ablation rung 15.
 
-name = "lr_sweep_2_sender_vit"
+name = "lr_sweep_8_receiver_cross_attention_lm"
 
 [sender]
 feature_model = "ShapeWorldViT"
+prototyper = "AttentionPrototyper"
+contrast = true
+language_model = "SenderTransformerLM"
 
-[optimiser.implementation_lr.sender_vision]
+[sender_language_model]
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+layers = 7
+bidirectional = false
+
+[receiver]
+feature_model = "ShapeWorldViT"
+language_model = "ReceiverCrossAttentionLM"
+discriminator = "AttentionDiscriminator"
+
+[receiver_discriminator]
+d_model = 256
+heads = 4
+ff_inner_size = 320
+layers = 3
+
+[receiver_language_model]
+d_model = 256
+heads = 4
+ff_inner_size = 320
+token_embedding_size = 256
+layers = 6
+bidirectional = true
+
+[optimiser.implementation_lr.receiver_language_model]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-ShapeWorldViT = 1e-5
+ReceiverCrossAttentionLM = 1e-5
 
 [scheduler]
 epochs = 100
@@ -121,12 +129,12 @@ repeats = 1
 # and read from the first config by filename only -- so this block governs the
 # whole array and belongs here and nowhere else. It sits in a ShapeWorld file
 # and is sized for a birds one, because the array is one submission and the
-# ceiling has to clear its slowest member. Untouched across the whole
-# 60 -> 100 -> 60 -> 100 round trip: it is the allowance
-# `ablation_birds/04_birds_sender_vit` carries for a 100-epoch birds ViT run,
-# which is the job these arms copy. That leaves ~14 min/epoch against the ~3.4
-# min/epoch `lr_sweep_1_cnn` measured on the CNN trunks; a ViT arm is slower and
-# still has not been timed at this length, so the margin is the untested part.
+# ceiling has to clear its slowest member. Unchanged when the arms went from 60
+# epochs to 100: it is the allowance `ablation_birds` carries for a 100-epoch
+# birds ViT run, which is the job these arms copy. That leaves ~14 min/epoch
+# against the ~3.4 min/epoch `lr_sweep_1_cnn` measured on the CNN trunks; a ViT
+# arm is slower and still has not been timed at this length, so the margin is
+# the untested part.
 time = "24:00:00"
 cpus_per_task = 6
 gpus_per_task = 1

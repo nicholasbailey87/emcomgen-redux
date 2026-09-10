@@ -1,0 +1,36 @@
+# lr_sweep_1_cnn arm: CUB backbones at 5e-6 under gumbel.
+#
+# See `01_shapeworld_1e-5.toml` for what this experiment measures and why.
+# This file differs from that one in `[optimiser.module_lr]`, in the dataset,
+# and in carrying a `[data]` block, since ShapeWorld is the default.
+#
+# ---
+#
+# **This arm: CUB backbones at 5e-6 under gumbel.** Half the first sweep's floor,
+# and the identity run at this rate is `baseline_lr_sweeps_2` arm 01. It is the
+# arm most likely to show the recorded collapse failure if that failure is about
+# rate, and the least likely to spike if the spikes are about rate.
+
+name = "lr_sweep_1_cnn"
+
+[data]
+dataset = "../data/cub"
+
+[sender_language_model]
+# This arm ran the straight-through Gumbel-softmax estimator against a
+# `DEFAULT.toml` that was still on `"identity"`, which is what the sweep was
+# for. It won, and `estimator` was removed on 2026-09-07 -- gumbel is now
+# unconditional and the key raises if set. The block is kept as the record of
+# what this arm carried; nothing sets it any more.
+
+[optimiser.module_lr]
+# The two vision models, and only them. Every other key in this table
+# stays at DEFAULT.toml's 1e-4.
+sender_vision = 5e-6
+receiver_vision = 5e-6
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
