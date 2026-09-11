@@ -48,6 +48,13 @@ from _bootstrap import build_listener, config_section, rung
 from models import receiver as R
 
 
+# The two readout scalars, asked for rather than inherited. DEFAULT.toml turned
+#     them off on 2026-09-11 with `loss = "hinge"`, which made a volume in front
+#     of a fixed margin degenerate with the margin. The four tests below are
+#     about those parameters existing, so they build the arrangement that has
+#     them; see test_score_scale.py's `READOUT_ON`, which is this constant.
+READOUT_ON = {"scale_score": True, "bias_score": True}
+
 REFERENT_DIM = 320
 BATCH, N_OBJ, SEQ = 6, 10, 7
 
@@ -143,6 +150,7 @@ def _legacy_pair(d_model=128, token_dim=TOKEN_DIM):
             layers=1,
             bidirectional=False,
         ),
+        discriminator_overrides=dict(READOUT_ON),
     ).eval()
 
     # The two halves of the old module, moved and not rewritten.
@@ -876,9 +884,10 @@ def test_the_two_arms_build_the_same_bilinear_comparison():
         says what `mix_logit` already says, and an inner constant across
         candidates says what the outer `score_bias` already says.
     """
-    attention = _attention_discriminator()
+    attention = _attention_discriminator(**READOUT_ON)
     bilinear = build_listener(
-        "ReceiverGRULM", "BilinearDiscriminator", REFERENT_DIM
+        "ReceiverGRULM", "BilinearDiscriminator", REFERENT_DIM,
+        discriminator_overrides=dict(READOUT_ON),
     ).discriminator
 
     assert type(attention.bilinear) is type(bilinear)
@@ -1010,6 +1019,7 @@ def test_the_pair_can_still_go_quiet():
     listener = build_listener(
         "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
         config_file=rung(CROSS_RUNG),
+        discriminator_overrides=dict(READOUT_ON),
     ).eval()
     discriminator = listener.discriminator
     referents, messages = _inputs(listener)
@@ -1081,6 +1091,7 @@ def test_resetting_returns_the_mix_and_the_readout_to_their_opening():
     listener = build_listener(
         "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
         config_file=rung(CROSS_RUNG),
+        discriminator_overrides=dict(READOUT_ON),
     )
     discriminator = listener.discriminator
     opening = discriminator.mix_weight.item()

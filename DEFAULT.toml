@@ -2317,8 +2317,41 @@ beta = "deepnorm"
 #
 # Checkpoints do not cross either key: the scalar it builds is absent from the
 # `state_dict` when it is off.
-scale_score = true
-bias_score = true
+#
+# **Both false since 2026-09-11**, with `loss = "hinge"` and for its sake. They
+# were true from the day the keys existed until then, and `true` remains
+# bit-identical to the code before the keys, so this is a change of default and
+# not of behaviour under `loss = "bce"`.
+#
+# `scale_score` is degenerate with the margin. `train.HINGE_MARGIN` is a
+# constant in units of the score, and this scalar multiplies the score in front
+# of it, so a learned volume beside a chosen margin is one degree of freedom
+# written down twice and the two drift against each other. Worse, the direction
+# of its failure inverts: under BCE the volume goes quiet -- the whole
+# eight-attempt story in docs/anecdotes.md, and `score_scale` 0.997 -> 0.122 on
+# `hinge_vs_bce`'s BCE arm -- and under a hinge the reward is to grow it until
+# every correct candidate sits past the margin and only errors contribute, which
+# is the perceptron loss arriving without saying so. A hinge arm wanting a
+# different margin wants the constant changed, which is a code change and reads
+# as one.
+#
+# `score_bias` is not earning its place on either objective, which is why it
+# comes off with the volume rather than for a reason of its own. Games are
+# balanced 10 positive / 10 negative, so the loss-optimal global offset is near
+# zero and the column sits there: 0.005 at epoch 99 on `hinge_vs_bce`'s BCE arm,
+# against a score calibrated to open at 0.577. What it corrects is a *systematic*
+# offset in where the scores sit, and the bilinear score's offset is per-game --
+# `mean_j(LN(r_j)) . proj` varies by game -- which no scalar reaches. If it is
+# ever wanted back, the thing to check first is whether the offset it is being
+# asked to fix is per-game, in which case the answer is a different readout.
+#
+# **This makes the default the configuration that was measured.**
+# `hinge_vs_bce`'s hinge arm set both false in its own config, so the pairing
+# promoted here is the one that produced `train_acc_md_shape` 0.726. What has
+# never run is a hinge *with* these on, and nothing above is evidence about it --
+# the argument against that pairing is structural, not measured.
+scale_score = false
+bias_score = false
 
 # `BilinearDiscriminator` reads nothing else from this table. It is sized
 # entirely by the referent width and by the language model's `output_size`,

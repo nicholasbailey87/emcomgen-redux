@@ -565,13 +565,22 @@ def test_the_scalar_overrides_survive_the_module_groups_with_the_channel_normali
         is the *partition*, and a rung that quietly contributed one scalar fewer
         would weaken the test without failing it.
 
-    The unnormalised arm is not left untested by the pin:
+    `scale_score` and `bias_score` are pinned on for exactly the same reason and
+        since exactly the same kind of change: they stopped being the default on
+        2026-09-11, when `loss = "hinge"` made a volume in front of a fixed
+        margin degenerate with the margin. Without the pin this rung contributes
+        one scalar instead of three and the partition being tested is mostly
+        empty.
+
+    The arms these pins turn off are not left untested:
         `test_a_scalar_group_that_applies_matches_a_parameter` runs every rung
         exactly as written and asserts each scalar group is empty precisely when
         it does not apply.
     """
     config, built = _build(
-        config_file, sender_language_model={"normalise_logits": True}
+        config_file,
+        sender_language_model={"normalise_logits": True},
+        receiver_discriminator={"scale_score": True, "bias_score": True},
     )
     lr_of = _lr_by_id(built["optimiser"])
     seen = 0

@@ -183,18 +183,29 @@ REFERENT_DIM = 512
 BATCH, N_OBJ, SEQ = 8, 20, 7
 
 
+# Both readout scalars, asked for explicitly rather than inherited.
+#     DEFAULT.toml turned them off on 2026-09-11, when `loss = "hinge"` became
+#     the default and a volume in front of a fixed margin became degenerate
+#     with it. This file is *about* those two parameters, so it builds the
+#     configuration that has them; `test_both_gates_off_is_the_identity` below
+#     is where the new default's arrangement is pinned.
+READOUT_ON = {"scale_score": True, "bias_score": True}
+
+
 def _comparer(referent_dim=REFERENT_DIM, **overrides):
     """
     The bilinear arm: `ReceiverGRULM` feeding `BilinearDiscriminator`, composed
         the way `Receiver` composes them. Overrides go to the language model,
         which is where every key this arm reads lives -- `BilinearDiscriminator`
-        takes nothing from its own config table.
+        takes nothing from its own config table -- apart from the two readout
+        gates, which are `READOUT_ON` here for the reason stated beside it.
     """
     return build_listener(
         "ReceiverGRULM",
         "BilinearDiscriminator",
         referent_dim,
         language_model_overrides=overrides or None,
+        discriminator_overrides=dict(READOUT_ON),
     )
 
 
@@ -231,10 +242,11 @@ def _cross_comparer(referent_dim=REFERENT_DIM, dropout=0.0, **overrides):
         tests of a deterministic property and a resampled mask between two
         calls would be measuring dropout.
     """
-    discriminator_overrides = {
+    discriminator_overrides = dict(READOUT_ON)
+    discriminator_overrides.update({
         key: value for key, value in overrides.items()
         if key in _DISCRIMINATOR_KEYS
-    }
+    })
     return build_listener(
         "ReceiverCrossAttentionLM",
         "AttentionDiscriminator",
@@ -599,6 +611,43 @@ def test_untrained_bce_opens_within_reach_of_ln_2(build, referent_dim):
 #     from the `ScoreVolume` mixin, downstream of a per-game `standardise`. The
 #     weight matrices carry direction. See the sixth round in the preamble.
 # --------------------------------------------------------------------------
+
+def test_both_gates_off_is_the_identity_and_is_the_default():
+    """
+    The arrangement DEFAULT.toml selects since 2026-09-11, and the one
+        `experiments/hinge_vs_bce/`'s hinge arm ran: `readout` is the identity,
+        neither parameter exists, and the score reaching the decision is the
+        calibrated one straight out of the comparison.
+
+    It is here rather than beside the gate tests because it is now the *default*
+        arrangement, and the rest of this file overrides its way back to the
+        other one. A hinge makes the volume degenerate with `train.HINGE_MARGIN`
+        -- a loudness in front of a fixed margin is a margin -- and inverts the
+        direction it fails in: BCE's volume goes quiet, and a hinge rewards one
+        that grows until only errors sit inside the margin.
+
+    The offset comes off with it rather than for a reason of its own. Games are
+        balanced, so the loss-optimal global offset is near zero and the column
+        sits there: 0.005 at epoch 99 on the BCE arm, against a score opening at
+        0.577.
+    """
+    settings = config_section("receiver_discriminator")
+    assert settings["scale_score"] is False
+    assert settings["bias_score"] is False
+
+    # Built straight from DEFAULT, where this file's other builds override
+    #     their way back to `READOUT_ON`.
+    bare = build_listener(
+        "ReceiverGRULM", "BilinearDiscriminator", REFERENT_DIM
+    ).discriminator
+
+    scores = torch.randn(BATCH, N_OBJ)
+    assert not bare.learns_score_scale
+    assert not bare.learns_score_bias
+    assert not hasattr(bare, "log_score_scale")
+    assert not hasattr(bare, "score_bias")
+    assert torch.equal(bare.readout(scores), scores)
+
 
 def test_each_discriminator_owns_exactly_one_volume_and_one_offset():
     """
@@ -1448,7 +1497,9 @@ def test_the_readout_scalars_are_elevated_and_the_weight_that_turns_is_not():
         `split_out_parameter` raises when nothing matches its suffix,
         deliberately, so a stale key takes every rung down at construction.
     """
-    config, pair, optimiser = _pair_and_optimiser("02_birds_baseline.toml")
+    config, pair, optimiser = _pair_and_optimiser(
+        "02_birds_baseline.toml", receiver_discriminator=READOUT_ON
+    )
 
     assert "mix_scale_lr" not in config["optimiser"]
     elevated = config["optimiser"]["score_scale_lr"]
@@ -1521,6 +1572,7 @@ def test_an_attention_rung_with_a_normalised_channel_asks_for_the_mix_weight_rat
     """
     config, pair, optimiser = _pair_and_optimiser(
         "16_birds_receiver_cross_attention_lm.toml",
+        receiver_discriminator=READOUT_ON,
         sender_language_model={"normalise_logits": True},
         # Pinned away from the base rate, which since 2026-09-05 it would
         #     otherwise equal: DEFAULT's table went flat at 1e-4 and

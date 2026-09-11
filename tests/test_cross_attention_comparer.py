@@ -188,7 +188,13 @@ def test_the_staged_walkthrough_matches_the_forward_pass():
         this test sensitive to call order through the running estimates. Both
         are gone. See test_score_scale.py for the whole sequence.
     """
-    listener = _listener()
+    # Both readout scalars pinned on: they stopped being the default on
+    #     2026-09-11 with `loss = "hinge"`, and the arithmetic this test walks
+    #     through is the readout *with* them. `readout` is the identity when
+    #     they are off, which test_score_scale.py pins.
+    listener = _listener(
+        discriminator_overrides={"scale_score": True, "bias_score": True}
+    )
     discriminator = listener.discriminator
     referents, messages = _inputs(listener)
 

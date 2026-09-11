@@ -309,7 +309,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # arithmetic is 1024 * 1024 + 2. Both operand norms have moved to
         # `Receiver` and neither held a parameter, so this count is unchanged by
         # the hoist. See test_score_scale.py.
-        ("01_shapeworld_baseline.toml", "receiver.discriminator", 1_048_578),
+        ("01_shapeworld_baseline.toml", "receiver.discriminator", 1_048_576),
         # The interfaces. `discriminator_referents` is `final_feat_dim` -> 1024
         # with no bias and `discriminator_message` 1024 -> 1024 with one; the GRU
         # declares no referent width, so there is no third. This is the whole of
@@ -345,7 +345,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.feature_model", 876_593),
         ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 6_758_354),
         ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_198),
+        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_196),
         # Three interfaces here, and all of them narrow: `final_feat_dim` -> 256
         # twice for the two slots' referents and 256 -> 256 for the message.
         # Against rung 13 the difference is the message interface, which reads a
@@ -359,7 +359,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         ("02_birds_baseline.toml", "sender.feat_model", 11_176_512),
         ("02_birds_baseline.toml", "sender.language_model", 6_822_649),
         ("02_birds_baseline.toml", "receiver.language_model", 4_687_872),
-        ("02_birds_baseline.toml", "receiver.discriminator", 1_048_578),
+        ("02_birds_baseline.toml", "receiver.discriminator", 1_048_576),
         # CUB: the top of the ladder. Only the two vision-dependent counts differ
         # from ShapeWorld's -- the ViT's patch tokeniser scales with image size,
         # and the speaker's language model carries a longer message.
@@ -382,7 +382,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         ("16_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 10_626_990),
         ("16_birds_receiver_cross_attention_lm.toml", "sender.language_model", 6_764_120),
         ("16_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
-        ("16_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_198),
+        ("16_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_196),
         # Rung 13's discriminator, pinned because it used to be the number that
         # made the 13 -> 15 step unclean and now is not: it is *equal* to rung
         # 15's. The gap was a `memory_adapter` bringing the GRU's 1024-wide
@@ -411,8 +411,16 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # rungs 1-12 could place the score against `train.py`'s fixed
         # `lis_scores > 0`. Two scalars is the whole cost of the listener's
         # readout.
-        ("13_shapeworld_attention_discriminator.toml", "receiver.discriminator", 2_384_198),
-        ("14_birds_attention_discriminator.toml", "receiver.discriminator", 2_384_198),
+        #
+        # **Every count here dropped by 2 on 2026-09-11**, when `scale_score`
+        # and `bias_score` went false in DEFAULT.toml beside `loss = "hinge"`:
+        # a volume in front of a fixed margin is degenerate with the margin, and
+        # the offset came off with it. The readout now costs nothing and
+        # `ScoreVolume.readout` is the identity. The numbers are the count under
+        # the current default; the paragraphs above are the history of the two
+        # parameters that are no longer there.
+        ("13_shapeworld_attention_discriminator.toml", "receiver.discriminator", 2_384_196),
+        ("14_birds_attention_discriminator.toml", "receiver.discriminator", 2_384_196),
         # Where the 13 -> 15 difference went: `final_feat_dim` -> 256 for the
         # referents and 1024 -> 256 for the GRU's state. The language model
         # declares no referent width on this rung, so there are two interfaces

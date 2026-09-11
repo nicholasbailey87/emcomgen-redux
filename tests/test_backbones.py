@@ -556,7 +556,15 @@ def _pair_with_gradients(contrast=False):
         "../data/shapeworld_40",
         SHAPEWORLD_FEATS,
         "shapeworld",
-        extra="[sender]\ncontrast = true\n" if contrast else "",
+        # `scale_score` went false in DEFAULT.toml on 2026-09-11 with
+        #     `loss = "hinge"`. It is pinned on here because the tests below are
+        #     about the *scalar groups* -- a lone scalar clipped by its own norm
+        #     rather than its module's -- and `log_score_scale` is the listener's
+        #     only member of one.
+        extra=(
+            "[receiver_discriminator]\nscale_score = true\n"
+            + ("[sender]\ncontrast = true\n" if contrast else "")
+        ),
     )
     n_examples = config["data"]["n_examples"]
     inputs = torch.randn(2, n_examples, *SHAPEWORLD_FEATS)
