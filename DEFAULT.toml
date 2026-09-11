@@ -79,7 +79,31 @@ vis = false
 # false wherever mixup is on. `validate_config` rejects the pair rather than
 # guessing at a target score for a candidate labelled 0.7. See
 # `parse_config.LOSSES`.
-loss = "bce"
+#
+# **`"hinge"` is the default since 2026-09-11**, on `experiments/hinge_vs_bce/`:
+# two ShapeWorld arms on the sweep-2 ViT speaker at 2e-5, 100 epochs, one seed
+# each, differing in this key and in the two readout scalars it makes degenerate.
+#
+#   * **Shape.** `train_acc_md_shape` 0.726 under a hinge against 0.525 under
+#     BCE, at an identical `train_acc_md_color` of 0.85. 0.525 is the colour-only
+#     minimum: every ViT arm of `lr_sweep_2_sender_vit` sat there, none above
+#     0.537. This is the first ShapeWorld ViT run on record to learn shape, and
+#     it was still climbing at epoch 99.
+#   * **Transfer.** `test_acc` 0.711 against 0.606.
+#   * **Ignition.** Epoch 3-4 against 7. Real but not the headline -- the BCE arm
+#     also ignited fast, so most of that belongs to `mixup_blends_classes` rather
+#     than to this key.
+#   * **The basin, seen directly.** The BCE arm slid `train_score_scale`
+#     0.997 -> 0.122 over its hundred epochs. The hinge arm has no such scalar to
+#     slide, and its loss was still falling at epoch 99 -- so the feared failure,
+#     a comfortable listener clearing the margin and starving the speaker, did
+#     not arrive within the budget.
+#
+# n = 1 per arm, and the two arms differ in three keys rather than one. So this
+# is a default moved on a strong single result, not a settled comparison; the
+# BCE arm is one line in an experiment TOML away if anything needs re-reading
+# against it.
+loss = "hinge"
 
 # Score the listener a second and third time on every training batch, in eval
 # mode, once with the real message and once with the batch's messages rolled by
@@ -265,8 +289,31 @@ n_workers = 5
 # The tell that this has gone too far is the one the whole key exists for --
 # shape falling back to ~0.52 on `test_acc_md_shape` while colour sits near
 # 0.80 -- and the response to it is to go back up, not to change the fill.
+# **0.0 on both agents since 2026-09-11.** The key exists to break the
+# colour-only minimum from outside, by taking colour out of the picture in a
+# fraction of games. `loss = "hinge"` attacks the same minimum from inside the
+# objective, and on the first pair of runs it did the job on its own: at an
+# identical `train_acc_md_color` of 0.84, `train_acc_md_shape` was 0.726 under a
+# hinge and 0.525 under BCE, and 0.525 is the colour-only minimum this rate was
+# turned up to escape. Whatever silhouetting was buying, the objective is now
+# buying it, and the suppression cost recorded above -- a fraction of the
+# receiver's games containing nothing worth decoding, and a correspondingly
+# weaker gradient for the speaker to sharpen on -- is a cost with nothing left
+# to pay for.
+#
+# It is also a confound removed. Every ShapeWorld run that has learned shape did
+# it with silhouetting on, so the hinge result arrives with that rate in the
+# background; setting it to zero is what makes the next ShapeWorld arm a
+# statement about the objective alone.
+#
+# **The tell, unchanged**, and it is the reason this is reversible rather than
+# settled: shape falling back to ~0.52 on `test_acc_md_shape` while colour sits
+# near 0.80. If that returns, titrate upwards from 0.2 -- the rate this came
+# down from, and the lowest at which a run has been seen to escape -- rather
+# than going to 0.5 or changing the fill. `silhouette_fill` is left at the mean
+# object colour for that reason: it is the setting the rate would come back at.
 silhouette_p_sender = 0.0
-silhouette_p_receiver = 0.2
+silhouette_p_receiver = 0.0
 
 # Geometric augmentation of the referents, train-only and drawn per image.
 #

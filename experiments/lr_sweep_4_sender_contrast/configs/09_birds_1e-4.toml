@@ -23,7 +23,7 @@ contrast = true
 sender_contrast = 1e-4
 
 [scheduler]
-epochs = 100
+epochs = 20
 
 [experiment]
 repeats = 1

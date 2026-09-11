@@ -204,7 +204,7 @@ Present for all four split prefixes.
 
 | Column | Meaning |
 | --- | --- |
-| `<split>_loss` | The training objective, averaged over the epoch's batches (batch-size weighted). `BCEWithLogitsLoss` over the listener's per-image scores, or `CrossEntropyLoss` over the candidate set when `reference_game_xent = true`. |
+| `<split>_loss` | The training objective, averaged over the epoch's batches (batch-size weighted). Selected by the top-level `loss` key: `train.hinge_loss` over the listener's per-image scores (the default since 2026-09-11, a silent listener paying the margin, 1.0) or `BCEWithLogitsLoss` over the same (a silent listener paying `ln 2` = 0.693) — or `CrossEntropyLoss` over the candidate set when `reference_game_xent = true`. **Not comparable across objectives**; `<split>_acc` is. |
 | `<split>_combined_loss` | Duplicate of `<split>_loss`. Vestigial — the two are logged from the same value in `train.py`. Ignore it. |
 | `<split>_acc` | Listener accuracy. Under BCE: the fraction of listener images whose sign is predicted correctly, meaned per game then over games. Under `reference_game_xent`: the fraction of games where the target is the argmax. |
 

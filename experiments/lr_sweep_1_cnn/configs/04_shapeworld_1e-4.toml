@@ -26,7 +26,7 @@ sender_vision = 1e-4
 receiver_vision = 1e-4
 
 [scheduler]
-epochs = 100
+epochs = 20
 
 [experiment]
 repeats = 1

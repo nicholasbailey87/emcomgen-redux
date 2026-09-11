@@ -40,14 +40,11 @@ missing key rather than raising.
   direction and a minimum magnitude and no target score, so a candidate labelled
   0.7 has no reading under it.
 
-  The margin is `train.HINGE_MARGIN = 1.0`, fixed rather than configurable:
-  `[receiver_discriminator] scale_score` multiplies the score in front of it, so
-  a learned volume beside a chosen margin is one degree of freedom written twice.
-  An arm asking for a hinge should be turning that scalar off. Note also that
-  `train_loss` then reads against 1.0 rather than against `ln 2` = 0.6931, so
-  every `ln 2` reference in these docs is a statement about the BCE arm alone.
-  `train_acc` and topsim are unaffected — the decision threshold is
-  `lis_scores > 0` under either objective.
+  `"hinge"` is the default since 2026-09-11; see **The objective** below for
+  what moved it and what it costs. `train_loss` reads against 1.0 rather than
+  against `ln 2` = 0.6931 under it, so every `ln 2` reference in these docs is a
+  statement about the `bce` arm. `train_acc` and topsim are unaffected — the
+  decision threshold is `lis_scores > 0` under either objective.
 - `mixup_blends_classes` must be present and a boolean. See docs/data.md.
 - `joint_training` must be false — there is no joint-training objective in this
   codebase. This used to be checked once per batch inside the training loop;
@@ -520,10 +517,85 @@ so the step count per epoch is unchanged at 156.25 and matches ShapeWorld's
 exactly. The traverse budget per epoch is therefore held, and what the larger
 batch buys is a lower-variance speaker gradient.
 
+## The objective (`loss`)
+
+`hinge` since 2026-09-11, `bce` before it. `train.hinge_loss` is
+`mean(relu(margin - t * score))` at `t = 2y - 1` and `HINGE_MARGIN = 1.0`;
+`bce` is `BCEWithLogitsLoss` on the same tensors. Both decide on
+`lis_scores > 0`, so accuracy and topsim are comparable across them and the loss
+column is not: a silent listener pays `ln 2` = 0.6931 under one and 1.0 under the
+other.
+
+**Why the default moved.** BCE has a trivial optimum that a listener with
+nothing to read descends into. `L(z) = softplus(z) − y·z` is convex and, averaged
+over balanced labels, strictly minimised at `z = 0`, so scoring every candidate
+at zero is not a place a stuck run happens to sit — it is the place the gradient
+is pointing. The listener has a one-scalar route there, and takes it: the
+2026-09-10 ShapeWorld ViT run slid `score_scale` 0.998 → 0.199 over thirty
+epochs while `bilinear_weight_norm` moved only 18.5 → 18.2. docs/anecdotes.md has
+had the mechanism written down since August — *BCE will always reduce a loss it
+cannot solve* — and `scale_without_attenuating` was an earlier attempt on the
+same problem from the other end, stopping the volume's slide from multiplying
+down the gradients behind it.
+
+A hinge removes the basin rather than compensating for it. Inside the margin the
+loss is `margin − mean(t · score)`, which is `margin` exactly whenever `t` and
+`score` are uncorrelated **and does not depend on their scale**, so going quiet is
+flat rather than downhill. Push the scores up while still uncorrelated and the
+wrong half grows linearly where the right half clips at zero, so the loss settles
+around `|score| ≈ margin` instead of collapsing to the origin. The gradient at
+zero is a constant per candidate rather than BCE's confidence-weighted
+`σ(s) − y`, so a speaker whose message carries nothing still gets a full-sized
+push.
+
+**The second property, and the one that turned out to matter.** A candidate
+already right by a full margin contributes exactly zero. So once the
+colour-solvable games are solved they go silent and the gradient concentrates on
+the games colour cannot do. This is automatic hard-example mining aimed at
+precisely the failure this repo keeps landing in, and from inside the objective
+rather than from outside via the images.
+
+**What was measured.** `experiments/hinge_vs_bce/`, two ShapeWorld arms on the
+sweep-2 ViT speaker at 2e-5, 100 epochs, one seed each:
+
+| epoch 99 | `bce` | `hinge` |
+|---|---|---|
+| `train_acc_md_color` | 0.850 | 0.845 |
+| `train_acc_md_shape` | 0.525 | **0.726** |
+| `test_acc` | 0.606 | 0.711 |
+| `train_score_scale` | 0.122 | — (parameter absent) |
+| ignition epoch | 7 | 3–4 |
+
+Colour is identical. Shape is not: 0.525 is the colour-only minimum — every ViT
+arm of `lr_sweep_2_sender_vit` sat there and none exceeded 0.537 — and the hinge
+arm is the first ShapeWorld ViT run on record to leave it, still climbing at
+epoch 99. Ignition moved too, but most of that belongs to `mixup_blends_classes`
+rather than to the objective: the BCE arm also ignited at epoch 7, against 48 for
+the last run under the old mixup.
+
+**What it costs.** No emergent-communication work runs a hinge, so the loss
+column stops being comparable to jayelm's and to every run recorded here; the
+`ln 2` references throughout these docs are statements about the BCE arm.
+`[receiver_discriminator] scale_score` becomes degenerate — a volume in front of
+a fixed margin *is* a margin — and its failure inverts: BCE's volume goes quiet,
+a hinge's grows until only errors are inside the margin, which is the perceptron
+loss arriving without saying so. An arm asking for a hinge should clear that
+scalar, as `hinge_vs_bce`'s does; DEFAULT.toml has not, and that pairing is
+unmeasured.
+
+**The failure to watch for** is the mirror of the one it fixes: a comfortable
+listener clears the margin on everything and sends the speaker nothing. It did
+not arrive inside 100 epochs — the hinge arm's loss was still falling at 99 — and
+the response if it does is a larger `HINGE_MARGIN`, not a different objective.
+
+n = 1 per arm, and the arms differ in three keys rather than one. This is a
+default moved on a strong single result, not a settled comparison.
+
 ## Reading a run: deadlock, or undertrained?
 
-Both look like a flat loss near `ln 2`. They want opposite responses, and the
-diagnostic columns separate them cheaply.
+Both look like a flat loss near the silent value — `ln 2` under `bce`, and the
+margin, 1.0, under `hinge`. They want opposite responses, and the diagnostic
+columns separate them cheaply.
 
 **The deadlock signature is joint and it is exact.** Every learned quantity on the
 speaker side stationary to four decimal places across tens of epochs:

@@ -337,7 +337,30 @@ polarities and, in the concept game, the disjoint half that agent sees.
 comparable to the paper's and to the `probe_shape.py` sweep, which measures the
 sender on un-augmented images.
 
-### The rates are 0.0 sender, 0.1 receiver
+### The rates are 0.0 on both agents
+
+**Since 2026-09-11.** The receiver's rate went 0.5 → 0.1 → 0.2 → 0.0 over three
+weeks, and the history below is the argument for each of the first three. The
+last one is not a refinement of it: the key exists to break the colour-only
+minimum from outside, by taking colour out of a fraction of the games, and
+`loss = "hinge"` now attacks the same minimum from inside the objective. On
+`experiments/hinge_vs_bce/` it did the job unaided — `train_acc_md_shape` 0.726
+against BCE's 0.525 at an identical colour accuracy of 0.84, where 0.525 *is* the
+minimum this rate was raised to escape. So the suppression cost recorded below —
+a fraction of the receiver's games containing nothing worth decoding, and a
+correspondingly weaker gradient for the speaker to sharpen on — is now being paid
+for nothing.
+
+It also removes a confound. Every ShapeWorld run that has ever learned shape did
+it with silhouetting on, the hinge result included, so zeroing the rate is what
+makes the next ShapeWorld arm a statement about the objective alone.
+
+The tell is unchanged and the decision is reversible: shape falling back to ~0.52
+on `test_acc_md_shape` while colour sits near 0.80. If it returns, titrate up
+from 0.2 rather than going to 0.5 or touching `silhouette_fill`, which is left at
+the mean object colour precisely so the rate has somewhere to come back to.
+
+### History: 0.0 sender, 0.1 receiver
 
 Both were 0.0 for a few hours on 2026-08-30 and the receiver has been at 0.1
 since. It ran at `silhouette_p_receiver = 0.5` from 2026-08-25, and on the

@@ -760,7 +760,17 @@ the readout standardised and the two measured the same thing.
 
 A **monotone descent towards zero** is the finding: BCE reduces a loss it cannot
 otherwise reduce by becoming less confident, and nothing in this readout stops it.
-Wandering is not that. Nothing in the loss rewards the magnitude in either
+Wandering is not that.
+
+**Under `loss = "hinge"`, the default since 2026-09-11, this column is usually
+not there at all.** Inside the margin the loss does not depend on the scale, so
+the descent has nothing pulling it — and an arm that takes a hinge should be
+clearing `[receiver_discriminator] scale_score` anyway, since a volume in front
+of a fixed margin is a margin. `experiments/hinge_vs_bce/` does, and its hinge
+arm reads NaN in this column for every row where its BCE twin slid
+0.997 → 0.122. Read the descent as a `bce` diagnostic; on a hinge arm that still
+carries the scalar, watch it for the opposite motion — growth until only errors
+sit inside the margin, which is the perceptron loss without the name. Nothing in the loss rewards the magnitude in either
 direction on a run that is learning; rung 10 carries the identical exposure and
 its `score_scale` falls 0.856 → 0.238 across thirty epochs while `train_acc`
 climbs. Sign-consistent descent alongside a flat `train_acc` is what to act on.

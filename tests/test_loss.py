@@ -244,14 +244,16 @@ def test_a_non_boolean_blend_flag_is_rejected(blends):
 # --------------------------------------------------------------------------
 
 
-def test_the_default_is_bce_and_within_polarity_mixup():
+def test_the_default_is_hinge_and_within_polarity_mixup():
     """
-    BCE because every run in this repo's history used it and every `ln 2`
-        reference in `docs/` is written against it; within polarity because
-        that is what leaves a hinge askable for at all.
+    Hinge since 2026-09-11, on `experiments/hinge_vs_bce/`:
+        `train_acc_md_shape` 0.726 against BCE's 0.525 at an identical colour
+        accuracy, where 0.525 is the colour-only minimum every ViT arm of
+        `lr_sweep_2_sender_vit` sat in. Within-polarity mixup because the hinge
+        cannot read a continuous target, which is the coupling checked above.
     """
     config = parse_config.get_config()
-    assert config["loss"] == "bce"
+    assert config["loss"] == "hinge"
     assert config["data"]["mixup_blends_classes"] is False
 
 

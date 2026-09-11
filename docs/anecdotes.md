@@ -4,7 +4,7 @@ Findings and failures, with the numbers. Several current design choices only mak
 sense as the survivors of something that did not work, and this is where those
 are recorded.
 
-## The listener readout: six attempts, and what each one was actually about
+## The listener readout: eight attempts, and what each one was actually about
 
 The longest story in the codebase. It concerns the attention listener's
 `decision`, a bare `nn.Linear(d_model, 1)` — which is exactly where it started.
@@ -14,7 +14,8 @@ Written before the listener was split into `ReceiverCrossAttentionLM` and
 `TransformerCrossAttentionComparer` below is both of those, and
 `BilinearGRUComparer` is `ReceiverGRULM` plus `BilinearDiscriminator`. **There
 is a fourth act, at the bottom of this section, and it changes what is true
-today.**
+today** — and a fifth, attempt eight, which stops treating the readout as the
+thing to fix.
 
 ### The problem
 
@@ -317,6 +318,45 @@ already decided. Before designing around a gradient magnitude, check whether the
 optimiser can see it: Adam normalises per parameter, clipping normalises per
 module, and `weight_decay = 0.0` removes the one mechanism that would have made
 absolute scale matter. What survives all three is a gradient's *direction*.
+
+### Attempt eight: stop asking the readout, and change the loss
+
+2026-09-11. Seven attempts went into where the volume should live, how it should
+reach the backward pass, and whether it should exist. None of them touched the
+sentence at the top of this section: *BCE will always reduce a loss it cannot
+otherwise reduce by becoming less confident.* Every attempt took that pressure as
+a given and argued about the pipe it came down.
+
+It is not a given. It is a property of the objective, and a different objective
+does not have it. `loss = "hinge"` is `mean(relu(margin - t * score))` at
+`t = 2y - 1`: inside the margin the loss is `margin - mean(t * score)`, which is
+`margin` exactly whenever `t` and `score` are uncorrelated **and does not depend
+on their scale**. Going quiet stops being downhill. There is nothing for the
+volume to collapse *for*, and an arm that takes a hinge should drop the scalar
+outright, since a volume in front of a fixed margin is a margin.
+
+`experiments/hinge_vs_bce/` is the A/B, two ShapeWorld arms on the sweep-2 ViT
+speaker at 2e-5, 100 epochs, one seed each. The BCE arm did what this whole
+section describes — `score_scale` 0.997 -> 0.122, monotone, with `train_acc`
+climbing the entire time, which is the "wandering is not that" reading from
+docs/measurement.md in its pure form. The hinge arm had no such scalar and
+finished at `train_acc_md_shape` 0.726 against the BCE arm's 0.525, at an
+identical colour accuracy of 0.85. 0.525 is the colour-only minimum every ViT arm
+of `lr_sweep_2_sender_vit` sat in.
+
+**The lesson, and it is the one this section had been circling.** The collapse
+was read for seven rounds as a structural defect in the readout — one vector doing
+two jobs, a scalar that could go quiet, a coupling that starved the speaker — and
+it was none of those. It was the loss getting what it asked for. Before
+redesigning the module that exhibits a pathology, check whether the objective is
+requesting it: a gradient pointing somewhere unhelpful is not always a bug in the
+thing it points at.
+
+What is *not* claimed: that the hinge is better for every reason it might be. Two
+seeds total, three keys differing between the arms, and its own failure mode
+untested — a listener that clears the margin on everything stops pushing the
+speaker at all, which is the same starvation attempt six was about, arriving from
+the other side. It did not show up inside 100 epochs. See docs/training.md.
 
 
 ## Frozen logit spread: NaN through a masked gradient

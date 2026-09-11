@@ -50,7 +50,7 @@ bidirectional = true
 ReceiverCrossAttentionLM = 5e-5
 
 [scheduler]
-epochs = 100
+epochs = 20
 
 [experiment]
 repeats = 1

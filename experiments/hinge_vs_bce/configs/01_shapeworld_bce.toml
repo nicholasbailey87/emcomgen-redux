@@ -35,12 +35,35 @@
 #
 # ---
 #
-# **This arm: `BCEWithLogitsLoss`**, i.e. DEFAULT.toml's objective and the one
-# every run in this repo's history used. The reference.
+# **RESULT, 2026-09-11.** Both arms ran 100 epochs at one seed. At an identical
+# `train_acc_md_color` of 0.85, `train_acc_md_shape` finished at 0.525 on this
+# arm and 0.726 on the hinge arm; `test_acc` 0.606 against 0.711. 0.525 is the
+# colour-only minimum every ViT arm of `lr_sweep_2_sender_vit` sat in, and the
+# hinge arm is the first ShapeWorld ViT run on record to leave it. This arm also
+# slid `train_score_scale` 0.997 -> 0.122, which is the basin the experiment was
+# written to show. `loss = "hinge"` became the default on the strength of it,
+# and `silhouette_p_receiver` went to 0.0 — hence the `[data]` pin below, which
+# keeps this folder describing what it ran.
+#
+# n = 1 per arm and the arms differ in three keys, so this ranks the objectives
+# rather than settling them.
+#
+# ---
+#
+# **This arm: `BCEWithLogitsLoss`**, the objective every run in this repo's
+# history used and DEFAULT.toml's own until this experiment moved it. The
+# reference.
 
 name = "hinge_vs_bce"
 
 loss = "bce"
+
+[data]
+# Pinned to what these two runs actually had. `silhouette_p_receiver` went to
+# 0.0 in DEFAULT.toml on 2026-09-11, on the strength of this experiment's own
+# result; leaving these arms to inherit the new default would silently make the
+# folder stop describing the runs recorded against it.
+silhouette_p_receiver = 0.2
 
 [sender]
 feature_model = "ShapeWorldViT"

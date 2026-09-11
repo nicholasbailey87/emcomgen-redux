@@ -155,21 +155,52 @@
 # `train_acc_md_shape` against `train_acc_md_color` on the ShapeWorld arms,
 #     which is the standing question there.
 #
-# **100 epochs, one repeat.** 100 because the first sweep's own lesson was that
-# 30 truncated its only working arm -- birds at 1e-5 ended on its own maximum,
-# still climbing -- and because the ShapeWorld shape signal at 2e-5 did not step
-# up until epoch 18. One repeat because nine arms is already the budget; with
-# n = 1 the between-arm gaps are the same size as within-arm epoch-to-epoch
-# wobble, so this experiment ranks candidates and does not settle them.
+# **20 epochs, one repeat.** This was 100 until 2026-09-11, and before that 60,
+# and the whole argument for the long budgets was ignition: a ShapeWorld run
+# could sit at `ln 2` for tens of epochs before the protocol appeared, so a
+# sixty-epoch budget bought eleven epochs of measurement and a null result at
+# that length was ambiguous between "no rate helps" and "the budget was short
+# again". The 2026-09-10 ShapeWorld ViT run is the case that forced 100:
+# ignition at epoch 49.
+#
+# `loss = "hinge"` removes the thing being paid for. The first hinge run on this
+# speaker ignited at **epoch 3-4**, and by epoch 20 it had separated from its BCE
+# twin on the question these sweeps exist to answer -- `train_acc_md_shape`
+# 0.674 against 0.508, at an identical `train_acc_md_color` of 0.84. The
+# separation is not marginal at 20 and it does not reverse: the same arm read at
+# 99 is 0.726 against 0.525. So the epochs after 20 were buying precision on a
+# gap already visible, on a chain of eight serial sweeps.
+#
+# The standing caution that shape emerges late -- `lr_sweep_1_cnn`'s ShapeWorld
+# arm at 2e-5 did not step up until epoch 18 -- was a statement about a run that
+# spent its first seven epochs flat. It is not repealed, it is *absorbed*: the
+# flat stretch is what moved, not the learning behind it.
+#
+# What 20 cannot do is settle an argmax, and it was never going to. This sweep's
+# own first pass took 98 epochs to separate its top two birds arms and separated
+# them by 0.001. One repeat for the same reason: n = 1 across eight sweeps is the
+# budget, so between-arm gaps here are the size of within-arm epoch-to-epoch
+# wobble and this ranks candidates rather than settling them.
+#
+# The arms no longer match the ablation rungs they copy on length. That is a
+# real cost and it is accepted: the rungs are 100 and these are 20, so an arm
+# and its rung now differ in the swept rate *and* the budget, and a rung's trace
+# is not a control for an arm's.
+#
+# **The measured rates in DEFAULT.toml were taken at 100 epochs**, under BCE and
+# under the old mixup, so they are not re-derivable from a re-run of this folder
+# at 20. What a re-run measures is the ranking, which is what the key was ever
+# set from.
 #
 # `epochs` and `repeats` are restated in every file: `scripts/job_utils.py` reads
 # both straight out of the file rather than out of the merged config. `[slurm]`
 # is read from the *first* config in the folder only, sorted by filename, so the
 # block here governs the whole array. It sits in a ShapeWorld file and is sized
-# for a birds one: the heaviest job in the set is a 100-epoch birds arm, and the
-# array is one submission, so the ceiling has to clear its slowest member. It
-# matches what `ablation_birds` gives its own.
-#
+# for a birds one: the heaviest job in the set is a birds arm, and the array is
+# one submission, so the ceiling has to clear its slowest member. The ceiling is
+# left where it was after the budget went 100 -> 20 — it is a ceiling, not a
+# reservation, and a job that finishes early releases it.
+
 # ---
 #
 # **This arm: ShapeWorld backbones at 1e-5 under gumbel.** It carries no
@@ -197,7 +228,7 @@ sender_vision = 1e-5
 receiver_vision = 1e-5
 
 [scheduler]
-epochs = 100
+epochs = 20
 
 [experiment]
 repeats = 1

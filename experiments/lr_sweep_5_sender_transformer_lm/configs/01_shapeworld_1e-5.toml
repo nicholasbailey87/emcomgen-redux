@@ -40,30 +40,38 @@
 # than the trunks this repo runs, so there is no prior reason to think the
 # optimum is beneath it.
 #
-# **100 epochs, one repeat.** 60 was the original figure and the reasoning for
-# it still holds as far as it goes: the sweeps are serial and the chain is what
-# costs, and 40 is definitely too short, because on `lr_sweep_1_cnn`'s own
-# traces the ShapeWorld arms at 2e-5 and 5e-5 are *inverted* at epoch 40 and
-# cross at 47. What 60 assumed is that ignition happens early enough for the
-# epochs after it to be the measurement. The 2026-09-10 ShapeWorld ViT run is
-# the counter-example: `train_loss` at ln 2 until epoch 48, ignition at 49, and
-# eleven epochs of protocol at the end of a sixty-epoch budget. A rate
-# comparison over eleven epochs of a code that is still moving is not a rate
-# comparison.
+# **20 epochs, one repeat.** This was 100 until 2026-09-11, and before that 60,
+# and the whole argument for the long budgets was ignition: a ShapeWorld run
+# could sit at `ln 2` for tens of epochs before the protocol appeared, so a
+# sixty-epoch budget bought eleven epochs of measurement and a null result at
+# that length was ambiguous between "no rate helps" and "the budget was short
+# again". The 2026-09-10 ShapeWorld ViT run is the case that forced 100:
+# ignition at epoch 49.
 #
-# So 100, which is also the ablation's own length -- rungs 09 and 10 are what
-# these arms copy, and matching it means an arm here and the rung it copies
-# differ in the swept rate and nothing else, including the budget. It costs the
-# serial chain 40 epochs x 10 arms; the `[slurm]` block below already carries
-# the ablation's 24-hour ceiling for the same work, so nothing there moves.
+# `loss = "hinge"` removes the thing being paid for. The first hinge run on this
+# speaker ignited at **epoch 3-4**, and by epoch 20 it had separated from its BCE
+# twin on the question these sweeps exist to answer -- `train_acc_md_shape`
+# 0.674 against 0.508, at an identical `train_acc_md_color` of 0.84. The
+# separation is not marginal at 20 and it does not reverse: the same arm read at
+# 99 is 0.726 against 0.525. So the epochs after 20 were buying precision on a
+# gap already visible, on a chain of eight serial sweeps.
 #
-# What the extra epochs do not buy is the argmax. `lr_sweep_1_cnn` took 98
-# epochs to separate its top two birds arms and then separated them by 0.001,
-# which is the size of the question this cannot answer and does not need to.
-# One repeat because n = 1 at eight sweeps is already the budget; between-arm
-# gaps here are the same size as within-arm epoch-to-epoch wobble, so this ranks
-# candidates and does not settle them.
+# The standing caution that shape emerges late -- `lr_sweep_1_cnn`'s ShapeWorld
+# arm at 2e-5 did not step up until epoch 18 -- was a statement about a run that
+# spent its first seven epochs flat. It is not repealed, it is *absorbed*: the
+# flat stretch is what moved, not the learning behind it.
 #
+# What 20 cannot do is settle an argmax, and it was never going to. Sweep 1 took
+# 98 epochs to separate its top two birds arms and separated them by 0.001. One
+# repeat for the same reason: n = 1 across eight sweeps is the budget, so
+# between-arm gaps here are the size of within-arm epoch-to-epoch wobble and
+# this ranks candidates rather than settling them.
+#
+# The arms no longer match the ablation rungs they copy on length. That is a
+# real cost and it is accepted: the rungs are 100 and these are 20, so an arm
+# and its rung now differ in the swept rate *and* the budget, and a rung's trace
+# is not a control for an arm's.
+
 # **What to read.** `train_clip_sender_language_model` first, in both directions: a
 # spike says the rate is too high and a decay toward AdamW's `eps` floor says
 # it is too low, and both are visible per-module because the clip groups and the
@@ -103,7 +111,7 @@ bidirectional = false
 SenderTransformerLM = 1e-5
 
 [scheduler]
-epochs = 100
+epochs = 20
 
 [experiment]
 repeats = 1
