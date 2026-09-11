@@ -17,8 +17,13 @@
 # 100 epochs birds was flat from 5e-5 up and the tiebreak was the train-test
 # gap -- so this is the hinge moving the whole curve, not a rate drifting.
 #
-# `[optimiser.implementation_lr] ResNet18` in DEFAULT.toml therefore still
-# holds the first pass's 5e-5, and is waiting on this arm and its twin.
+# `[optimiser.implementation_lr] ResNet18` in DEFAULT.toml was moved to 1e-4 on
+# 2026-09-11 anyway, before this arm was run: the ladder's next rungs need a
+# rate now, and every measured arm points the same way -- 1e-4 is first on
+# `test_acc` *and* carries the smallest train-test gap on the grid, 0.086
+# against 0.123, 0.120 and 0.125 below it. So this arm and its twin are no
+# longer deciding what the key holds; they are checking whether it should have
+# gone higher still.
 #
 # **What would settle it**, in order: `test_acc` first, and whether it turns
 # over between 1e-4 and here; then the train-test gap, which is the first
