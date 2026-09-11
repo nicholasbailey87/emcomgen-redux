@@ -24,7 +24,7 @@
 # over between 1e-4 and here; then the train-test gap, which is the first
 # pass's tiebreak and rose monotonically through the original grid; then
 # whether the arm is stable at all -- 2e-4 is twice DEFAULT.toml's base rate
-# and 40x the rate the first pass settled on, and `train_clip_sender_vision`
+# and 4x the rate the first pass settled on, and `train_clip_sender_vision`
 # reached 5.2e6 on this dataset the last time a backbone was pushed. An arm
 # that spikes is a result, not a failure.
 

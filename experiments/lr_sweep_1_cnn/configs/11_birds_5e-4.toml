@@ -24,7 +24,7 @@
 # over between 1e-4 and here; then the train-test gap, which is the first
 # pass's tiebreak and rose monotonically through the original grid; then
 # whether the arm is stable at all -- 5e-4 is 5x DEFAULT.toml's base rate and
-# 100x the rate the first pass settled on, and a backbone there is as likely
+# 10x the rate the first pass settled on, and a backbone there is as likely
 # to diverge as to win. `train_clip_sender_vision` and
 # `train_clip_receiver_vision` are where that shows up first, and this dataset
 # reached 5.2e6 on the former the last time a backbone was pushed. An arm that
