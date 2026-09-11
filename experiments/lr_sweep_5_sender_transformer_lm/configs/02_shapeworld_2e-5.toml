@@ -29,7 +29,7 @@ bidirectional = false
 SenderTransformerLM = 2e-5
 
 [scheduler]
-epochs = 20
+epochs = 30
 
 [experiment]
 repeats = 1

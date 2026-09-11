@@ -37,8 +37,9 @@
 # than the trunks this repo runs, so there is no prior reason to think the
 # optimum is beneath it.
 #
-# **20 epochs, one repeat.** This was 100 until 2026-09-11, and before that 60,
-# and the whole argument for the long budgets was ignition: a ShapeWorld run
+# **30 epochs, one repeat.** This was 20 for a day from 2026-09-11, 100 before
+# that, and 60 before that, and the whole argument for the long budgets was
+# ignition: a ShapeWorld run
 # could sit at `ln 2` for tens of epochs before the protocol appeared, so a
 # sixty-epoch budget bought eleven epochs of measurement and a null result at
 # that length was ambiguous between "no rate helps" and "the budget was short
@@ -68,6 +69,29 @@
 # real cost and it is accepted: the rungs are 100 and these are 20, so an arm
 # and its rung now differ in the swept rate *and* the budget, and a rung's trace
 # is not a control for an arm's.
+#
+# **Why 30 and not 20, from 2026-09-12.** The 20 above was argued from a CNN
+# speaker under hinge, and the ViT does not keep to that timetable. In
+# `lr_sweep_2_sender_vit` the one ShapeWorld arm that left the colour-only
+# minimum -- 5e-5 -- cleared `train_acc` 0.55 at epoch 8, against epoch 2 for
+# the two arms either side of it that never learned shape; at 20 epochs it had
+# twelve epochs of measurement and its `test_acc_md_shape` of 0.682 was still
+# climbing. The three fast arms are the warning, not the reassurance: early
+# ignition there is the colour shortcut arriving, and colour saturates before
+# shape starts.
+#
+# That is the shape of the thing. Shape does not emerge alongside colour, it
+# emerges once colour is finished -- `test_acc_md_color` sits at 0.885 on the
+# arm that learns shape and 0.888 on the arm that does not -- so the budget has
+# to cover a colour phase the transformer takes longer to complete than the CNN
+# did. 20 was sized to the phase that ends; 30 is sized to the one that starts
+# after it.
+#
+# `lr_sweep_1_cnn` stays at 20 deliberately. It is already run, its arms are
+# read, and re-lengthening it would reprice a finished sweep to no purpose. The
+# cost is that sweep 1's arms and sweeps 2-8's now differ in budget as well as
+# in the swept component, so a rate carried forward from sweep 1 was chosen over
+# a shorter run than the one testing it.
 
 # **What to read.** `train_clip_receiver_discriminator` first, in both directions: a
 # spike says the rate is too high and a decay toward AdamW's `eps` floor says
@@ -118,7 +142,7 @@ layers = 3
 AttentionDiscriminator = 1e-5
 
 [scheduler]
-epochs = 20
+epochs = 30
 
 [experiment]
 repeats = 1

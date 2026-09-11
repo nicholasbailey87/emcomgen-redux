@@ -20,7 +20,7 @@ prototyper = "AttentionPrototyper"
 AttentionPrototyper = 1e-4
 
 [scheduler]
-epochs = 20
+epochs = 30
 
 [experiment]
 repeats = 1

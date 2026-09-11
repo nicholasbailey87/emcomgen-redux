@@ -41,7 +41,7 @@ layers = 3
 AttentionDiscriminator = 5e-5
 
 [scheduler]
-epochs = 20
+epochs = 30
 
 [experiment]
 repeats = 1
