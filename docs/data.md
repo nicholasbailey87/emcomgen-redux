@@ -455,6 +455,12 @@ them, and the response was to go back to the last configuration observed to
 ignite rather than to rule any of the three out. The warm-up went back with it,
 as the pair they came off as.
 
+The warm-up came off again on 2026-09-11, and that one is not a coin-toss: the
+flat 48 epochs above are a BCE symptom — the listener's volume had a trivial
+optimum to slide into — and under `loss = "hinge"` the same speaker ignites at
+epoch 3–4 with no ramp at all. See `[scheduler] warm_up_epochs` in DEFAULT.toml.
+This key, `augment_flip_sender`, is untouched by that and still on.
+
 The argument is that the augmentations exist to stop *memorisation*, and
 memorisation only pays for the agent that can act on it without the channel.
 The listener can pick a game's positives out of the pixels and ignore the

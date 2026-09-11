@@ -457,8 +457,8 @@ Three things to look for, in order:
 
 - **Does it pin at 2.0, and how fast?** At `logit_scale_lr` = 2e-3 a
   sign-consistent gradient covers `ln 2` in 2.2 epochs, so the ceiling binding is
-  expected and is not a fault — but it should not now happen before the warm-up
-  is over. If it pins early and stays, the question is whether 2.0 is the wrong
+  expected and is not a fault — and with `warm_up_epochs` back to 0 since
+  2026-09-11 those 2.2 epochs are the whole of the delay. If it pins early and stays, the question is whether 2.0 is the wrong
   ceiling rather than 2e-3 the wrong rate — check `logit_margin` first, because a speaker already spending its shape
   budget does not need the scale as well.
 - **Does it ever come back down?** A dip and a return is a speaker declining to

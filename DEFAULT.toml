@@ -1476,7 +1476,35 @@ epochs = 100
 # ignite, not to have decided between them. The two-arm run at the mean-colour
 # fill, ramp on and off, is still unpaid for and still the thing that would
 # settle it.
-warm_up_epochs = 10
+#
+# **0 since 2026-09-11, and this time not as a coin-toss between two halves of
+# a confound.** The ramp was only ever treating a symptom of the objective. Read
+# the paragraph above back: what it describes is a listener calibrating its
+# volume against a code that is still close to input-independent, and the reason
+# that was destructive is that under BCE the calibration has somewhere to go --
+# scoring everything at zero is the strict minimum on an uninformative message,
+# so the volume slid 0.95 -> 0.26 and the run sat at `ln 2` until the
+# representations crossed on their own. The ramp bought the representations a
+# head start on a race the loss should not have been running.
+#
+# `loss = "hinge"` takes the destination away: inside the margin the loss does
+# not depend on the scale at all, so a listener that calibrates early
+# calibrates against nothing and is not rewarded for going quiet. The first
+# hinge run on the ShapeWorld ViT -- the same speaker whose ramp-off run above
+# held `ln 2` for 48 epochs -- ignited at **epoch 3-4**, with the ramp
+# irrelevant either way at that length.
+#
+# Two things follow, and both are why it comes off rather than staying at 10 on
+# the grounds that it is harmless. The sweeps are 20 epochs now, so ten of them
+# is half the budget spent at a rate no arm is actually testing -- on eight
+# serial sweeps whose whole content is a rate. And 0 is jayelm's value, so this
+# is one fewer place the repo departs from the paper it is reproducing, at a
+# point where the departure no longer buys anything.
+#
+# If a ShapeWorld run under the hinge does sit flat again, the ramp is still the
+# first thing to put back, and everything above describes what it does. See
+# the `loss` key at the top of this file.
+warm_up_epochs = 0
 
 # `flat` or `cosine` -- an intention, not a curve.
 #

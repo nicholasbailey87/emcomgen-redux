@@ -23,11 +23,29 @@ dataset = "../data/cub"
 # unconditional and the key raises if set. The block is kept as the record of
 # what this arm carried; nothing sets it any more.
 
-[optimiser.module_lr]
-# The two vision models, and only them. Every other key in this table
-# stays at DEFAULT.toml's 1e-4.
-sender_vision = 5e-6
-receiver_vision = 5e-6
+# The two vision models, and only them, and keyed by the class each of them
+# holds rather than by the module group.
+#
+# **It has to be this table.** `builder.resolve_module_learning_rates` consults
+# `[optimiser.implementation_lr].<group>` *after* `[optimiser.module_lr].<group>`
+# and lets it win, because the implementation is the more specific claim. Since
+# this sweep's own first pass DEFAULT.toml carries `ResNet56 = 2e-5` and
+# `ResNet18 = 5e-5` in both vision groups -- written there from these very arms
+# -- so a `[optimiser.module_lr] sender_vision` line here is read, and then
+# overridden by the default, and every arm in the folder runs at the same rate
+# whatever its filename says. The arms were stated that way until 2026-09-11 and
+# would have been inert; nothing has been run from them since the default was
+# written.
+#
+# Stating the rate per class also means a re-run measures what the key is
+# actually keyed on. Every other key in `[optimiser.module_lr]` stays at
+# DEFAULT.toml's 1e-4, and DEFAULT's entry for the *other* dataset's backbone
+# (ResNet56) is untouched and unreachable from here -- this arm never builds one.
+[optimiser.implementation_lr.sender_vision]
+ResNet18 = 5e-6
+
+[optimiser.implementation_lr.receiver_vision]
+ResNet18 = 5e-6
 
 [scheduler]
 epochs = 20

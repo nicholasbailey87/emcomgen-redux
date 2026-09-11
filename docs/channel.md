@@ -352,8 +352,9 @@ giving the mixin a method, so the module still owns the rule.
 
 **Expect the ceiling to bind.** At `logit_scale_lr` = 2e-3 and 156.25 optimiser
 steps an epoch, a sign-consistent gradient covers `ln 2` in 2.2 epochs — so no
-longer inside the first epoch, and not before the ten-epoch warm-up has the rate
-at full value. That is the case the design is for and is *not* a fault — sitting
+longer inside the first epoch, though `warm_up_epochs` is 0 again since
+2026-09-11 and the rate is therefore at full value from step one, so nothing
+holds it off beyond its own 2.2 epochs. That is the case the design is for and is *not* a fault — sitting
 at the bound costs nothing and leaving it is free. But it is what makes
 `train_logit_scale` worth watching in the first runs: whether it pins at 2.0 at
 all, and if so whether 2.0 is the wrong ceiling rather than 2e-3 the wrong rate;

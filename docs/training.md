@@ -320,8 +320,9 @@ ceiling answers the argument for deleting it and a closed form does not.
 At 2e-3 and 156.25 optimiser steps an epoch — the figure both datasets run since
 `[birds.optimiser] accumulator_steps` went to 2 — that is 0.3125 log-units an
 epoch: 1.0 → the 2.0 ceiling in 2.2 epochs, 1.0 → 0.1 in 7.4. **Expect the
-ceiling to bind**, though no longer before the warm-up is over, and read that as
-the design working rather than as a fault. 6e-3 covered the same range in 0.74 of
+ceiling to bind**, and read that as the design working rather than as a fault.
+There is no warm-up in front of it any more — `warm_up_epochs` is 0 since
+2026-09-11 — so 2.2 epochs is the whole of the delay. 6e-3 covered the same range in 0.74 of
 an epoch and was the setting from 2026-08-28 to 2026-08-31; it is the fallback if
 2e-3 proves slow.
 
@@ -464,6 +465,18 @@ is a full period that ends where it began.
 to, and it governs **only** the shape after the warm-up. `flat` does not descend
 and takes no floor at all; `validate_config` rejects one set beside it rather
 than leaving it unread.
+
+**`warm_up_epochs` is 0, so in practice neither invariant is exercised by the
+defaults.** The ramp's job was to stop the listener calibrating its volume
+against a code that was still close to input-independent; under
+`loss = "hinge"` that calibration has nowhere to go, because inside the margin
+the loss does not depend on the scale at all, and the first hinge run on the
+ShapeWorld ViT ignited at epoch 3–4 with no ramp. It came off on 2026-09-11 for
+that reason and for two others: the LR sweeps are 20 epochs now, so ten of ramp
+is half a budget spent at a rate no arm is testing, and 0 is jayelm's value. A
+run that wants the ramp sets it in its own `[scheduler]` block. DEFAULT.toml's
+comment on the key is the full history — it has been 0, then 10, then 0, then 10,
+and now 0 again, and a comparison across any of those dates differs in this too.
 
 ### What this replaced, and what it means for old traces
 
