@@ -1,0 +1,50 @@
+# lr_sweep_1_cnn arm: CUB backbones at 2e-4 under the hinge.
+#
+# See `01_shapeworld_1e-5.toml` for what this experiment measures and why. This
+# file differs from that one in `[data] dataset` and in the rate below.
+#
+# **Added 2026-09-11, after the second pass, and it has no identity control.**
+# The other eight arms each have one in `baseline_lr_sweeps`; this rate was
+# never run there, so the only comparison it has is the rest of this folder.
+#
+# **Why the grid needed extending.** At 20 epochs under `loss = "hinge"`, birds
+# `test_acc` across the original five arms ran 0.529, 0.505, 0.514, 0.542,
+# 0.593 for 5e-6, 1e-5, 2e-5, 5e-5, 1e-4 -- monotone over the top three and
+# best at the top of the grid, with 1e-4 still climbing over its last five
+# epochs (0.575, 0.588, 0.590, 0.612, 0.593). An argmax at the edge of a grid
+# is not an argmax: it says the optimum is at that rate *or above it*, and the
+# sweep cannot tell which. The first pass had no such problem -- under BCE at
+# 100 epochs birds was flat from 5e-5 up and the tiebreak was the train-test
+# gap -- so this is the hinge moving the whole curve, not a rate drifting.
+#
+# `[optimiser.implementation_lr] ResNet18` in DEFAULT.toml therefore still
+# holds the first pass's 5e-5, and is waiting on this arm and its twin.
+#
+# **What would settle it**, in order: `test_acc` first, and whether it turns
+# over between 1e-4 and here; then the train-test gap, which is the first
+# pass's tiebreak and rose monotonically through the original grid; then
+# whether the arm is stable at all -- 2e-4 is twice DEFAULT.toml's base rate
+# and 40x the rate the first pass settled on, and `train_clip_sender_vision`
+# reached 5.2e6 on this dataset the last time a backbone was pushed. An arm
+# that spikes is a result, not a failure.
+
+name = "lr_sweep_1_cnn"
+
+[data]
+dataset = "../data/cub"
+
+# Keyed by class rather than by module group, for the reason the other eight
+# arms give at length: `implementation_lr` beats `module_lr`, and DEFAULT.toml
+# holds a `ResNet18` rate, so a `[optimiser.module_lr]` line here would be
+# overridden and this arm would silently run at the default.
+[optimiser.implementation_lr.sender_vision]
+ResNet18 = 2e-4
+
+[optimiser.implementation_lr.receiver_vision]
+ResNet18 = 2e-4
+
+[scheduler]
+epochs = 20
+
+[experiment]
+repeats = 1

@@ -1274,24 +1274,59 @@ receiver_discriminator = 1e-4
 # `[birds.optimiser.module_lr]` exists and would work, and is deliberately not
 # used for this.
 #
-# **Where these two numbers come from.** `experiments/lr_sweep_1_cnn/`, nine
-# arms, 100 epochs, one repeat. `ResNet56` on ShapeWorld: 2e-5, which is the
-# only rate where the shape/colour separation is large and still opening --
-# `train_acc_md_shape` 0.879 against `train_acc_md_color` 0.661 at epoch 100,
-# against 0.790/0.687 at 1e-5 and 0.797/0.686 at 5e-5, with 1e-4 stuck on the
-# colour shortcut at 0.531. The optimum is bracketed: there is a cliff between
-# 5e-5 and 1e-4, not a plateau running off the end.
+# **Where these two numbers come from.** `experiments/lr_sweep_1_cnn/`, run
+# twice: nine arms at 100 epochs on 2026-09-07 under BCE, and the same nine at
+# 20 epochs on 2026-09-11 under `loss = "hinge"`, at `8848c4b`, which is the
+# first pass in which the arms were not inert -- until that commit they stated
+# the swept rate in `module_lr`, where this very table overrode it. **The
+# second pass is what these numbers are from.** The first is kept below because
+# the ShapeWorld half disagrees, and the disagreement is the point.
 #
-# `ResNet18` on birds: 5e-5. `test_acc` over the last ten epochs goes 0.623,
-# 0.668, 0.681, 0.693, 0.692 across 5e-6 to 1e-4, so it is flat from 5e-5 up
-# and the tiebreak is the train-test gap, which rises monotonically -- 0.094,
-# 0.088, 0.113, 0.129, 0.145. Above 5e-5 the extra rate buys fit and not
-# transfer, which is why the sweep was not extended past 1e-4.
+# `ResNet56` on ShapeWorld: **5e-5**, and it is not close. At epoch 20,
+# `train_acc_md_shape` / `train_acc_md_color` across 1e-5, 2e-5, 5e-5, 1e-4:
 #
-# **These are plateau rates, not argmaxes.** n = 1, and adjacent arms are
-# inside the noise: 1e-5 against 5e-5 on ShapeWorld does not separate, and
-# 5e-5 against 1e-4 on birds separates by 0.001. What the sweep ranks is which
-# region to be in.
+#     1e-5   0.63 / 0.91    test_acc 0.646
+#     2e-5   0.52 / 0.90    test_acc 0.582
+#     5e-5   0.78 / 0.93    test_acc 0.706
+#     1e-4   0.50 / 0.81    test_acc 0.603
+#
+# 5e-5 is best on shape, on colour and on `test_acc` at once, so nothing is
+# being traded for it, and its shape curve is the one still climbing -- 0.53 at
+# epoch 9 to 0.78 at 20, no sign of a ceiling. 1e-4 sits at exactly 0.50 shape
+# in all twenty epochs, which is the colour shortcut in its pure form, and 2e-5
+# is barely better at 0.52. The optimum is bracketed with a cliff on each side.
+#
+# **The first pass said 2e-5, and 2e-5 is now the worst arm on the grid.** That
+# pass measured `train_acc_md_shape` 0.879 against `train_acc_md_color` 0.661 at
+# epoch 100, with 0.790/0.687 at 1e-5 and 0.797/0.686 at 5e-5. It is superseded
+# rather than contradicted: it was BCE, at 100 epochs, with class-blending
+# mixup and a ten-epoch warm-up, so four things differ and the objective is the
+# one with a mechanism. Under BCE a listener can descend to `ln 2` by going
+# quiet, which is what made the low rates look good -- they were the rates slow
+# enough not to reach the colour minimum within the budget. The hinge removes
+# that basin, and the rate that then wins is the one that learns fastest.
+#
+# `ResNet18` on birds: **5e-5, and unresolved.** The second pass ranks 1e-4
+# first on `test_acc` -- 0.529, 0.505, 0.514, 0.542, 0.593 across 5e-6 to 1e-4 --
+# and 1e-4 is the top of the grid and still climbing at epoch 20 (0.575, 0.588,
+# 0.590, 0.612, 0.593 over the last five). An argmax at the edge of a grid is
+# not an argmax, so nothing is written from it: two further arms, 2e-4 and 5e-4,
+# are in the folder as `10_birds_2e-4.toml` and `11_birds_5e-4.toml` and this
+# key holds the first pass's 5e-5 until they come back. Birds is also the half
+# that barely moves in twenty epochs -- every arm is within 0.05 of chance until
+# about epoch 12 -- so a 20-epoch budget is a weaker instrument here than on
+# ShapeWorld, and that is a second reason not to write a rate from it yet.
+#
+# The first pass's birds reading, for the comparison: `test_acc` over the last
+# ten of 100 epochs went 0.623, 0.668, 0.681, 0.693, 0.692 across the same five
+# rates -- flat from 5e-5 up, with the train-test gap rising monotonically
+# through 0.094, 0.088, 0.113, 0.129, 0.145. That is why it was not extended
+# past 1e-4 then. The hinge has moved the whole curve down at 20 epochs and has
+# not yet said where its own plateau starts.
+#
+# **These are plateau rates, not argmaxes.** n = 1 on both passes, and adjacent
+# arms can be inside the noise. What a sweep ranks is which region to be in;
+# ShapeWorld's 5e-5 is unusually clear for that, and birds' is not resolved.
 #
 # `ViT2` is absent, and so is every other class the ladder introduces. Each
 # arrives from its own sweep -- `experiments/lr_sweep_2_sender_vit/` onwards,
@@ -1300,7 +1335,7 @@ receiver_discriminator = 1e-4
 # it runs at `module_lr`'s 1e-4, which is jayelm's rate and an untested guess
 # for anything this repo trains from random init at this scale.
 [optimiser.implementation_lr.sender_vision]
-ResNet56 = 2e-5
+ResNet56 = 5e-5
 ResNet18 = 5e-5
 # `BirdsViT` at 2e-5, from `experiments/lr_sweep_2_sender_vit/`, five arms from
 # 1e-5 to 2e-4, 60 epochs, one repeat, run 2026-09-09 under the ignition
@@ -1370,7 +1405,7 @@ ShapeWorldViT = 2e-5
 # receiver ViT gets its own sweep at rung 11 rather than inheriting the
 # speaker's, because those two arrive at different rungs.
 [optimiser.implementation_lr.receiver_vision]
-ResNet56 = 2e-5
+ResNet56 = 5e-5
 ResNet18 = 5e-5
 
 [scheduler]
