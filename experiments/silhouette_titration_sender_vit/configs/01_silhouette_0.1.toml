@@ -25,10 +25,11 @@
 # that went the right way. That is the thing this folder now measures.
 #
 # **It is a probe for a rate of escape, not for an optimum.** The reading is
-# how many of the six seeds in an arm leave the colour-only minimum, and the
+# how many of the three seeds in an arm leave the colour-only minimum, and the
 # arms are compared on that fraction before anything else. An arm that escapes
-# six times out of six at 0.3 and twice at 0.1 has answered the question even
-# if its accuracies are unremarkable; six arms each read once would not have.
+# three times out of three at 0.3 and none at 0.1 has answered the question
+# even if its accuracies are unremarkable; nine arms each read once would not
+# have.
 #
 # **Why the transformer is expected to want its own rate.** Two reasons, both
 # from the 2026-09-10 writing and both intact.
@@ -61,7 +62,7 @@
 # above 0.3, only establish whether suppression works at all in the range the
 # CNNs used.
 #
-# **30 epochs, six repeats.** 30 because that is what sweeps 2-8 now run and
+# **30 epochs, three repeats.** 30 because that is what sweeps 2-8 now run and
 # what the 30-epoch sweep showed is enough: the ShapeWorld arm that learned
 # shape there had `train_acc_md_shape` moving by epoch 6 and 0.769 by epoch 29,
 # and the arms that did not were flat at 0.50 from the start. The 48-epoch dead
@@ -70,13 +71,17 @@
 # epochs observed across ten sweep arms are 3 to 8. If an arm here sits at
 # `ln 2` past epoch 15 that assumption is wrong and the folder is short.
 #
-# Six repeats because the quantity is a fraction of runs and three cannot
-# measure one. Three seeds separate 0/3 from 3/3 and nothing in between; six
-# separate an arm that escapes half the time from one that escapes always,
-# which is the distinction that decides whether suppression is a fix or an
-# improvement in the odds. `job_utils.py` makes each repeat its own array task,
-# so this is 18 tasks of one run and not three of six, and the `[slurm]`
-# ceiling below is per run.
+# Three repeats because the quantity is a fraction of runs and one cannot
+# measure a fraction at all, which is the whole lesson of the sweep. Three is
+# the floor that does anything rather than the number the statistics want: it
+# separates 0/3 from 3/3 and leaves 1/3 and 2/3 indistinguishable from each
+# other, so this folder can say whether suppression works and cannot say
+# whether it works every time. Six seeds an arm would have drawn that second
+# distinction and were judged not worth three times the compute of the sweep
+# that motivated the folder. If an arm comes back 1/3 or 2/3 the honest next
+# step is more seeds at that rate, not a finer grid. `job_utils.py` makes each
+# repeat its own array task, so this is 9 tasks of one run and not three of
+# three, and the `[slurm]` ceiling below is per run.
 #
 # **What to read.** `train_acc_md_shape` against `train_acc_md_color`, per
 # seed, and count escapes before averaging anything -- the failure signature is
@@ -115,7 +120,7 @@ silhouette_p_receiver = 0.1
 epochs = 30
 
 [experiment]
-repeats = 6
+repeats = 3
 
 [slurm]
 # Sized for one 30-epoch ShapeWorld run on a ViT trunk, and read from the first

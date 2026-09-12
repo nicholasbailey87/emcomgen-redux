@@ -1,9 +1,9 @@
 # **PARKED 2026-09-12, not queued.** This file is one level above `configs/`,
-# so `run_experiment.sh` does not submit it. The budget went to six seeds on
-# three arms instead of three seeds on six: the question is what fraction of
-# runs escape the colour-only minimum, and three repeats cannot measure a
-# fraction. If the escape fraction is still climbing at 0.3, move this back
-# into `configs/` and set `epochs = 30` and `repeats = 6` to match the live
+# so `run_experiment.sh` does not submit it. The grid was cut to the three
+# rates the CNN titrations bracket, so that the folder spends its tasks on
+# seeds at rates that might work rather than on single reads of rates that
+# might not. If the escape fraction is still climbing at 0.3, move this back
+# into `configs/` and set `epochs = 30` and `repeats = 3` to match the live
 # arms.
 #
 # ---

@@ -2,12 +2,12 @@
 # so `run_experiment.sh` does not submit it. The control moved out because the
 # sweep already is one: ten ShapeWorld arms ran at 0.0 across the two
 # `lr_sweep_2_sender_vit` runs and two of them escaped the colour-only minimum,
-# which measures the no-suppression escape rate at n = 10. Spending six of
-# eighteen tasks to re-measure it at n = 6 bought nothing.
+# which measures the no-suppression escape rate at n = 10. Spending three of
+# twelve tasks to re-measure it at n = 3 bought nothing.
 #
 # It also carried the `[slurm]` block for the array; that block now lives in
 # `configs/01_silhouette_0.1.toml`. If this arm is ever requeued, move it back
-# into `configs/`, set `epochs = 30` and `repeats = 6` to match the live arms,
+# into `configs/`, set `epochs = 30` and `repeats = 3` to match the live arms,
 # and delete the `[slurm]` block below rather than leaving two -- `00` sorts
 # first, so it would silently take over the array.
 #

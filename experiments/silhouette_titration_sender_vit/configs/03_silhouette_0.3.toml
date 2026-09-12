@@ -30,4 +30,4 @@ silhouette_p_receiver = 0.3
 epochs = 30
 
 [experiment]
-repeats = 6
+repeats = 3
