@@ -1,3 +1,13 @@
+# **PARKED 2026-09-12, not queued.** This file is one level above `configs/`,
+# so `run_experiment.sh` does not submit it. The budget went to six seeds on
+# three arms instead of three seeds on six: the question is what fraction of
+# runs escape the colour-only minimum, and three repeats cannot measure a
+# fraction. If the escape fraction is still climbing at 0.3, move this back
+# into `configs/` and set `epochs = 30` and `repeats = 6` to match the live
+# arms.
+#
+# ---
+#
 # silhouette_titration_sender_vit arm: `silhouette_p_receiver` at 0.4.
 #
 # See `00_silhouette_0.0.toml` for what this folder measures and why -- the

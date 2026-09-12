@@ -1,14 +1,22 @@
 # silhouette_titration_sender_vit arm: `silhouette_p_receiver` at 0.3.
 #
-# See `00_silhouette_0.0.toml` for what this folder measures and why -- the
-# short version is that 0.2 was titrated on CNNs, and `ViT2`'s `BatchNorm2d(3)`
-# stem and its capacity both argue the transformer wants its own number. This
+# See `01_silhouette_0.1.toml` for what this folder measures and why -- the
+# short version is that shape emergence on the speaker's ViT is close to a coin
+# flip at 0.0, and this folder asks whether suppression makes it reliable. This
 # file differs from that one in the swept rate and in carrying no `[slurm]`
-# block, which is read from `00_silhouette_0.0.toml` alone.
+# block, which is read from `01_silhouette_0.1.toml` alone.
 #
 # ---
 #
 # **This arm: `silhouette_p_receiver = 0.3`.**
+#
+# The top of the queued grid, and the direction the capacity argument points.
+# If the escape fraction is still rising here rather than turning over, this
+# folder has bracketed nothing and 0.4 and 0.5 -- parked one level up, written
+# and unqueued -- are the follow-up. Read this arm's ignition epochs against
+# 0.1's before reading its shape: 0.3 removes colour from nearly a third of the
+# listener's games, and the failure mode at the top of a titration is that the
+# protocol never lights rather than that shape never arrives.
 
 name = "silhouette_titration_sender_vit"
 
@@ -19,7 +27,7 @@ feature_model = "ShapeWorldViT"
 silhouette_p_receiver = 0.3
 
 [scheduler]
-epochs = 100
+epochs = 30
 
 [experiment]
-repeats = 3
+repeats = 6

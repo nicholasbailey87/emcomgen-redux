@@ -1,3 +1,8 @@
+# **PARKED 2026-09-12, not queued.** As `04_silhouette_0.4.toml` -- see the
+# note there. Requeue both together or neither; 0.5 alone brackets nothing.
+#
+# ---
+#
 # silhouette_titration_sender_vit arm: `silhouette_p_receiver` at 0.5.
 #
 # See `00_silhouette_0.0.toml` for what this folder measures and why -- the

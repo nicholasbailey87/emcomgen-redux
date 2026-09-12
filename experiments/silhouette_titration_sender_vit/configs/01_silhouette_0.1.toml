@@ -1,14 +1,107 @@
-# silhouette_titration_sender_vit arm: `silhouette_p_receiver` at 0.1.
+# silhouette_titration_sender_vit: does suppressing colour make shape emergence
+# reliable on the speaker's ViT, and at what rate.
 #
-# See `00_silhouette_0.0.toml` for what this folder measures and why -- the
-# short version is that 0.2 was titrated on CNNs, and `ViT2`'s `BatchNorm2d(3)`
-# stem and its capacity both argue the transformer wants its own number. This
-# file differs from that one in the swept rate and in carrying no `[slurm]`
-# block, which is read from `00_silhouette_0.0.toml` alone.
+# Three arms. `[data] silhouette_p_receiver` moves over 0.1, 0.2 and 0.3, six
+# repeats each, and nothing else differs between them or from ablation rung 03
+# as `DEFAULT.toml` leaves it. That means the mean-colour fill, no warm-up,
+# hinge loss, symmetric geometric augmentation, mixup on the listener's
+# candidates, and `ShapeWorldViT` on the speaker at 1e-4, inherited rather than
+# restated so this folder cannot drift from the rate the sweep chose.
+#
+# **Why this folder exists, restated 2026-09-12.** It was written on 2026-09-10
+# as a titration -- six arms from 0.0 to 0.5, 100 epochs, three repeats, at the
+# 2e-5 placeholder rate -- on the argument that 0.2 was titrated on CNNs and
+# the transformer wants its own number. That argument still holds and is below.
+# What changed is that the question got sharper and the folder is now sized to
+# the sharper one.
+#
+# `lr_sweep_2_sender_vit` ran twice, at 20 epochs and at 30, same configs and
+# same seed. On ShapeWorld the two runs disagree about which rate learns shape:
+# 5e-5 ended the first at `train_acc_md_shape` 0.690 and the second at 0.499,
+# and 2e-4 did the reverse, 0.507 then 0.778. The arms diverge from epoch 0 and
+# the split tracks the ignition epoch, not the rate. So shape emergence on this
+# backbone is close to a binary outcome the run settles in its first few
+# epochs, and at one repeat a sweep cannot tell a rate that helps from a seed
+# that went the right way. That is the thing this folder now measures.
+#
+# **It is a probe for a rate of escape, not for an optimum.** The reading is
+# how many of the six seeds in an arm leave the colour-only minimum, and the
+# arms are compared on that fraction before anything else. An arm that escapes
+# six times out of six at 0.3 and twice at 0.1 has answered the question even
+# if its accuracies are unremarkable; six arms each read once would not have.
+#
+# **Why the transformer is expected to want its own rate.** Two reasons, both
+# from the 2026-09-10 writing and both intact.
+#
+# The first is `nn.BatchNorm2d(3)`. `ViT2` opens with one, over raw RGB, and
+# `Conv4` and `ResNet18SmallInput` do not. That is exactly the half of the fill
+# argument `[data] silhouette_fill` says only bites on this backbone: a
+# silhouetted batch shifts the channel statistics that every image in it is
+# normalised by, so the rate does not only decide how often colour is removed,
+# it decides how far the encoder's input distribution moves. On a CNN the same
+# rate is doing strictly less.
+#
+# The second is capacity. The record on ShapeWorld is that the more capable the
+# backbone, the more reliably it lands in the colour-only minimum -- `Conv4` at
+# 113k learns shape under this recipe where `ResNet18SmallInput` at 11.2M did
+# not, across two fills and nine of ten runs. If that holds, a
+# capacity-matched-to-`ResNet56` transformer is on the wrong side of it and
+# needs *more* suppression than the CNN titration found, not the same amount.
+#
+# **Why 0.0, 0.4 and 0.5 are parked one level up rather than queued.** The
+# three files are still here, in `experiments/silhouette_titration_sender_vit/`,
+# and `configs/` is the queue. 0.0 goes because the sweep is the control: ten
+# ShapeWorld arms at 0.0 across the two runs, of which two escaped, which is
+# the baseline rate of escape this folder is trying to beat and it is already
+# measured at n = 10. Re-running it here would spend six of eighteen tasks
+# re-measuring it at n = 6. 0.4 and 0.5 go because the budget bought seeds
+# instead: if the fraction is still climbing at 0.3 they are the obvious
+# follow-up and can be moved back down, and if it is not they were never
+# needed. The cost is that this folder can no longer find an interior optimum
+# above 0.3, only establish whether suppression works at all in the range the
+# CNNs used.
+#
+# **30 epochs, six repeats.** 30 because that is what sweeps 2-8 now run and
+# what the 30-epoch sweep showed is enough: the ShapeWorld arm that learned
+# shape there had `train_acc_md_shape` moving by epoch 6 and 0.769 by epoch 29,
+# and the arms that did not were flat at 0.50 from the start. The 48-epoch dead
+# zone that argued for 100 epochs in the 2026-09-10 writing was a run under
+# BCE, a ten-epoch warm-up and the 2e-5 rate; under hinge at 1e-4 the ignition
+# epochs observed across ten sweep arms are 3 to 8. If an arm here sits at
+# `ln 2` past epoch 15 that assumption is wrong and the folder is short.
+#
+# Six repeats because the quantity is a fraction of runs and three cannot
+# measure one. Three seeds separate 0/3 from 3/3 and nothing in between; six
+# separate an arm that escapes half the time from one that escapes always,
+# which is the distinction that decides whether suppression is a fix or an
+# improvement in the odds. `job_utils.py` makes each repeat its own array task,
+# so this is 18 tasks of one run and not three of six, and the `[slurm]`
+# ceiling below is per run.
+#
+# **What to read.** `train_acc_md_shape` against `train_acc_md_color`, per
+# seed, and count escapes before averaging anything -- the failure signature is
+# shape pinned at ~0.50 while colour sits at 0.93, and averaging an arm that
+# contains both outcomes reports a number no run produced. Then the ignition
+# epoch, because if suppression is buying shape at the cost of lighting at all
+# the two move in opposite directions across the grid and the choice is a trade
+# rather than an optimum. `test_acc_md_shape` is the one that has to move for
+# any of it to count -- it read below chance on every arm of the first ViT
+# sweep -- and `train_eval_mode_acc` against `train_shuffled_message_acc` says
+# whether there is a protocol to attribute anything to.
+#
+# `epochs` and `repeats` are restated in every file: `scripts/job_utils.py`
+# reads both straight out of the file rather than out of the merged config.
+# `[slurm]` is read from the *first* config in the folder only, sorted by
+# filename, so the block below governs the whole array -- it moved here from
+# `00_silhouette_0.0.toml` when that arm was parked.
 #
 # ---
 #
-# **This arm: `silhouette_p_receiver = 0.1`.**
+# **This arm: `silhouette_p_receiver = 0.1`.** The weakest suppression in the
+# grid, and the one that says whether the effect is graded. If 0.1 escapes as
+# often as 0.3 the rate is not what matters and any non-zero suppression will
+# do; if it escapes as rarely as the 0.0 sweep arms did, the grid is pointing
+# upward and 0.4 and 0.5 are owed a run.
 
 name = "silhouette_titration_sender_vit"
 
@@ -19,7 +112,19 @@ feature_model = "ShapeWorldViT"
 silhouette_p_receiver = 0.1
 
 [scheduler]
-epochs = 100
+epochs = 30
 
 [experiment]
-repeats = 3
+repeats = 6
+
+[slurm]
+# Sized for one 30-epoch ShapeWorld run on a ViT trunk, and read from the first
+# config by filename only, so this block governs all 18 array tasks. Inherited
+# from `00_silhouette_0.0.toml`, which carried it for 100-epoch runs, so at 30
+# the margin is roughly threefold and deliberately not trimmed: the ViT trunk
+# has still never been timed at any length on this cluster, and the ~3.4
+# min/epoch `lr_sweep_1_cnn` measured is a CNN number.
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

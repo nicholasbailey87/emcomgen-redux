@@ -1,19 +1,21 @@
 # silhouette_titration_sender_vit arm: `silhouette_p_receiver` at 0.2.
 #
-# See `00_silhouette_0.0.toml` for what this folder measures and why -- the
-# short version is that 0.2 was titrated on CNNs, and `ViT2`'s `BatchNorm2d(3)`
-# stem and its capacity both argue the transformer wants its own number. This
+# See `01_silhouette_0.1.toml` for what this folder measures and why -- the
+# short version is that shape emergence on the speaker's ViT is close to a coin
+# flip at 0.0, and this folder asks whether suppression makes it reliable. This
 # file differs from that one in the swept rate and in carrying no `[slurm]`
-# block, which is read from `00_silhouette_0.0.toml` alone.
+# block, which is read from `01_silhouette_0.1.toml` alone.
 #
 # ---
 #
 # **This arm: `silhouette_p_receiver = 0.2`.**
 #
-# This is `DEFAULT.toml`'s live rate, so this arm is the folder's tie to
-# everything else the repo has run lately -- and to the 2026-09-10 trace that
-# motivated the folder, which differs from it in the warm-up and the geometry
-# and not in this key.
+# This is the rate the CNN titrations chose and the one `DEFAULT.toml` carried
+# until 2026-09-11, so it is the folder's tie to everything the repo ran under
+# the ignition recipe. It is also the arm the capacity argument predicts will
+# be too weak: if a `ResNet56`-sized transformer needs more suppression than a
+# 113k `Conv4` did, 0.2 escapes less often than 0.3 and the CNN's number does
+# not transfer.
 
 name = "silhouette_titration_sender_vit"
 
@@ -24,7 +26,7 @@ feature_model = "ShapeWorldViT"
 silhouette_p_receiver = 0.2
 
 [scheduler]
-epochs = 100
+epochs = 30
 
 [experiment]
-repeats = 3
+repeats = 6
