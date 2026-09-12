@@ -48,7 +48,7 @@ ResNet18 = 5e-6
 ResNet18 = 5e-6
 
 [scheduler]
-epochs = 20
+epochs = 25
 
 [experiment]
 repeats = 1

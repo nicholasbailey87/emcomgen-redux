@@ -312,8 +312,56 @@ n_workers = 5
 # down from, and the lowest at which a run has been seen to escape -- rather
 # than going to 0.5 or changing the fill. `silhouette_fill` is left at the mean
 # object colour for that reason: it is the setting the rate would come back at.
+#
+# **The tell returned, and `silhouette_p_receiver` is 0.3 since 2026-09-12.**
+# The hinge did not do the job on its own once the speaker's backbone became a
+# ViT. `lr_sweep_2_sender_vit` ran ten ShapeWorld arms at 0.0 across two passes
+# and two of them escaped the colour-only minimum; the other eight read shape
+# at ~0.50 against colour at 0.80-0.93, which is the signature above almost
+# exactly. Worse, escape did not track the rate: the same config and seed at 20
+# and at 30 epochs ended at `train_acc_md_shape` 0.690 and 0.499. So at 0.0 the
+# outcome is near-binary and settled in the first few epochs, and the paragraph
+# above was right that the response is to titrate back up.
+#
+# `experiments/silhouette_titration_sender_vit/` did that at the rate the sweep
+# chose, 1e-4, three seeds an arm, 30 epochs. Escapes are monotonic in the
+# suppression:
+#
+#     rate    escaped   test_acc_md_shape        test_acc_md_color
+#     0.0     2 / 10    ~0.50 on the failures    0.863
+#     0.1     0 / 3     0.493, 0.507, 0.501      0.828, 0.627, 0.843
+#     0.2     2 / 3     0.671, 0.656, 0.492      0.660, 0.691, 0.826
+#     0.3     3 / 3     0.707, 0.668, 0.656      0.768, 0.682, 0.816
+#
+# 0.3 is the rate at which shape stopped being a coin flip, and it is taken for
+# that and not for its accuracy: `test_acc` goes 0.644 at 0.0 to 0.668 at 0.3,
+# which is almost nothing. What moves is which feature the language carries.
+#
+# **It is a trade, and the per-seed reading is what shows it.** Colour falls on
+# the *test* side, where nothing is silhouetted, so this is capability and not
+# the mechanical consequence of removing colour from the training input. And it
+# falls within an arm, by outcome rather than by rate: at 0.2 the seed that did
+# not escape holds colour at 0.826 while the two that did sit at 0.660 and
+# 0.691. A run is largely picking one feature or the other, and the rate shifts
+# which one it picks. One seed in nine -- 0.3 seed 2 -- had colour 0.816 and
+# shape 0.656 together, so both is possible and rare.
+#
+# **What this rate does not buy is speed, and that is the standing risk.** At
+# 0.3 shape cleared 0.55 at epochs 5, 12 and 25 across the three seeds. The
+# third sat at `ln 2` until epoch 17 and was still climbing at 29, so it escaped
+# on about two epochs of margin; read at 25 that arm is 2/3 and not 3/3. The
+# 3/3 is therefore a statement about the rate given a budget, and a short budget
+# takes it back. If an arm here reports shape at ~0.52, check the ignition epoch
+# before touching this key.
+#
+# Unbracketed above. 0.4 and 0.5 are written and parked one level up in that
+# folder, unqueued, and nothing measured says 0.3 is the least sufficient rate
+# rather than merely a sufficient one -- 0.2 at 2/3 may be the same rate through
+# a small sample. `silhouette_p_sender` stays 0.0: it is the axis
+# `conv4_silhouette_asymmetric` moves, and the speaker learns only through the
+# listener in any case.
 silhouette_p_sender = 0.0
-silhouette_p_receiver = 0.0
+silhouette_p_receiver = 0.3
 
 # Geometric augmentation of the referents, train-only and drawn per image.
 #

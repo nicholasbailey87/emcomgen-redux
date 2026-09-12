@@ -21,7 +21,7 @@ feature_model = "BirdsViT"
 BirdsViT = 2e-5
 
 [scheduler]
-epochs = 30
+epochs = 25
 
 [experiment]
 repeats = 1

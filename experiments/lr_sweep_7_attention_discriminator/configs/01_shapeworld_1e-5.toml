@@ -37,9 +37,9 @@
 # than the trunks this repo runs, so there is no prior reason to think the
 # optimum is beneath it.
 #
-# **30 epochs, one repeat.** This was 20 for a day from 2026-09-11, 100 before
-# that, and 60 before that, and the whole argument for the long budgets was
-# ignition: a ShapeWorld run
+# **25 epochs, one repeat.** This was 30 for a day from 2026-09-12, 20 for a
+# day before that, 100 before that and 60 before that, and the whole argument
+# for the long budgets was ignition: a ShapeWorld run
 # could sit at `ln 2` for tens of epochs before the protocol appeared, so a
 # sixty-epoch budget bought eleven epochs of measurement and a null result at
 # that length was ambiguous between "no rate helps" and "the budget was short
@@ -69,6 +69,24 @@
 # real cost and it is accepted: the rungs are 100 and these are 20, so an arm
 # and its rung now differ in the swept rate *and* the budget, and a rung's trace
 # is not a control for an arm's.
+#
+# **25 from 2026-09-12, and it is a compromise between the two facts below.**
+# The 30 was set the day before because the ShapeWorld ViT arm that learned
+# shape was still climbing at 20. It still was. What arrived alongside it is
+# `experiments/silhouette_titration_sender_vit/`, which made shape emergence a
+# job for `silhouette_p_receiver = 0.3` rather than for the rate -- and with
+# that key now carrying the escape, the sweeps no longer have to be long enough
+# to watch shape arrive. They have to be long enough to rank colour learning,
+# which is the part that reproduces and which is settled by about epoch 10 on
+# every arm read so far.
+#
+# So 25 buys back a sixth of the chain's compute against a criterion that does
+# not need the last five epochs. What it costs is the ability to read shape off
+# these folders at all: at 0.3 the three probe seeds cleared shape 0.55 at
+# epochs 5, 12 and 25, so a 25-epoch arm would have reported two escapes of
+# three where 30 reported three. If a sweep arm is ever read for shape rather
+# than for colour, this budget is too short and the number to quote is the
+# probe's, not this folder's.
 #
 # **Why 30 and not 20, from 2026-09-12.** The 20 above was argued from a CNN
 # speaker under hinge, and the ViT does not keep to that timetable. In
@@ -142,7 +160,7 @@ layers = 3
 AttentionDiscriminator = 1e-5
 
 [scheduler]
-epochs = 30
+epochs = 25
 
 [experiment]
 repeats = 1
