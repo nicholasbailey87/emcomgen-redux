@@ -44,7 +44,7 @@ ResNet56 = 1e-4
 ResNet56 = 1e-4
 
 [scheduler]
-epochs = 25
+epochs = 30
 
 [experiment]
 repeats = 1
