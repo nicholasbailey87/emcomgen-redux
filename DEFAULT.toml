@@ -1396,88 +1396,87 @@ receiver_discriminator = 1e-4
 [optimiser.implementation_lr.sender_vision]
 ResNet56 = 5e-5
 ResNet18 = 1e-4
-# `BirdsViT` at 1e-5 and `ShapeWorldViT` at 1e-4, from
-# `experiments/lr_sweep_2_sender_vit/`, five arms from 1e-5 to 2e-4, one
-# repeat, run twice: at 20 epochs on 2026-09-11 (52a1598) and again at 30 on
-# 2026-09-12 (3e9ce07). Current regime -- hinge loss, `silhouette_p_sender` and
-# `silhouette_p_receiver` both 0.0, no warm-up. The speaker's backbone is the
-# only thing swept: the listener is pinned at sweep 1's winners, `ResNet56` at
-# 5e-5 on ShapeWorld and `ResNet18` at 1e-4 on birds, so each arm reads as a
-# speaker rate against a tuned listener rather than as a joint move.
+# **Both ViT classes at 5e-5**, from `experiments/lr_sweep_2_sender_vit/`, five
+# arms from 1e-5 to 2e-4, one repeat, now run three times: 20 epochs on
+# 2026-09-11 (52a1598), 30 epochs on 2026-09-12 (3e9ce07), and 25 epochs on
+# 2026-09-13 (84b807d). Hinge loss, no warm-up throughout. The third pass is
+# the first under the current silhouetting regime -- `silhouette_p_receiver`
+# 0.3 with flip and 10-degree affine on the ShapeWorld arms, and 0.0 with no
+# augmentation on the birds arms, which leaves the birds half directly
+# comparable to the two earlier passes. The speaker's backbone is the only
+# thing swept: the listener is pinned at sweep 1's winners, `ResNet56` at 5e-5
+# on ShapeWorld and `ResNet18` at 1e-4 on birds, so each arm reads as a speaker
+# rate against a tuned listener rather than as a joint move.
 #
-# **Read the two runs together, because separately they disagree.** They are
-# the same configs and the same seed, differing only in `epochs`, and on
-# ShapeWorld they diverge from epoch 0 and land on opposite sides of the
-# question the sweep exists to answer. 5e-5 ignited at epoch 3 in the first and
-# epoch 8 in the second; it ended the first with `train_acc_md_shape` 0.690 and
-# the second with 0.499. 2e-4 did the reverse -- 0.507 in the first, 0.778 in
-# the second. Whether a ShapeWorld arm escapes the colour-only minimum is not a
-# function of the rate at n = 1. It is close to a coin flip the run makes in
-# its first few epochs, and a sweep read on accuracy is ranking those flips.
+# **The ShapeWorld arms do not rank on shape at n = 1, and that finding still
+# stands.** Passes 1 and 2 are the same configs and the same seed differing
+# only in `epochs`, and they land on opposite sides of the question. 5e-5
+# ignited at epoch 3 in the first and epoch 8 in the second, ending with
+# `train_acc_md_shape` 0.690 and 0.499 respectively; 2e-4 did the reverse,
+# 0.507 then 0.778. Whether a ShapeWorld arm escapes the colour-only minimum is
+# close to a coin flip the run makes in its first few epochs. Pass 3 adds a
+# third face of the same coin: 5e-5 sat at 0.493 for all 25 epochs while 2e-4
+# ignited in the last three, 0.528 at epoch 21 to 0.671 at 25. Nothing in three
+# passes ranks the rates on shape.
 #
-# **So ShapeWorld is chosen on colour, which is the part that reproduces.**
-# Shape is the outcome that flips; colour learning does not. 3-epoch rolling
-# `train_acc_md_color`, each run read against itself:
+# **What does separate 5e-5 on ShapeWorld is that it is late, not absent.**
+# Through pass 3's 25 epochs it carried the highest topological similarity of
+# the five arms and still climbing -- `test_avg_topsim_s3` 0.436 at epoch 5 to
+# 0.566 at 21 -- with the shape probe flat beneath it, which is the shape of a
+# run about to turn rather than one in the colour minimum for good. Nick's
+# rerun past 25 epochs confirms it: 5e-5 ignites on shape, after the old
+# cutoff. That is why every sweep in this repo now runs 30 epochs rather than
+# 25. The rate is not chosen because it ranks first on shape at 25 -- no rate
+# does -- but because it is the arm whose ignition was being truncated away.
 #
-#     lr      run 1 (ep 19)   run 2 (ep 29)   first clears 0.85
-#     1e-5    0.806           0.819           never, never
-#     2e-5    0.845           0.839           never, never
-#     5e-5    0.842           0.929           never, ep 7
-#     1e-4    0.870           0.932           ep 14, ep 5
-#     2e-4    0.836           0.925           never, ep 7
+# **Birds is flat across the low half of the grid, so uniformity picks it.**
+# Pass 3 at 25 epochs, `train_acc` / `test_same_acc` / ignition epoch, where
+# ignition is the first epoch `train_acc` clears 0.55:
 #
-# 1e-4 is the argmax in both, and in the first run it is not close: it is the
-# only arm that ever clears 0.85, while the other four plateau between 0.81 and
-# 0.85. In the second the top three tie on level and 1e-4 gets there two epochs
-# sooner. The whole-run variance is large -- every arm reaches a higher ceiling
-# in run 2 than run 1 -- which is exactly why the comparison is within a run
-# and not across.
+#     lr      train   test_same   ignition
+#     1e-5    0.678   0.692       1
+#     2e-5    0.687   0.682       1
+#     5e-5    0.684   0.687       1
+#     1e-4    0.637   0.643       3
+#     2e-4    0.645   0.656       1
 #
-# What this number is *not* is the accuracy argmax. On the 30-epoch run 2e-4
-# ends at `test_acc` 0.723 against 1e-4's 0.644, and the whole of that margin
-# is the shape the 2e-4 arm happened to find. Picking on `test_acc` would be
-# picking the rate whose coin came up, and the previous revision of this
-# comment did exactly that at 5e-5 on the strength of run 1.
+# The top three are inside 0.01 of each other on both columns and ignite on the
+# same epoch; only 1e-4 and 2e-4 are properly behind, and 1e-4 is the one arm
+# that stalls, two flat epochs at 0.501 before it moves. The earlier passes put
+# 1e-5 nominally ahead and this one puts 2e-5 there, which is the ordering
+# changing inside its own noise. **5e-5 is not the birds argmax -- it is inside
+# the tie, and it is the rate ShapeWorld needs.** One number for both classes
+# is worth more than a 0.005 preference that does not hold its sign across
+# runs.
 #
-# **Birds is chosen on test accuracy, because birds reproduces.** The two runs
-# agree at epoch 19 to within 0.02 on every arm with the same ordering, and
-# there is no bifurcation to confound it. 3-epoch rolling, run 2:
+# **The CNN rates do not follow the ViTs, and that was checked rather than
+# assumed.** `ResNet18` stays at 1e-4: on `lr_sweep_1_cnn`'s second pass 5e-5
+# ends at `test_same_acc` 0.650 on a 5-epoch rolling mean against 1e-4's 0.689,
+# a gap of about five times the within-arm scatter, and it is also the noisiest
+# arm on that grid -- sd 0.018 over the last five epochs against ~0.008 for
+# every other rate. Its single final epoch reads 0.640, which understates it;
+# the rolling mean puts it level with 2e-5 rather than mid-pack. Either way
+# 1e-4 clears the whole field. So three of the four backbone rates here are
+# 5e-5 and birds' CNN is the exception, which is the opposite of tidy but is
+# what the grids say.
 #
-#     lr      test ep 19   test ep 29   gap ep 19   gap ep 29
-#     1e-5    0.580        0.616        0.081       0.091
-#     2e-5    0.563        0.592        0.105       0.114
-#     5e-5    0.572        0.606        0.094       0.094
-#     1e-4    0.542        0.554        0.094       0.108
-#     2e-4    0.535        0.552        0.088       0.084
+# **The two ViT classes differ in size and now share a rate.** `ShapeWorldViT`
+# is 128 wide over 6 layers, sized to `ResNet56`; `BirdsViT` is 320 over 10.
+# Width scaling would argue for the smaller stack wanting a somewhat larger
+# rate, and the earlier revision of this comment had them ten-fold apart in
+# that direction. That separation did not survive pass 3: it rested on a birds
+# ordering inside the noise on one side and a ShapeWorld ordering that was a
+# truncation artefact on the other.
 #
-# 1e-5 leads from about epoch 21 to the end and carries the narrowest gap of
-# the three live arms. The rate below it was never swept and the two above it
-# are behind on both columns, so this is an interior choice rather than an edge
-# argmax.
-#
-# It is also still climbing. Every arm gains test accuracy over the last ten
-# epochs with the gap roughly flat -- 5e-5's is dead flat, 2e-4's narrows -- so
-# birds has not converged at 30 and is not overfitting there either. The rate
-# is picked on a trajectory that has not turned, which is a weaker thing than
-# picking one on a converged run.
-#
-# **The two datasets are ten-fold apart and the backbones are the smaller half
-# of why.** `ShapeWorldViT` is 128 wide over 6 layers, sized to `ResNet56`;
-# `BirdsViT` is 320 over 10. The smaller stack wanting the larger rate is the
-# expected sign, but width scaling argues for about 2.5x and this is 10x, and
-# the two also differ in dataset, resolution and games per epoch. The sign is
-# explained; the magnitude is not, and nothing here separates the backbone from
-# the data.
-#
-# **What is still owed.** A ShapeWorld rate chosen on colour is a rate chosen
-# on the shortcut, and it is deliberate: it picks the arm that learns what can
-# be learned reliably and leaves the shape to the suppression that exists for
-# it. `experiments/silhouette_probe_sender_vit/` runs 1e-4 against
-# `silhouette_p_receiver` at 0.1, 0.2 and 0.3, six seeds each, and asks whether
-# shape emergence stops being a coin flip. Until it reports, this file states a
-# rate for ShapeWorld and no expectation that rung 3 learns shape at it.
-BirdsViT = 1e-5
-ShapeWorldViT = 1e-4
+# **These are plateau rates, not argmaxes, and n = 1 on all three passes.**
+# Adjacent arms are inside the noise on birds by measurement, and on ShapeWorld
+# the outcome that matters is not a function of the rate at one seed. What is
+# owed is seeds, not a finer grid: `experiments/silhouette_titration_sender_vit/`
+# runs 5e-5 against `silhouette_p_receiver` and asks whether shape emergence
+# stops being a coin flip. Until it reports, this file states a rate for
+# ShapeWorld and no expectation that rung 3 learns shape at it reliably.
+BirdsViT = 5e-5
+ShapeWorldViT = 5e-5
 
 # The listener's backbone takes the same rates as the speaker's. That is what
 # `lr_sweep_1_cnn` measured -- `sender_vision` and `receiver_vision` moved
