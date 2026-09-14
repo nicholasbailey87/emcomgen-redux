@@ -162,8 +162,8 @@ def test_the_default_rates_are_flat_at_jayelms_own():
 
     **This is now a claim about the fallback, not about what every module runs
         at.** `[optimiser.implementation_lr]` sits in front of it since
-        2026-09-07 and moves the two CNN backbones -- `ResNet56` to 2e-5,
-        `ResNet18` to 5e-5, from `experiments/lr_sweep_1_cnn/`. Flat here means
+        2026-09-07 and moves the two CNN backbones -- `ResNet56` to 5e-5,
+        `ResNet18` to 1e-4, from `experiments/lr_sweep_1_cnn/`. Flat here means
         that a group whose class carries no measured rate falls back to one
         number rather than to a grid, which is the property the paragraphs
         below are about. `test_the_measured_backbone_rates_are_the_ones_the_
@@ -221,27 +221,25 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
         because they are *measurements* rather than structure -- unlike the flat
         table above, where the shape is the claim and the magnitude is not.
 
-    2e-5 for `ResNet56` on ShapeWorld and 5e-5 for `ResNet18` on birds, on both
+    5e-5 for `ResNet56` on ShapeWorld and 1e-4 for `ResNet18` on birds, on both
         agents, because the sweep moved `sender_vision` and `receiver_vision`
         together in every arm and stating them apart would claim a distinction
         it did not make.
 
-    `BirdsViT` at 2e-5 on the speaker alone, from `lr_sweep_2_sender_vit`. It is
-        on `sender_vision` only because the listener's ViT arrives eight rungs
-        later, in a different surrounding stack, and gets its own sweep -- which
-        is also why the two are keyed separately. The birds arm chose the number
-        (test accuracy 0.658, 0.661, 0.645, 0.646, 0.638 from 1e-5 to 2e-4, with
-        the train-test gap stepping up where the accuracy turns).
+    Both ViT classes at 5e-5 on the speaker alone, from `lr_sweep_2_sender_vit`
+        as of its third pass (84b807d, 25 epochs). They are on `sender_vision`
+        only because the listener's ViT arrives eight rungs later, in a
+        different surrounding stack, and gets its own sweep -- which is also why
+        the two are keyed separately. The earlier revision of this test had the
+        two classes ten-fold apart; that separation did not survive pass 3, and
+        DEFAULT.toml carries why.
 
-    `ShapeWorldViT` at 2e-5 is the exception to the paragraph above: it is not a
-        measurement, and it is pinned here for the opposite reason -- so that a
-        placeholder cannot quietly become the record. The ShapeWorld arm of
-        sweep 2 sat in the colour-only minimum at every rate and chose nothing.
-        The number is birds' own, borrowed on 2026-09-10 because the
-        alternative was `module_lr`'s 1e-4, which is jayelm's `Conv4` default
-        and the one rate in range with a positive reason to be wrong here.
-        Sweep 2 is still owed a ShapeWorld rate and DEFAULT.toml says the
-        replacement is expected to be larger.
+    `AttentionPrototyper` at 1e-4, from `lr_sweep_3_attention_prototyper`
+        (77f579e, 30 epochs). One key for both rungs: `implementation_lr` is
+        keyed by class and this is the class ShapeWorld and birds both
+        instantiate. It is also `module_lr`'s rate for the group, so the entry
+        changes nothing about what runs -- it is here so that a rate which was
+        swept cannot be mistaken later for one that was merely inherited.
 
     A retune replaces these and edits this test in the same commit, which is
         the point: a rate arrived at by measurement should not be able to drift
@@ -252,12 +250,13 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
 
     assert rates == {
         "sender_vision": {
-            "ResNet56": 2e-5,
-            "ResNet18": 5e-5,
-            "BirdsViT": 2e-5,
-            "ShapeWorldViT": 2e-5,
+            "ResNet56": 5e-5,
+            "ResNet18": 1e-4,
+            "BirdsViT": 5e-5,
+            "ShapeWorldViT": 5e-5,
         },
-        "receiver_vision": {"ResNet56": 2e-5, "ResNet18": 5e-5},
+        "receiver_vision": {"ResNet56": 5e-5, "ResNet18": 1e-4},
+        "sender_prototyper": {"AttentionPrototyper": 1e-4},
     }
 
 

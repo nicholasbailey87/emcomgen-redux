@@ -1478,6 +1478,32 @@ ResNet18 = 1e-4
 BirdsViT = 5e-5
 ShapeWorldViT = 5e-5
 
+# **`AttentionPrototyper` at 1e-4**, from
+# `experiments/lr_sweep_3_attention_prototyper/` (77f579e, 2026-09-14): five
+# arms from 1e-5 to 2e-4, one repeat, 30 epochs, hinge loss, no warm-up. Only
+# the prototyper's rate moves. The speaker's ViT is pinned at this file's 5e-5
+# and the listener at sweep 1's winners, so each arm reads as a prototyper rate
+# against a tuned stack rather than as a joint move.
+#
+# **1e-4 is not the argmax on either half.** Final `test_same_acc` across the
+# five rates ran 0.655, 0.515, 0.605, 0.620, 0.649 on ShapeWorld and 0.712,
+# 0.723, 0.720, 0.741, 0.572 on birds. Birds puts 1e-4 first by 0.016 over
+# 5e-5, inside the noise at n = 1. ShapeWorld ranks 1e-5 first and 1e-4 third,
+# but the ShapeWorld ordering is not trustworthy: 2e-5 never left chance at all,
+# flat at 0.52 for all 30 epochs between two arms that both learned, which is a
+# dead run rather than a rate effect and leaves the curve non-monotone through
+# the middle of the grid. On the one ShapeWorld measure that ranks rates rather
+# than runs, `train_acc_md_shape`, 1e-4's 0.677 is second of five behind 1e-5's
+# 0.717.
+#
+# The tiebreak is that 1e-4 is `module_lr`'s rate for `sender_prototyper` and
+# jayelm's for everything. Stating it here rather than leaving the class to
+# inherit it changes nothing about what runs; it records that the rate was swept
+# and survived, so a later reader does not mistake an inherited default for an
+# untested one. What is owed here is seeds, not a finer grid.
+[optimiser.implementation_lr.sender_prototyper]
+AttentionPrototyper = 1e-4
+
 # The listener's backbone takes the same rates as the speaker's. That is what
 # `lr_sweep_1_cnn` measured -- `sender_vision` and `receiver_vision` moved
 # together in every arm -- so stating them apart here would be claiming a
