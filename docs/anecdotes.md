@@ -358,6 +358,67 @@ untested — a listener that clears the margin on everything stops pushing the
 speaker at all, which is the same starvation attempt six was about, arriving from
 the other side. It did not show up inside 100 epochs. See docs/training.md.
 
+### Round ten: the same helper, on the contrast gate, for a different reason
+
+2026-09-14. Not a ninth readout attempt — the readout's story ends at eight. This
+is the next round in the argument over `model_util.scale_without_attenuating`
+itself, which attempts six and seven are about and which round nine put back on
+both channel scalars on 2026-08-31 (recorded in that function's docstring and in
+`tests/test_score_scale.py`'s preamble rather than here). The helper now also
+carries `ExampleContrast.contrast_gate`.
+
+**What prompted it.** `lr_sweep_4_sender_contrast`, 30 epochs, ten arms, swept
+`sender_contrast` over 1e-5 … 2e-4. The rate is not the headline. On birds the
+gate never opened — `train_contrast_share` 0.001–0.005 on all five arms — while
+`train_contrast_within_share` reached 0.52–0.64, the highest anywhere in the
+sweep. That is `docs/measurement.md`'s "the stage found something example-level
+but is not being trusted with the decision": a well-shaped branch held out by a
+shut gate. Arm 06's gate ran +0.032, +0.015, +0.011, +0.007, +0.014, +0.012,
+−0.014, −0.001.
+
+**Why the old line produced that.** `contribution = contrast_gate * branch` is a
+two-parameter product with a sign degeneracy — `g·b` and `(−g)·(−b)` are the same
+function, which is precisely what the class docstring used to offer as a
+reassurance ("its sign is free because the branch's own direction is arbitrary").
+Near zero that freedom is the failure. The gate crosses zero, `∂L/∂branch = g ·
+∂L/∂contribution` reverses behind it, the branch begins unlearning the direction
+it had, and `∂L/∂gate = ⟨branch, ∂L/∂out⟩` reverses in turn. Neither factor is
+anchored and the pair wanders.
+
+**Round seven's objection, which this has to answer rather than inherit.**
+Attempt seven's standing critique of the helper is that `∂L/∂s = x` is the true
+partial while `∂L/∂x = J` is not, the truth being `s · J`; the pair is not the
+gradient of any function, so nothing guarantees the joint dynamics descend the
+loss, and the machinery behind the scale is shaped for a volume of 1 whatever the
+forward uses. All of that transfers to the gate verbatim, and none of it is
+disputed here.
+
+The answer is that the justification is different. Rounds six through nine argued
+the helper on *magnitude* — a small volume attenuating the stack behind it,
+underflow under `float16`, gradients that never reach the optimiser. Round seven
+is right that AdamW's `m/√v` cancels a constant factor per parameter, and
+`hyperion`'s GPUs autocast in `bfloat16`, so the underflow half is inert there
+too; on magnitude grounds the channel-side change is a live null. The gate is not
+a magnitude argument. It is a *sign* argument, and a sign does not cancel under
+`m/√v`. The birds `train_clip_sender_contrast` norms of 1e-4 to 2e-3 are eight
+orders above `eps` and far under `clip_grad_norm` — nothing here is starved.
+
+And "shaped for a volume of 1" is exactly what is wanted for a gate, which is the
+second half of the answer. The contribution is *linear* in the gate, so the
+direction the branch should point does not depend on the gate's magnitude.
+Training the branch as though the gate were 1 therefore optimises the right
+problem at the wrong volume — and the volume is the gate's job, not the branch's.
+The gate keeps its true partial and stays as free to sit shut as it was, so rung
+8 remains a fair test of the stage rather than a thumb on the scale.
+
+**What is not claimed.** That the gate will now open, or that the stage helps.
+The forward pass is bit-identical and this buys one thing: the branch trains
+while the gate is shut, and both factors have a preferred sign. Sweep 4's arms
+predate the change, so its rate recommendation is provisional; sweeps 5–8 have
+configs and no results, which is why the change is made now rather than after
+them. `tests/test_contrast.py` pins the two behaviours — the branch learning at a
+shut gate, and its gradient not tracking the gate in size or in sign.
+
 
 ## Frozen logit spread: NaN through a masked gradient
 

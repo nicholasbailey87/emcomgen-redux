@@ -1138,6 +1138,15 @@ mix_logit_lr = 2e-3
 # contributed anything at all, and `out_projection` starting at a properly
 # scaled random direction means the branch is at a sensible magnitude the moment
 # the gate opens. See `ExampleContrast`'s docstring.
+#
+# The gate reaches the loss through `model_util.scale_without_attenuating`, as
+# the logit scale above does and for a related reason: `d/dbranch` is 1 rather
+# than the gate, so the branch keeps learning while the gate is shut and is
+# anchored to the gate-positive convention instead of being free to reverse
+# with it. Nothing here changes -- the gate keeps its true partial, so the
+# `lr * steps` arithmetic and the scalar-beats-a-zero-init-matrix argument both
+# stand exactly as written. See `ExampleContrast`'s docstring and
+# docs/anecdotes.md round ten.
 contrast_gate_lr = 2e-3
 
 # One learning rate per module clip group, and the only mechanism in the

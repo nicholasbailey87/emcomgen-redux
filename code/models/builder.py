@@ -522,7 +522,11 @@ SPLIT_LEARNING_RATES = (
         #     It opens at exactly zero, and at the base rate a lone scalar
         #     cannot travel further than `lr * steps` -- 156.25 steps an epoch
         #     on both datasets since 2026-08-31 -- so without this the stage
-        #     would stay shut for most of a run. See `sender.ExampleContrast`.
+        #     would stay shut for most of a run. Like the two scalars below it
+        #     reaches the loss through `model_util.scale_without_attenuating`,
+        #     which is what stops the branch behind it reversing whenever the
+        #     gate crosses zero; the gate's own partial is untouched, so this
+        #     rate means what it always did. See `sender.ExampleContrast`.
         "contrast_gate_lr",
         "contrast_gate",
         lambda pair: pair.sender.contrast is not None,

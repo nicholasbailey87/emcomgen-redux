@@ -94,6 +94,94 @@ def test_the_gate_is_a_starting_point_and_not_a_weld():
     assert contrast.contrast_gate.grad.abs().item() > 0.0
 
 
+def test_the_branch_learns_while_the_gate_is_shut():
+    """
+    `contribution` goes through `model_util.scale_without_attenuating`, so
+    `d(contribution)/d(branch)` is 1 rather than the gate and the attention,
+    the adapter and `out_projection` all receive a gradient at a gate of zero.
+
+    Under the old `contrast_gate * branch` line this gradient existed but was
+    exactly zero at the opening, which is the shape `lr_sweep_4_sender_contrast`
+    shows on birds: `train_contrast_share` 0.001-0.005 on every arm while
+    `train_contrast_within_share` reached 0.52-0.64. A well-shaped branch held
+    out by a shut gate, with nothing pinning either factor's sign.
+    """
+    contrast = _contrast()
+
+    assert contrast.contrast_gate.item() == 0.0
+
+    contrast(_examples(), _labels()).pow(2).sum().backward()
+
+    for name, parameter in contrast.named_parameters():
+        assert parameter.grad is not None, name
+
+    assert contrast.out_projection.weight.grad.abs().sum().item() > 0.0
+    assert contrast.adapter.weight.grad.abs().sum().item() > 0.0
+
+
+def test_the_branch_gradient_does_not_track_the_gate():
+    """
+    Neither in size nor in sign. The upstream gradient is fixed -- the loss is
+    `<out, upstream>` and not `out.pow(2).sum()` -- so the gate cannot reach the
+    branch through the loss either, and what is left is only the path through
+    the multiplication. It is exactly 1, so the branch descends `dL/dcontribution`
+    whatever the gate is doing.
+
+    That is what retires the sign degeneracy the class docstring used to rest
+    on. `g * b` and `(-g) * (-b)` are the same function, so near zero neither
+    factor had an anchor: the gate would cross zero, the branch's gradient would
+    reverse behind it, and `dL/dgate = <branch, dL/dout>` would reverse in turn.
+    The `-1.0` case below is the one that would have failed before, and it is
+    the point of the change.
+
+    The gate keeps its own true partial, so it is as free to sit shut as it ever
+    was -- which is what keeps rung 8 a test of the stage rather than a thumb on
+    the scale. Pinned here alongside.
+    """
+    contrast = _contrast()
+    samples, labels = _examples(), _labels()
+
+    # `branch` is `out_projection`'s output and is not exposed, so catch it on
+    #     the way past and keep its gradient.
+    captured = {}
+
+    def capture(module, inputs, output):
+        output.retain_grad()
+        captured["branch"] = output
+
+    handle = contrast.out_projection.register_forward_hook(capture)
+
+    generator = torch.Generator().manual_seed(11)
+    upstream = torch.randn(BATCH, N_EXAMPLES, FEAT, generator=generator)
+
+    reference = None
+    for gate in (0.0, 0.01, 1.0, -1.0):
+        with torch.no_grad():
+            contrast.contrast_gate.fill_(gate)
+        contrast.zero_grad(set_to_none=True)
+
+        out = contrast(samples, labels)
+        (out * upstream).sum().backward()
+
+        branch = captured["branch"]
+
+        # The branch's gradient is the upstream one, untouched by the gate.
+        assert torch.equal(branch.grad, upstream)
+
+        # And identical from one gate to the next, including across the sign.
+        if reference is None:
+            reference = branch.grad.clone()
+        else:
+            assert torch.equal(branch.grad, reference)
+
+        # While the gate still learns from `<branch, dL/dout>`.
+        assert contrast.contrast_gate.grad.item() == pytest.approx(
+            (branch.detach() * upstream).sum().item(), rel=1e-4
+        )
+
+    handle.remove()
+
+
 def test_the_stage_cannot_read_the_referent_ordering():
     """
     Permuting the examples and their labels together permutes the output the

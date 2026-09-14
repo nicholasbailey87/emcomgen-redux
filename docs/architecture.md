@@ -124,6 +124,10 @@ h    = LayerNorm(adapter(x)) + label_embedding[labels]
 out  = x + contrast_gate * out_projection(MHSA(h, h, h))
 ```
 
+The last line is that product in value, but it is written through
+`model_util.scale_without_attenuating`, so `d/dbranch` is 1 rather than
+`contrast_gate` on the way back. See below.
+
 The prototyper downstream is unchanged and still receives the backbone's own
 width, which is what lets either of them compose with this.
 
@@ -150,15 +154,55 @@ the logit scale's traverse the bottleneck for those runs, and it is why
 `contrast_gate_lr` exists at 2e-3 — fifty steps to 0.1 instead. A scalar is also
 better shaped than a matrix here: `out_projection` starts at a properly scaled
 random direction, so the branch contributes at a sensible magnitude the moment
-the gate opens rather than having to build one first.
+the gate opens rather than having to build one first — and, since the change
+below, pointing somewhere useful as well, because the branch trains while the
+gate is still shut.
 
 The gate is **not** log-parameterised, unlike `log_score_scale`. That is a
 volume that must stay strictly positive and open at 1.0; this one must be able to
-be exactly zero, which `exp` cannot reach. Its sign is free because the branch's own direction is arbitrary —
-a negative gate is the same branch pointing the other way. And zero is a
+be exactly zero, which `exp` cannot reach. And zero is a
 starting point rather than a floor: `dL/dgate = <branch, dL/dout>` is non-zero
 there, which is the same distinction that keeps the discriminator's mix floor in
 the parameterisation and out of a `clamp`.
+
+### The gate scales the branch without attenuating it
+
+The contribution goes through `model_util.scale_without_attenuating`, so the
+forward value is `contrast_gate * branch` exactly as the formula above reads,
+but `d/dbranch` is 1. `logit_scale` on the speaker's channel and
+`log_score_scale` on the listener's readout are the same reversal.
+
+This paragraph used to say the gate's sign was free, because the branch's own
+direction is arbitrary and a negative gate is the same branch pointing the other
+way. That is true of the function and it is exactly the problem. `g·b` and
+`(−g)·(−b)` are the same map, so near zero neither factor has an anchor: the
+gate crosses zero, the branch's gradient reverses behind it, the branch starts
+unlearning the direction it had, and `dL/dgate = <branch, dL/dout>` reverses in
+turn. `lr_sweep_4_sender_contrast` is what made this concrete. On birds the gate
+never opened — `train_contrast_share` 0.001–0.005 on all five arms — while
+`train_contrast_within_share` reached 0.52–0.64, the highest in the sweep: a
+well-shaped branch held out by a shut gate, which is the row
+`docs/measurement.md` reads as "found something example-level but is not being
+trusted with the decision". Arm 06's gate ran +0.032, +0.015, +0.011, +0.007,
++0.014, +0.012, −0.014, −0.001.
+
+It is **not** a gradient-magnitude argument. AdamW's `m/√v` cancels a constant
+factor per parameter and the birds `train_clip_sender_contrast` norms of 1e-4 to
+2e-3 are eight orders above `eps` and far under `clip_grad_norm`. What does not
+cancel is the sign.
+
+With `d/dbranch = 1` the branch descends `dL/dcontribution` whatever the gate is
+doing, so it is pinned to the gate-equals-`+1` convention and the product has a
+preferred sign. That is safe because the contribution is *linear* in the gate:
+the direction the branch should point does not depend on the gate's magnitude,
+so training the branch as though the gate were 1 optimises the right problem at
+the wrong volume — and the volume is the gate's job. The gate keeps its true
+partial and stays as free to sit shut as it was, which is what keeps rung 8 a
+fair test of the stage. The standing objection to the helper is
+`docs/anecdotes.md`'s round seven; round ten there answers it for this use.
+
+`lr_sweep_4_sender_contrast`'s ten arms were run before this change, so its rate
+recommendation is provisional.
 
 ### Polarity arrives through the tag and nowhere else
 

@@ -420,8 +420,46 @@ class ExampleContrast(nn.Module):
         run with this stage on is bit-identical to one without it at step 0 and
         the arm is an ablation of one thing. The gate is a plain scalar and
         deliberately *not* log-parameterised: `exp` cannot reach zero, and zero
-        is the whole point. Its sign is free because the branch's direction is
-        arbitrary -- a negative gate is the same branch pointing the other way.
+        is the whole point.
+
+    **The branch reaches the loss through `scale_without_attenuating`,** so
+        `d(contribution)/d(branch)` is 1 rather than the gate. The forward value
+        is the plain product and every diagnostic below reads exactly what it
+        read before; what changes is only the path back to the branch.
+
+        The old line, `contrast_gate * branch`, was a two-parameter product with
+        a sign degeneracy: `g*b` and `(-g)*(-b)` are the same function, which is
+        why this paragraph used to say the gate's sign was free. It is free only
+        in the sense that nothing anchors it -- and near zero that is the
+        problem rather than the licence. The gate crosses zero, the branch's
+        gradient reverses behind it, the branch starts unlearning the direction
+        it had, and `dL/dgate = <branch, dL/dout>` reverses in turn.
+        `lr_sweep_4_sender_contrast` shows the wander: on birds,
+        `train_contrast_share` sat at 0.001-0.005 on all five arms while
+        `train_contrast_within_share` reached 0.52-0.64 -- the highest in the
+        sweep, and exactly the row docs/measurement.md calls "the stage found
+        something example-level but is not being trusted with the decision". Arm
+        06's gate ran +0.032, +0.015, +0.011, +0.007, +0.014, +0.012, -0.014,
+        -0.001.
+
+        This is *not* about gradient magnitude, and it should not be defended as
+        if it were. AdamW's `m/sqrt(v)` cancels a constant factor per parameter
+        and `eps` is small enough that the cancellation holds over the range
+        these runs visit. What does not cancel is the sign.
+
+        With `d/dbranch = 1` the branch descends `dL/dcontribution` whatever the
+        gate is doing, so it is pinned to the gate-equals-`+1` convention, the
+        product has a preferred sign, and the gate's own gradient points
+        consistently one way. This is safe *because the contribution is linear
+        in the gate*: the direction the branch should point does not depend on
+        the gate's magnitude, so training the branch as though the gate were 1
+        optimises the right problem at the wrong volume -- and the volume is
+        the gate's job, not the branch's. The gate keeps its true partial and is
+        as free to sit shut as it ever was, which is what keeps rung 8 a test of
+        the stage rather than a thumb on the scale. `logit_scale` below and the
+        listener's `log_score_scale` are the same reversal; the objection it has
+        to answer is `docs/anecdotes.md`'s round seven, and round ten there is
+        the answer.
 
     **Why a gate rather than a zero-initialised projection.** Both open at the
         identity, but a zero matrix does not travel. AdamW moves a parameter by
@@ -434,7 +472,10 @@ class ExampleContrast(nn.Module):
         `contrast_gate_lr` (2e-3) reaches 0.1 in fifty steps instead, and
         `out_projection` starts at a properly scaled random direction, so the
         branch contributes at a sensible magnitude the moment the gate opens
-        rather than having to build one first.
+        rather than having to build one first. It now arrives pointing somewhere
+        useful as well: with the helper in the way the branch trains while the
+        gate is still shut, where under the old line its gradient at the opening
+        was present but exactly zero.
 
         A gate at zero is a starting point and not a weld:
         `dL/dgate = <branch, dL/dout>` is non-zero there. Compare
@@ -564,7 +605,15 @@ class ExampleContrast(nn.Module):
         #     but it is then built from content rather than from a parameter.
         tagged = adapted + tag
         branch = self.out_projection(self.attention(tagged, tagged, adapted))
-        contribution = self.contrast_gate * branch
+        # Through `scale_without_attenuating`: the forward value is
+        #     `contrast_gate * branch` exactly as it reads, but `d/dbranch` is 1
+        #     rather than the gate, so the branch learns its direction while the
+        #     gate is shut and is anchored to the gate-positive convention. The
+        #     gate keeps its own true partial, `<branch, dL/dout>`, and is as
+        #     free to sit quiet as it ever was. See the class docstring.
+        contribution = model_util.scale_without_attenuating(
+            branch, self.contrast_gate
+        )
 
         self._record_diagnostics(samples, branch, contribution)
 
