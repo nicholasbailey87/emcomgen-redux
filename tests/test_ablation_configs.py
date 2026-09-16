@@ -48,14 +48,10 @@ def _name(config_file):
     return "cub" if int(config_file[:2]) % 2 == 0 else "shapeworld"
 
 
-def _build(config_file, contrast=False):
+def _build(config_file):
     """A real rung, through `models.builder`, with a stub dataloader."""
     config = parse_config.get_config(rung(config_file))
     config["cuda"] = False
-    # Forced either way rather than inherited, so a test that builds both arms
-    #     of a rung gets both arms whatever the rung itself says. Rungs 7 and
-    #     above set this to true.
-    config["sender"]["contrast"] = contrast
 
     class _Dataset:
         n_feats = _feats(config_file)
@@ -67,8 +63,8 @@ def _build(config_file, contrast=False):
     return config, models.builder.build_models({"train": _Loader()}, config)
 
 
-def _pair(config_file, contrast=False):
-    config, built = _build(config_file, contrast=contrast)
+def _pair(config_file):
+    config, built = _build(config_file)
     return config, built["pair"]
 
 
@@ -122,7 +118,24 @@ def test_every_rung_found_can_be_opened():
 #     no translation: the old `false` also removed the `1/sqrt(d)` calibration,
 #     and no current setting does that, so the arm is unreachable rather than
 #     renamed. See DEFAULT.toml beside those two keys.
-STALE_EXPERIMENTS = ("silhouette_titration_norms",)
+#
+#     The five `conv4_*` folders each flatten `[optimiser.module_lr]` to a
+#     single rate, which means restating all ten group names -- and
+#     `sender_contrast` stopped being one of them on 2026-09-16, when the
+#     contrast stage was folded into `AttentionPrototyper`. Deleting that one
+#     line from each would make them parse, and it would also be a lie: those
+#     runs really did set a rate for a module group that really did exist, and
+#     the flat table is the whole content of the arm. `conv4_mixup_silhouetting`
+#     is the arm DEFAULT.toml was promoted from, so this is the most load-
+#     bearing of the five and the one it is least acceptable to edit.
+STALE_EXPERIMENTS = (
+    "silhouette_titration_norms",
+    "conv4_lr_reference",
+    "conv4_mixup_reference",
+    "conv4_mixup_silhouetting",
+    "conv4_silhouette_asymmetric",
+    "conv4_silhouette_reference",
+)
 
 
 def test_every_experiment_config_parses():
@@ -341,11 +354,11 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # ShapeWorld: the top of the ladder. The speaker's language model is the
         # causal arm at seven blocks -- see rung 9's `layers` for why seven, and
         # for the two depths before it.
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 876_593),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.feature_model", 876_593),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 6_758_354),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_196),
+        ("13_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 876_593),
+        ("13_shapeworld_receiver_cross_attention_lm.toml", "receiver.feature_model", 876_593),
+        ("13_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 6_758_354),
+        ("13_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
+        ("13_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_196),
         # Three interfaces here, and all of them narrow: `final_feat_dim` -> 256
         # twice for the two slots' referents and 256 -> 256 for the message.
         # Against rung 13 the difference is the message interface, which reads a
@@ -354,7 +367,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # ShapeWorld reads 131,328 -- 128 * 256 twice plus 256 * 256 + 256 --
         # against CUB's 229,632 at the 320-wide birds ViT. The referent side is
         # where the two datasets' ViT widths show up.
-        ("15_shapeworld_receiver_cross_attention_lm.toml", "receiver.interfaces", 131_328),
+        ("13_shapeworld_receiver_cross_attention_lm.toml", "receiver.interfaces", 131_328),
         # CUB: the CNN/GRU baseline.
         ("02_birds_baseline.toml", "sender.feat_model", 11_176_512),
         ("02_birds_baseline.toml", "sender.language_model", 6_822_649),
@@ -379,10 +392,10 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # layer's weight and bias -- it is the only BatchNorm in the stack, so
         # this count is also the assertion that it is gone. `BirdsViT` keeps it
         # and is unchanged. See `vision.ShapeWorldViT` for why.
-        ("16_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 10_626_990),
-        ("16_birds_receiver_cross_attention_lm.toml", "sender.language_model", 6_764_120),
-        ("16_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
-        ("16_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_196),
+        ("14_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 10_626_990),
+        ("14_birds_receiver_cross_attention_lm.toml", "sender.language_model", 6_764_120),
+        ("14_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
+        ("14_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_196),
         # Rung 13's discriminator, pinned because it used to be the number that
         # made the 13 -> 15 step unclean and now is not: it is *equal* to rung
         # 15's. The gap was a `memory_adapter` bringing the GRU's 1024-wide
@@ -419,8 +432,8 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # `ScoreVolume.readout` is the identity. The numbers are the count under
         # the current default; the paragraphs above are the history of the two
         # parameters that are no longer there.
-        ("13_shapeworld_attention_discriminator.toml", "receiver.discriminator", 2_384_196),
-        ("14_birds_attention_discriminator.toml", "receiver.discriminator", 2_384_196),
+        ("11_shapeworld_attention_discriminator.toml", "receiver.discriminator", 2_384_196),
+        ("12_birds_attention_discriminator.toml", "receiver.discriminator", 2_384_196),
         # Where the 13 -> 15 difference went: `final_feat_dim` -> 256 for the
         # referents and 1024 -> 256 for the GRU's state. The language model
         # declares no referent width on this rung, so there are two interfaces
@@ -429,18 +442,28 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # ShapeWorld reads 295,168 -- 128 * 256 plus 1024 * 256 + 256 -- against
         # rung 15's 131,328. CUB reads 344,320 against rung 16's 229,632, which
         # is the same arithmetic at 320.
-        ("13_shapeworld_attention_discriminator.toml", "receiver.interfaces", 295_168),
-        ("14_birds_attention_discriminator.toml", "receiver.interfaces", 344_320),
+        ("11_shapeworld_attention_discriminator.toml", "receiver.interfaces", 295_168),
+        ("12_birds_attention_discriminator.toml", "receiver.interfaces", 344_320),
         # The two intermediate vision swaps, so a rung that stopped inheriting
         # the shared ViT specification shows up here rather than in a run.
         ("03_shapeworld_sender_vit.toml", "sender.feat_model", 876_593),
         ("04_birds_sender_vit.toml", "sender.feat_model", 10_626_990),
-        # And the prototyper, which is one scoring direction and a bias per
-        # polarity, where rung 3's is nothing at all. 2,050 rather than the 642
-        # it was: it sizes off the referents, which the adapter now delivers at
-        # the speaker's GRU width of 1024 rather than at the ViT's 320.
-        ("05_shapeworld_attention_prototyper.toml", "sender.prototyper", 2_050),
-        ("06_birds_attention_prototyper.toml", "sender.prototyper", 2_050),
+        # And the prototyper, where rung 3's is nothing at all. One transformer
+        # block, two `SequencePool`s and the label tag, at the width this
+        # module now declares for itself -- the sender ViT's, per dataset. The
+        # two datasets differ here where they used to agree, because this used
+        # to size off the adapter's output at the speaker's GRU width of 1024
+        # and now sizes off `[sender_prototyper] d_model`.
+        #
+        # Exact, and worth being exact about: this absorbed `ExampleContrast` on
+        # 2026-09-16, and the pair of them came to 1,068,995 before the merge.
+        # Capacity on the speaker is the standing suspect for ShapeWorld's
+        # colour shortcut, so a merge that quietly *added* capacity would be the
+        # thing to catch. Birds falls by under a tenth -- SwiGLU's `linear_in`
+        # is double width, which is 184,897 of the 967,171 -- and ShapeWorld by
+        # a factor of eight.
+        ("05_shapeworld_attention_prototyper.toml", "sender.prototyper", 132_738),
+        ("06_birds_attention_prototyper.toml", "sender.prototyper", 967_171),
     ],
 )
 def test_the_arms_are_the_sizes_they_claim(config_file, module, expected):
@@ -485,7 +508,7 @@ def test_the_shapeworld_backbones_are_matched():
     # Both agents, and both on the same backbone as their partner. A rung that
     # moved one and not the other would be measuring asymmetry.
     assert _count(baseline.receiver.feature_model) == cnn
-    _, receiver_vit = _pair("11_shapeworld_receiver_vit.toml")
+    _, receiver_vit = _pair("09_shapeworld_receiver_vit.toml")
     assert _count(receiver_vit.receiver.feature_model) == vit
 
 
@@ -594,13 +617,13 @@ def test_nothing_that_should_be_undecayed_is_decayed(config_file):
         # `2 * referent_width`, which the adapter took from the backbone's 512
         # to the GRU's own 1024. This rung's stack runs at its own `d_model` and
         # did not move with it. See rung 9's `layers`.
-        ("01_shapeworld_baseline.toml", "09_shapeworld_sender_transformer_lm.toml", 0.05),
-        ("02_birds_baseline.toml", "10_birds_sender_transformer_lm.toml", 0.05),
+        ("01_shapeworld_baseline.toml", "07_shapeworld_sender_transformer_lm.toml", 0.05),
+        ("02_birds_baseline.toml", "08_birds_sender_transformer_lm.toml", 0.05),
         # The same speaker at the top of the ladder, which nothing above rung 9
         # is supposed to touch. If these two diverge from the pair above, a
         # listener rung has reached into the speaker.
-        ("01_shapeworld_baseline.toml", "15_shapeworld_receiver_cross_attention_lm.toml", 0.05),
-        ("02_birds_baseline.toml", "16_birds_receiver_cross_attention_lm.toml", 0.05),
+        ("01_shapeworld_baseline.toml", "13_shapeworld_receiver_cross_attention_lm.toml", 0.05),
+        ("02_birds_baseline.toml", "14_birds_receiver_cross_attention_lm.toml", 0.05),
     ],
 )
 def test_the_speakers_language_models_are_matched(baseline, transformer, tolerance):
@@ -626,8 +649,8 @@ def test_the_speakers_language_models_are_matched(baseline, transformer, toleran
 @pytest.mark.parametrize(
     "config_file",
     [
-        "09_shapeworld_sender_transformer_lm.toml",
-        "15_shapeworld_receiver_cross_attention_lm.toml",
+        "07_shapeworld_sender_transformer_lm.toml",
+        "13_shapeworld_receiver_cross_attention_lm.toml",
     ],
 )
 def test_every_rope_attention_takes_all_its_heads(config_file):
@@ -659,139 +682,3 @@ def test_every_rope_attention_takes_all_its_heads(config_file):
         checked += 1
 
     assert checked, "no rotary attention in this pair; the test proved nothing"
-
-
-# --------------------------------------------------------------------------
-# The speaker's contrast stage, forced on and off independently of what a rung
-#     says. Rungs 7 and above set `[sender] contrast` themselves; these build
-#     both arms of each rung below, one per dataset for each of the two sender
-#     backbones the ladder uses.
-# --------------------------------------------------------------------------
-
-CONTRAST_RUNGS = (
-    "01_shapeworld_baseline.toml",
-    "02_birds_baseline.toml",
-    "11_shapeworld_receiver_vit.toml",
-    "12_birds_receiver_vit.toml",
-)
-
-
-@pytest.mark.parametrize("config_file", CONTRAST_RUNGS)
-def test_a_rung_with_contrast_still_speaks(config_file):
-    """
-    The stage returns the backbone's own width, so everything downstream should
-    be unable to tell it ran. This is the same end-to-end pass as
-    `test_every_rung_speaks_a_message_of_the_configured_length`, with the flag
-    on.
-    """
-    config, pair = _pair(config_file, contrast=True)
-    pair.eval()
-
-    batch, n_obj = 2, config["data"]["n_examples"]
-    samples = torch.randn(batch, n_obj, *_feats(config_file))
-    targets = torch.zeros(batch, n_obj)
-    targets[:, : n_obj // 2] = 1.0
-
-    with torch.no_grad():
-        messages, _ = pair.sender(samples, targets)
-
-    assert messages.shape == (
-        batch,
-        config["sender_language_model"]["message_length"],
-        config["sender_language_model"]["vocabulary"] + 4,
-    )
-
-
-@pytest.mark.parametrize("config_file", CONTRAST_RUNGS)
-def test_contrast_opens_at_the_parent_rung(config_file):
-    """
-    Bit-identical messages with the flag on and off, from the same seed. This is
-    what makes the contrast arm an ablation of one thing, and it holds only
-    because `contrast_gate` opens at zero *and* because the stage is built after
-    the speaker's other modules, so it does not shift their draws from the RNG.
-
-    Greedy at eval, so there is no channel noise to average over.
-    """
-    batch = 2
-    messages = {}
-
-    for contrast in (False, True):
-        torch.manual_seed(0)
-        config, pair = _pair(config_file, contrast=contrast)
-        pair.eval()
-
-        n_obj = config["data"]["n_examples"]
-        generator = torch.Generator().manual_seed(1)
-        samples = torch.randn(
-            batch, n_obj, *_feats(config_file), generator=generator
-        )
-        targets = torch.zeros(batch, n_obj)
-        targets[:, : n_obj // 2] = 1.0
-
-        with torch.no_grad():
-            messages[contrast], _ = pair.sender(samples, targets)
-
-    assert torch.equal(messages[False], messages[True])
-
-
-@pytest.mark.parametrize(
-    "config_file,expected",
-    [
-        # What the stage sees is no longer the backbone's width but the
-        #     adapter's output, which is the speaker's own language model
-        #     `d_model`: 1024 at the GRU rungs, 320 wherever
-        #     `SenderTransformerLM` sets it there. The rest is the stage's own
-        #     width, so the numbers are
-        #     `2 * feat * 320 + 4 * 320^2 + 320 + 2 * 320 + feat + 1` -- the two
-        #     projections, the attention's four, its `out_norm` gain, the label
-        #     tag and the gate.
-        #
-        #     Both datasets read the same number now where they always did, but
-        #     for a different reason: it used to be that `ResNet18` and `Conv4`
-        #     both happened to hand over 512, and it is now that both speakers
-        #     run their GRU at the same `d_model`. A backbone swap no longer
-        #     moves this count at all, which is the adapter working.
-        ("01_shapeworld_baseline.toml", 1_066_945),
-        ("02_birds_baseline.toml", 1_066_945),
-        ("11_shapeworld_receiver_vit.toml", 615_681),
-        ("12_birds_receiver_vit.toml", 615_681),
-    ],
-)
-def test_contrast_costs_what_it_says(config_file, expected):
-    """
-    Exact, for the reason every other count in this file is exact: the stage is
-    one attention and two projections, and a second block or a feedforward
-    creeping in would otherwise show up only as a slower run.
-    """
-    _, plain = _pair(config_file)
-    _, contrasted = _pair(config_file, contrast=True)
-
-    assert plain.sender.contrast is None
-    assert _count(contrasted.sender.contrast) == expected
-    assert (
-        _count(contrasted.sender) - _count(plain.sender) == expected
-    ), "the stage changed something outside itself"
-
-
-@pytest.mark.parametrize("config_file", CONTRAST_RUNGS)
-def test_the_gate_gets_its_own_learning_rate(config_file):
-    """
-    The gate is a lone scalar opening at zero, and at the base rate it cannot
-    travel further than `lr * steps` -- sixteen epochs of sign-consistent
-    gradient to reach 0.1 on birds. `contrast_gate_lr` is what makes the arm
-    answerable inside a run, so a group that quietly stopped being created would
-    look like "the contrast stage does nothing".
-    """
-    config, built = _build(config_file, contrast=True)
-
-    gate = built["pair"].sender.contrast.contrast_gate
-    expected_lr = config["optimiser"]["contrast_gate_lr"]
-
-    group = [
-        g for g in built["optimiser"].param_groups
-        if any(p is gate for p in g["params"])
-    ]
-
-    assert len(group) == 1
-    assert group[0]["lr"] == expected_lr
-    assert group[0]["lr"] != config["optimiser"]["lr"]

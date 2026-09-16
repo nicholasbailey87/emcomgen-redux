@@ -32,7 +32,7 @@
 # and the very keys this pass wrote into DEFAULT.toml then overrode them, so
 # every later reading of this folder was reading one rate nine times.
 #
-# **This is sweep 1 of eight.** Each rung of the ablation introduces a
+# **This is sweep 1 of seven.** Each rung of the ablation introduces a
 # component whose rate is an untested guess, so `lr_sweep_2_sender_vit`
 # onwards repeat this one rung at a time, in the presence of the components
 # below them, with DEFAULT.toml updated from each before the next is
@@ -210,7 +210,7 @@
 # 0.674 against 0.508, at an identical `train_acc_md_color` of 0.84. The
 # separation is not marginal at 20 and it does not reverse: the same arm read at
 # 99 is 0.726 against 0.525. So the epochs after 20 were buying precision on a
-# gap already visible, on a chain of eight serial sweeps.
+# gap already visible, on a chain of seven serial sweeps.
 #
 # The standing caution that shape emerges late -- `lr_sweep_1_cnn`'s ShapeWorld
 # arm at 2e-5 did not step up until epoch 18 -- was a statement about a run that
@@ -219,7 +219,7 @@
 #
 # What 20 cannot do is settle an argmax, and it was never going to. This sweep's
 # own first pass took 98 epochs to separate its top two birds arms and separated
-# them by 0.001. One repeat for the same reason: n = 1 across eight sweeps is the
+# them by 0.001. One repeat for the same reason: n = 1 across seven sweeps is the
 # budget, so between-arm gaps here are the size of within-arm epoch-to-epoch
 # wobble and this ranks candidates rather than settling them.
 #
@@ -231,7 +231,7 @@
 # **The arms in this folder were run at 20, not at 25.** The rates it settled
 # -- `ResNet56` 5e-5 and `ResNet18` 1e-4, both live in `DEFAULT.toml` -- come
 # off 20-epoch traces, and the number above was raised to 25 on 2026-09-12 only
-# so that the eight sweeps of the chain state one budget rather than three. A
+# so that the seven sweeps of the chain state one budget rather than three. A
 # rerun of this folder is therefore not a reproduction of the results quoted
 # below; it is a longer run of the same arms, and the two should not be pooled.
 #

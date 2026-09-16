@@ -53,8 +53,8 @@ BIRDS_FEATS = (3, 224, 224)
 
 RUNGS = all_rungs()
 
-# `(suffix, config key)` for every group `SPLIT_LEARNING_RATES` creates. Six
-#     keys against four scalar clip groups, and the mismatch is deliberate:
+# `(suffix, config key)` for every group `SPLIT_LEARNING_RATES` creates. Five
+#     keys against three scalar clip groups, and the mismatch is deliberate:
 #     `score_bias` and `polarity_embedding` take a rate of their own but clip
 #     with the module whose output they modify. See `SCALAR_GROUPS`.
 #
@@ -67,7 +67,6 @@ SCALAR_OVERRIDES = (
     ("score_bias", "score_bias_lr"),
     ("polarity_embedding", "polarity_embedding_lr"),
     ("mix_logit", "mix_logit_lr"),
-    ("contrast_gate", "contrast_gate_lr"),
 )
 
 
@@ -156,9 +155,15 @@ def test_the_group_names_are_the_module_lr_keys():
 
 def test_the_default_rates_are_flat_at_jayelms_own():
     """
-    DEFAULT's `[optimiser.module_lr]` is flat: ten entries, one number, no
+    DEFAULT's `[optimiser.module_lr]` is flat: nine entries, one number, no
         split between the agents and none within one, and that number is
         jayelm's 1e-4.
+
+    Nine since 2026-09-16, where it was ten: `sender_contrast` went when the
+        contrast stage was folded into `AttentionPrototyper`. `sender_adapter`
+        did not change shape with it -- it names both of the speaker's
+        interfaces now, one `nn.ModuleDict`, exactly as `receiver_adapter` names
+        three. See `builder.MODULE_GROUPS`.
 
     **This is now a claim about the fallback, not about what every module runs
         at.** `[optimiser.implementation_lr]` sits in front of it since
@@ -182,7 +187,7 @@ def test_the_default_rates_are_flat_at_jayelms_own():
         two-tier version was: the magnitudes are chosen and the shape is the
         claim. A change that keeps the table flat is a retune; one that
         re-tiers it is a different position, and this is where a reader is told
-        which happened. It applies to all sixteen rungs at once either way.
+        which happened. It applies to all fourteen rungs at once either way.
 
     One consequence worth knowing, and it is why `polarity_embedding_lr` is
         pinned away from base in `tests/test_score_scale.py`: `build_models`
@@ -203,7 +208,6 @@ def test_the_default_rates_are_flat_at_jayelms_own():
         "sender_vision": base_lr,
         "sender_adapter": base_lr,
         "sender_prototyper": base_lr,
-        "sender_contrast": base_lr,
         "sender_language_model": base_lr,
         "receiver_vision": base_lr,
         "receiver_adapter": base_lr,
@@ -234,12 +238,14 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
         two classes ten-fold apart; that separation did not survive pass 3, and
         DEFAULT.toml carries why.
 
-    `AttentionPrototyper` at 1e-4, from `lr_sweep_3_attention_prototyper`
-        (77f579e, 30 epochs). One key for both rungs: `implementation_lr` is
-        keyed by class and this is the class ShapeWorld and birds both
-        instantiate. It is also `module_lr`'s rate for the group, so the entry
-        changes nothing about what runs -- it is here so that a rate which was
-        swept cannot be mistaken later for one that was merely inherited.
+    `AttentionPrototyper` at 1e-4, and this one is *owed a fresh sweep*. The
+        number came from `lr_sweep_3_attention_prototyper` (77f579e, 30 epochs),
+        which measured a prototyper that was two scoring directions and two
+        biases; the class absorbed `ExampleContrast` on 2026-09-16 and is a
+        transformer block now, sixty times larger. It is kept because it is also
+        `module_lr`'s rate for the group, so the entry changes nothing about
+        what runs, and pinned here so that the re-run replaces it deliberately
+        rather than by drift. See DEFAULT.toml beside the key.
 
     A retune replaces these and edits this test in the same commit, which is
         the point: a rate arrived at by measurement should not be able to drift
@@ -402,8 +408,8 @@ def test_each_module_group_gets_the_rate_its_config_names(config_file):
 
     The scaling scalars are excluded on both sides. `claimed_separately` keeps
         them out of the module's optimiser group as well as out of its clip
-        group, so a module at 3.2e-4 does not drag its gate along with it and
-        `contrast_gate_lr = lr` still means "no override".
+        group, so a module at 3.2e-4 does not drag its scalars along with it and
+        `mix_logit_lr = lr` still means "no override".
     """
     config, built = _build(config_file)
     pair = built["pair"]
@@ -436,8 +442,8 @@ def test_the_resolved_rates_are_written_back_for_save_args(config_file):
     """
     `train.py` calls `save_args` *after* `build_models` precisely so this
         mapping reaches `args.json`. It records which groups existed as well as
-        what each ran at -- `sender_contrast` is absent when the stage is off,
-        and that is a fact about the run worth having in the artefact.
+        what each ran at -- a group whose module this pair does not build is
+        absent, and that is a fact about the run worth having in the artefact.
     """
     config, built = _build(config_file)
     resolved = config["optimiser"]["resolved_module_lrs"]
@@ -463,7 +469,6 @@ def test_the_resolved_rates_are_written_back_for_save_args(config_file):
     [
         ("volume.log_score_scale", True),
         ("mix_logit", True),
-        ("contrast.contrast_gate", True),
         # The two that deliberately stay with their module.
         ("score_bias", False),
         ("polarity_embedding", False),
@@ -551,9 +556,9 @@ def test_the_scalar_overrides_survive_the_module_groups_with_the_channel_normali
 ):
     """
     The disjointness `claimed_separately` buys, read off the built pair. The
-        four scaling scalars are held out of their module's group, and the two
+        three scaling scalars are held out of their module's group, and the two
         that are not -- `score_bias` and `polarity_embedding` -- are moved back
-        out by `split_out_parameter` afterwards, so all six end at the rate
+        out by `split_out_parameter` afterwards, so all five end at the rate
         their own key names whatever their module's rate is.
 
     `log_logit_scale` is one of the four, and the one whose module rate differs

@@ -108,29 +108,35 @@ def split_out_parameter(optimiser, pair, suffix, lr, config_key):
 #     `sender.language_model`" is not expressible as a suffix and an attribute
 #     lookup cannot be quietly broken by a rename the way a suffix match can.
 #
-# A selector may return None -- `sender.contrast` is `None` when the stage is
-#     off -- which means the group does not exist on this pair. Nothing else
-#     built so far is optional.
+# A selector may return None, which means the group does not exist on this
+#     pair. Nothing built so far is optional: `sender.contrast` was, and went
+#     when the contrast stage was folded into the prototyper, but the mechanism
+#     stays because the next optional module should not have to reintroduce it.
 #
 # One table serving two mechanisms that used to disagree. `train.py` had its own
-#     `CLIP_GROUPS`, which omitted `sender.contrast` and so clipped the whole
-#     stage under the `other` catch-all -- on every rung with the stage on,
-#     `other` *was* the contrast stage under a misleading name. `MUP_MODULES`
+#     `CLIP_GROUPS`, which omitted the speaker's contrast stage and so clipped
+#     the whole of it under the `other` catch-all -- on every rung that had it,
+#     `other` *was* that stage under a misleading name. `MUP_MODULES`
 #     was a second list, which included the contrast stage and omitted the
 #     listener's embedding table. Neither was derivable from the other and
 #     nothing held them in step, so adding a module to one was a silent partial
 #     change. Add a module here and it is clipped and rateable at once.
 MODULE_GROUPS = (
     ("sender_vision", lambda pair: pair.sender.feat_model),
-    # Its own group rather than folded into the vision model it follows. The
-    #     adapter is the one stage whose *input* width is the backbone's and
-    #     whose output width is the language model's, so a gradient norm taken
-    #     across the pair of them would be read as the backbone's and is not.
-    #     It is also the stage a backbone swap changes the shape of, which is
-    #     exactly what a per-module clip column is for.
-    ("sender_adapter", lambda pair: pair.sender.adapter),
+    # Its own group rather than folded into the vision model it follows. An
+    #     interface is the one kind of stage whose *input* width is one module's
+    #     and whose output width is another's, so a gradient norm taken across
+    #     it and the backbone together would be read as the backbone's and is
+    #     not. It is also the stage a backbone swap changes the shape of, which
+    #     is exactly what a per-module clip column is for.
+    #
+    # Both of the speaker's interfaces, in one `nn.ModuleDict`, for the reason
+    #     `receiver_adapter` below holds three: the group keeps the name it had
+    #     when the speaker had a single adapter, so `[optimiser.module_lr]
+    #     sender_adapter`, the `clip_sender_adapter` column and `GROUP_NAMES`
+    #     are all unchanged by the prototyper declaring a width of its own.
+    ("sender_adapter", lambda pair: pair.sender.interfaces),
     ("sender_prototyper", lambda pair: pair.sender.prototyper),
-    ("sender_contrast", lambda pair: pair.sender.contrast),
     ("sender_language_model", lambda pair: pair.sender.language_model),
     ("receiver_vision", lambda pair: pair.receiver.feature_model),
     # Every interface between the listener's backbone or message encoder and a
@@ -169,11 +175,10 @@ MODULE_GROUPS = (
 #     each rate be measured once, recorded once, and picked up by whichever
 #     rungs run that class. See `experiments/lr_sweep_*/`.
 #
-# Only these six. `sender_contrast` is a boolean over one class
-#     (`sender.ExampleContrast`), and the two adapter groups and the listener's
-#     embedding table are `LinearInterface` and `nn.Embedding` unconditionally
-#     -- there is no choice to key on, so those groups take their rate from
-#     `[optimiser.module_lr]` alone and naming them here raises.
+# Only these six. The two adapter groups and the listener's embedding table are
+#     `LinearInterface` and `nn.Embedding` unconditionally -- there is no choice
+#     to key on, so those groups take their rate from `[optimiser.module_lr]`
+#     alone and naming them here raises.
 #
 # The value is read from the config rather than from `type(module).__name__`
 #     deliberately: `vision.ResNet18` and `vision.ResNet18SmallInput` are
@@ -229,18 +234,17 @@ def implementation_of(config, group):
 #
 # The gate is on the architecture rather than on finding the parameter, exactly
 #     as `SPLIT_LEARNING_RATES`'s is: a `BilinearDiscriminator` has no mixing
-#     weight and a speaker without the contrast stage has no gate, so for those
-#     the group is inapplicable rather than missing, and `group_parameters`
-#     raises if an applicable one matches nothing.
+#     weight, so for that one the group is inapplicable rather than missing, and
+#     `group_parameters` raises if an applicable one matches nothing.
 SCALAR_GROUPS = (
     # Both of these are now gated on a config flag as well as on the
     #     architecture. `[receiver_discriminator] scale_score = false` leaves
     #     the listener with no volume and `[sender_language_model]
     #     normalise_logits = false` leaves the speaker with no channel scale,
     #     so on those rungs the group is inapplicable rather than missing --
-    #     the same distinction `mix_logit` and `contrast_gate` already make,
-    #     read off the module that owns the parameter rather than off the
-    #     config, so the gate and the parameter cannot disagree.
+    #     the same distinction `mix_logit` already makes, read off the module
+    #     that owns the parameter rather than off the config, so the gate and
+    #     the parameter cannot disagree.
     #
     # Note `bias_score` has no entry here and needs none: `score_bias` is an
     #     offset rather than a scale and belongs to its module's clip norm, as
@@ -261,7 +265,6 @@ SCALAR_GROUPS = (
             pair.receiver.discriminator, receiver.AttentionDiscriminator
         ),
     ),
-    ("contrast_gate", lambda pair: pair.sender.contrast is not None),
 )
 
 
@@ -271,8 +274,8 @@ SCALAR_SUFFIXES = tuple(name for name, _ in SCALAR_GROUPS)
 # Every group name, in reporting order, with the catch-all last. `train.py`
 #     reports one gradient-norm column per entry on every rung, NaN where the
 #     group does not exist on that architecture, so that the metrics header
-#     keeps its shape across a resume -- the same rule the contrast columns
-#     follow.
+#     keeps its shape across a resume -- the same rule the prototyper's own
+#     columns follow.
 GROUP_NAMES = (
     tuple(name for name, _ in MODULE_GROUPS) + SCALAR_SUFFIXES + ("other",)
 )
@@ -288,8 +291,8 @@ def claimed_separately(name, parameter=None):
         rate `SPLIT_LEARNING_RATES` gives them rather than inheriting their
         module's. A module group that also claimed them would clip them twice --
         once alone and once inside the module's norm, which they would inflate
-        on the way -- and would make `contrast_gate_lr = lr` mean "follow the
-        contrast stage" rather than the documented "no override".
+        on the way -- and would make `mix_logit_lr = lr` mean "follow the
+        discriminator" rather than the documented "no override".
 
     Args:
         name: the parameter's name, relative to whatever is being walked. Every
@@ -518,20 +521,6 @@ SPLIT_LEARNING_RATES = (
         ),
     ),
     (
-        # The one scalar standing between the contrast stage and the identity.
-        #     It opens at exactly zero, and at the base rate a lone scalar
-        #     cannot travel further than `lr * steps` -- 156.25 steps an epoch
-        #     on both datasets since 2026-08-31 -- so without this the stage
-        #     would stay shut for most of a run. Like the two scalars below it
-        #     reaches the loss through `model_util.scale_without_attenuating`,
-        #     which is what stops the branch behind it reversing whenever the
-        #     gate crosses zero; the gate's own partial is untouched, so this
-        #     rate means what it always did. See `sender.ExampleContrast`.
-        "contrast_gate_lr",
-        "contrast_gate",
-        lambda pair: pair.sender.contrast is not None,
-    ),
-    (
         # The speaker's channel scale, and the counterpart of `score_scale_lr`
         #     above: both are lone scalars sitting in front of a normalised
         #     quantity, both reach the loss through
@@ -656,43 +645,37 @@ def build_models(dataloaders, config):
         n_feats=n_feats,
         **config['sender_feature_model']
     )
-    # Every stage after the backbone is sized from the adapter's output rather
-    #     than from `final_feat_dim`, which is the whole point of it: the
-    #     speaker runs at its language model's `d_model` and the vision model
-    #     emits whatever it emits. The same class the listener's interfaces are,
-    #     at the same defaults -- no bias, no mask. See
-    #     `model_util.LinearInterface`.
-    sender_referent_width = config['sender_language_model']['d_model']
-    sender_adapter = LinearInterface(
-        sender_feature_model.final_feat_dim,
-        sender_referent_width,
-    )
-    sender_prototyper = sender_prototyper_class(sender_referent_width)
-    sender_language_model = sender_language_model_class(
-        sender_referent_width,
-        **config['sender_language_model']
-    )
+    # Each stage after the backbone is sized from the width it declared rather
+    #     than from `final_feat_dim`, which is the whole point of an interface:
+    #     the vision model emits whatever it emits and every consumer runs at
+    #     the width it asked for. Two of them on the speaker since the
+    #     prototyper stopped running at the language model's width -- the
+    #     referents on the way in, the prototypes on the way out. The same class
+    #     the listener's interfaces are, at the same defaults -- no bias, no
+    #     mask. See `model_util.LinearInterface`.
+    sender_prototyper_width = config['sender_prototyper']['d_model']
+    sender_language_model_width = config['sender_language_model']['d_model']
 
-    # A boolean rather than a class name, because there is one of these or there
-    #     is nothing: the stage is a residual on the referents, so "off" is
-    #     `None` and not another module. `False` builds the speaker that existed
-    #     before it, and `True` opens at that speaker exactly -- see
-    #     `sender.ExampleContrast`.
-    sender_contrast = (
-        sender.ExampleContrast(
-            sender_referent_width,
-            **config['sender_contrast']
-        )
-        if config['sender']['contrast']
-        else None
+    sender_referent_interface = LinearInterface(
+        sender_feature_model.final_feat_dim,
+        sender_prototyper_width,
+    )
+    sender_prototyper = sender_prototyper_class(**config['sender_prototyper'])
+    sender_prototype_interface = LinearInterface(
+        sender_prototyper_width,
+        sender_language_model_width,
+    )
+    sender_language_model = sender_language_model_class(
+        sender_language_model_width,
+        **config['sender_language_model']
     )
 
     sender_ = sender_class(
         feat_model = sender_feature_model,
-        adapter = sender_adapter,
+        referent_interface = sender_referent_interface,
         prototyper = sender_prototyper,
+        prototype_interface = sender_prototype_interface,
         language_model = sender_language_model,
-        contrast = sender_contrast,
         vision_dropout = config['sender']['vision_dropout'],
         prototype_dropout = config['sender']['prototype_dropout']
     )
@@ -817,9 +800,9 @@ def build_models(dataloaders, config):
     for name, module, lr in module_lrs:
         optimiser = split_out_module(optimiser, module, lr, name)
 
-    # Written back so `save_args` records what was *built*. `sender_contrast`
-    #     is absent when the stage is off, so this says which groups existed as
-    #     well as what rate each ran at. Note the rate here is the one the
+    # Written back so `save_args` records what was *built*. A group whose
+    #     module this pair does not have is absent, so this says which groups
+    #     existed as well as what rate each ran at. Note the rate here is the
     #     module's own parameters got: the scalars that clip separately kept
     #     theirs, and `score_bias` and `polarity_embedding` move again below.
     config['optimiser']['resolved_module_lrs'] = resolved_module_lrs

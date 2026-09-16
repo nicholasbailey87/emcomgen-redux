@@ -120,8 +120,8 @@ normalised rather than by normalising the result.
 
 Round eight finished that. Removing the centring made the decision threshold a
 fixed origin -- `train.py` reads `lis_scores > 0` -- and only four of the
-sixteen rungs could place their scores against one. `AttentionDiscriminator`
-had a `mix_bias`; `BilinearDiscriminator`, and so rungs 1-12, had no bias
+fourteen rungs could place their scores against one. `AttentionDiscriminator`
+had a `mix_bias`; `BilinearDiscriminator`, and so rungs 1-10, had no bias
 anywhere, `bilinear` being built `bias=False`. So `ScoreVolume` gained a
 `score_bias` beside its volume, applied after it, and `mix_bias` retired into
 it: same position, same arithmetic, both arms, and now with a config key at
@@ -209,7 +209,7 @@ def _comparer(referent_dim=REFERENT_DIM, **overrides):
     )
 
 
-CROSS_RUNG = "15_shapeworld_receiver_cross_attention_lm.toml"
+CROSS_RUNG = "13_shapeworld_receiver_cross_attention_lm.toml"
 
 # The keys that belong to the discriminator's table rather than the language
 #     model's, so `_cross_comparer` can take one flat kwargs like the builder it
@@ -1538,21 +1538,21 @@ def test_the_readout_scalars_are_elevated_and_the_weight_that_turns_is_not():
 def test_an_attention_rung_with_a_normalised_channel_asks_for_the_mix_weight_rate_and_nothing_else():
     """
     Which parameters are left in an elevated group, on the rung that has the
-        most of them. Five of the six keys cannot be told apart by their rate --
+        most of them. Four of the five keys cannot be told apart by their rate --
         DEFAULT.toml opens the scaling scalars and `score_bias` together at
         6e-3 -- so the assertion is on membership.
 
-    `polarity_embedding` is the sixth and is deliberately *not* with them. It is
+    `polarity_embedding` is the fifth and is deliberately *not* with them. It is
         a 2-d tag rather than a scalar, and it has no traverse to cover since it
         opens as an antipodal draw at `referent_layer_norm`'s own scale, so the
         argument that put the others at 6e-3 does not reach it. Since
         `2026-08-29` it takes the speaker's module rate, so it is asserted on
         group membership below rather than by looking a group up by its rate.
 
-    This rung's `SenderTransformerLM` earns the speaker's two, its contrast
-        stage a third and its channel scale a fourth -- `log_logit_scale` takes
-        `score_scale_lr`'s rate, because it is the listener's volume's
-        counterpart at the other end of the channel. It exists only under
+    This rung's `SenderTransformerLM` earns the speaker's two, its channel
+        scale being the second -- `log_logit_scale` takes `score_scale_lr`'s
+        rate, because it is the listener's volume's counterpart at the other end
+        of the channel. It exists only under
         `normalise_logits`, which stopped being the default on 2026-09-05 and
         which this rung's file does not set, so the flag is pinned on at the
         call below: the subject here is which parameters land in an elevated
@@ -1571,7 +1571,7 @@ def test_an_attention_rung_with_a_normalised_channel_asks_for_the_mix_weight_rat
         it used to own itself now comes from `ScoreVolume` like the volume does.
     """
     config, pair, optimiser = _pair_and_optimiser(
-        "16_birds_receiver_cross_attention_lm.toml",
+        "14_birds_receiver_cross_attention_lm.toml",
         receiver_discriminator=READOUT_ON,
         sender_language_model={"normalise_logits": True},
         # Pinned away from the base rate, which since 2026-09-05 it would
@@ -1615,7 +1615,6 @@ def test_an_attention_rung_with_a_normalised_channel_asks_for_the_mix_weight_rat
 
     assert elevated == {
         "sender.language_model.log_logit_scale",
-        "sender.contrast.contrast_gate",
         "receiver.discriminator.mix_logit",
         "receiver.discriminator.log_score_scale",
         "receiver.discriminator.score_bias",

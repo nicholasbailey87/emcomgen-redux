@@ -63,7 +63,7 @@ BATCH, N_OBJ, SEQ = 6, 10, 7
 #     coincidence.
 TOKEN_DIM = 37
 
-CROSS_RUNG = "15_shapeworld_receiver_cross_attention_lm.toml"
+CROSS_RUNG = "13_shapeworld_receiver_cross_attention_lm.toml"
 
 
 def _inputs(listener, seed=0):
@@ -295,7 +295,7 @@ def test_the_default_gru_is_jayelms():
 
 @pytest.mark.parametrize(
     "config_file",
-    [CROSS_RUNG, "16_birds_receiver_cross_attention_lm.toml"],
+    [CROSS_RUNG, "14_birds_receiver_cross_attention_lm.toml"],
 )
 def test_the_two_listener_arms_are_parameter_matched(config_file):
     """

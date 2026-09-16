@@ -1,0 +1,158 @@
+# Rung 12: rung 10 with the attention discriminator.
+#
+# The listener is two slots -- a language model that encodes the message and a
+# discriminator that scores the candidates from it -- and this rung replaces the
+# second one only. The message is still read by `ReceiverGRULM`; what changes is
+# how the encoding is compared against the candidate set.
+#
+# That split is the point of the pair of rungs. One `comparer` key used to
+# choose both halves at once, so a rung swapping the bilinear comparer for the
+# cross-attention one changed the message encoder *and* the comparison, and
+# "attention helps" could not be attributed to either. 13 moves the comparison
+# and 15 moves the encoder.
+#
+# `AttentionDiscriminator` scores the candidates with a decoder stack that reads
+# the encoded message as memory, mixed with a bilinear score over the same
+# message. The mix opens at the bilinear limit and departs only if attention
+# earns it, because the attention path alone does not bootstrap: under a nuisance
+# level where the bilinear comparison reaches 0.938 it sits at 0.469.
+# `train_mix_alpha` and `train_path_agreement` are the columns that say which
+# happened. See docs/architecture.md.
+#
+# **Read the parameter counts here with care.** They have been fixed twice, and
+# both fixes are worth knowing about. `ReceiverGRULM` used to inherit 2 layers
+# bidirectional at DEFAULT's 1024 wide, which is 28,262,400 parameters, against
+# this discriminator's 3,580,487 -- itself inflated by a `memory_adapter`
+# bringing the GRU's then-2048-wide output down to 256. The listener on this
+# rung was therefore dominated by an encoder that rung 13 replaced with a
+# 2,466,139-parameter one, so the step from 13 to 15 was an architecture change
+# *and* a 26M parameter change, which is not the clean contrast the rest of the
+# ladder is built on.
+#
+# `[receiver_language_model]` restores jayelm's 1 layer unidirectional:
+# 4,687,872 here at an `output_size` of 1024, and rung 13 deepens its
+# transformer to 6 blocks for 4,702,646. Parity is bought at jayelm's width by
+# moving the arm under test, rather than at a shared 256 by moving the baseline.
+#
+# The second fix is the interface hoist, and it closes the last of the gap.
+# `AttentionDiscriminator` owned two adapters and two norms; they are
+# `Receiver.interfaces` now, sized from the widths this slot declares. So this
+# discriminator is **2,384,198 on this rung and on rung 13 alike** -- the same
+# module at the same size, where it used to differ by a `memory_adapter` reading
+# a 1024-wide GRU state against a 256-wide encoded message. That difference has
+# moved into `receiver.interfaces`, which is 344,320 here against 229,632 there.
+#
+# **What the hoist changed about what this rung *is*.** The composed bilinear
+# path used to run at `[receiver_language_model] d_model` = 1024, which is the
+# same width and the same form as rung 9's standalone bilinear -- that is what
+# made this rung "rung 9 plus attention". It now runs at this slot's own
+# `d_model` = 256, so the fallback branch is about an order of magnitude
+# smaller. The mix's bootstrapping argument still holds; it holds at less
+# capacity. No trajectory recorded before the hoist pools with one recorded
+# after it.
+
+name = "ablation_birds"
+
+[data]
+dataset = "../data/cub"
+
+[sender]
+feature_model = "BirdsViT"
+prototyper = "AttentionPrototyper"
+language_model = "SenderTransformerLM"
+
+[sender_language_model]
+# The two must equal *each other*, and neither has anything to do with the
+# vision model's width. `SenderTransformerLM` layer-norms the incoming
+# prototypes at its own `d_model` and separately rejects
+# `token_embedding_size != referent_embedding_size`, so these two are pinned
+# together -- but the referents arrive already at this `d_model`:
+# `builder.build_models` sets `sender_referent_width` from *this* table and the
+# speaker's adapter brings `final_feat_dim` to it, whatever the backbone emits.
+#
+# The comment this replaces said both keys "must equal
+# `sender_feature_model.d_model`". That was true of the speaker before the
+# adapter landed and has been false since; verified by building rung 11 with a
+# 128-wide vision model under a 320-wide language model. It is worth naming
+# rather than deleting, because ShapeWorld's ViT2 is 128 wide now -- narrowed to
+# match `ResNet56` -- and under the old reading that narrowing would have
+# dragged this stack, and the whole capacity match against the GRU baseline,
+# down with it. Rung 3 still comes before this one, but for the ordering of the
+# ladder rather than for a width constraint.
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+
+# 6 blocks and `ff_inner_size = 512`, which together hold the speaker's language
+# model at 1.015x the GRU baseline's. The blocks lost their cross-attention
+# sublayer when the referents moved into the stack's input, so they are cheaper
+# and there are more of them. The argument is at rung 7; this rung is not
+# supposed to touch the speaker at all.
+layers = 7
+
+# `false` selects the causal arm: the blocks run over the latent array under a
+# causal mask and the message slots in its tail are generated in order, each
+# read and then overwritten by its symbol so the next one is conditioned on it.
+# `true` selects the parallel arm, which runs the same blocks unmasked and reads
+# the whole tail in one shot.
+#
+# `false` here, because the GRU baseline at rung 1 is autoregressive too: this
+# rung then moves the language model's architecture and nothing else. `true`
+# would move the generation regime at the same time, and whatever the
+# combination measured could not be attributed to either.
+#
+# The parallel arm is no longer a rung of its own. It used to sit beside the top
+# of the ladder as a fork; to measure it again, copy the topmost rung and flip
+# this key. A difference then covers the generation regime and nothing else,
+# which is new: the two arms used to be different architectures at different
+# sizes, and are now the same blocks at the same size under different masks.
+# They differ by `token_embedding` alone -- 5,760 parameters, which only the
+# causal arm needs because only it reads a symbol back.
+bidirectional = false
+
+[receiver]
+feature_model = "BirdsViT"
+discriminator = "AttentionDiscriminator"
+
+[receiver_discriminator]
+# Neither listener slot's width is tied to any other width in the run -- each
+# adapts the referents into its own space -- so this is sized to buy depth
+# rather than to match the repo's other transformers. Depth is what matters
+# here: every block is another crossing of the message into the stream the
+# scores are read off, where the bilinear discriminator it replaces has exactly
+# one. Width bought nothing at that margin.
+#
+# So 256 wide with a feedforward inner size of 320, against DEFAULT's 320 / 5
+# heads / 576 for this table. That keeps the repo-wide head dimension of 64 --
+# hence 4 heads rather than 5, since 256 % 4 == 0 where 256 % 5 is not -- and
+# gives up the repo-wide feedforward proportion of 1.73 for 1.25, which is what
+# pays for the extra blocks.
+#
+# This stack reads no `bidirectional` key at all: its sequence axis is the
+# candidate set, whose order is the label vector, so it is unconditionally
+# non-causal and takes no positional embedding. `layers` is a block count and
+# its DeepNorm constants are resolved from it -- `decoder=True`, three sublayers
+# to the block, so alpha 1.732 and beta 0.408 at 3.
+#
+# No `token_embedding_size` here. The width the message arrives at is the
+# language model's `output_size`, which `build_models` passes in, and
+# `Receiver`'s message interface brings it to this `d_model` -- so the two
+# tables' widths need not agree and a key restating one in the other could only
+# be wrong. This `d_model` is what the slot declares for both of its inputs, so
+# it also sets the width of the composed bilinear path.
+d_model = 256
+heads = 4
+ff_inner_size = 320
+layers = 3
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

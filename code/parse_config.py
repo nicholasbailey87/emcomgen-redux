@@ -229,6 +229,46 @@ def validate_config(config: dict) -> bool:
             "See `sender.sample_symbols`",
         ),
         (
+            'sender',
+            'contrast',
+            "the contrast stage was folded into `AttentionPrototyper` on "
+            "2026-09-16. There is no separate stage to switch on: the "
+            "prototyper mixes the referents in one transformer block and then "
+            "pools them, so `[sender] prototyper = \"AttentionPrototyper\"` "
+            "is the whole of the choice. `AveragePrototyper` is the arm "
+            "without it. See `sender.AttentionPrototyper`",
+        ),
+        (
+            'sender_contrast',
+            'd_model',
+            "the contrast stage's shape is `[sender_prototyper]` now, which "
+            "carries `d_model`, `heads`, `ff_inner_size`, `activation` and the "
+            "block's dropouts, and has a `[birds.sender_prototyper]` override "
+            "-- the two datasets size this module from their own sender ViT",
+        ),
+        (
+            'sender_contrast',
+            'heads',
+            "see `sender_contrast.d_model` above; the whole table is "
+            "`[sender_prototyper]` now",
+        ),
+        (
+            'sender_contrast',
+            'self_attention_dropout',
+            "see `sender_contrast.d_model` above; the whole table is "
+            "`[sender_prototyper]` now",
+        ),
+        (
+            'optimiser',
+            'contrast_gate_lr',
+            "there is no gate. The merged prototyper's block is a "
+            "normally-initialised DeepNorm residual, so nothing stands between "
+            "it and the identity for a rate to govern, and the sign degeneracy "
+            "that rate was raised to outrun is gone with it. The module takes "
+            "`[optimiser.module_lr] sender_prototyper`, or a rate under "
+            "`[optimiser.implementation_lr.sender_prototyper]` keyed by class",
+        ),
+        (
             'data',
             'augment_flip',
             "the geometry is set per agent since 2026-09-09. Use "

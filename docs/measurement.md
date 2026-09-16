@@ -449,7 +449,7 @@ unaffected. See [channel.md](channel.md).
 primary read on whether the channel is earning anything. Under
 `normalise_logits = false` it does not exist and this column reads NaN, as does
 `train_clip_log_logit_scale`; the header keeps its shape either way, which is
-the same convention the contrast columns follow. It opens at exactly
+the same convention the prototyper's columns follow. It opens at exactly
 **1.0** on both datasets and is bounded above at **2.0** by `MAX_LOGIT_SCALE`;
 there is no floor.
 
@@ -518,9 +518,9 @@ makes the two standard deviations identical and nothing has to reach past
 **`referent_spread` and `referent_spread_backbone`** — how much the referents
 within one polarity still differ from each other, relative to what they share:
 subtract each polarity's own mean, then take the RMS of the residual over the RMS
-of the means. The same decomposition `contrast_within_share` uses, so the two are
-read on one basis, and dimensionless, so a global rescale of the embeddings does
-not move it.
+of the means. The same decomposition `prototyper_within_share` uses — one
+`sender.polarity_means` helper serves both — so the two are read on one basis,
+and dimensionless, so a global rescale of the embeddings does not move it.
 
 They exist to break an ambiguity `pool_score_sd` cannot. A flat pooling score has
 two causes that call for opposite fixes — the examples genuinely collapsed onto
@@ -528,14 +528,21 @@ one point, or the single scoring direction rotated somewhere they do not vary �
 and these columns never touch the scoring vector, so a collapse here is the
 backbone and a flat `pool_score_sd` alongside a healthy spread here is the pool.
 
-`referent_spread_backbone` is taken on `embed_images`' output and `referent_spread`
-after the contrast stage, so they bracket it. They are **equal** on a rung without
-the stage, which is the informative reading and the reason neither is NaN there.
-A gap between them is the contrast branch homogenising the referents, which is
-live enough to be worth watching: `contrast_share` reached 0.32 on the 2026-08-29
-run while `contrast_within_share` was 1.6e-4, a branch that was 99.98% a shared
-vector plus a per-polarity offset. Adding a common vector lowers this ratio by
-construction — that is what it is for.
+Both are taken **inside the prototyper** rather than on the agent, and that is
+where they moved when the contrast stage was merged into `AttentionPrototyper`:
+the mixing and the pooling are one module now, so nothing outside it can see
+between them. `Sender` exposes the two names as properties reading off the
+prototyper, so `train.py` is unchanged.
+
+`referent_spread_backbone` is taken on what the referent interface handed over
+and `referent_spread` on the block's output, so they bracket the block. They are
+**equal** under `AveragePrototyper`, which has no block — that is the
+informative reading and the reason neither is NaN there. A gap between them on an
+`AttentionPrototyper` rung is the block homogenising the referents, which is live
+enough to be worth watching: on the 2026-08-29 run the contrast branch this
+module absorbed reached a share of 0.32 while its within-share was 1.6e-4, a
+branch that was 99.98% a shared vector plus a per-polarity offset. Adding a
+common vector lowers this ratio by construction — that is what it is for.
 
 **`polarity_separation`** — `norm(e_pos − e_neg)` for the Transformer speaker's
 `polarity_embedding`. A constant added to both rows shifts every key and value
@@ -559,55 +566,60 @@ It is a *parameter* norm rather than a per-batch quantity, so it does not depend
 on the pass at all; it is recorded inside the decode so every column stays on the
 same clock.
 
-**`contrast_gate`, `contrast_share`, `contrast_within_share`** — the speaker's
-optional contrast stage, and all three are NaN when `[sender] contrast` is false.
-NaN rather than absent because the header has to be the same shape either way or
-a run cannot be resumed against a config that toggles the flag; and NaN rather
-than zero because "the stage is not there" and "the stage is there and has not
-opened" are different rows.
+**`prototyper_mix_share`, `prototyper_within_share`** — the speaker's mixing
+block, and both are NaN under `AveragePrototyper`, which has no block. NaN rather
+than absent because the header has to be the same shape either way or a run
+cannot be resumed against a config that changes the prototyper; and NaN rather
+than zero because "there is no block" and "there is a block and it contributed
+nothing" are different rows.
+
+They were `contrast_share` and `contrast_within_share` until 2026-09-16, and they
+are re-sited as well as renamed: the delta they read is now the block's own
+input-to-output difference, `block(x + tag) − (x + tag)`, rather than a gated
+branch. The tag is excluded deliberately — it is a per-polarity constant, and
+including it would let it dominate the volume at initialisation while telling
+nobody anything. `contrast_gate` is gone; there is no gate.
 
 They divide the way the speaker's other columns do, into volume and shape:
 
-| | did it open | how loud | is it doing anything new |
-|---|---|---|---|
-| `ExampleContrast` | `contrast_gate` | `contrast_share` | `contrast_within_share` |
-
-**`contrast_gate`** is the scalar standing between the branch and the identity.
-It opens at exactly zero and takes `contrast_gate_lr`, so as a lone scalar it
-cannot travel further than `lr × steps` — 0.1 an epoch at 2e-3 and birds' 62
-steps, against 0.0062 at the base rate, which is why it has its own key. A
-parameter rather than a per-batch quantity, so it does not depend on the pass.
-
-**`contrast_share`** is `rms(gate × branch) / rms(referents)`: what fraction of
-the referent going into the prototyper is contrast. This is the reportable
-column, and it is what the gate alone cannot give — the gate's meaning depends on
-whatever magnitude `out_projection` happens to emit, and that is neither
-configured nor pinned.
-
-**`contrast_within_share`** is the part of the branch that is example-level.
-Within each game the branch decomposes by nested means into a single vector
-common to all `2n`, a per-polarity offset, and a per-example remainder; the three
-are orthogonal, so their sums of squares add to the total, and this is the
-remainder's share. It is measured on the branch *before* the gate, so a
-well-shaped branch that is still quiet reads as well-shaped — the only time
-anyone needs the column is early, when the gate is small.
-
-It exists because a large `contrast_share` is not evidence of contrast. A vector
-common to the whole game shifts both prototypes equally and the language model's
-`LayerNorm` eats most of it; a per-polarity offset is a learned "I am positive",
-which `AttentionPrototyper`'s two separate pools already provide. Only the
-remainder is contrast *between examples*, which is the entire reason the stage is
-there.
-
-| `contrast_share` | `contrast_within_share` | reading |
+| | how loud | is it doing anything new |
 |---|---|---|
-| ~0 | any | the gate never opened; the arm is its parent rung and says nothing about contrast |
-| large | ~0 | a null result dressed up as a departure — the branch is a polarity tag or a global shift |
-| small | large | the stage found something example-level but is not being trusted with the decision |
+| `AttentionPrototyper`'s block | `prototyper_mix_share` | `prototyper_within_share` |
+
+**`prototyper_mix_share`** is `rms(delta) / rms(referents)`: what fraction of
+what the pooling sees the block put there. This is the reportable volume column.
+
+**`prototyper_within_share`** is the part of that delta which is example-level.
+Within each game the delta decomposes by nested means into a single vector common
+to all `2n`, a per-polarity offset, and a per-example remainder; the three are
+orthogonal, so their sums of squares add to the total, and this is the
+remainder's share.
+
+It exists because a large `prototyper_mix_share` is not evidence of contrast. A
+vector common to the whole game shifts both prototypes equally and the language
+model's `LayerNorm` eats most of it; a per-polarity offset is a learned "I am
+positive", which the two separate pools already provide. Only the remainder is
+contrast *between examples*, which is the entire reason the block is there — and
+attention is the only operation in the block that can produce any, the
+feedforward being per-referent.
+
+**This column matters more since the merge, not less.** The old stage put the
+label tag on the queries and keys only, so a per-polarity vector had to be built
+out of content; the tag now rides the block's input and its values, and there is
+a feedforward behind it. Nothing about that makes a per-polarity vector *useful*
+— it cancels in the pooling softmax and the language model's biases already
+supply one — but it makes it cheap to emit, and this is the column that says
+whether the block did.
+
+| `prototyper_mix_share` | `prototyper_within_share` | reading |
+|---|---|---|
+| ~0 | any | the block contributed nothing; the arm is its parent rung with an extra module doing no work |
+| large | ~0 | a null result dressed up as a departure — the delta is a polarity tag or a global shift |
+| small | large | the block found something example-level but is barely being used |
 | large | large | the referents are genuinely being read against each other, which is the arm working |
 
-Read all three against `topsim` and not against `acc`. The stage makes messages
-distractor-dependent by construction, so a run where the share is large and
+Read both against `topsim` and not against `acc`. The block makes messages
+distractor-dependent by construction, so a run where the mix share is large and
 `topsim` has fallen is the cost showing up, not a bug — see
 [architecture.md](architecture.md).
 
@@ -818,24 +830,24 @@ is how the last collapse ran for a whole smoke test.
 
 **`train_clip_<group>`** — the gradient norm of one clip group, taken *before*
 clipping, for every group in `models.builder.GROUP_NAMES`. Fourteen named groups
-— ten modules and the four scaling scalars — plus `other`. See
+— nine modules and the three scaling scalars — plus `other`. See
 [training.md](training.md#the-group-table) for what is in each.
 
 Averaged **per optimiser step**, not per example: a gradient norm is a property
 of the step, and the trailing partial accumulation counts once like any other.
 `nan` means the group does not exist on this architecture, or exists and holds
-nothing with a gradient — `sender_contrast` on a rung with the stage off,
-`mix_logit` on a `BilinearDiscriminator`, `sender_prototyper` under
-`AveragePrototyper`, which has no parameters at all. Every column is present on
-every rung so that the header survives a resume, exactly as the contrast columns
-are.
+nothing with a gradient — `mix_logit` on a `BilinearDiscriminator`, or
+`sender_prototyper` under `AveragePrototyper`, which has no parameters at all.
+Every column is present on every rung so that the header survives a resume,
+exactly as the prototyper's own columns are.
 
 **`train_clip_other` should be `nan`.** It is the catch-all that keeps a module
 nobody registered from going unclipped, so a number there is not a reading — it
 is a report that something was built without being added to `MODULE_GROUPS`, and
 whatever it is has been clipped under a name that says nothing about it. That
 was the state of the repo until August 2026, when `other` was silently the whole
-`sender.contrast` stage.
+of the speaker's contrast stage — the one that is part of `AttentionPrototyper`
+now.
 
 **What these are and are not for.** They say how hard clipping is biting on each
 group: a norm far above `clip_grad_norm` means that group is renormalised on

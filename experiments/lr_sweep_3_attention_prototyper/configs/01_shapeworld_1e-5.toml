@@ -7,7 +7,7 @@
 # arms, copying rung 06. Nothing else differs between the arms, and nothing
 # else differs from the rung each one copies.
 #
-# **Sweep 3 of eight.** `lr_sweep_1_cnn` did the two CNN backbones and is
+# **Sweep 3 of seven.** `lr_sweep_1_cnn` did the two CNN backbones and is
 # where the reasoning for the whole set is written down. The short version:
 # every rung of the ablation introduces a component whose learning rate has
 # never been measured, `[optimiser] lr`'s 1e-4 is jayelm's default tuned on a
@@ -24,9 +24,29 @@
 # is launched. Launching out of order does not fail, it silently measures this
 # component against an untuned stack. See `experiments/README.md`.
 #
+# **This sweep has run once and is being re-run, because the module changed
+# under it.** The first pass (77f579e, 2026-09-14) measured an
+# `AttentionPrototyper` that was two scoring directions and two biases --
+# 2,050 parameters -- and put 1e-4 first. On 2026-09-16 the `ExampleContrast`
+# stage that used to sit at rung 07 was folded into this class, which now holds
+# a transformer block, two pools and a label tag: 132,738 parameters on
+# ShapeWorld and 967,171 on birds. A rate tuned for four vectors is not evidence
+# about a block, so the old result is withdrawn rather than carried forward.
+# DEFAULT.toml still states 1e-4, which is also `module_lr`'s fallback for the
+# group, so nothing about what runs depends on that line until this lands.
+#
+# The old pass's numbers, for the record, since the arms are still on disk:
+# final `test_same_acc` ran 0.655, 0.515, 0.605, 0.620, 0.649 on ShapeWorld and
+# 0.712, 0.723, 0.720, 0.741, 0.572 on birds across the same five rates.
+#
+# **No rung above this one is meaningful until this sweep lands**, for the
+# reason the whole set exists: rungs 07 and up all carry this module, so each of
+# them would differ from the rung below it in the architecture it was there to
+# move *and* in how well an inherited rate fits a module that has just grown by
+# a factor of sixty.
+#
 # `AveragePrototyper`, which this replaces, has no parameters at all, so
-# there is no rate it could have been running at and no continuity to
-# preserve. This is the first rate this group has ever had.
+# there is no rate it could have been running at.
 #
 # **The grid, and why it is this one.** 1e-5 to 2e-4, five arms, roughly
 # log-spaced. The bottom is where `lr_sweep_1_cnn`'s ShapeWorld arm found its
@@ -51,7 +71,7 @@
 # 0.674 against 0.508, at an identical `train_acc_md_color` of 0.84. The
 # separation is not marginal at 20 and it does not reverse: the same arm read at
 # 99 is 0.726 against 0.525. So the epochs after 20 were buying precision on a
-# gap already visible, on a chain of eight serial sweeps.
+# gap already visible, on a chain of seven serial sweeps.
 #
 # The standing caution that shape emerges late -- `lr_sweep_1_cnn`'s ShapeWorld
 # arm at 2e-5 did not step up until epoch 18 -- was a statement about a run that
@@ -60,7 +80,7 @@
 #
 # What 20 cannot do is settle an argmax, and it was never going to. Sweep 1 took
 # 98 epochs to separate its top two birds arms and separated them by 0.001. One
-# repeat for the same reason: n = 1 across eight sweeps is the budget, so
+# repeat for the same reason: n = 1 across seven sweeps is the budget, so
 # between-arm gaps here are the size of within-arm epoch-to-epoch wobble and
 # this ranks candidates rather than settling them.
 #
@@ -106,7 +126,7 @@
 #
 # `lr_sweep_1_cnn` stays at 20 deliberately. It is already run, its arms are
 # read, and re-lengthening it would reprice a finished sweep to no purpose. The
-# cost is that sweep 1's arms and sweeps 2-8's now differ in budget as well as
+# cost is that sweep 1's arms and sweeps 2-7's now differ in budget as well as
 # in the swept component, so a rate carried forward from sweep 1 was chosen over
 # a shorter run than the one testing it.
 

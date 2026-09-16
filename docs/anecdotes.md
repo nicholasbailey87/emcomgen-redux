@@ -419,6 +419,68 @@ configs and no results, which is why the change is made now rather than after
 them. `tests/test_contrast.py` pins the two behaviours — the branch learning at a
 shut gate, and its gradient not tracking the gate in size or in sign.
 
+### Round ten, closed out: the gate is gone and the question with it
+
+2026-09-16, two days later. `ExampleContrast` has been folded into
+`AttentionPrototyper` and there is no `contrast_gate`, no `contrast_gate_lr`, no
+`scale_without_attenuating` on the speaker's referent path, and no
+`tests/test_contrast.py`. The round above is kept in full because the argument in
+it is sound and the same helper is still live on both channel scalars; what
+changed is that its subject stopped existing.
+
+**The re-run, which is what the round above was waiting for.**
+`lr_sweep_4_sender_contrast` at `ab4e64e`, ten arms, 30 epochs, with the helper
+in place. On birds the branch *found* example-level structure —
+`train_contrast_within_share` 0.19–0.65 — and the gate sat between **−0.17 and
+−0.26 on all five arms**, persistently anti-aligned with what the speaker wanted,
+while `test_same_acc` fell on two arms and was flat on three. ShapeWorld's gate
+did open, +0.27 to +1.05, and within-share improved on every arm, but the
+accuracy gains were confined to the arms that had been degenerate before. Neither
+dataset is a stage working well.
+
+So the helper did what round ten said it would — the branch trained, both factors
+acquired a preferred sign, the wander stopped — and the answer it produced on
+birds was a stable negative gate. That is a sharper result than the wander, and
+it is the last measurement the gate ever produced.
+
+**Why the question is dissolved rather than answered.** *Why* was the branch
+consistently anti-aligned? Nothing here says. It could be that subtracting a
+contrast direction genuinely helped the listener on CUB, that the branch and the
+gate settled into a mirrored pair the loss was indifferent between, or that 30
+epochs is short. The merge does not decide between those; it removes the
+parameter whose sign the question was about. **That is worth stating as an
+unfinished question rather than a closed one**, because the same shape can come
+back the moment any scalar is put in front of a learned branch again — and the
+repo has three of those left.
+
+**What the merge rests on instead**, and it is not the gate result. The stage was
+attention with no feedforward, so per referent its branch was a data-dependent
+*linear* recombination of the referent set: it gathered without computing, and
+the depth meant to resolve the mixture sat downstream of the pooling, where the
+mixture is no longer separable. That argument would hold if every arm of sweep 4
+had been a clean win. The gate result is why the change was made *now*.
+
+**What is given up, and it is real.** Rungs 5/6 and 7/8 both opened bit-identically
+to their parents — zero-initialised scoring weights, and a gate at zero — so each
+was an ablation of one module *and* a comparison starting from identical numbers.
+The merged rung opens at a transformer block's random perturbation of the
+referents, then the mean. It is still an ablation of one module. The price of the
+old recipe is on the record above: an opening at exactly zero is what produced a
+gate whose sign nothing anchored, and two days of argument about it.
+
+**Capacity, since that is the standing worry.** It falls. The two modules came to
+1,068,995 parameters, almost all of it the two 1024↔320 projections the stage
+needed to enter and leave its own width; the merged module is 132,738 on
+ShapeWorld and 967,171 on birds, and the interfaces either side shrink too. If
+ShapeWorld shape accuracy moves after this, it did not move because the speaker
+got bigger — the numbers are pinned in
+`tests/test_ablation_configs.py::test_the_arms_are_the_sizes_they_claim` so that
+a later change cannot add capacity here quietly.
+
+**What is owed.** A fresh `lr_sweep_3_attention_prototyper`. The rate in
+DEFAULT.toml was measured on a module of 2,050 parameters and the module is sixty
+times larger; no rung above the prototyper is meaningful until that lands.
+
 
 ## Frozen logit spread: NaN through a masked gradient
 

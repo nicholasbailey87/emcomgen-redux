@@ -12,7 +12,7 @@
 # without one. Nothing else differs between the arms, and nothing else differs
 # from the rung each one copies.
 #
-# **Sweep 2 of eight.** `lr_sweep_1_cnn` did the two CNN backbones and is
+# **Sweep 2 of seven.** `lr_sweep_1_cnn` did the two CNN backbones and is
 # where the reasoning for the whole set is written down. The short version:
 # every rung of the ablation introduces a component whose learning rate has
 # never been measured, `[optimiser] lr`'s 1e-4 is jayelm's default tuned on a
@@ -59,7 +59,7 @@
 # 0.674 against 0.508, at an identical `train_acc_md_color` of 0.84. The
 # separation is not marginal at 20 and it does not reverse: the same arm read at
 # 99 is 0.726 against 0.525. So the epochs after 20 were buying precision on a
-# gap already visible, on a chain of eight serial sweeps.
+# gap already visible, on a chain of seven serial sweeps.
 #
 # The standing caution that shape emerges late -- `lr_sweep_1_cnn`'s ShapeWorld
 # arm at 2e-5 did not step up until epoch 18 -- was a statement about a run that
@@ -68,7 +68,7 @@
 #
 # What 20 cannot do is settle an argmax, and it was never going to. Sweep 1 took
 # 98 epochs to separate its top two birds arms and separated them by 0.001. One
-# repeat for the same reason: n = 1 across eight sweeps is the budget, so
+# repeat for the same reason: n = 1 across seven sweeps is the budget, so
 # between-arm gaps here are the size of within-arm epoch-to-epoch wobble and
 # this ranks candidates rather than settling them.
 #
@@ -114,7 +114,7 @@
 #
 # `lr_sweep_1_cnn` stays at 20 deliberately. It is already run, its arms are
 # read, and re-lengthening it would reprice a finished sweep to no purpose. The
-# cost is that sweep 1's arms and sweeps 2-8's now differ in budget as well as
+# cost is that sweep 1's arms and sweeps 2-7's now differ in budget as well as
 # in the swept component, so a rate carried forward from sweep 1 was chosen over
 # a shorter run than the one testing it.
 

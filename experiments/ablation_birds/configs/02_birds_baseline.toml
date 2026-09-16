@@ -30,8 +30,8 @@
 # it.
 #
 # Note the `[birds.*]` family is merged *under* this file rather than over it,
-# so a rung that names a vision model here wins. That is what lets rungs 4, 6, 8,
-# 10 and 12 swap in a ViT without the birds defaults putting ResNet18 back.
+# so a rung that names a vision model here wins. That is what lets rungs 4, 6, 8
+# and 10 swap in a ViT without the birds defaults putting ResNet18 back.
 #
 # Nothing else is overridden. The optimiser and channel settings this file used
 # to restate -- `weight_decay` 0.0 and the `logit_scale_lr` /
@@ -45,7 +45,7 @@
 # in an experiment must carry them even when they restate the default. `[slurm]`
 # is read from the *first* config in the folder only (sorted by filename), which
 # in this experiment is this file, so the block here governs the birds array --
-# it is sized for the heaviest job in the set, which is rung 16.
+# it is sized for the heaviest job in the set, which is rung 14.
 
 name = "ablation_birds"
 

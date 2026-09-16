@@ -169,8 +169,9 @@ class LinearInterface(nn.Module):
         `feature_model.final_feat_dim` was threaded straight into the
         prototyper, the language model, the contrast stage and the
         discriminator, so a single scalar chosen by the backbone set the width
-        of an entire agent. That coupling is what made rung 9 unreadable as an
-        experiment: `SenderTransformerLM` rejects `token_embedding_size !=
+        of an entire agent. That coupling is what made the speaker's
+        Transformer-language-model rung -- 9 in the sixteen-rung numbering, 7
+        now -- unreadable as an experiment: `SenderTransformerLM` rejects `token_embedding_size !=
         referent_embedding_size` outright, so the speaker's language model had
         to take the ViT's 320 and the ViT had to take the language model's, and
         neither could move without the other. The language model is quadratic

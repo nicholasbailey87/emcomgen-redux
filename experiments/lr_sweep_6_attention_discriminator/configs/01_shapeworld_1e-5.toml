@@ -1,0 +1,181 @@
+# lr_sweep_6_attention_discriminator: what learning rate `AttentionDiscriminator` wants, in
+# the presence of everything below it on the ladder.
+#
+# Ten arms. `[optimiser.implementation_lr.receiver_discriminator] AttentionDiscriminator` moves over 1e-5,
+# 2e-5, 5e-5, 1e-4 and 2e-4 on both datasets -- `01`-`05` are the five
+# ShapeWorld arms, copying ablation rung 11, and `06`-`10` the five birds
+# arms, copying rung 12. Nothing else differs between the arms, and nothing
+# else differs from the rung each one copies.
+#
+# **Sweep 6 of seven.** `lr_sweep_1_cnn` did the two CNN backbones and is
+# where the reasoning for the whole set is written down. The short version:
+# every rung of the ablation introduces a component whose learning rate has
+# never been measured, `[optimiser] lr`'s 1e-4 is jayelm's default tuned on a
+# 113k-parameter `Conv4`, and a rung that inherits a wrong rate differs from the
+# rung below it in two things at once -- the architecture it was there to move,
+# and how well the rate fits it. That is the confound every rung comment in
+# DEFAULT.toml is written to avoid, and it is not one the ladder can be read
+# through.
+#
+# **This sweep takes its rates from DEFAULT.toml and restates none of them.**
+# It inherits every rate the first six sweeps found. That is
+# deliberate and it is also a constraint on when this can run: the sweeps are
+# serial, and DEFAULT.toml must already carry sweep 6's result before this one
+# is launched. Launching out of order does not fail, it silently measures this
+# component against an untuned stack. See `experiments/README.md`.
+#
+# `BilinearDiscriminator`, which this replaces, keeps `module_lr`'s 1e-4
+# and is untouched by anything here: a rate stated for one class is
+# inert on every rung that runs the other. Rung 11 was the worst arm of
+# the old ShapeWorld ablation and rung 12 the worst of the birds one.
+#
+# **The grid, and why it is this one.** 1e-5 to 2e-4, five arms, roughly
+# log-spaced. The bottom is where `lr_sweep_1_cnn`'s ShapeWorld arm found its
+# floor and the top is twice jayelm's default, so the grid brackets the
+# inherited rate on both sides rather than only below it. That matters here in
+# a way it did not for the backbones: 1e-4 was tuned on something 99x smaller
+# than the trunks this repo runs, so there is no prior reason to think the
+# optimum is beneath it.
+#
+# **25 epochs, one repeat.** This was 30 for a day from 2026-09-12, 20 for a
+# day before that, 100 before that and 60 before that, and the whole argument
+# for the long budgets was ignition: a ShapeWorld run
+# could sit at `ln 2` for tens of epochs before the protocol appeared, so a
+# sixty-epoch budget bought eleven epochs of measurement and a null result at
+# that length was ambiguous between "no rate helps" and "the budget was short
+# again". The 2026-09-10 ShapeWorld ViT run is the case that forced 100:
+# ignition at epoch 49.
+#
+# `loss = "hinge"` removes the thing being paid for. The first hinge run on this
+# speaker ignited at **epoch 3-4**, and by epoch 20 it had separated from its BCE
+# twin on the question these sweeps exist to answer -- `train_acc_md_shape`
+# 0.674 against 0.508, at an identical `train_acc_md_color` of 0.84. The
+# separation is not marginal at 20 and it does not reverse: the same arm read at
+# 99 is 0.726 against 0.525. So the epochs after 20 were buying precision on a
+# gap already visible, on a chain of seven serial sweeps.
+#
+# The standing caution that shape emerges late -- `lr_sweep_1_cnn`'s ShapeWorld
+# arm at 2e-5 did not step up until epoch 18 -- was a statement about a run that
+# spent its first seven epochs flat. It is not repealed, it is *absorbed*: the
+# flat stretch is what moved, not the learning behind it.
+#
+# What 20 cannot do is settle an argmax, and it was never going to. Sweep 1 took
+# 98 epochs to separate its top two birds arms and separated them by 0.001. One
+# repeat for the same reason: n = 1 across seven sweeps is the budget, so
+# between-arm gaps here are the size of within-arm epoch-to-epoch wobble and
+# this ranks candidates rather than settling them.
+#
+# The arms no longer match the ablation rungs they copy on length. That is a
+# real cost and it is accepted: the rungs are 100 and these are 20, so an arm
+# and its rung now differ in the swept rate *and* the budget, and a rung's trace
+# is not a control for an arm's.
+#
+# **25 from 2026-09-12, and it is a compromise between the two facts below.**
+# The 30 was set the day before because the ShapeWorld ViT arm that learned
+# shape was still climbing at 20. It still was. What arrived alongside it is
+# `experiments/silhouette_titration_sender_vit/`, which made shape emergence a
+# job for `silhouette_p_receiver = 0.3` rather than for the rate -- and with
+# that key now carrying the escape, the sweeps no longer have to be long enough
+# to watch shape arrive. They have to be long enough to rank colour learning,
+# which is the part that reproduces and which is settled by about epoch 10 on
+# every arm read so far.
+#
+# So 25 buys back a sixth of the chain's compute against a criterion that does
+# not need the last five epochs. What it costs is the ability to read shape off
+# these folders at all: at 0.3 the three probe seeds cleared shape 0.55 at
+# epochs 5, 12 and 25, so a 25-epoch arm would have reported two escapes of
+# three where 30 reported three. If a sweep arm is ever read for shape rather
+# than for colour, this budget is too short and the number to quote is the
+# probe's, not this folder's.
+#
+# **Why 30 and not 20, from 2026-09-12.** The 20 above was argued from a CNN
+# speaker under hinge, and the ViT does not keep to that timetable. In
+# `lr_sweep_2_sender_vit` the one ShapeWorld arm that left the colour-only
+# minimum -- 5e-5 -- cleared `train_acc` 0.55 at epoch 8, against epoch 2 for
+# the two arms either side of it that never learned shape; at 20 epochs it had
+# twelve epochs of measurement and its `test_acc_md_shape` of 0.682 was still
+# climbing. The three fast arms are the warning, not the reassurance: early
+# ignition there is the colour shortcut arriving, and colour saturates before
+# shape starts.
+#
+# That is the shape of the thing. Shape does not emerge alongside colour, it
+# emerges once colour is finished -- `test_acc_md_color` sits at 0.885 on the
+# arm that learns shape and 0.888 on the arm that does not -- so the budget has
+# to cover a colour phase the transformer takes longer to complete than the CNN
+# did. 20 was sized to the phase that ends; 30 is sized to the one that starts
+# after it.
+#
+# `lr_sweep_1_cnn` stays at 20 deliberately. It is already run, its arms are
+# read, and re-lengthening it would reprice a finished sweep to no purpose. The
+# cost is that sweep 1's arms and sweeps 2-7's now differ in budget as well as
+# in the swept component, so a rate carried forward from sweep 1 was chosen over
+# a shorter run than the one testing it.
+
+# **What to read.** `train_clip_receiver_discriminator` first, in both directions: a
+# spike says the rate is too high and a decay toward AdamW's `eps` floor says
+# it is too low, and both are visible per-module because the clip groups and the
+# rate groups are the same table. Then `train_eval_mode_acc` against
+# `train_shuffled_message_acc`, whose gap is the message and nothing else and is
+# the honest measure of whether a protocol exists at all. On the ShapeWorld arms
+# `train_acc_md_shape` against `train_acc_md_color` is the standing question and
+# is what decided `lr_sweep_1_cnn`.
+#
+# `epochs` and `repeats` are restated in every file: `scripts/job_utils.py` reads
+# both straight out of the file rather than out of the merged config. `[slurm]`
+# is read from the *first* config in the folder only, sorted by filename, so the
+# block below governs the whole array.
+#
+# ---
+#
+# **This arm: `AttentionDiscriminator` at 1e-5 on ShapeWorld**, copying ablation rung 11.
+
+name = "lr_sweep_6_attention_discriminator"
+
+[sender]
+feature_model = "ShapeWorldViT"
+prototyper = "AttentionPrototyper"
+language_model = "SenderTransformerLM"
+
+[sender_language_model]
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+layers = 7
+bidirectional = false
+
+[receiver]
+feature_model = "ShapeWorldViT"
+discriminator = "AttentionDiscriminator"
+
+[receiver_discriminator]
+d_model = 256
+heads = 4
+ff_inner_size = 320
+layers = 3
+
+[optimiser.implementation_lr.receiver_discriminator]
+# The one key this sweep moves. Every other rate is DEFAULT.toml's,
+# including the ones earlier sweeps in this set have already settled.
+AttentionDiscriminator = 1e-5
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+# Sized for the heaviest job in the set, a 100-epoch birds arm on a ViT trunk,
+# and read from the first config by filename only -- so this block governs the
+# whole array and belongs here and nowhere else. It sits in a ShapeWorld file
+# and is sized for a birds one, because the array is one submission and the
+# ceiling has to clear its slowest member. Unchanged when the arms went from 60
+# epochs to 100: it is the allowance `ablation_birds` carries for a 100-epoch
+# birds ViT run, which is the job these arms copy. That leaves ~14 min/epoch
+# against the ~3.4 min/epoch `lr_sweep_1_cnn` measured on the CNN trunks; a ViT
+# arm is slower and still has not been timed at this length, so the margin is
+# the untested part.
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

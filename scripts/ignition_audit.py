@@ -8,6 +8,10 @@ restarts or does not. `pool_score_norm` -- the `AttentionPrototyper` scoring
 weight, which `reset_parameters` sets to exactly zero -- shows it most cleanly,
 because it has nowhere to go but up:
 
+Rung numbers here are the sixteen-rung ladder's, which is what these runs were
+    made on; the ladder is fourteen rungs since 2026-09-16 and old 9-16 are new
+    7-14, so the last three rows are now rungs 07, 09 and 11.
+
     rung   ep0      ep5      ep10     ep29     outcome
     ----   ------   ------   ------   ------   ---------------------------
     05     0.0102   0.0111   0.1022   0.0558   escaped at ~epoch 10
@@ -16,8 +20,8 @@ because it has nowhere to go but up:
     11     0.0064   0.0069   0.0069   0.0069   never left the plateau
     13     0.0099   0.0121   0.0121   0.2121   escaped late, ~epoch 20
 
-`logit_scale`, `contrast_gate` and `pool_score_norm` used to leave the plateau
-in the same epoch, so this is one event and not three: the speaker sharpens
+`logit_scale` and `pool_score_norm` used to leave the plateau
+in the same epoch, so this is one event and not two: the speaker sharpens
 because the listener started to decode, and the listener decodes because the
 speaker sharpened. Ignition, not learning. (The channel scale was a constant
 between 2026-08-30 and 2026-08-31 and is a learned parameter again, so all three
@@ -50,7 +54,7 @@ consistency step by step, which was the sharpest single number here. It was
 dropped when the parameter was, and the parameter came back on 2026-08-31 while
 the reading did not; the `scale_grad` columns are still gone. Restoring them is
 the obvious next thing to do here, and the question about any other lone scalar
--- `log_score_scale`, `contrast_gate` -- would be
+-- `log_score_scale`, `mix_logit` -- would be
 asked the same way, and this script does not currently ask it.
 
 Rung 13 is the control that makes this worth running. It has the *same speaker
@@ -61,9 +65,9 @@ whether the listener is failing to supply signal or the speaker is failing to
 use it.
 
     python scripts/ignition_audit.py \
-        --configs experiments/ablation_shapeworld/configs/07_shapeworld_sender_contrast.toml \
-                  experiments/ablation_shapeworld/configs/09_shapeworld_sender_transformer_lm.toml \
-                  experiments/ablation_shapeworld/configs/13_shapeworld_attention_discriminator.toml \
+        --configs experiments/ablation_shapeworld/configs/05_shapeworld_attention_prototyper.toml \
+                  experiments/ablation_shapeworld/configs/07_shapeworld_sender_transformer_lm.toml \
+                  experiments/ablation_shapeworld/configs/11_shapeworld_attention_discriminator.toml \
         --steps 800 --out results/ignition_audit
 
 Real data, real optimiser, real `accumulator_steps`, and the same bf16 autocast
@@ -112,8 +116,8 @@ import paths  # noqa: E402
 GROUPS = OrderedDict(
     [
         ("sender_vision", ("sender.feat_model",)),
+        ("sender_adapter", ("sender.interfaces",)),
         ("sender_prototyper", ("sender.prototyper",)),
-        ("sender_contrast", ("sender.contrast",)),
         ("sender_language_model", ("sender.language_model",)),
         ("receiver_vision", ("receiver.feature_model",)),
         ("receiver_token_embedding", ("receiver.token_embedding",)),
@@ -172,7 +176,6 @@ def diagnostics(pair):
     """
     language_model = pair.sender.language_model
     prototyper = pair.sender.prototyper
-    contrast = pair.sender.contrast
     unmeasured = float("nan")
 
     return {
@@ -189,8 +192,11 @@ def diagnostics(pair):
         "polarity_separation": getattr(
             language_model, "polarity_separation", unmeasured
         ),
-        "contrast_gate": (
-            contrast.contrast_gate.item() if contrast is not None else unmeasured
+        "prototyper_mix_share": getattr(
+            prototyper, "prototyper_mix_share", unmeasured
+        ),
+        "prototyper_within_share": getattr(
+            prototyper, "prototyper_within_share", unmeasured
         ),
     }
 

@@ -1,18 +1,14 @@
 # Rung 6: rung 4 with the attention prototyper.
 #
-# The CUB counterpart of rung 5, and identical to it in what it adds: both
-# datasets' senders now emit 320, so the pooler costs the same 642 parameters on
-# each.
+# The CUB counterpart of rung 5, and the same change in what it adds, at CUB's
+# own width: `[birds.sender_prototyper]` pins 320 wide, 5 heads, feedforward
+# inner 576, SwiGLU, which is the birds ViT's own specification exactly as the
+# ShapeWorld block takes ShapeWorld's. 967,171 parameters here against
+# ShapeWorld's 132,738; the gap is the width and SwiGLU's double-width
+# `linear_in`, and it is the gap the two ViT stacks already carry.
 #
-# Replaces the mean over each polarity's examples with broccoli's `SequencePool`
-# attention pooling, one instance per polarity. The prototyper is sized from the
-# sender's feature model, so at the ViT's 320-d output this adds 2 x 321 = 642
-# parameters -- one scoring direction and a bias per polarity.
-#
-# It opens at exactly the mean: the scoring weights are zero-initialised, so the
-# softmax over examples is uniform at step 0 and this rung starts where its
-# parent finished. `train_pool_effective_examples` and `train_pool_score_norm`
-# are what say whether it ever left. See docs/architecture.md.
+# Everything else -- what the block is for, what merging it cost, and which two
+# columns to read it by -- is at rung 5 and is not repeated here.
 
 name = "ablation_birds"
 

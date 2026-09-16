@@ -28,7 +28,7 @@
 # output, so an attention pooler measured over ResNet features and one measured
 # over ViT features are different experiments, and putting vision first means
 # every rung above it pools the same kind of vector. And the speaker's language
-# model at rung 9 pins its width to the vision model's, so the ViT has to be in
+# model at rung 7 pins its width to the vision model's, so the ViT has to be in
 # place well before then for that rung to be about the language model.
 #
 # The ViT's shape is not set here. `[sender_feature_model]` and
@@ -39,9 +39,9 @@
 # That is a change of principle, not just of numbers. The widths used to be
 # picked per dataset to match each one's own baseline backbone, which is
 # defensible for a vision rung on its own but not once `SenderTransformerLM`
-# enters at rung 9: it pins its width to the vision model's, so ShapeWorld's
+# enters at rung 7: it pins its width to the vision model's, so ShapeWorld's
 # language model inherited 128 and came out 12.8x smaller than the GRU it is
-# compared against. One width for both datasets is what makes rungs 9 and 10
+# compared against. One width for both datasets is what makes rungs 7 and 8
 # comparable.
 
 name = "ablation_shapeworld"

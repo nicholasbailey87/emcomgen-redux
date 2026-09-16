@@ -1,14 +1,40 @@
 # Rung 5: rung 3 with the attention prototyper.
 #
-# Replaces the mean over each polarity's examples with broccoli's `SequencePool`
-# attention pooling, one instance per polarity. The prototyper is sized from the
-# sender's feature model, so at the ViT's 320-d output this adds 2 x 321 = 642
-# parameters -- one scoring direction and a bias per polarity.
+# One transformer block over all the referents -- positives and negatives
+# together, tagged by label -- and then `SequencePool` attention pooling over
+# each half, one instance per polarity, in place of the mean. So the referents
+# see each other before they are pooled, and the pooling chooses among examples
+# that have already been told apart. `[sender_prototyper]` in DEFAULT.toml
+# carries the shape: 128 wide, 4 heads, feedforward inner 256, GELU -- the
+# ShapeWorld ViT's own specification, which is where the width comes from.
 #
-# It opens at exactly the mean: the scoring weights are zero-initialised, so the
-# softmax over examples is uniform at step 0 and this rung starts where its
-# parent finished. `train_pool_effective_examples` and `train_pool_score_norm`
-# are what say whether it ever left. See docs/architecture.md.
+# **This rung is two.** Until 2026-09-16 the block was a separate
+# `ExampleContrast` stage at rung 7, switched on by `[sender] contrast`, and
+# this rung was the pooling alone at 2,050 parameters. The stage was attention
+# with no feedforward, so per referent it was a data-dependent linear
+# recombination of the referent set -- it gathered without computing -- and the
+# depth that was meant to resolve the mixture sat downstream of the pooling,
+# where the mixture is no longer separable. Merging them puts the depth where
+# the mixing happens. See `sender.AttentionPrototyper` and docs/anecdotes.md.
+#
+# **It no longer opens at its parent, and that is the price.** The pooling still
+# does -- the scoring weights are zero-initialised, so the softmax over examples
+# is uniform at step 0 -- but the block in front of it is a normally-initialised
+# DeepNorm residual, so this rung opens at a random perturbation of the
+# referents and then their mean. It is still an ablation of one module. What
+# went with the gate that used to buy the bit-identical opening is two days of
+# argument over a sign nothing anchored; see docs/anecdotes.md round ten.
+#
+# 132,738 parameters against rung 3's nothing at all, and against the 1,068,995
+# the prototyper and the contrast stage came to between them before the merge.
+# Capacity on the speaker falls here rather than rising, which matters because
+# it is the standing suspect for the colour shortcut.
+#
+# Read `train_prototyper_mix_share` with `train_prototyper_within_share`, never
+# alone: a large mix share with a small within share is a block emitting one
+# vector per polarity, which the two separate pools already provide.
+# `train_pool_effective_examples` and `train_pool_score_norm` are what say
+# whether the pooling ever left the mean. See docs/measurement.md.
 
 name = "ablation_shapeworld"
 

@@ -50,14 +50,14 @@ PROJECT_DIR="${SLURM_SUBMIT_DIR}"
 #   09  SenderTransformerLM + BilinearDiscriminator -- never ignites
 #   13  SenderTransformerLM + AttentionDiscriminator -- ignites at ~epoch 20
 #
-# 13 is the control: same speaker as 09, different listener, opposite outcome.
+# 11 is the control: same speaker as 07, different listener, opposite outcome.
 # So a per-group gradient norm across the three separates "the speaker cannot
 # use the signal" from "the listener never supplies one".
 
 CONFIGS=(
-    "07_shapeworld_sender_contrast"
-    "09_shapeworld_sender_transformer_lm"
-    "13_shapeworld_attention_discriminator"
+    "05_shapeworld_attention_prototyper"
+    "07_shapeworld_sender_transformer_lm"
+    "11_shapeworld_attention_discriminator"
 )
 
 STEPS="${STEPS:-1800}"

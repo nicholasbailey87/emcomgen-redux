@@ -57,26 +57,76 @@ The mean of the positives and the mean of the negatives. The `labels` argument
 exists for signature compatibility and is not read: the first half of the
 examples is always positive by construction (`data.util.split_spk_lis`).
 
+It defines the five diagnostic attributes `AttentionPrototyper` writes, at NaN
+or at their trivial values, so both arms of the rung write the same
+`metrics.csv` header. The two referent spreads it *does* write, and they are
+equal — there is nothing between them here, and equality is the informative
+reading.
+
 ### `AttentionPrototyper`
 
-Pools each polarity with `SequencePool`'s learned attention — one scoring
-direction per polarity, softmaxed over the examples — rather than averaging.
+Two things in one module: one transformer block over all `2n` referents, and
+then a `SequencePool` over each half.
+
+```
+x        = referents at this module's width          (batch, 2n, d_model)
+h        = x + label_embedding[(1 - labels).long()]  the polarity tag
+h        = TransformerEncoder(..., n_layers=1)(h)    attention + feedforward
+pos, neg = h[:, :n], h[:, n:]
+out      = (pool_pos(pos), pool_neg(neg))            two prototypes
+```
+
+So the referents see each other before they are pooled, and the pooling chooses
+among examples that have already been told apart.
+
+#### This module is two rungs, merged on 2026-09-16
+
+It used to be the pooling alone, with a separate optional `ExampleContrast`
+stage in front of it selected by `[sender] contrast`. That stage was one
+`MHAttention` with no feedforward — `out_projection(LN(MHAttention(q, k, v)))`
+over values `LN(adapter(samples))` — so every step in it was linear except the
+softmax choosing the weights. Per referent its branch was therefore a
+data-dependent **linear recombination** of the referent set: it could express
+"me minus the mean of the negatives" and nothing that needed a nonlinear
+function of that difference, and what came out landed in the same subspace the
+inputs came from, activating much the same downstream features as the referents
+it was built from. It gathered without computing.
+
+The stated defence was that the depth is elsewhere — "this stage exists to let
+the referents see each other, and the prototyper and language model downstream
+are where the depth already is". That cannot be right, because resolving a
+mixture has to happen where the mixing happened: once each half is pooled to one
+vector, no amount of downstream depth recovers which example contributed what.
+So the feedforward moved into the block that does the mixing.
+
+`lr_sweep_4_sender_contrast` is consistent with the stage not working. Re-run at
+`ab4e64e` over ten arms and 30 epochs, birds reached `train_contrast_within_share`
+0.19–0.65 — the branch *found* example-level structure — while the gate sat
+between −0.17 and −0.26 on all five arms, persistently anti-aligned with what
+the speaker wanted, and `test_same_acc` fell on two arms and was flat on three.
+ShapeWorld's gate opened (+0.27 to +1.05) and within-share improved on every
+arm, but the accuracy gains were confined to the arms that had been degenerate
+before. **Why the branch was anti-aligned is not answered by this merge, it is
+dissolved by it** — there is no longer a gate for a sign to be wrong about. That
+is an open question retired without being settled, and
+[anecdotes.md](anecdotes.md) records it as such.
+
+#### The pooling opens at the mean; the block does not
+
 Two departures from a bare `SequencePool`, both there to stop the *softmax over
 examples* inheriting the problem the softmax over tokens had before
-`layer_norm_logits`: a pre-softmax input whose magnitude is set by the backbone
-rather than by anything learned.
+`layer_norm_logits`: a pre-softmax input whose magnitude is set by whatever is
+upstream rather than by anything learned.
 
 **Zero-initialised scoring weights.** Scores are then equal across examples, the
-softmax is exactly uniform, and the prototype is exactly the mean — so this rung
-opens at `AveragePrototyper`'s behaviour and can only depart from it where the
-loss pays for the departure. That is what an ablation rung should isolate. Left
-at broccoli's default init, the opening pooling is an arbitrary weighting, and
-how arbitrary depends on the feature scale: with a random scoring direction the
-softmax's sharpness goes as the between-example standard deviation of the
-embeddings, so at Conv4's scale a fresh pooler is within a whisker of selecting
-one example, while at a normalised backbone's it is within a few percent of the
-mean. Two arms of the ladder would then differ in their pooling as well as in
-the thing being ablated.
+softmax is exactly uniform, and the prototype is exactly the mean of what the
+block emitted. Left at broccoli's default init, the opening pooling is an
+arbitrary weighting, and how arbitrary depends on the feature scale: with a
+random scoring direction the softmax's sharpness goes as the between-example
+standard deviation of the embeddings, so at Conv4's scale a fresh pooler is
+within a whisker of selecting one example, while at a normalised backbone's it
+is within a few percent of the mean. Two arms of the ladder would then differ in
+their pooling as well as in the thing being ablated.
 
 Zeroing a weight matrix is safe here in a way it is not for a hidden layer:
 there is one output unit, so no symmetry between units to break, and
@@ -88,16 +138,30 @@ constant added to every score cancels in the softmax, so it has exactly zero
 gradient — and it is zeroed too, to say so.
 
 **A parameter-free `LayerNorm` on the scoring path only.** The pooled *values*
-are the raw embeddings, so prototype magnitude is unchanged and whatever the
-backbone emits still reaches the language model intact; only the scores are
-computed from normalised examples. This is what makes the rate of departure from
-the mean comparable across arms. Growth in the scoring vector's norm buys score
-spread in units of the embeddings' scale, so without it an arm on a
-large-magnitude backbone leaves the mean tens of times faster than one on a
-normalised backbone — the same architecture-dependence, relocated from where the
+are the block's raw output, so prototype magnitude is unchanged; only the scores
+are computed from normalised examples. This is what makes the rate of departure
+from the mean comparable across arms. Growth in the scoring vector's norm buys
+score spread in units of the embeddings' scale, so without it an arm on a
+large-magnitude input leaves the mean tens of times faster than one on a
+normalised input — the same architecture-dependence, relocated from where the
 pooling starts to how fast it moves. `elementwise_affine=False` on purpose: a
 learnable gain here would be one more route to score magnitude that differs by
 arm, which is the thing being removed.
+
+**But the block in front of it is initialised normally**, so the rung as a whole
+no longer opens at its parent's numbers. It opens at a transformer block's
+random perturbation of the referents, and then their mean. That is a real loss
+and it was taken deliberately. What bought the bit-identical opening was
+`contrast_gate`, a lone scalar at exactly zero — and `g·b` and `(−g)·(−b)` are
+the same map, so near zero neither factor had an anchor: the gate could cross
+zero, the branch's gradient reverse behind it, and `dL/dgate = ⟨branch, dL/dout⟩`
+reverse in turn. Two days of argument went into that sign, into routing the gate
+through `scale_without_attenuating`, and into `contrast_gate_lr`'s traverse
+arithmetic. A normally-initialised DeepNorm residual has none of those problems,
+and the repo already trusts that construction everywhere else:
+`SenderTransformerLM` and both listener stacks are exactly it. The rung is still
+an ablation of one module; it is no longer a comparison that begins from
+identical numbers.
 
 `reset_parameters` runs broccoli's own reset *first* and only then overrides the
 scoring projection, so that any parameter `SequencePool` grows in future is
@@ -105,139 +169,98 @@ still initialised the way broccoli intends. The override lives here rather than
 in broccoli because `SequencePoolClassificationHead` uses the same module and
 wants the usual init.
 
-## `ExampleContrast` — the optional contrast stage
+#### No positional information of any kind
 
-Both prototypers pool **within** a polarity: `AveragePrototyper` means each half
-and `AttentionPrototyper` scores each half with its own `SequencePool`. So
-nothing in the speaker compares a positive example against a negative one. The
-two halves first meet in the language model's cross-attention, by which point
-each is already a single vector, and whatever distinguished a positive example
-from the distractors it was shown beside has been averaged away.
+`relative_position_embedding=False`, `absolute_position_embedding=False`,
+`positional_heads=1.0`, `causal=False`. The block is therefore
+permutation-equivariant and cannot read the first-half-positive ordering the
+rest of the speaker relies on. That is load-bearing twice: referent order
+*within* a polarity is sampling order and means nothing, and the halving *is*
+the label vector, so a block able to index its own sequence axis could infer
+polarity without the tag and the tag would stop meaning anything.
 
-`[sender] contrast = true` inserts one self-attention over all `2n` referents
-between the vision model and the prototyper, and adds its output back as a
-residual:
-
-```
-x    = vision(samples)                        (batch, 2n, feat), post vision_dropout
-h    = LayerNorm(adapter(x)) + label_embedding[labels]
-out  = x + contrast_gate * out_projection(MHSA(h, h, h))
-```
-
-The last line is that product in value, but it is written through
-`model_util.scale_without_attenuating`, so `d/dbranch` is 1 rather than
-`contrast_gate` on the way back. See below.
-
-The prototyper downstream is unchanged and still receives the backbone's own
-width, which is what lets either of them compose with this.
-
-A boolean rather than a class name, because there is one of these or there is
-nothing: it is a residual on the referents, so "off" is the absence of a module
-rather than a different one. `Sender` holds it as `None` and guards on that,
-never `hasattr` — see `reset_parameters has no hasattr guard` above.
-
-### It opens at the identity, and the gate is what makes that survivable
-
-`contrast_gate` is a scalar opening at exactly zero, so a speaker with the stage
-on is bit-identical to one without it at step 0 and the arm is an ablation of one
-thing. That is the same recipe as `AttentionPrototyper`'s zero-initialised
-scoring weights and `AttentionDiscriminator`'s mix floor: open at the simple
-behaviour, depart only if it pays.
-
-A zero-initialised `out_projection` would open at the identity too, and it would
-not move. AdamW steps a parameter by about `lr` per step whatever the gradient's
-size, so the matrix would have to climb from 0 to its own init scale
-`1/sqrt(d_model)` = 0.056 one `lr`-step at a time: 560 steps of perfectly
-sign-consistent gradient at `lr` 1e-4, which on birds' 62 optimiser steps an
-epoch is nine epochs of flat, optimistically. That is the arithmetic that made
-the logit scale's traverse the bottleneck for those runs, and it is why
-`contrast_gate_lr` exists at 2e-3 — fifty steps to 0.1 instead. A scalar is also
-better shaped than a matrix here: `out_projection` starts at a properly scaled
-random direction, so the branch contributes at a sensible magnitude the moment
-the gate opens rather than having to build one first — and, since the change
-below, pointing somewhere useful as well, because the branch trains while the
-gate is still shut.
-
-The gate is **not** log-parameterised, unlike `log_score_scale`. That is a
-volume that must stay strictly positive and open at 1.0; this one must be able to
-be exactly zero, which `exp` cannot reach. And zero is a
-starting point rather than a floor: `dL/dgate = <branch, dL/dout>` is non-zero
-there, which is the same distinction that keeps the discriminator's mix floor in
-the parameterisation and out of a `clamp`.
-
-### The gate scales the branch without attenuating it
-
-The contribution goes through `model_util.scale_without_attenuating`, so the
-forward value is `contrast_gate * branch` exactly as the formula above reads,
-but `d/dbranch` is 1. `logit_scale` on the speaker's channel and
-`log_score_scale` on the listener's readout are the same reversal.
-
-This paragraph used to say the gate's sign was free, because the branch's own
-direction is arbitrary and a negative gate is the same branch pointing the other
-way. That is true of the function and it is exactly the problem. `g·b` and
-`(−g)·(−b)` are the same map, so near zero neither factor has an anchor: the
-gate crosses zero, the branch's gradient reverses behind it, the branch starts
-unlearning the direction it had, and `dL/dgate = <branch, dL/dout>` reverses in
-turn. `lr_sweep_4_sender_contrast` is what made this concrete. On birds the gate
-never opened — `train_contrast_share` 0.001–0.005 on all five arms — while
-`train_contrast_within_share` reached 0.52–0.64, the highest in the sweep: a
-well-shaped branch held out by a shut gate, which is the row
-`docs/measurement.md` reads as "found something example-level but is not being
-trusted with the decision". Arm 06's gate ran +0.032, +0.015, +0.011, +0.007,
-+0.014, +0.012, −0.014, −0.001.
-
-It is **not** a gradient-magnitude argument. AdamW's `m/√v` cancels a constant
-factor per parameter and the birds `train_clip_sender_contrast` norms of 1e-4 to
-2e-3 are eight orders above `eps` and far under `clip_grad_norm`. What does not
-cancel is the sign.
-
-With `d/dbranch = 1` the branch descends `dL/dcontribution` whatever the gate is
-doing, so it is pinned to the gate-equals-`+1` convention and the product has a
-preferred sign. That is safe because the contribution is *linear* in the gate:
-the direction the branch should point does not depend on the gate's magnitude,
-so training the branch as though the gate were 1 optimises the right problem at
-the wrong volume — and the volume is the gate's job. The gate keeps its true
-partial and stays as free to sit shut as it was, which is what keeps rung 8 a
-fair test of the stage. The standing objection to the helper is
-`docs/anecdotes.md`'s round seven; round ten there answers it for this use.
-
-`lr_sweep_4_sender_contrast`'s ten arms were run before this change, so its rate
-recommendation is provisional.
-
-### Polarity arrives through the tag and nowhere else
-
-`rotary_embedding=None`, so this attention is permutation-equivariant and cannot
-read the first-half-positive ordering that the rest of the speaker relies on.
 `label_embedding` — row 0 positive, row 1 negative, indexed from the labels
-rather than from the halving index — is the only route by which polarity reaches
-the stage, and it is initialised antipodally at unit per-element variance for the
-reasons set out under [the polarity embedding](#the-polarity-embedding): it is
-added after a parameter-free norm, so that is the scale of what it marks.
+rather than from the halving index, so it stays correct if a future game ever
+draws unequal positives and negatives — is the only route polarity has in. It is
+initialised antipodally at unit per-element variance for the reasons set out
+under [the polarity embedding](#the-polarity-embedding): it is added to
+referents that arrive from a parameter-free norm, so that is the scale of what
+it marks.
 
 The name is deliberate twice over. It keeps `"embedding"` in it, which is what
 holds it out of `gradboard`'s weight decay; and it is *not* `polarity_embedding`,
 because `SPLIT_LEARNING_RATES` selects by name suffix and anything ending that
-way — `contrast_polarity_embedding` included — would silently join the speaker
+way — `prototyper_polarity_embedding` included — would silently join the speaker
 tag's parameter group.
 
-The adapter carries `bias=False` for the same reason
-every other `model_util.LinearInterface` does: the norm can only divide the
-backbone's scale out exactly if what reaches it is homogeneous in the input,
-which is what makes the *rate* of departure comparable across arms. The residual
-is over the raw `x`, so what the prototyper pools is still at the backbone's own
-scale — the same "score from normalised selves, weight over raw selves" split
-`AttentionPrototyper` makes.
+#### The tag rides the block's input, values included
 
-### What it costs
+`ExampleContrast` put the tag on the queries and keys only, with the residual
+over the untagged referents, so polarity chose what a query read and was absent
+from what came back. That is not available here and would buy little if it were.
+
+Not available: broccoli's `EncoderBlock` computes `attn(x, x, x)` from a single
+input and carries that same input down its residual, so a tag that reaches the
+queries reaches the output whatever the attention does. Keeping it off the
+values would mean hand-rolling the block, and `TransformerEncoder(…, 1, …)` is
+the construction this repo uses everywhere else.
+
+Little: the thing the old rule protected against is not a shortcut here. A
+constant added to every positive shifts all of `pos_pool`'s scores by the same
+amount, which cancels in the softmax — so it changes the pooling not at all, and
+leaves only a constant on the prototype, which the split into two halves and the
+language model's own biases already provide for free. What the rule really
+protected was the *reading* rather than the model: it kept the volume column
+from being inflated by a per-polarity vector, which is not contrast between
+examples. `prototyper_within_share` does that job directly, and is why that
+column rather than `prototyper_mix_share` is the one to read here.
+
+#### Width, and the two interfaces
+
+This module declares its own width and takes it from the sender's **vision**
+transformer, per dataset: 128 / 4 / 256 with GELU on ShapeWorld and 320 / 5 /
+576 with SwiGLU on birds, which are `[sender_feature_model]` and
+`[birds.sender_feature_model]` exactly. The speaker's path is therefore
+
+```
+backbone -> LinearInterface -> AttentionPrototyper -> LinearInterface -> language model
+            (feat -> 128/320)                         (128/320 -> 1024)
+```
+
+which is [`model_util.LinearInterface`](#the-interfaces)'s rule applied rather
+than an exception to it: every swappable module declares the widths it wants and
+the agent brings each input to that width in a stated distribution. The second
+interface is new — until the merge the prototyper ran at the language model's
+own width, so nothing had to bring its output anywhere.
+
+Both live in one `nn.ModuleDict`, `Sender.interfaces`, so `MODULE_GROUPS` can
+select the pair with one entry and `sender_adapter` keeps its name, its
+`[optimiser.module_lr]` key and its `clip_*` column. That is the arrangement
+`Receiver.interfaces` already has for its three.
+
+**On ShapeWorld this is a real bottleneck.** The referent path narrows from 1024
+to 128 before pooling and widens again afterwards. It is the intended reading of
+"sized from the sender transformer, per dataset" and it is a per-dataset
+capacity-matching choice, not a claim that 128 is enough.
+
+**Capacity falls rather than rises**, which matters because capacity on the
+speaker is the standing suspect for ShapeWorld's colour shortcut. The two
+modules this replaces came to **1,068,995** parameters — almost all of it the two
+1024↔320 projections the contrast stage needed to get in and out of its own
+width. The merged module is **132,738** at ShapeWorld's 128/4/256 and **967,171**
+at birds' 320/5/576, and the interfaces either side shrink too. Birds is the
+close one: SwiGLU's `linear_in` is double width, so the feedforward gained here
+is most of what the projections dropped there used to cost, and the fall is
+under a tenth. ShapeWorld's is a factor of eight.
+
+#### What it costs
 
 The message becomes a function of the sampled negatives rather than of the
 concept alone: the same concept with different distractors gets a different
-message. `topsim` measures exactly that correspondence, so this stage can raise
-accuracy and lower compositionality at once, and that outcome is a finding rather
-than a bug. `contrast_share` and `contrast_within_share` are what make it
-reportable — see [measurement.md](measurement.md). Note also that
-`AveragePrototyper` stops being a parameter-free control in this arm: its pooling
-is still a mean, but what it means is no longer the backbone's output.
+message. `topsim` measures exactly that correspondence, so this rung can raise
+accuracy and lower compositionality at once, and that outcome is a finding
+rather than a bug. `prototyper_mix_share` and `prototyper_within_share` are what
+make it reportable — see [measurement.md](measurement.md).
 
 ## Speaker language models
 
@@ -1187,8 +1210,11 @@ and holds its between-candidate share at 0.90; handed a scrambled one it
 collapses to 0.40. Uniformity is *correct behaviour* when there is no pattern,
 and at initialisation nothing in the pair is a pattern yet. So the pair needs
 something that already works at step zero, and the attention path can take over
-if it earns it. That is the recipe `AttentionPrototyper` already follows: open at
-pooling that *is* the mean, and depart only if it pays.
+if it earns it. That is the recipe `AttentionPrototyper`'s *pooling* already
+follows: open at a softmax that *is* the mean, and depart only if it pays. Note
+the recipe now stops at the pooling there — the block in front of it is
+initialised normally, so that rung no longer opens at its parent's numbers, and
+[the prototyper section](#attentionprototyper) has why.
 
 At `a = mix_floor` the discriminator is essentially the bilinear comparison,
 which is the configuration measured bootstrapping. `mix_logit_init = −4.0`

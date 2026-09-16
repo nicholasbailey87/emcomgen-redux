@@ -867,9 +867,9 @@ log_interval = 100
 # per-group norms to see it in.
 eps = 1e-12
 
-# The five keys below -- `logit_scale_lr`, `score_scale_lr`, `score_bias_lr`,
-# `mix_logit_lr` and `contrast_gate_lr` -- are the two ends' scaling scalars and
-# the one offset that pairs with one of them, and they all sit at 2e-3. Each
+# The four keys below -- `logit_scale_lr`, `score_scale_lr`, `score_bias_lr`
+# and `mix_logit_lr` -- are the two ends' scaling scalars and the one offset
+# that pairs with one of them, and they all sit at 2e-3. Each
 # block below carries its own arithmetic for what distance that parameter has to
 # cover, and 2e-3 is the value those arithmetics were written against, so they
 # read straight rather than needing a factor applied to them.
@@ -1120,35 +1120,6 @@ polarity_embedding_lr = 1e-4
 # well inside it.
 mix_logit_lr = 2e-3
 
-# `ExampleContrast.contrast_gate`, the one scalar between the speaker's contrast
-# stage and the identity. Inert unless `[sender] contrast` is true.
-#
-# It opens at exactly zero, which is what makes the stage an ablation of one
-# thing, and the lone-scalar arithmetic above then decides whether it ever
-# leaves: AdamW moves a parameter by about `lr` per step whatever the
-# gradient's size, so a lone scalar cannot travel further than `lr * steps`. At
-# the base 5e-5 and the 156.25 steps an epoch both datasets now run, that is
-# 0.0078 an epoch, so a gate reaching even 0.1 -- a tenth of the branch, at the
-# scale `out_projection` emits -- would take thirteen epochs of perfectly
-# sign-consistent gradient. At 2e-3 it takes fifty steps.
-#
-# This is also why the gate is a scalar rather than a zero-initialised
-# projection matrix. The matrix opens at the identity too, but it would have to
-# climb from zero to its own init scale one `lr`-step at a time before it
-# contributed anything at all, and `out_projection` starting at a properly
-# scaled random direction means the branch is at a sensible magnitude the moment
-# the gate opens. See `ExampleContrast`'s docstring.
-#
-# The gate reaches the loss through `model_util.scale_without_attenuating`, as
-# the logit scale above does and for a related reason: `d/dbranch` is 1 rather
-# than the gate, so the branch keeps learning while the gate is shut and is
-# anchored to the gate-positive convention instead of being free to reverse
-# with it. Nothing here changes -- the gate keeps its true partial, so the
-# `lr * steps` arithmetic and the scalar-beats-a-zero-init-matrix argument both
-# stand exactly as written. See `ExampleContrast`'s docstring and
-# docs/anecdotes.md round ten.
-contrast_gate_lr = 2e-3
-
 # One learning rate per module clip group, and the only mechanism in the
 # codebase giving different modules different rates.
 #
@@ -1159,7 +1130,7 @@ contrast_gate_lr = 2e-3
 # like a setting while the module it was meant for runs at base. `build_models`
 # writes the resolved rates back as `[optimiser] resolved_module_lrs` so
 # args.json records what each group actually ran at, and which groups existed --
-# `sender_contrast` is absent when the stage is off.
+# a group whose module this pair does not build is absent.
 #
 # Stated rather than computed, and that is a reversal. Until August 2026 these
 # rates came out of a rule -- `lr * reference_width / d_model / layers`. The
@@ -1262,9 +1233,8 @@ contrast_gate_lr = 2e-3
 # already raised them to 1e-4 and 5e-5, and this raises them again. Vision has
 # been the fastest-moving entry in this table across three regimes.
 #
-# The speaker's prototyper and contrast stage, and the listener's token
-# embedding and discriminator, took their agent's rate under the two-claim grid
-# too. Nothing about them changes; there is simply no longer a split for them to
+# The speaker's prototyper, and the listener's token embedding and
+# discriminator, took their agent's rate under the two-claim grid too. Nothing about them changes; there is simply no longer a split for them to
 # be on a side of.
 #
 # What this is not. One claim with a literature behind it, at a magnitude with
@@ -1300,7 +1270,6 @@ sender_vision = 1e-4
 # one of -- the same class, at the same defaults, as each of the listener's.
 sender_adapter = 1e-4
 sender_prototyper = 1e-4
-sender_contrast = 1e-4
 sender_language_model = 1e-4
 receiver_vision = 1e-4
 # The listener has no single adapter; this key names `Receiver.interfaces`, the
@@ -1487,29 +1456,25 @@ ResNet18 = 1e-4
 BirdsViT = 5e-5
 ShapeWorldViT = 5e-5
 
-# **`AttentionPrototyper` at 1e-4**, from
-# `experiments/lr_sweep_3_attention_prototyper/` (77f579e, 2026-09-14): five
-# arms from 1e-5 to 2e-4, one repeat, 30 epochs, hinge loss, no warm-up. Only
-# the prototyper's rate moves. The speaker's ViT is pinned at this file's 5e-5
-# and the listener at sweep 1's winners, so each arm reads as a prototyper rate
-# against a tuned stack rather than as a joint move.
+# **`AttentionPrototyper` at 1e-4, and the rate is owed a fresh sweep.** The
+# 1e-4 here is `lr_sweep_3_attention_prototyper`'s winner (77f579e, 2026-09-14),
+# but that sweep measured a module that no longer exists: it moved the rate of
+# two scoring directions and two biases -- 2,050 parameters -- and this group
+# now holds a transformer block, two pools and a label tag, 132,738 parameters
+# on ShapeWorld and 967,171 on birds. A rate tuned for four vectors is not
+# evidence about a block, and 1e-4 is kept only because it is `module_lr`'s
+# fallback for the group and jayelm's for everything: nothing about what runs
+# changes if this line is deleted.
 #
-# **1e-4 is not the argmax on either half.** Final `test_same_acc` across the
-# five rates ran 0.655, 0.515, 0.605, 0.620, 0.649 on ShapeWorld and 0.712,
-# 0.723, 0.720, 0.741, 0.572 on birds. Birds puts 1e-4 first by 0.016 over
-# 5e-5, inside the noise at n = 1. ShapeWorld ranks 1e-5 first and 1e-4 third,
-# but the ShapeWorld ordering is not trustworthy: 2e-5 never left chance at all,
-# flat at 0.52 for all 30 epochs between two arms that both learned, which is a
-# dead run rather than a rate effect and leaves the curve non-monotone through
-# the middle of the grid. On the one ShapeWorld measure that ranks rates rather
-# than runs, `train_acc_md_shape`, 1e-4's 0.677 is second of five behind 1e-5's
-# 0.717.
+# What the old sweep found, for the record, since the arms are still on disk:
+# final `test_same_acc` across five rates from 1e-5 to 2e-4 ran 0.655, 0.515,
+# 0.605, 0.620, 0.649 on ShapeWorld and 0.712, 0.723, 0.720, 0.741, 0.572 on
+# birds. Birds put 1e-4 first by 0.016 over 5e-5, inside the noise at n = 1, and
+# ShapeWorld's ordering was not trustworthy -- 2e-5 never left chance at all,
+# flat at 0.52 for 30 epochs between two arms that both learned.
 #
-# The tiebreak is that 1e-4 is `module_lr`'s rate for `sender_prototyper` and
-# jayelm's for everything. Stating it here rather than leaving the class to
-# inherit it changes nothing about what runs; it records that the rate was swept
-# and survived, so a later reader does not mistake an inherited default for an
-# untested one. What is owed here is seeds, not a finer grid.
+# `experiments/lr_sweep_3_attention_prototyper/` is the re-run, and no rung
+# above the prototyper is meaningful until it lands. See experiments/README.md.
 [optimiser.implementation_lr.sender_prototyper]
 AttentionPrototyper = 1e-4
 
@@ -1531,7 +1496,7 @@ epochs = 100
 # then, 2e-3 since 2026-08-31.
 #
 # The two are one change. The elevation is there so that the traverses -- the
-# listener's volume and offset, the contrast gate -- are not what
+# listener's volume and offset, the speaker's channel scale -- are not what
 # a run is waiting on; the ramp is there so that arriving fast is not the same
 # as arriving first. A lone scalar at 2e-3 crosses its whole useful range in a
 # few hundred steps, and a listener that calibrates while the speaker's argmax
@@ -1716,41 +1681,73 @@ vision_dropout = 0.0    # On per-image embeddings, before pooling. jayelm's
 prototype_dropout = 0.1 # On the pooled concept vectors, before the language
                         # model. This is where jayelm's single speaker-side
                         # `--dropout` sits (at 0.1 in their runs).
+# `AveragePrototyper` means each polarity's examples; `AttentionPrototyper` runs
+# one transformer block over all of them together -- positives and negatives,
+# tagged by label -- and then pools each half with its own `SequencePool`. The
+# swap is one rung of the ladder and `[sender_prototyper]` below is the shape it
+# takes.
+#
+# There used to be a third key here, `contrast = false`, selecting a separate
+# `ExampleContrast` stage upstream of the prototyper; it was folded into
+# `AttentionPrototyper` on 2026-09-16 and `parse_config` now rejects it. The
+# short reason is that the stage was attention with no feedforward, so per
+# referent it was a data-dependent linear recombination of the referent set --
+# it gathered without computing, and the depth that was supposed to resolve the
+# mixture sat downstream of the pooling, where the mixture is no longer
+# separable. See `sender.AttentionPrototyper` for the long one.
 prototyper = "AveragePrototyper"
 language_model = "SenderGRULM"
-# Run one self-attention over all the referents, positive and negative together,
-# and add it back as a residual before they are pooled. Both prototypers work
-# *within* a polarity, so without this nothing in the speaker ever compares a
-# positive example against a negative one -- the two halves first meet as single
-# vectors in the language model's cross-attention.
-#
-# A boolean rather than a class name because there is one of these or there is
-# nothing: it is a residual on the referents, so "off" is the absence of a
-# module and not a different one. It opens at exactly the identity either way;
-# see `contrast_gate_lr` above and `models/sender.py`.
-#
-# Off by default, and note what it costs when it is on: the message becomes a
-# function of the sampled negatives rather than of the concept alone, so the
-# same concept with different distractors gets a different message. That is what
-# `topsim` penalises, so this can raise accuracy and lower compositionality at
-# once -- `train_contrast_share` and `train_contrast_within_share` are what make
-# that readable. See docs/measurement.md.
-contrast = false
 
-[sender_contrast]
-# Inert unless `[sender] contrast` is true.
+[sender_prototyper]
+# Inert under `AveragePrototyper`, which takes no arguments at all.
 #
-# One `MHAttention` and no feedforward: this stage exists to let the referents
-# see each other, and the prototyper and language model downstream are where the
-# depth already is. `d_model` 320 with 5 heads is head_dim 64, the head
-# dimension every attention module in the repo now has -- see
-# `[sender_feature_model]` for where that number comes from. The referents
-# arrive at whatever width the backbone emits (512 for ResNet18, 640 for a
-# concat-pooled ViT2), and this stage owns the projection between the two, as
-# the listener's slots own theirs.
-d_model = 320
-heads = 5 # head_dim 64
+# **Sized from the sender's vision transformer, per dataset**, which is what
+# makes this the first per-dataset table this module has had: 128 / 4 / 256 with
+# GELU here and 320 / 5 / 576 with SwiGLU under `[birds.sender_prototyper]`,
+# exactly the two stacks `[sender_feature_model]` and
+# `[birds.sender_feature_model]` hold. Each dataset's speaker therefore mixes
+# its referents at the width it sees them at, and the two datasets are matched
+# to their own baselines rather than to each other -- the same rule, and the
+# same reason, as the ViT blocks above.
+#
+# **Note what that does to the ShapeWorld path.** Everything after the backbone
+# used to run at the language model's 1024. It now goes
+# `backbone -> interface (feat -> 128) -> prototyper -> interface (128 -> 1024)
+# -> language model`, so the referents are squeezed through 128 before they are
+# pooled and opened out again afterwards. That is a real bottleneck and it is
+# the intended reading of "sized from the sender transformer, per dataset"; it
+# is not a claim that 128 is enough. If a ShapeWorld result moves, this is one
+# of the two things that moved.
+#
+# **Capacity falls rather than rises**, which is the other. The prototyper and
+# the contrast stage it absorbed came to 1,068,995 parameters between them,
+# almost all of it the two 1024<->320 projections the stage needed to get in and
+# out of its own width. The merged module is 132,738 here and 967,171 on birds,
+# and `Sender`'s two interfaces shrink with it. So this commit is not the
+# capacity addition the colour-trap worry is about -- see docs/anecdotes.md.
+# Birds is the close one: 967,171 against 1,068,995 is a fall of under a tenth,
+# because SwiGLU's `linear_in` is double width and the feedforward gained here
+# is most of what the two projections dropped there used to cost.
+#
+# **The block is one layer**, which fixes DeepNorm's residual scaling at
+# `(2^0.25, 8^-0.25)` = (1.189, 0.595); it is resolved in Python rather than
+# keyed here, because a single block is the architecture and not a knob.
+# `pre_norm`/`post_norm` and every positional argument are pinned there too, the
+# positional ones load-bearing: referent order within a polarity is sampling
+# order and the halving *is* the label vector, so a block able to index its own
+# sequence axis could read polarity without the tag. See
+# `sender.AttentionPrototyper` and docs/broccoli.md.
+d_model = 128
+heads = 4 # head_dim 32, broccoli's axial-RoPE floor. See [sender_feature_model]
+ff_inner_size = 256
+activation = "GELU" # one of ReLU, GELU, SquaredReLU, SwiGLU
+# The block's internals, which never take `[sender] prototype_dropout` -- that
+# one regularises the prototypes on the way out, and these regularise the mixing
+# that produces them. Same split, and same defaults, as every other block in the
+# repo.
 self_attention_dropout = 0.0
+ff_inner_dropout = 0.0
+ff_outer_dropout = 0.0
 
 [sender_feature_model]
 # The block that sizes **`ShapeWorldViT`** -- `models/backbone/vision.py`'s
@@ -2739,7 +2736,7 @@ eval_games_per_species = 16
 # What it costs, and what pays for it. Accumulation halves the step count at a
 # fixed game count, and a halved step count is a halved `lr * steps` travel
 # budget. The cost falls hardest on the lone scalars -- the speaker's channel
-# scale, the listener's volume and offset, the contrast gate -- and
+# scale, the listener's volume and offset -- and
 # docs/anecdotes.md works out why: sign consistency less 0.5 grows as the root
 # of the batch while the step count falls as the batch, so accumulation is a net
 # loss for a lone Adam scalar even where it is a net gain for the modules above
@@ -2795,6 +2792,26 @@ feature_model = "ResNet18"
 # both datasets.
 d_model = 320
 layers = 10
+heads = 5 # head_dim 64
+ff_inner_size = 576
+activation = "SwiGLU"
+
+[birds.sender_prototyper]
+# CUB's block, and it is `[birds.sender_feature_model]`'s four shape keys
+# repeated rather than anything new: 320 wide, 5 heads at head_dim 64,
+# feedforward inner 576, SwiGLU. The speaker mixes its referents at the width
+# its own ViT sees them at, on both datasets, and the two datasets differ here
+# for exactly the reason they differ there -- each is matched to its own
+# baseline backbone rather than to the other dataset. See
+# `[sender_prototyper]`.
+#
+# 967,171 parameters against ShapeWorld's 132,738. The gap is the width and the
+# activation: SwiGLU's `linear_in` is double width, which is 184,897 of it. Both
+# are differences the dataset's own ViT stack already carries.
+#
+# Only the keys that differ are restated; the dropouts and everything pinned in
+# Python are shared, so an argument made there still governs both datasets.
+d_model = 320
 heads = 5 # head_dim 64
 ff_inner_size = 576
 activation = "SwiGLU"

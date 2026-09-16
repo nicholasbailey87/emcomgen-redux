@@ -11,18 +11,23 @@
 #           BilinearDiscriminator
 #    3,  4  + sender ViT2
 #    5,  6  + AttentionPrototyper
-#    7,  8  + ExampleContrast upstream of the prototyper
-#    9, 10  + SenderTransformerLM
-#   11, 12  + receiver ViT2
-#   13, 14  + AttentionDiscriminator
-#   15, 16  + ReceiverCrossAttentionLM
+#    7,  8  + SenderTransformerLM
+#    9, 10  + receiver ViT2
+#   11, 12  + AttentionDiscriminator
+#   13, 14  + ReceiverCrossAttentionLM
+#
+# **Fourteen rungs since 2026-09-16, and this is the second renumbering.** The
+# old 7/8 pair was `+ ExampleContrast upstream of the prototyper`; that stage is
+# part of `AttentionPrototyper` now, so the pair went and everything above it
+# came down by two. The correspondence is old 9-16 -> new 7-14, and
+# experiments/README.md carries it beside the first renumbering's.
 #
 # Odd numbers are ShapeWorld, even are CUB. The two datasets never mix: rung 4
 # is rung 2 plus one change, not rung 3 plus a dataset. That is why the ladder
 # is two experiments -- the odd rungs here in `ablation_shapeworld`, the even
 # ones in `ablation_birds` -- so either arm can be queued, re-run and read
 # without waiting on the other. The numbers did not change with the split, so
-# this folder runs 1, 3, 5, ..., 15 and the gaps are the birds arm.
+# this folder runs 1, 3, 5, ..., 13 and the gaps are the birds arm.
 #
 # **The backbone is `ResNet56` as of 2026-09-06, and this is the third one.**
 # It was `Conv4` (113,088 parameters), then `ResNet18SmallInput` (11,168,832),
@@ -91,7 +96,7 @@
 # the direct test of the reading. Both halves of that test are now off. If the
 # reading holds, rung 3 meets the same rate at step one with no ramp to escape
 # in first, so a rung 3 that dies immediately is the *expected* outcome under
-# that hypothesis rather than a new failure -- and rung 9's escape at epoch 3
+# that hypothesis rather than a new failure -- and rung 7's escape at epoch 3
 # happened at roughly 30% of base rate, which was the ramp. Watch
 # `logit_prior_share` and `referent_spread` in the first two epochs on rungs 3
 # and 9, and if they go, that is the evidence for the threshold rather than
@@ -105,8 +110,8 @@
 # ranks nothing may be ranking nothing for that reason and not for an
 # architectural one.
 #
-# **Eight configs here, one per ShapeWorld rung, and no variants.** Half-rate and
-# silhouette-rate forks of rungs 3 and 10 lived here through August 2026; the
+# **Seven configs here, one per ShapeWorld rung, and no variants.** Half-rate and
+# silhouette-rate forks of rungs 3 and 8 lived here through August 2026; the
 # half-rate one is now DEFAULT.toml's `[optimiser] lr` and the silhouette ones
 # are the `silhouette_titration` experiment, so the ladder is back to one file
 # per rung and every file differs from the one two below it by exactly one
@@ -117,7 +122,7 @@
 # config in an experiment must carry them even when they restate the default.
 # `[slurm]` is read from the *first* config in the folder only (sorted by
 # filename), so the block here governs this experiment's whole array -- it is
-# sized for the heaviest job in the set, which is rung 15. The birds arm's array
+# sized for the heaviest job in the set, which is rung 13. The birds arm's array
 # is governed by rung 2's block, not this one.
 
 name = "ablation_shapeworld"

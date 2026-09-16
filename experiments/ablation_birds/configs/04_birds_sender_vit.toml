@@ -19,9 +19,9 @@
 # That is a change of principle, not just of numbers. The widths used to be
 # picked per dataset to match each one's own baseline backbone, which is
 # defensible for a vision rung on its own but not once `SenderTransformerLM`
-# enters at rung 9: it pins its width to the vision model's, so ShapeWorld's
+# enters at rung 7: it pins its width to the vision model's, so ShapeWorld's
 # language model inherited 128 and came out 12.8x smaller than the GRU it is
-# compared against. One width for both datasets is what makes rungs 9 and 10
+# compared against. One width for both datasets is what makes rungs 7 and 8
 # comparable.
 
 name = "ablation_birds"

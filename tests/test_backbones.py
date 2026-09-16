@@ -489,7 +489,7 @@ def test_attention_listener_reset_covers_its_interfaces():
         512,
         # Rung 11 rather than DEFAULT, whose `[receiver_language_model] d_model`
         # is the GRU's 1024 and does not divide its `heads = 5`.
-        config_file=rung("15_shapeworld_receiver_cross_attention_lm.toml"),
+        config_file=rung("13_shapeworld_receiver_cross_attention_lm.toml"),
         # So neither stack is a single block, where a depth ramp would be inert.
         language_model_overrides=dict(layers=2),
         discriminator_overrides=dict(layers=2),
@@ -538,16 +538,21 @@ def test_attention_listener_reset_covers_its_interfaces():
             assert not stale, f"{slot}.{name} not reset: {stale}"
 
 
-def _pair_with_gradients(contrast=False):
+def _pair_with_gradients(prototyper="AveragePrototyper"):
     """
     A ShapeWorld pair that has backpropped, so every group has a real gradient.
 
-    `contrast` is a parameter rather than a default because DEFAULT.toml has the
-        stage off, and building only from DEFAULT is what made the partition
-        test below blind for as long as it was: `sender.contrast`'s ten tensors
-        were falling to the `other` catch-all on every rung that had the stage,
-        and the one pair these tests built was the one pair where that could not
-        show. The partition itself is asserted over all sixteen rungs in
+    `prototyper` is a parameter rather than a default because DEFAULT.toml runs
+        `AveragePrototyper`, which has no parameters at all -- so a pair built
+        from DEFAULT alone leaves `sender_prototyper` empty and the tests below
+        blind to anything that group could get wrong. That blindness has cost
+        something before: `sender.contrast`'s ten tensors were falling to the
+        `other` catch-all on every rung that had the stage, and the one pair
+        these tests built was the one pair where that could not show. That stage
+        is part of `AttentionPrototyper` now, so the arm that used to be
+        `contrast = true` is this class.
+
+        The partition itself is asserted over all fourteen rungs in
         `tests/test_module_learning_rates.py`, which needs no backward pass;
         what needs one is everything below about the norms.
     """
@@ -563,7 +568,7 @@ def _pair_with_gradients(contrast=False):
         #     only member of one.
         extra=(
             "[receiver_discriminator]\nscale_score = true\n"
-            + ("[sender]\ncontrast = true\n" if contrast else "")
+            f"[sender]\nprototyper = \"{prototyper}\"\n"
         ),
     )
     n_examples = config["data"]["n_examples"]
@@ -576,8 +581,10 @@ def _pair_with_gradients(contrast=False):
     return pair
 
 
-@pytest.mark.parametrize("contrast", [False, True])
-def test_clip_gradients_reports_every_group_and_leaves_nothing_over(contrast):
+@pytest.mark.parametrize(
+    "prototyper", ["AveragePrototyper", "AttentionPrototyper"]
+)
+def test_clip_gradients_reports_every_group_and_leaves_nothing_over(prototyper):
     """
     `MODULE_GROUPS` must cover the pair, and every group that exists on it must
     report a real norm rather than a NaN.
@@ -585,9 +592,11 @@ def test_clip_gradients_reports_every_group_and_leaves_nothing_over(contrast):
     `other` is the alarm and not the fix: it catches whatever a future
     architecture adds so that nothing goes unclipped, and it is NaN when there
     is nothing in it. It was not NaN before `sender_contrast` was added -- it
-    held the whole contrast stage, under a name that said nothing about it.
+    held the whole contrast stage, under a name that said nothing about it --
+    and the same hole would open again if the speaker's second interface were
+    left out of `sender_adapter`, which is why both arms are built here.
     """
-    pair = _pair_with_gradients(contrast=contrast)
+    pair = _pair_with_gradients(prototyper=prototyper)
     norms = train.clip_gradients(pair, 1.0)
 
     assert tuple(norms) == models.builder.GROUP_NAMES
@@ -601,17 +610,23 @@ def test_clip_gradients_reports_every_group_and_leaves_nothing_over(contrast):
         expected_nan = not any(p.grad is not None for p in params)
         assert math.isnan(norms[name]) is expected_nan, f"{name}: {norms[name]}"
 
-    assert math.isnan(norms["contrast_gate"]) is not contrast
+    # The prototyper is the group the arm moves: empty under the average, and a
+    #     whole transformer block under the other.
+    assert math.isnan(norms["sender_prototyper"]) is (
+        prototyper == "AveragePrototyper"
+    )
 
 
-@pytest.mark.parametrize("contrast", [False, True])
-def test_clip_gradients_bounds_each_module_independently(contrast):
+@pytest.mark.parametrize(
+    "prototyper", ["AveragePrototyper", "AttentionPrototyper"]
+)
+def test_clip_gradients_bounds_each_module_independently(prototyper):
     """
     The point of clipping per group: a group under the ceiling is left alone
     however large another group's gradient is. Under one global norm the
     speaker's vision model was scaled by ~86x because of the comparer.
     """
-    pair = _pair_with_gradients(contrast=contrast)
+    pair = _pair_with_gradients(prototyper=prototyper)
     before = train.clip_gradients(pair, 1.0)
     assert not all(math.isnan(v) for v in before.values()), "no gradients"
 

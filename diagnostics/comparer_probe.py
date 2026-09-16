@@ -69,7 +69,7 @@ DEFAULT_CONFIG = next(
     path for path in (
         os.path.join(
             os.path.dirname(__file__), "..", "experiments", "ablation_birds",
-            directory, "16_birds_receiver_cross_attention_lm.toml",
+            directory, "14_birds_receiver_cross_attention_lm.toml",
         )
         for directory in ("configs", "")
     )

@@ -153,15 +153,22 @@ quiet. `split_out_module` has no equivalent, because it cannot fail that way.
 One table in `models/builder.py` decides both what is clipped together and what
 is trained at what rate.
 
-`MODULE_GROUPS` names ten modules, each picked off the constructed pair by
+`MODULE_GROUPS` names nine modules, each picked off the constructed pair by
 attribute:
 
-`sender_vision`, `sender_adapter`, `sender_prototyper`, `sender_contrast`,
+`sender_vision`, `sender_adapter`, `sender_prototyper`,
 `sender_language_model`, `receiver_vision`, `receiver_adapter`,
 `receiver_token_embedding`, `receiver_language_model`, `receiver_discriminator`
 
-`SCALAR_GROUPS` names the four scaling scalars — `log_score_scale`,
-`log_logit_scale`, `mix_logit`, `contrast_gate` — each of which is a group of one
+Nine since 2026-09-16, where it was ten: `sender_contrast` went when
+`ExampleContrast` was folded into `AttentionPrototyper`. Two of these names
+cover a container rather than a single module — `sender_adapter` is
+`Sender.interfaces`, the speaker's two `LinearInterface`s, and
+`receiver_adapter` is `Receiver.interfaces`, the listener's three — so that a
+module declaring a width of its own does not cost the header a column.
+
+`SCALAR_GROUPS` names the three scaling scalars — `log_score_scale`,
+`log_logit_scale`, `mix_logit` — each of which is a group of one
 tensor. The speaker's channel scale is the second of those: a lone 0-d tensor
 inside `sender_language_model`, which would otherwise be renormalised against a
 whole module's norm. `claimed_separately` holds them out of their module's group
@@ -170,14 +177,14 @@ sides, so a scalar is never clipped twice, never inflates its module's norm, and
 never inherits its module's rate.
 
 **Every entry is gated, and two of the gates are now config rather than
-architecture.** `mix_logit` needs an `AttentionDiscriminator` and
-`contrast_gate` needs the contrast stage; `log_score_scale` needs
+architecture.** `mix_logit` needs an `AttentionDiscriminator`;
+`log_score_scale` needs
 `[receiver_discriminator] scale_score` — which builds that one scalar and
 nothing else, the `1/√d` calibration being unconditional — and `log_logit_scale`
 needs `[sender_language_model] normalise_logits`, both read off the module that
 owns the parameter rather than off the config so the gate and the parameter
 cannot disagree. On an arm where a gate is false the group is *inapplicable*,
-not missing, and the same three keys — `score_scale_lr`, `score_bias_lr`,
+not missing, and the three keys — `score_scale_lr`, `score_bias_lr`,
 `logit_scale_lr` — stay live in `[optimiser]` and simply have no effect.
 `score_bias_lr` has a condition of its own, `learns_score_bias`, gated by
 `[receiver_discriminator] bias_score`. It used to share the volume's, which was
@@ -195,9 +202,9 @@ their places in the header and read NaN — the convention that keeps the metric
 header stable across a resume.
 
 **Why one table.** There used to be three lists and none was derivable from
-another. `train.py` had its own `CLIP_GROUPS`, which omitted `sender.contrast`,
-so on every rung with the stage on the `other` catch-all *was* the contrast
-stage under a name that said nothing about it. `MUP_MODULES` was a second list,
+another. `train.py` had its own `CLIP_GROUPS`, which omitted the speaker's contrast
+stage, so on every rung that had one the `other` catch-all *was* that stage
+under a name that said nothing about it. `MUP_MODULES` was a second list,
 which included the contrast stage and omitted the listener's embedding table.
 `SPLIT_LEARNING_RATES` was the third. Adding a module to one and not the others
 was a silent partial change. Now a module added to `MODULE_GROUPS` is clipped
@@ -210,10 +217,9 @@ thousand matrices is renormalised by *their* norm. At recorded speaker norms of
 ~10 against `clip_grad_norm = 1.0` that is a tenfold attenuation, applied on
 every step that binds, to a parameter whose whole travel is already bounded by
 `lr × steps` — and these are the parameters ignition waits on.
-`scripts/ignition_audit.py` found `logit_scale`, `contrast_gate` and
+`scripts/ignition_audit.py` found `logit_scale` and
 `pool_score_norm` leaving the plateau in the same epoch, so what constrains them
-constrains the run. (The scale no longer moves at all, which removes one of those
-three; the argument for the other two is unchanged.)
+constrains the run.
 
 **Why `score_bias` and `polarity_embedding` are not.** An offset is not a scale
 and a 2-d tag is not a scalar; both belong to the norm of the module producing
@@ -230,12 +236,12 @@ moved to parse time because a module group selects an attribute and so cannot
 fail by rename. `resolve_module_learning_rates` reads the table and
 `split_out_module` does the regrouping.
 
-DEFAULT.toml states all eight and no rung overrides any of them, so this is what
+DEFAULT.toml states all nine and no rung overrides any of them, so this is what
 every rung runs:
 
 | group | rate |
 |---|---|
-| `sender_vision`, `sender_prototyper`, `sender_contrast`, `sender_language_model` | 1e-4 |
+| `sender_vision`, `sender_adapter`, `sender_prototyper`, `sender_language_model` | 1e-4 |
 | `receiver_vision`, `receiver_token_embedding`, `receiver_language_model`, `receiver_discriminator` | 5e-5 |
 
 One factor of two — the whole listener at half the whole speaker — pinned at
@@ -377,19 +383,17 @@ because `BilinearGRUComparer` keeps its scale and is the ablation's baseline
 listener — and gating on the class that *has* the parameter leaves
 `split_out_parameter`'s error on duty where it can still fire.
 
-**`contrast_gate_lr`** — gated on `pair.sender.contrast is not None`, i.e. on the
-stage existing at all, since `[sender] contrast` is a boolean and "off" is the
-absence of the module rather than a different one.
-
-This is the override the arm depends on rather than merely benefits from.
-`contrast_gate` opens at exactly zero — that is what makes the contrast arm an
-ablation of one thing — and a lone scalar cannot travel further than `lr × steps`.
-At the base 5e-5 and the 156.25 steps an epoch both datasets now run, it would
-take thirteen epochs of perfectly sign-consistent gradient to reach 0.1, so a run
-at the base rate would report "contrast does nothing" and be measuring the
-learning rate. At 2e-3 it is fifty steps. See [architecture.md](architecture.md) for why the gate is a scalar
-rather than a zero-initialised projection, which has the same problem and no way
-out of it.
+**There was a fourth, `contrast_gate_lr`, and it is gone.** It governed the lone
+scalar standing between the speaker's contrast stage and the identity, at 2e-3
+for the usual reason: the gate opened at exactly zero, a lone scalar cannot
+travel further than `lr × steps`, and at the base rate reaching even 0.1 would
+have taken thirteen epochs of perfectly sign-consistent gradient — so an arm at
+the base rate would have reported "contrast does nothing" and been measuring the
+learning rate. The stage was folded into `AttentionPrototyper` on 2026-09-16 and
+its block is a normally-initialised DeepNorm residual, so there is no scalar in
+front of it and nothing for a rate to govern. That retires the traverse
+arithmetic, the `scale_without_attenuating` routing behind it, and the unanchored
+sign the pair of them existed to manage; see [architecture.md](architecture.md).
 
 ## Gradient clipping
 
@@ -409,12 +413,12 @@ gradient. It does not change the *ratio* between modules — a uniform rescale
 never did, and AdamW normalises per coordinate anyway — what it removes is the
 cross-module noise coupling.
 
-The groups are `models.builder`'s — ten modules and four lone scalars, see
+The groups are `models.builder`'s — nine modules and three lone scalars, see
 [the group table](#the-group-table) — and an `other` group catches anything a
 future architecture adds, so no parameter can silently go unclipped. `other`
-being non-empty is the alarm and not the fix: it held the whole of
-`sender.contrast` until August 2026, because `train.py` kept a list of its own
-that had never been given the stage.
+being non-empty is the alarm and not the fix: it held the whole of the speaker's
+contrast stage until August 2026, because `train.py` kept a list of its own that
+had never been given the stage.
 
 Every group's pre-clip norm is recorded, including ones that did not reach the
 ceiling, as `train_clip_<group>` in `metrics.csv`. They are averaged **per
@@ -515,12 +519,12 @@ steps, not batches.
 
 Adam's update is bounded at roughly ±lr per step regardless of gradient
 magnitude, so a lone scalar cannot travel further than `lr × steps` (the reason
-`contrast_gate_lr` exists at all). Averaging `accumulator_steps` microbatches
+`score_scale_lr` and `mix_logit_lr` are elevated at all). Averaging `accumulator_steps` microbatches
 into one update buys a better gradient *estimate*, which a single scalar does not
 need, and costs it the moves it would otherwise have made.
 
 So when a run's takeoff waits on one of these scalars — `log_score_scale`,
-`contrast_gate` — raising the effective batch delays it in
+`mix_logit` — raising the effective batch delays it in
 direct proportion, at identical compute. That is a real trade against whatever
 the larger batch was for, and on ShapeWorld the reference setup's batch of 128
 (32 × `accumulator_steps` 4) is four times the traverse cost of the same compute
@@ -612,7 +616,7 @@ columns separate them cheaply.
 
 **The deadlock signature is joint and it is exact.** Every learned quantity on the
 speaker side stationary to four decimal places across tens of epochs:
-`realised_survival` flat near its opening, `contrast_gate` unmoved,
+`realised_survival` flat near its opening, `pool_score_norm` unmoved,
 `pool_effective_examples` pinned at
 the positive-example count, `polarity_separation` at its opening — `sqrt(2·d_model)`
 = 25.3 at 320 wide since `843dc81` drew the two polarity tags independently,
@@ -820,7 +824,7 @@ checkpoints then disproved.
 
 **Read parameter counts off `final_model.pt`, not off either file.** Several
 config blocks are inert for a given class combination — `[sender_feature_model]`
-under a ResNet backbone, `[sender_contrast]` when `contrast = false` — and
+under a ResNet backbone, `[sender_prototyper]` under `AveragePrototyper` — and
 several widths are derived rather than declared: `SenderTransformerLM` takes its
 `d_model` from the vision model, and the discriminator is sized from
 `receiver_language_model.output_size` (see
@@ -829,9 +833,9 @@ module was built that way.
 
 `[optimiser] resolved_module_lrs` is the one derived quantity that *is* recorded,
 and deliberately: it is a `group → lr` mapping over the groups that were
-constructed, so `sender_contrast` is absent when the stage is off and its
+constructed, so a group whose module this pair does not build is absent and its
 presence is itself a fact about the run. Read it as the answer to "which module
-was trained at what rate", and note what it does not cover — the four scaling
+was trained at what rate", and note what it does not cover — the three scaling
 scalars keep their own rate whatever their module's is, and `score_bias` and
 `polarity_embedding` are moved again afterwards by `SPLIT_LEARNING_RATES`.
 

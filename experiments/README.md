@@ -24,13 +24,15 @@ ladder. `tests/_bootstrap.rung` and `all_rungs` do, and so do the two probes in
 `diagnostics/`. The failure mode when something does not is quiet: a
 `FileNotFoundError` inside `parse_config.get_config` at collection time reads
 as a wall of failing tests rather than as a missing path, and it hid 159 tests
-for a day in August 2026. `test_there_are_sixteen_rungs` is the backstop.
+for a day in August 2026. `test_every_rung_found_can_be_opened` is the backstop
+-- and note it deliberately does *not* pin how many rungs there are, because the
+ladder is allowed to change and did, twice.
 
 The rest of this file is a reference for the columns of that `metrics.csv`.
 
 ## The learning-rate sweeps are a serial chain
 
-**`lr_sweep_1_cnn` through `lr_sweep_8_receiver_cross_attention_lm`**, one
+**`lr_sweep_1_cnn` through `lr_sweep_7_receiver_cross_attention_lm`**, one
 folder per rung of the ladder, each measuring the learning rate of the one
 component that rung introduces. They must be run **in order**, and DEFAULT.toml
 must be updated with each result before the next is launched.
@@ -40,11 +42,24 @@ must be updated with each result before the next is launched.
 | `lr_sweep_1_cnn` | 1 / 2 | `ResNet56`, `ResNet18` | `implementation_lr.{sender,receiver}_vision` |
 | `lr_sweep_2_sender_vit` | 3 / 4 | the speaker's ViT | `implementation_lr.sender_vision.{ShapeWorldViT,BirdsViT}` |
 | `lr_sweep_3_attention_prototyper` | 5 / 6 | `AttentionPrototyper` | `implementation_lr.sender_prototyper.AttentionPrototyper` |
-| `lr_sweep_4_sender_contrast` | 7 / 8 | `ExampleContrast` | `module_lr.sender_contrast` |
-| `lr_sweep_5_sender_transformer_lm` | 9 / 10 | `SenderTransformerLM` | `implementation_lr.sender_language_model.SenderTransformerLM` |
-| `lr_sweep_6_receiver_vit` | 11 / 12 | the listener's ViT | `implementation_lr.receiver_vision.{ShapeWorldViT,BirdsViT}` |
-| `lr_sweep_7_attention_discriminator` | 13 / 14 | `AttentionDiscriminator` | `implementation_lr.receiver_discriminator.AttentionDiscriminator` |
-| `lr_sweep_8_receiver_cross_attention_lm` | 15 / 16 | `ReceiverCrossAttentionLM` | `implementation_lr.receiver_language_model.ReceiverCrossAttentionLM` |
+| `lr_sweep_4_sender_transformer_lm` | 7 / 8 | `SenderTransformerLM` | `implementation_lr.sender_language_model.SenderTransformerLM` |
+| `lr_sweep_5_receiver_vit` | 9 / 10 | the listener's ViT | `implementation_lr.receiver_vision.{ShapeWorldViT,BirdsViT}` |
+| `lr_sweep_6_attention_discriminator` | 11 / 12 | `AttentionDiscriminator` | `implementation_lr.receiver_discriminator.AttentionDiscriminator` |
+| `lr_sweep_7_receiver_cross_attention_lm` | 13 / 14 | `ReceiverCrossAttentionLM` | `implementation_lr.receiver_language_model.ReceiverCrossAttentionLM` |
+
+**Sweep 3 has run once and is owed a re-run, and nothing above it is meaningful
+until it lands.** Its first pass measured an `AttentionPrototyper` that was two
+scoring directions and two biases; the class absorbed `ExampleContrast` on
+2026-09-16 and holds a transformer block now, 132,738 parameters on ShapeWorld
+and 967,171 on birds. A rate tuned for four vectors is not evidence about a
+block, so the old result is withdrawn rather than carried forward -- DEFAULT.toml
+still states 1e-4, which is `module_lr`'s fallback for the group anyway, so
+nothing about what runs depends on that line meanwhile.
+
+There were eight sweeps until then. `lr_sweep_4_sender_contrast` tuned
+`module_lr.sender_contrast`, which named a module group that no longer exists;
+the folder is deleted and the four above it came down by one, in step with the
+ladder.
 
 Ten arms each -- 1e-5, 2e-5, 5e-5, 1e-4 and 2e-4 on both datasets -- at 100
 epochs and one repeat. 100 is the ablation's own length, so an arm and the rung
@@ -91,8 +106,9 @@ both, so a backbone rung would inherit the previous rung's rate and differ from
 it in two things at once. `[optimiser.implementation_lr]` is keyed by group and
 then by class name and is consulted first; see `models.builder.GROUP_IMPLEMENTATION` for
 the six groups whose implementation the config chooses, and DEFAULT.toml beside
-the table for the rates themselves. `sender_contrast` is the one component in
-this set with no choice of class, which is why sweep 4 moves a `module_lr` key.
+the table for the rates themselves. Every sweep in the set now moves an
+`implementation_lr` key; the one that moved a `module_lr` key was sweep 4, whose
+component had no choice of class, and it is gone.
 
 **Why 60 epochs.** On sweep 1's own traces the two leading ShapeWorld rates are
 *inverted* at epoch 40 and cross at 47, so a 40-epoch sweep returns the wrong
@@ -140,15 +156,37 @@ What the split does change:
   documentation -- `train.py` takes the experiment name from the config's path,
   not from that key.
 
-## The ablation ladder was renumbered
+## The ablation ladder was renumbered, twice
 
-The ablation now has **sixteen** rungs rather than fourteen, and the numbers
-moved. Anything written before that -- run directories, the
-`docs/` prose, `diagnostics/README.md`, commit messages -- names rungs in the old
-scheme, so read those numbers against this table rather than against the current
-configs:
+Anything written before a renumbering -- run directories, the `docs/` prose,
+`diagnostics/README.md`, commit messages -- names rungs in the scheme of its day,
+so read those numbers against these tables rather than against the current
+configs.
+
+### Second renumbering: sixteen rungs to **fourteen**, 2026-09-16
+
+`ExampleContrast` was folded into `AttentionPrototyper`, so the pair of rungs
+that switched the stage on went and everything above them came down by two:
 
 | old | new | correspondence |
+| --- | --- | --- |
+| 1-6 | 1-6 | exact, except that 5 and 6 are now the merged module |
+| 7, 8 `+ ExampleContrast` | — | gone; the stage is part of the prototyper at 5, 6 |
+| 9, 10 sender Transformer LM | 7, 8 | exact |
+| 11, 12 receiver ViT | 9, 10 | exact |
+| 13, 14 attention discriminator | 11, 12 | exact |
+| 15, 16 cross-attention listener | 13, 14 | exact |
+
+Only rungs 5 and 6 change in content, and they change a great deal: they hold a
+transformer block where they held two scoring directions and two biases, and
+they no longer open at their parent rung's numbers. Every rung above them
+inherits that. So **no rung from 5 up is configuration-identical to any
+sixteen-rung-era rung**, and traces should not be pooled across the boundary.
+The `lr_sweep_*` chain moved with it -- see the table above.
+
+### First renumbering: fourteen rungs to sixteen
+
+| old | new (sixteen-rung) | correspondence |
 | --- | --- | --- |
 | 1, 2 baseline | 1, 2 | exact |
 | 3, 4 attention prototyper on a CNN sender | — | gone; the prototyper now sits on top of the ViT |
@@ -158,14 +196,12 @@ configs:
 | 11, 12 cross-attention listener | 15, 16 | plus the contrast stage, and the listener's two halves now enter separately at 13 and 15 |
 | 13, 14 parallel speaker arm | — | gone; flip `[sender_language_model] bidirectional` on the top rung to get it back |
 
-Two changes are structural rather than a renaming. The sender's vision swap now
-comes **before** the prototyper, so an attention pooler is never measured over
-CNN features; and the listener's message encoder and discriminator, which one
-`comparer` key used to change together, now enter as two rungs so that "attention
-helps" can be attributed to one of them. Rungs 7 and 8 are new entirely.
-
-A consequence worth stating plainly: no rung above 6 is configuration-identical
-to any old rung, so old and new trajectories should not be pooled.
+Two changes there were structural rather than a renaming. The sender's vision
+swap moved **before** the prototyper, so an attention pooler is never measured
+over CNN features; and the listener's message encoder and discriminator, which
+one `comparer` key used to change together, became two rungs so that "attention
+helps" can be attributed to one of them. That scheme's rungs 7 and 8 were new
+entirely -- and are the pair the second renumbering removed again.
 
 ## Shape of the file
 

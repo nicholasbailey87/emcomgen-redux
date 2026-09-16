@@ -359,8 +359,8 @@ def clip_gradients(pair, max_norm):
     The groups come from `models.builder`, which is also where each one's
         learning rate is read, so a module cannot be rateable without being
         clipped or the other way round. That list used to live here and had
-        drifted: it omitted `sender.contrast`, so on every rung with the stage
-        on the `other` group *was* the contrast stage under a misleading name.
+        drifted: it omitted the speaker's contrast stage, so on every rung that
+        had one the `other` group *was* that stage under a misleading name.
 
     Args:
         pair: the sender/receiver `Pair`, with gradients already unscaled
@@ -372,7 +372,7 @@ def clip_gradients(pair, max_norm):
             where the group does not exist on this architecture or holds nothing
             with a gradient. The shape is fixed so that the metrics header
             survives a resume against a config that toggles a stage, exactly as
-            the contrast columns are NaN-filled rather than absent.
+            the prototyper's columns are NaN-filled rather than absent.
     """
     norms = {}
 
@@ -900,15 +900,6 @@ def run(
                 language_model = pair.sender.language_model
                 prototyper = pair.sender.prototyper
 
-                # The contrast stage is optional, so its three columns are NaN
-                # rather than absent when it is off -- the header has to be the
-                # same shape either way or a run cannot be resumed against a
-                # config that toggles it, and a NaN says "not applicable" where
-                # a zero would read as a stage that never opened. Guarded on
-                # `None` rather than by `hasattr`, matching `Sender`.
-                # `contrast_gate` is a parameter and so does not depend on the
-                # pass; the other two are per-batch.
-                contrast = pair.sender.contrast
                 unmeasured = float("nan")
 
                 stats.update(
@@ -917,10 +908,10 @@ def run(
                     logit_margin=language_model.logit_margin,
                     logit_prior_share=language_model.logit_prior_share,
                     logit_spread=language_model.logit_spread,
-                    # A parameter again as of 2026-08-31, so `.item()` -- like
-                    # `contrast_gate` below, and unlike the per-batch
-                    # diagnostics above it, which are already floats. A live
-                    # tensor here would keep a graph alive inside `Statistics`.
+                    # A parameter again as of 2026-08-31, so `.item()`, unlike
+                    # the per-batch diagnostics above it, which are already
+                    # floats. A live tensor here would keep a graph alive inside
+                    # `Statistics`.
                     logit_scale=(
                         language_model.logit_scale.item()
                         if language_model.normalises_logits else unmeasured
@@ -929,21 +920,15 @@ def run(
                     pool_effective_examples=prototyper.pool_effective_examples,
                     pool_score_norm=prototyper.pool_score_norm,
                     pool_score_sd=prototyper.pool_score_sd,
+                    # NaN on an `AveragePrototyper` rung, which has no block to
+                    # take a share of -- the same "not applicable" convention
+                    # the three columns above follow, and the reason both arms
+                    # write one header. See `sender.AveragePrototyper`.
+                    prototyper_mix_share=prototyper.prototyper_mix_share,
+                    prototyper_within_share=prototyper.prototyper_within_share,
                     referent_spread=pair.sender.referent_spread,
                     referent_spread_backbone=pair.sender.referent_spread_backbone,
                     polarity_separation=language_model.polarity_separation,
-                    contrast_gate=(
-                        contrast.contrast_gate.item()
-                        if contrast is not None else unmeasured
-                    ),
-                    contrast_share=(
-                        contrast.contrast_share
-                        if contrast is not None else unmeasured
-                    ),
-                    contrast_within_share=(
-                        contrast.contrast_within_share
-                        if contrast is not None else unmeasured
-                    ),
                     batch_size=batch_size,
                 )
 
@@ -990,8 +975,8 @@ def run(
 
                 # NaN rather than an absent column when a parameter does not
                 # exist, so the metrics header keeps its shape across the flags
-                # -- the same convention the contrast columns and the per-group
-                # gradient norms follow.
+                # -- the same convention the prototyper's columns and the
+                # per-group gradient norms follow.
                 #
                 # Read separately, because `scale_score` and `bias_score` are
                 # separate keys: each column reads NaN exactly when its own

@@ -1,8 +1,10 @@
 # diagnostics
 
-> **Rung numbers below are the old ladder.** It was renumbered when it grew to
-> sixteen rungs; old 10 is new 12 and old 12 is new 16, both now carrying the
-> speaker's contrast stage. See `experiments/README.md` for the full table.
+> **Rung numbers below are the old fourteen-rung ladder**, which has been
+> renumbered twice since: old 10 is new 10 and old 12 is new 14. The sixteen-rung
+> numbering in between put them at 12 and 16, both carrying the separate contrast
+> stage that is part of `AttentionPrototyper` now. See `experiments/README.md`
+> for the full table.
 
 Scripts for taking one suspect at a time out of a stuck run.
 
@@ -51,7 +53,7 @@ python diagnostics/comparer_probe.py --message scrambled --distractors varied
 ```
 
 `--config` takes any rung. It defaults to
-`experiments/ablation_birds/configs/16_birds_receiver_cross_attention_lm.toml`, and works
+`experiments/ablation_birds/configs/14_birds_receiver_cross_attention_lm.toml`, and works
 on the bilinear baseline too. `--lr` defaults to the config's own
 `optimiser.lr`, so the timings below are the rate the real run learns at, not a
 convenience setting. About a minute on CPU for a thousand steps.
@@ -148,7 +150,7 @@ the loop cheap enough to run on a laptop.
 
 ```
 python diagnostics/bootstrap_probe.py                        # rung 12
-python diagnostics/bootstrap_probe.py --config experiments/ablation_birds/configs/12_birds_receiver_vit.toml
+python diagnostics/bootstrap_probe.py --config experiments/ablation_birds/configs/10_birds_receiver_vit.toml
 ```
 
 It prints `metrics.csv`'s own columns under their own names, because a working
