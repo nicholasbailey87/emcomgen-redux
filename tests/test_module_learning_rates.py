@@ -238,14 +238,15 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
         two classes ten-fold apart; that separation did not survive pass 3, and
         DEFAULT.toml carries why.
 
-    `AttentionPrototyper` at 1e-4, and this one is *owed a fresh sweep*. The
-        number came from `lr_sweep_3_attention_prototyper` (77f579e, 30 epochs),
-        which measured a prototyper that was two scoring directions and two
+    `AttentionPrototyper` at 2e-5, from `lr_sweep_3_attention_prototyper`
+        re-run after the merge (a4bbb8f, 30 epochs). The previous pass of the
+        same sweep measured a prototyper that was two scoring directions and two
         biases; the class absorbed `ExampleContrast` on 2026-09-16 and is a
-        transformer block now, sixty times larger. It is kept because it is also
-        `module_lr`'s rate for the group, so the entry changes nothing about
-        what runs, and pinned here so that the re-run replaces it deliberately
-        rather than by drift. See DEFAULT.toml beside the key.
+        transformer block now, sixty times larger, so the rate was re-measured
+        rather than carried over. 2e-5 is birds' argmax and sits on a
+        three-rate plateau on ShapeWorld. Unlike the ViT keys this one now
+        departs from `module_lr`'s 1e-4 for the group, so deleting the entry
+        would change what runs. DEFAULT.toml beside the key carries the arms.
 
     A retune replaces these and edits this test in the same commit, which is
         the point: a rate arrived at by measurement should not be able to drift
@@ -262,7 +263,7 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
             "ShapeWorldViT": 5e-5,
         },
         "receiver_vision": {"ResNet56": 5e-5, "ResNet18": 1e-4},
-        "sender_prototyper": {"AttentionPrototyper": 1e-4},
+        "sender_prototyper": {"AttentionPrototyper": 2e-5},
     }
 
 

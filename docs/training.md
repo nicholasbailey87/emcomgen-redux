@@ -248,6 +248,15 @@ One factor of two — the whole listener at half the whole speaker — pinned at
 `5e-5` on `receiver_language_model`, the module jayelm tuned `lr` on. Nothing is
 split *within* an agent.
 
+Three of the nine are then narrowed by class in `[optimiser.implementation_lr]`,
+which is the more specific claim and wins wherever the class it names is the one
+in use: `sender_vision` and `receiver_vision` at 5e-5 for `ResNet56` and 1e-4 for
+`ResNet18`, both ViT classes at 5e-5 on the speaker, and `sender_prototyper` at
+2e-5 for `AttentionPrototyper`. Those are measurements from the `lr_sweep_*`
+folders rather than structure, and the table above is the fallback wherever no
+class rate applies — which is the other six groups at every rung, and
+`sender_prototyper` too on the rungs running `AveragePrototyper`.
+
 **The whole table halved on 2026-08-31, along with the base `lr`.** The shape is
 unchanged; only its scale moved. jayelm tuned at 1e-4, which is where the grid
 was pinned until then, so the speaker now sits at his rate and the listener — the
