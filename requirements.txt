@@ -3,26 +3,59 @@
 # this file alone must produce an environment that runs both; anything only vit
 # needs is listed at the bottom under "vit-representation-learning only".
 #
-# Where the two disagree, this file wins, and it disagrees in exactly one place:
-# vit asks for broccoli-ml and gradboard at the `neovit` *branch*, and this file
-# pins them by SHA for the reason immediately below. As of 2026-08-15 those are
-# the same commits -- neovit points at broccoli 33d6f21 and gradboard ae464db --
-# so the superset costs vit nothing today. If they diverge later, the SHA is the
-# one to keep and vit's file is the one to update.
+# Where the two disagree, this file wins. It used to disagree in exactly one
+# place -- vit asks for broccoli-ml and gradboard at the `neovit` *branch*, and
+# this file pinned them by SHA -- and as of 2026-09-18 it no longer does: both
+# are tracked at `neovit` here too, so the venv the two projects share installs
+# one version of each and vit's file and this one cannot drift apart.
 #
-# broccoli-ml and gradboard are pinned to commit SHAs, not branches. A branch
-# ref is not a pin: `neovit` was used for both, and broccoli's was
-# fast-forwarded onto main, taking it from 27.1.1 to 30.1.0. That added a Q/K
-# RMSNorm and an output RMSNorm to every attention and feedforward block, and
-# flipped the `pre_norm`/`post_norm` defaults. The result was the cluster and
-# the local venv running different architectures off this same file, and
-# checkpoints that cannot be resumed across the boundary (the new `out_norm`
-# entries are missing keys under a strict load).
+# A branch ref is not a pin, and that has cost this project before. `neovit` was
+# fast-forwarded onto main and took broccoli from 27.1.1 to 30.1.0 under a
+# requirements file that had not changed a character. That added a Q/K RMSNorm
+# and an output RMSNorm to every attention and feedforward block and flipped the
+# `pre_norm`/`post_norm` defaults, so the cluster and the local venv ran
+# different architectures off this same file, and checkpoints could not be
+# resumed across the boundary (the new `out_norm` entries are missing keys under
+# a strict load). Tracking the branch accepts that risk knowingly, in exchange
+# for the two projects staying in step. Three things make it survivable:
 #
-# broccoli-ml 30.1.0 (rollback: 27.1.1 = d50d2e8689659947cade11c06000c1bc70bc019b)
-broccoli-ml @ git+https://github.com/nicholasbailey87/broccoli.git@33d6f21642f754f841a5adbc27ff331b191a4e90
-# gradboard 17.0.0 -- where `neovit` already pointed; main is ahead at 17.1.1
-gradboard @ git+https://github.com/nicholasbailey87/gradboard.git@ae464db502c1bfcaee2181b040bfd41acf475359
+#   - `code/util.py` records the installed version and commit of both packages
+#     in each run's `config.toml`, so a result always says what built it.
+#   - The SHAs `neovit` points at today, and the ones to roll back to, are
+#     written below.
+#   - Rebuild the venv between experiments, not during one. `pip install -r`
+#     may skip a reinstall when the installed version string still matches, so
+#     pass `--force-reinstall` for these two lines when you mean to move.
+#
+# As of 2026-09-18 `neovit` is identical to `main` in both repositories:
+#
+#   broccoli-ml 30.3.0 = 00b93c8794e3846401cdfb9c8cc9e3048abae3f7
+#       (rollback: 30.1.0 = 33d6f21642f754f841a5adbc27ff331b191a4e90,
+#                  27.1.1 = d50d2e8689659947cade11c06000c1bc70bc019b)
+#   gradboard   17.1.1 = 099de94ca31b787933a0811a1db7bc28534021d3
+#       (rollback: 17.0.0 = ae464db502c1bfcaee2181b040bfd41acf475359)
+#
+# Arriving at those commits from the SHAs this file pinned until today is not
+# inert, in two ways that are worth knowing before a run is resumed:
+#
+#   - gradboard renamed `get_optimiser`'s `exclude_keywords` argument to
+#     `weight_decay_exclusions` (ca38880), which is what `builder.py` now
+#     passes; and renamed the fan-in correction's denominator from
+#     `base_model_embedding_size` to `d_model` (099de94). The second is a rename
+#     only as far as this repository is concerned: the same second positional
+#     argument still carries `[sender_language_model] d_model`. Nothing about
+#     what the optimiser computes here changes, and `blockwise_lr` defaults off.
+#
+#   - broccoli 30.3.0 renames parameters in order to change what is decayed. The
+#     patch-embedding `FeedforwardBlock`'s `linear_in`/`linear_out` become
+#     `linear_in_embedding`/`linear_out_embedding`, and `SequencePool`'s
+#     projection is registered a second time as `nondecay_linear`. Both new
+#     names match gradboard's exclusion list, which is the point -- those
+#     tensors stop being weight-decayed. Both also change the state dict, so a
+#     checkpoint written under 30.1.0 will not load strictly against 30.3.0.
+#     Finish a run under one or the other.
+broccoli-ml @ git+https://github.com/nicholasbailey87/broccoli.git@neovit
+gradboard @ git+https://github.com/nicholasbailey87/gradboard.git@neovit
 
 # torch and torchvision were previously absent from this file entirely. These
 # are the versions the cluster runs, which is where results are produced; the

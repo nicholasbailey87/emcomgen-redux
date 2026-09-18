@@ -755,8 +755,8 @@ def build_models(dataloaders, config):
     #     `add_param_group` fills it into every group `split_out_*` adds below.
     #     See `[optimiser] eps` in DEFAULT.toml for why it is far smaller here.
     #
-    # `exclude_keywords` extends `gradboard`'s own list with `"bn"`, which is
-    #     how this repository's BatchNorm scale parameters are named:
+    # `weight_decay_exclusions` extends `gradboard`'s own list with `"bn"`,
+    #     which is how this repository's BatchNorm scale parameters are named:
     #     `SimpleBlock` and `CifarBlock` call theirs `BN1` and `BN2`, so
     #     `trunk.3.BN1.weight` matches none of "nondecay", "bias", "norm",
     #     "embedding" or "beta" where the transformers' `post_mlp_norm.weight`
@@ -780,7 +780,7 @@ def build_models(dataloaders, config):
         lr=config['optimiser']['lr'],
         weight_decay=config['optimiser']['weight_decay'],
         eps=config['optimiser']['eps'],
-        exclude_keywords=EXCLUDE_FROM_WEIGHT_DECAY + ["bn"],
+        weight_decay_exclusions=EXCLUDE_FROM_WEIGHT_DECAY + ["bn"],
     )
 
     base_lr = config['optimiser']['lr']
