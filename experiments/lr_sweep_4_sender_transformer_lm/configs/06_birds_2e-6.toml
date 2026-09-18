@@ -1,17 +1,20 @@
-# lr_sweep_4_sender_transformer_lm arm: `SenderTransformerLM` at 2e-4 on ShapeWorld.
+# lr_sweep_4_sender_transformer_lm arm: `SenderTransformerLM` at 2e-6 on CUB.
 #
-# See `01_shapeworld_1e-5.toml` for what this experiment measures and why.
-# This file differs from that one in the swept rate, and in carrying no
-# `[data]` block, since ShapeWorld is the default dataset.
+# See `01_shapeworld_2e-6.toml` for what this experiment measures and why.
+# This file differs from that one in the swept rate, in the dataset, and in
+# carrying a `[data]` block, since ShapeWorld is the default.
 #
 # ---
 #
-# **This arm: `SenderTransformerLM` at 2e-4 on ShapeWorld**, copying ablation rung 07.
+# **This arm: `SenderTransformerLM` at 2e-6 on CUB**, copying ablation rung 08.
 
 name = "lr_sweep_4_sender_transformer_lm"
 
+[data]
+dataset = "../data/cub"
+
 [sender]
-feature_model = "ShapeWorldViT"
+feature_model = "BirdsViT"
 prototyper = "AttentionPrototyper"
 language_model = "SenderTransformerLM"
 
@@ -25,10 +28,10 @@ bidirectional = false
 [optimiser.implementation_lr.sender_language_model]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-SenderTransformerLM = 2e-4
+SenderTransformerLM = 2e-6
 
 [scheduler]
-epochs = 30
+epochs = 60
 
 [experiment]
 repeats = 1

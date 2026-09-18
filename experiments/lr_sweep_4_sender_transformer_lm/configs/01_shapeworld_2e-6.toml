@@ -1,0 +1,204 @@
+# lr_sweep_4_sender_transformer_lm: what learning rate `SenderTransformerLM` wants, in
+# the presence of everything below it on the ladder.
+#
+# Ten arms. `[optimiser.implementation_lr.sender_language_model] SenderTransformerLM` moves over 2e-6,
+# 5e-6, 1e-5, 2e-5 and 5e-5 on both datasets -- `01`-`05` are the five
+# ShapeWorld arms, copying ablation rung 07, and `06`-`10` the five birds
+# arms, copying rung 08. Nothing else differs between the arms, and nothing
+# else differs from the rung each one copies.
+#
+# **Sweep 4 of seven.** `lr_sweep_1_cnn` did the two CNN backbones and is
+# where the reasoning for the whole set is written down. The short version:
+# every rung of the ablation introduces a component whose learning rate has
+# never been measured, `[optimiser] lr`'s 1e-4 is jayelm's default tuned on a
+# 113k-parameter `Conv4`, and a rung that inherits a wrong rate differs from the
+# rung below it in two things at once -- the architecture it was there to move,
+# and how well the rate fits it. That is the confound every rung comment in
+# DEFAULT.toml is written to avoid, and it is not one the ladder can be read
+# through.
+#
+# **This sweep takes its rates from DEFAULT.toml and restates none of them.**
+# It inherits every rate the first three sweeps found. That is
+# deliberate and it is also a constraint on when this can run: the sweeps are
+# serial, and DEFAULT.toml must already carry sweep 3's result before this one
+# is launched. Launching out of order does not fail, it silently measures this
+# component against an untuned stack. See `experiments/README.md`.
+#
+# The rung this copies is where both arms of the old ablation died:
+# `09_shapeworld_sender_transformer_lm` fell to chance on every column
+# with `test_unique_message_fraction` at 0.0010 -- one message for the
+# whole test set -- and rung 08 was the last birds arm still speaking.
+# The speaker's language model is also the module whose width is pinned
+# by the backbone in front of it, so an untuned rate here is a rate
+# inherited by a stack that changed size as well as architecture.
+#
+# ## The first pass, and why the grid moved
+#
+# **This sweep has run once, over 1e-5 to 2e-4, and the grid was in the wrong
+# place.** That pass ran at `40b67f5` on 2026-09-17, ten arms, 30 epochs, one
+# repeat, with `AttentionPrototyper` already pinned at 2e-5. Final
+# `test_same_acc`:
+#
+#   ShapeWorld  1e-5 0.591 | 2e-5 0.512 | 5e-5 0.511 | 1e-4 0.514 | 2e-4 0.510
+#   birds       1e-5 0.664 | 2e-5 0.666 | 5e-5 0.660 | 1e-4 0.498 | 2e-4 0.500
+#
+# It is a cliff and not a slope. Every arm above the cliff finished with
+# `test_unique_message_count` at exactly 1 -- one message for the whole test set
+# -- and with `train_shuffled_message_acc` equal to `train_acc` to three
+# decimals, which is the channel carrying nothing at all. Nothing intermediate
+# appeared anywhere on either dataset: an arm either speaks or it is a constant.
+#
+# **The column that separates them is `train_logit_prior_share`**, and it
+# separates them within the first epoch. On every dead arm it reaches 0.99-1.00
+# by epoch 1 and stays, while `train_logit_scale` *decays* from 0.99 to about
+# 0.96 over the run; on every live arm the share falls away -- to 0.25 on birds
+# and, eventually, to 0.30 on ShapeWorld -- and the scale traverses to 1.9-2.0.
+# So the failure is not slowness. The speaker locks onto an input-independent
+# prior over the vocabulary before it can find an input-dependent code, and once
+# the logits are entirely prior there is no gradient out of it; weight decay then
+# shrinks the projection that would have got it out. That is the same mechanism
+# diagnosed on 2026-08-10 for the old rung 07, where `SenderTransformerLM` is
+# post-norm and `outputs2vocab` therefore reads a LayerNorm output pinned at
+# std 1.0 while its projection weight shrank 2.446 -> 2.385 over ninety epochs.
+# `train_realised_survival` says the same thing more bluntly: 0.79-0.89 on the
+# live arms against 0.14-0.31 on the dead ones.
+#
+# **ShapeWorld's winner was the bottom of the grid.** 1e-5 was the only arm of
+# five that spoke, so the grid bracketed the cliff from above and not the
+# optimum from below, and an edge argmax is not a measurement. Birds is not in
+# the same position -- 1e-5, 2e-5 and 5e-5 finished within 0.006 of each other,
+# which is a plateau with the cliff on the far side of it -- but the rate is one
+# key for both datasets, so the pin has to come from the region where both are
+# alive, and as measured that region is a single point.
+#
+# **The new grid: 2e-6, 5e-6, 1e-5, 2e-5, 5e-5.** It adds a decade below the old
+# floor at the same 1-2-5 spacing, keeps the three rates that bracket both
+# cliffs, and drops 1e-4 and 2e-4, which were dead on both datasets by the
+# clearest margin the telemetry has -- one message and a saturated prior share.
+# Re-running those two would buy a second copy of a null. Going below 1e-5 is
+# not a new move for this set: `lr_sweep_1_cnn`'s birds arms already run from
+# 5e-6.
+#
+# **There is no 1e-6 arm, and 2e-6 is included as a test rather than a
+# candidate.** Ignition on the one live ShapeWorld arm came at epoch 21-22, and
+# if the epoch at which it arrives goes as `1/lr` -- which is the only model
+# available and is what a fixed distance under a fixed rate implies -- then
+# 5e-6 ignites around epoch 42 and 2e-6 around epoch 105, with 1e-6 past 200 and
+# out of reach of any budget this chain will pay for. 2e-6 is here because it is
+# cheap and because it is the arm that checks that scaling. **A flat 2e-6 arm
+# must be read as "did not ignite inside the budget", not as "no protocol exists
+# at this rate"** -- the two are distinguishable only by `logit_prior_share`,
+# which sits near 1.0 in both cases until the moment it does not.
+#
+# ## 60 epochs, one repeat, and why this sweep alone
+#
+# **The budget was 25 and then 30 on the argument that these sweeps rank colour
+# learning and colour is settled by about epoch 10. That argument is false on
+# this rung.** The one live ShapeWorld arm sat at chance for twenty-one epochs
+# -- `train_acc` 0.504 at epoch 0 and 0.516 at epoch 21, `unique_message_count`
+# at 1 throughout -- and then went over in a single epoch: `logit_prior_share`
+# 0.987 -> 0.605, `logit_scale` 0.970 -> 1.137, `realised_survival` 0.198 ->
+# 0.554. That left eight epochs of measurement in a thirty-epoch run, and the
+# arm had not finished moving in them: `train_acc` was still climbing at 29 and
+# the logit scale was still traversing, 1.816 -> 1.843 -> 1.885 over the last
+# three epochs. The reported numbers are a snapshot of a run in motion.
+#
+# So extending the grid downwards at 30 epochs would produce arms that are flat
+# for two reasons at once, and no column would separate them. 60 covers roughly
+# twice the observed ignition delay, which is what 5e-6 needs under the `1/lr`
+# reading and is the most 2e-6 is going to get.
+#
+# **What it costs, measured rather than estimated.** The first pass's own
+# timestamps give 7.1 min/epoch on ShapeWorld and 3.7 on birds, so 60 epochs is
+# 7.1 h and 3.7 h per arm against the 24 h ceiling in `[slurm]` below -- about
+# three times the margin, and the `~14 min/epoch` that block was sized for turns
+# out to be twice the truth. The whole array is about 54 GPU-hours against the
+# first pass's 26.
+#
+# **Sweeps 5-7 stay at 30.** The argument above is about this rung's ignition
+# delay and nothing else; it is not a claim about the chain, and re-lengthening
+# the sweeps that have already run would reprice finished work to no purpose.
+# The standing cost of that, unchanged: the arms no longer match the ablation
+# rungs they copy on length, so an arm and its rung differ in the swept rate
+# *and* the budget, and a rung's trace is not a control for an arm's. This
+# sweep's arms now do not match the other sweeps' either.
+#
+# **One repeat, for the same reason as everywhere else in the set.** n = 1
+# across seven serial sweeps is the budget. Between-arm gaps here are the size
+# of within-arm epoch-to-epoch wobble -- birds' top three spanned 0.006 on the
+# first pass -- so this ranks candidates rather than settling them. What it can
+# settle, and what the first pass did settle, is which arms are alive.
+#
+# **What it cannot do is report shape.** At `silhouette_p_receiver = 0.3` the
+# three probe seeds cleared shape 0.55 at epochs 5, 12 and 25, so a 60-epoch arm
+# covers all three -- but on this rung the speaker spends the first twenty
+# epochs not speaking, and shape cannot emerge before the protocol does. If a
+# sweep arm is ever read for shape rather than for colour, the number to quote
+# is the probe's, not this folder's.
+#
+# **What to read.** `train_logit_prior_share` first, before anything else: it is
+# what told the first pass apart, it does so within one epoch, and every other
+# column on a dead arm is downstream of it. Then `train_realised_survival` and
+# `train_logit_scale`, which move with it at ignition. Then
+# `train_eval_mode_acc` against `train_shuffled_message_acc`, whose gap is the
+# message and nothing else and is the honest measure of whether a protocol
+# exists at all. `train_clip_sender_language_model` in both directions -- a
+# spike says the rate is too high and a decay toward AdamW's `eps` floor says it
+# is too low, and both are visible per-module because the clip groups and the
+# rate groups are the same table. On the ShapeWorld arms `train_acc_md_shape`
+# against `train_acc_md_color` is the standing question and is what decided
+# `lr_sweep_1_cnn`, subject to the paragraph above.
+#
+# Read `test_topsim_*` against `test_unique_message_count` and never on its own.
+# The first pass's highest ShapeWorld topsim belonged to its *only* live arm on
+# twelve distinct messages, and birds' 2e-5 arm reported `topsim_s1_static`
+# 0.791 on twenty-eight messages where sweep 3's best reported 0.829 on a
+# hundred and forty-three. A small code is easy to be topographic over.
+#
+# `epochs` and `repeats` are restated in every file: `scripts/job_utils.py` reads
+# both straight out of the file rather than out of the merged config. `[slurm]`
+# is read from the *first* config in the folder only, sorted by filename, so the
+# block below governs the whole array.
+#
+# ---
+#
+# **This arm: `SenderTransformerLM` at 2e-6 on ShapeWorld**, copying ablation rung 07.
+
+name = "lr_sweep_4_sender_transformer_lm"
+
+[sender]
+feature_model = "ShapeWorldViT"
+prototyper = "AttentionPrototyper"
+language_model = "SenderTransformerLM"
+
+[sender_language_model]
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+layers = 7
+bidirectional = false
+
+[optimiser.implementation_lr.sender_language_model]
+# The one key this sweep moves. Every other rate is DEFAULT.toml's,
+# including the ones earlier sweeps in this set have already settled.
+SenderTransformerLM = 2e-6
+
+[scheduler]
+epochs = 60
+
+[experiment]
+repeats = 1
+
+[slurm]
+# Sized for the heaviest job in the set and read from the first config by
+# filename only -- so this block governs the whole array and belongs here and
+# nowhere else. The ceiling has to clear the array's slowest member, which is a
+# 60-epoch ShapeWorld arm rather than a birds one: the first pass timed 7.1
+# min/epoch on ShapeWorld against 3.7 on birds, so 60 epochs is 7.1 h here and
+# 3.7 h there. The 24 h stands unchanged from when this was a 100-epoch birds
+# allowance at a guessed ~14 min/epoch; the guess was twice the measurement, and
+# what was a thin margin is now a threefold one.
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

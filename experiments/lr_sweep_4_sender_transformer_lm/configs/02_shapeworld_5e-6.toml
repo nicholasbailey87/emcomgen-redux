@@ -1,12 +1,12 @@
-# lr_sweep_4_sender_transformer_lm arm: `SenderTransformerLM` at 2e-5 on ShapeWorld.
+# lr_sweep_4_sender_transformer_lm arm: `SenderTransformerLM` at 5e-6 on ShapeWorld.
 #
-# See `01_shapeworld_1e-5.toml` for what this experiment measures and why.
+# See `01_shapeworld_2e-6.toml` for what this experiment measures and why.
 # This file differs from that one in the swept rate, and in carrying no
-# `[data]` block, since ShapeWorld is the default dataset.
+# `[slurm]` block, which is read from the first config by filename alone.
 #
 # ---
 #
-# **This arm: `SenderTransformerLM` at 2e-5 on ShapeWorld**, copying ablation rung 07.
+# **This arm: `SenderTransformerLM` at 5e-6 on ShapeWorld**, copying ablation rung 07.
 
 name = "lr_sweep_4_sender_transformer_lm"
 
@@ -25,10 +25,10 @@ bidirectional = false
 [optimiser.implementation_lr.sender_language_model]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-SenderTransformerLM = 2e-5
+SenderTransformerLM = 5e-6
 
 [scheduler]
-epochs = 30
+epochs = 60
 
 [experiment]
 repeats = 1

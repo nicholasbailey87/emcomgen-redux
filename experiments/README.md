@@ -47,27 +47,32 @@ must be updated with each result before the next is launched.
 | `lr_sweep_6_attention_discriminator` | 11 / 12 | `AttentionDiscriminator` | `implementation_lr.receiver_discriminator.AttentionDiscriminator` |
 | `lr_sweep_7_receiver_cross_attention_lm` | 13 / 14 | `ReceiverCrossAttentionLM` | `implementation_lr.receiver_language_model.ReceiverCrossAttentionLM` |
 
-**Sweep 3 has run once and is owed a re-run, and nothing above it is meaningful
-until it lands.** Its first pass measured an `AttentionPrototyper` that was two
-scoring directions and two biases; the class absorbed `ExampleContrast` on
-2026-09-16 and holds a transformer block now, 132,738 parameters on ShapeWorld
-and 967,171 on birds. A rate tuned for four vectors is not evidence about a
-block, so the old result is withdrawn rather than carried forward -- DEFAULT.toml
-still states 1e-4, which is `module_lr`'s fallback for the group anyway, so
-nothing about what runs depends on that line meanwhile.
+**Sweeps 1-3 have landed and sweep 4 is where the chain is.** Sweep 3 ran twice,
+because the module changed under it: its first pass measured an
+`AttentionPrototyper` that was two scoring directions and two biases, the class
+absorbed `ExampleContrast` on 2026-09-16 and holds a transformer block now, and
+a rate tuned for four vectors is not evidence about a block. The second pass
+landed 2e-5 in DEFAULT.toml at `40b67f5`, and that folder's preamble keeps the
+withdrawn first-pass numbers for the record.
 
 There were eight sweeps until then. `lr_sweep_4_sender_contrast` tuned
 `module_lr.sender_contrast`, which named a module group that no longer exists;
 the folder is deleted and the four above it came down by one, in step with the
 ladder.
 
-Ten arms each -- 1e-5, 2e-5, 5e-5, 1e-4 and 2e-4 on both datasets -- at 100
-epochs and one repeat. 100 is the ablation's own length, so an arm and the rung
-it copies differ in the swept rate and nothing else, the budget included; sweeps
-2-8 were briefly at 60 on 2026-09-10 and each folder's preamble records why they
-are not. Sweep 1 is the exception, in arm count and in grid: nine arms, over
-1e-5 to 1e-4 on ShapeWorld and 5e-6 to 1e-4 on birds, and it also settled the
-gradient estimator.
+Ten arms each -- 1e-5, 2e-5, 5e-5, 1e-4 and 2e-4 on both datasets -- at 30
+epochs and one repeat, restated in every config because `scripts/job_utils.py`
+reads both out of the file rather than out of the merged config. Two folders
+depart from that and each says why in its own preamble. Sweep 1 has eleven arms
+on an asymmetric grid, four over 1e-5 to 1e-4 on ShapeWorld and seven over 5e-6
+to 5e-4 on birds, and it also settled the gradient estimator. **Sweep 4 is on
+its second pass**, over
+2e-6 to 5e-5 at 60 epochs: its first pass found a cliff rather than a slope --
+every arm above it finishing on one message for the whole test set -- with the
+only live ShapeWorld arm sitting at the bottom of the grid, and with ignition on
+that arm arriving at epoch 21 of 30. The grid moved down a decade and the budget
+doubled to cover the delay. Neither change propagates to sweeps 5-7, which stay
+at 30 on the old grid until something about those rungs says otherwise.
 
 **ShapeWorld comes first in every sweep**, with no exceptions: `01`-`05` are
 the ShapeWorld arms and `06`-`10` the birds ones (`01`-`04` and `05`-`09` in
@@ -110,12 +115,20 @@ the table for the rates themselves. Every sweep in the set now moves an
 `implementation_lr` key; the one that moved a `module_lr` key was sweep 4, whose
 component had no choice of class, and it is gone.
 
-**Why 60 epochs.** On sweep 1's own traces the two leading ShapeWorld rates are
-*inverted* at epoch 40 and cross at 47, so a 40-epoch sweep returns the wrong
-answer; at 60 the winner leads by 0.032 on `train_acc_md_shape`. What 60 does
-not buy is the argmax within the winning region -- sweep 1 took 98 epochs to
-separate its top two birds arms, and then by 0.001. These sweeps pick a
-plateau.
+**What a long budget was for, and why 30 is usually enough anyway.** On sweep
+1's own traces the two leading ShapeWorld rates are *inverted* at epoch 40 and
+cross at 47, so a 40-epoch sweep returns the wrong answer; at 60 the winner
+leads by 0.032 on `train_acc_md_shape`. What 60 does not buy is the argmax
+within the winning region -- sweep 1 took 98 epochs to separate its top two
+birds arms, and then by 0.001. These sweeps pick a plateau.
+
+That argument was about shape, and shape stopped being the sweeps' job when
+`silhouette_p_receiver = 0.3` took the escape over on 2026-09-12; what is left
+for them to rank is colour learning, which settles by about epoch 10, and 30 is
+sized to that. **The exception is a rung where the protocol itself arrives
+late.** Sweep 4's live ShapeWorld arm was a constant speaker until epoch 21, so
+30 would have measured it for eight epochs and its grid extension not at all,
+and that folder runs at 60 for that reason and no other.
 
 ## The ablation ladder is two experiments
 

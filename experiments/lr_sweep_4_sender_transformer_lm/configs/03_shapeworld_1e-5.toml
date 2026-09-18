@@ -1,20 +1,17 @@
-# lr_sweep_4_sender_transformer_lm arm: `SenderTransformerLM` at 1e-5 on CUB.
+# lr_sweep_4_sender_transformer_lm arm: `SenderTransformerLM` at 1e-5 on ShapeWorld.
 #
-# See `01_shapeworld_1e-5.toml` for what this experiment measures and why.
-# This file differs from that one in the swept rate, in the dataset, and in
-# carrying a `[data]` block, since ShapeWorld is the default.
+# See `01_shapeworld_2e-6.toml` for what this experiment measures and why.
+# This file differs from that one in the swept rate, and in carrying no
+# `[slurm]` block, which is read from the first config by filename alone.
 #
 # ---
 #
-# **This arm: `SenderTransformerLM` at 1e-5 on CUB**, copying ablation rung 08.
+# **This arm: `SenderTransformerLM` at 1e-5 on ShapeWorld**, copying ablation rung 07.
 
 name = "lr_sweep_4_sender_transformer_lm"
 
-[data]
-dataset = "../data/cub"
-
 [sender]
-feature_model = "BirdsViT"
+feature_model = "ShapeWorldViT"
 prototyper = "AttentionPrototyper"
 language_model = "SenderTransformerLM"
 
@@ -31,7 +28,7 @@ bidirectional = false
 SenderTransformerLM = 1e-5
 
 [scheduler]
-epochs = 30
+epochs = 60
 
 [experiment]
 repeats = 1
