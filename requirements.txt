@@ -27,13 +27,28 @@
 #     may skip a reinstall when the installed version string still matches, so
 #     pass `--force-reinstall` for these two lines when you mean to move.
 #
-# As of 2026-09-18 `neovit` is identical to `main` in both repositories:
+# As of 2026-09-24 `neovit` is identical to `main` in both repositories:
 #
-#   broccoli-ml 30.3.0 = 00b93c8794e3846401cdfb9c8cc9e3048abae3f7
-#       (rollback: 30.1.0 = 33d6f21642f754f841a5adbc27ff331b191a4e90,
+#   broccoli-ml 30.4.0 = 669263d19acecf1018070e8dda980a6efc6ec2a0
+#       (rollback: 30.3.0 = 00b93c8794e3846401cdfb9c8cc9e3048abae3f7,
+#                  30.1.0 = 33d6f21642f754f841a5adbc27ff331b191a4e90,
 #                  27.1.1 = d50d2e8689659947cade11c06000c1bc70bc019b)
-#   gradboard   17.1.1 = 099de94ca31b787933a0811a1db7bc28534021d3
-#       (rollback: 17.0.0 = ae464db502c1bfcaee2181b040bfd41acf475359)
+#   gradboard   18.0.0 = 806a0bf2d56092dc279a2f465df478de80bdd2f4
+#       (rollback: 17.1.1 = 099de94ca31b787933a0811a1db7bc28534021d3,
+#                  17.0.0 = ae464db502c1bfcaee2181b040bfd41acf475359)
+#
+# 2026-09-24: gradboard 18.0.0 (806a0bf) removed `get_optimiser`'s `d_model`
+# argument along with the fan-in correction it fed, and this broke the cluster
+# silently until the first job ran: the int `builder.py` still passed second
+# fell into the `optimiser=AdamW` slot and died as "'int' object is not
+# callable". `builder.py` no longer passes it. This one is not inert -- every
+# decayed matrix now takes a coefficient of 1.0, so the feed-forward down
+# projections (fan-in wider than d_model) are decayed less than under 17.x, and
+# runs either side of the boundary are not strictly comparable. broccoli 30.4.0
+# (669263d) only adds opt-in `NormedSwiGLU`/`NormedGELU`; defaults and state
+# dict keys are unchanged.
+#
+# The notes below describe the 2026-09-18 move:
 #
 # Arriving at those commits from the SHAs this file pinned until today is not
 # inert, in two ways that are worth knowing before a run is resumed:

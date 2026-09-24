@@ -776,7 +776,6 @@ def build_models(dataloaders, config):
     #     output rather than being absorbed.
     optimiser = get_optimiser(
         pair,
-        config['sender_language_model']['d_model'],
         lr=config['optimiser']['lr'],
         weight_decay=config['optimiser']['weight_decay'],
         eps=config['optimiser']['eps'],
