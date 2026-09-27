@@ -1,19 +1,17 @@
-# lr_sweep_7_receiver_cross_attention_lm arm: `ReceiverCrossAttentionLM` at 2e-4 on CUB.
+# lr_sweep_7_receiver_cross_attention_lm arm: `ReceiverCrossAttentionLM` at 1e-5 on ShapeWorld.
 #
-# See `01_shapeworld_1e-5.toml` for what this experiment measures and why.
-# This file differs from that one in the swept rate.
+# See `01_shapeworld_2e-6.toml` for what this experiment measures and why.
+# This file differs from that one in the swept rate, and in carrying no
+# `[data]` block, since ShapeWorld is the default dataset.
 #
 # ---
 #
-# **This arm: `ReceiverCrossAttentionLM` at 2e-4 on CUB**, copying ablation rung 14.
+# **This arm: `ReceiverCrossAttentionLM` at 1e-5 on ShapeWorld**, copying ablation rung 13.
 
 name = "lr_sweep_7_receiver_cross_attention_lm"
 
-[data]
-dataset = "../data/cub"
-
 [sender]
-feature_model = "BirdsViT"
+feature_model = "ShapeWorldViT"
 prototyper = "AttentionPrototyper"
 language_model = "SenderTransformerLM"
 
@@ -25,7 +23,7 @@ layers = 7
 bidirectional = false
 
 [receiver]
-feature_model = "BirdsViT"
+feature_model = "ShapeWorldViT"
 language_model = "ReceiverCrossAttentionLM"
 discriminator = "AttentionDiscriminator"
 
@@ -46,10 +44,10 @@ bidirectional = true
 [optimiser.implementation_lr.receiver_language_model]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-ReceiverCrossAttentionLM = 2e-4
+ReceiverCrossAttentionLM = 1e-5
 
 [scheduler]
-epochs = 30
+epochs = 60
 
 [experiment]
 repeats = 1

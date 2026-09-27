@@ -1357,10 +1357,16 @@ ShapeWorld's parameter count was unchanged by the grid at 876,599, because at
 dropped its initial BatchNorm. CUB's moves to **10,626,990**, or 0.95× `ResNet18`,
 since a 14px patch is 588 values where a 20px one was 1,200.
 
+**Both moved again on 2026-09-27**, to 874,417 and 10,612,078: every ViT
+feedforward went bias-free and every ViT gained four register tokens. The
+reason is ShapeWorld's all-black background — with biases, each zero patch
+embeds to one shared learned constant, and ~240 copies of it outbid the image in
+every head. See `vision.BIAS_FREE_LINEAR`.
+
 **The two datasets no longer run the same ViT.** `[sender_feature_model]` is
-ShapeWorld's — 128 wide, 6 layers, 4 heads, `ff_inner_size` 256, GELU, 876,593
+ShapeWorld's — 128 wide, 6 layers, 4 heads, `ff_inner_size` 256, GELU, 874,417
 parameters — and `[birds.sender_feature_model]` pins CUB's, which is the 320 /
-10 / 5 / 576 SwiGLU stack both used to share, at 10,626,990. Each is matched to
+10 / 5 / 576 SwiGLU stack both used to share, at 10,612,078. Each is matched to
 its own baseline backbone rather than to the other dataset's: `ResNet56` at
 852,368 on ShapeWorld and `ResNet18` at 11,176,512 on CUB. See
 [the CIFAR ResNet](#resnet56-the-cifar-resnet) below for why the ShapeWorld

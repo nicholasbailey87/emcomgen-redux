@@ -1779,7 +1779,9 @@ ff_outer_dropout = 0.0
 # since 2026-09-10, because `ShapeWorldViT` passes `initial_batch_norm=False`
 # and that layer's weight and bias are six of them; the sizing argument below
 # is about the transformer body and is unmoved by it. See
-# `vision.ShapeWorldViT`. That is the whole point of
+# `vision.ShapeWorldViT`. **874,417 since 2026-09-27**, 1.03x still: the
+# feedforwards went bias-free (-2,688) and four registers came in (+512); see
+# `vision.BIAS_FREE_LINEAR` and `utility_tokens` below. That is the whole point of
 # the number: a ViT rung against a CNN rung is a comparison of architectures
 # only if the two are the same size, and until this change the ShapeWorld pair
 # was 0.11M of `Conv4` against 10.3M of ViT2, then 11.2M of
@@ -1795,7 +1797,14 @@ ff_outer_dropout = 0.0
 d_model = 128 # Only applies to Transformer vision models
 layers = 6 # Only applies to Transformer vision models
 heads = 4 # head_dim 32, broccoli's axial-RoPE floor. Transformer models only
-utility_tokens = 0 # Only applies to Transformer vision models
+# Four register tokens since 2026-09-27, on every ViT on both datasets (the
+# birds overlays do not restate this key). Paired with the ViT's bias-free
+# feedforwards: once an all-black ShapeWorld patch stays exactly zero, a head
+# with nothing useful to read needs somewhere to put its softmax mass other
+# than the image, and a register is a harmless one (Darcet et al. 2023). Not
+# returned: `return_bos_tokens` stays false, so the pool never sees them. See
+# `vision.BIAS_FREE_LINEAR`.
+utility_tokens = 4 # Only applies to Transformer vision models
 # Architecture settings that used to be hardcoded in the model classes, and so
 # were neither recorded in a run's `args.json` nor sweepable. Every value here
 # is the one that was previously hardcoded, so promoting them changed nothing.
@@ -2312,7 +2321,7 @@ dropout = 0.1
 d_model = 128 # Only applies to Transformer vision models
 layers = 6 # Only applies to Transformer vision models
 heads = 4 # head_dim 32. Only applies to Transformer vision models
-utility_tokens = 0 # Only applies to Transformer vision models
+utility_tokens = 4 # Registers; see [sender_feature_model]. Transformer vision models only
 # See [sender_feature_model] for what these are and why they are here.
 ff_inner_size = 256 # Only applies to Transformer vision models
 # Off; see [sender_language_model].
@@ -2790,6 +2799,10 @@ feature_model = "ResNet18"
 # direction that understates the ViT rather than flattering it. See
 # `models/backbone/vision.ViT2` for why the grid became the fixed quantity;
 # the reason is ShapeWorld's and CUB pays for it here.
+#
+# **10,612,078 since 2026-09-27**, still 0.95x: bias-free feedforwards
+# (-16,192) and four registers (+1,280), both set outside this block. See
+# `vision.BIAS_FREE_LINEAR`.
 #
 # Without this block the ShapeWorld narrowing would have dragged the birds ViT
 # rungs down to 128 wide as well, matching them to a backbone the birds arm does

@@ -1,5 +1,6 @@
 # This code is modified from https://github.com/facebookresearch/low-shot-shrink-hallucinate
 
+import functools
 import torch
 import torch.nn as nn
 import math
@@ -15,6 +16,31 @@ from ..model_util import get_activation, resolve_residual_scaling
 #     so every dataset runs the same sequence length. See `ViT2.__init__` for
 #     why the grid is the fixed quantity and the patch size the derived one.
 PATCH_GRID = 16
+
+# The ViT's feedforward linears, bias-free since 2026-09-27. Attention was
+#     already bias-free inside broccoli; these were the last biases in the
+#     transformer body.
+#
+# Why. ShapeWorld arrives unnormalised with ~94% of every image at exactly 0.0,
+#     so most patches tokenise to the zero vector. With biases, the embedding
+#     feedforward turns every one of those into the same learned constant, and
+#     ~240 copies of one key outbid the content tokens in every head by about
+#     log 240 while handing back a value that says nothing about the image.
+#     `lr_sweep_4_sender_transformer_lm` measured the consequence:
+#     `train_referent_spread_backbone` at 0.014 for twenty epochs on ShapeWorld
+#     against 0.59 on birds. Without biases a zero patch stays exactly zero into
+#     the first block, where it scores 0 against every query and returns a zero
+#     value, so `out_norm` rescales it out of the content tokens' reading.
+#
+# Not a complete fix. Past block 1 the background tokens are ~240 identical
+#     copies of the image's mean again, and a mean keeps colour and loses shape.
+#     Dropping all-zero patches from the sequence is the version that removes
+#     the vote entirely.
+#
+# `functools.partial` rather than a wrapper that swallows `bias`: broccoli calls
+#     these positionally as `(in, out)` and never passes `bias`, so the two
+#     only differ for a caller who asks for a bias explicitly.
+BIAS_FREE_LINEAR = functools.partial(nn.Linear, bias=False)
 
 
 class ViT2(nn.Module):
@@ -129,8 +155,12 @@ class ViT2(nn.Module):
             transformer_initial_ff_dropout=None,
             transformer_initial_ff_inner_dropout=None,
             transformer_initial_ff_outer_dropout=None,
-            transformer_ff_linear_module_up=None,
-            transformer_ff_linear_module_down=None,
+            # Bias-free, and the two `transformer_initial_ff_*` modules above
+            #     fall back to these, so every feedforward in the stack --
+            #     patch embedding included -- runs without biases. See
+            #     `BIAS_FREE_LINEAR`.
+            transformer_ff_linear_module_up=BIAS_FREE_LINEAR,
+            transformer_ff_linear_module_down=BIAS_FREE_LINEAR,
             transformer_pre_norm=kwargs["pre_norm"],
             transformer_post_norm=kwargs["post_norm"],
             # Pinned False, and no longer a config option; every stack here
@@ -192,15 +222,17 @@ class ViT2(nn.Module):
 def ShapeWorldViT(*args, **kwargs):
     """
     `ViT2` under ShapeWorld's name, with no initial BatchNorm: 128 wide, 6
-        layers, 4 heads, feedforward inner 256, GELU -- 876,593 parameters
-        against `ResNet56`'s 852,368.
+        layers, 4 heads, feedforward inner 256, GELU -- 874,417 parameters
+        against `ResNet56`'s 852,368, since the feedforwards went bias-free and
+        four registers came in on 2026-09-27 (876,593 before; see
+        `BIAS_FREE_LINEAR`).
 
     The size is not here. It is in `[sender_feature_model]` and
         `[receiver_feature_model]`, which is where every backbone's
         hyperparameters live. What *is* here is `initial_batch_norm=False`,
         which is the one thing this factory does beyond naming the class --
         so it is not a pure alias the way `ResNet56` and `ResNet18` are over
-        `ResNet`, and the 6 parameters between 876,593 and 876,599 are that
+        `ResNet`, and the 6 parameters between 876,593 and 876,599 were that
         layer's weight and bias.
 
     **Why it is off here and on for birds.** `ViT2` opened with an
@@ -248,7 +280,8 @@ def ShapeWorldViT(*args, **kwargs):
 def BirdsViT(*args, **kwargs):
     """
     `ViT2` under CUB's name: 320 wide, 10 layers, 5 heads at head_dim 64,
-        feedforward inner 576, SwiGLU -- 10,626,990 parameters against
+        feedforward inner 576, SwiGLU -- 10,612,078 parameters (10,626,990 before
+        2026-09-27's bias-free feedforwards and registers) against
         `ResNet18`'s 11,176,512.
 
     Sized by `[birds.sender_feature_model]` and

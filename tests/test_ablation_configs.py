@@ -354,8 +354,8 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # ShapeWorld: the top of the ladder. The speaker's language model is the
         # causal arm at seven blocks -- see rung 9's `layers` for why seven, and
         # for the two depths before it.
-        ("13_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 876_593),
-        ("13_shapeworld_receiver_cross_attention_lm.toml", "receiver.feature_model", 876_593),
+        ("13_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 874_417),
+        ("13_shapeworld_receiver_cross_attention_lm.toml", "receiver.feature_model", 874_417),
         ("13_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 6_758_354),
         ("13_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
         ("13_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_196),
@@ -392,7 +392,15 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # layer's weight and bias -- it is the only BatchNorm in the stack, so
         # this count is also the assertion that it is gone. `BirdsViT` keeps it
         # and is unchanged. See `vision.ShapeWorldViT` for why.
-        ("14_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 10_626_990),
+        #
+        # **874,417 and 10,612,078 since 2026-09-27**, on both datasets at
+        # once: every ViT feedforward went bias-free (`vision.BIAS_FREE_LINEAR`)
+        # and every ViT gained four register tokens (`utility_tokens = 4`).
+        # ShapeWorld loses 256 + 128 = 384 biases in each of seven feedforwards
+        # -- the patch embedding and six blocks -- and gains 4 * 128 registers,
+        # for -2,176. CUB loses 1,152 + 320 = 1,472 in each of eleven, SwiGLU's
+        # `linear_in` being double width, and gains 4 * 320, for -14,912.
+        ("14_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 10_612_078),
         ("14_birds_receiver_cross_attention_lm.toml", "sender.language_model", 6_764_120),
         ("14_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
         ("14_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_196),
@@ -446,8 +454,8 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         ("12_birds_attention_discriminator.toml", "receiver.interfaces", 344_320),
         # The two intermediate vision swaps, so a rung that stopped inheriting
         # the shared ViT specification shows up here rather than in a run.
-        ("03_shapeworld_sender_vit.toml", "sender.feat_model", 876_593),
-        ("04_birds_sender_vit.toml", "sender.feat_model", 10_626_990),
+        ("03_shapeworld_sender_vit.toml", "sender.feat_model", 874_417),
+        ("04_birds_sender_vit.toml", "sender.feat_model", 10_612_078),
         # And the prototyper, where rung 3's is nothing at all. One transformer
         # block, two `SequencePool`s and the label tag, at the width this
         # module now declares for itself -- the sender ViT's, per dataset. The
@@ -484,8 +492,10 @@ def test_the_shapeworld_backbones_are_matched():
     Both numbers are stated in DEFAULT.toml as the reason for the sizes chosen
     there, so both are pinned here: 852,368 for the CNN, which is `6n + 2` at
     n = 9 and is within 1% of the 0.85M the architecture is known by, and
-    876,593 for the ViT, which is what 128 / 6 / 4 / 256 with GELU comes to less
-    the six parameters of the initial BatchNorm `ShapeWorldViT` no longer builds.
+    874,417 for the ViT, which is what 128 / 6 / 4 / 256 with GELU comes to less
+    the six parameters of the initial BatchNorm `ShapeWorldViT` no longer builds,
+    less its feedforward biases and plus four register tokens (2026-09-27; see
+    the table above).
     The ratio is the point -- a ViT rung against a CNN rung measures architecture
     only if the two are the same size -- and 3% is the band the feedforward
     width can be tuned to at this depth.
@@ -501,7 +511,7 @@ def test_the_shapeworld_backbones_are_matched():
 
     assert cnn == 852_368
     assert abs(cnn - 850_000) / 850_000 < 0.01, f"{cnn:,} is not 0.85M"
-    assert vit == 876_593
+    assert vit == 874_417
 
     assert abs(vit / cnn - 1.0) < 0.03, f"{vit / cnn:.3f}x"
 

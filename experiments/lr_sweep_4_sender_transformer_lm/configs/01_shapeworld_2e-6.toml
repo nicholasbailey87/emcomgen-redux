@@ -123,6 +123,33 @@
 # *and* the budget, and a rung's trace is not a control for an arm's. This
 # sweep's arms now do not match the other sweeps' either.
 #
+# **Except sweep 7, from 2026-09-27**, which now runs this grid at this length
+# so the two transformer-LM sweeps read side by side. Sweeps 5 and 6 stay at 30.
+#
+# ## The second pass ran on a different ViT
+#
+# **The 2e-6 and 5e-6 arms (2026-09-25, at `005b4c9`) located the flat start in
+# the backbone, not in this module.** On the live 1e-5 ShapeWorld arm,
+# `train_referent_spread_backbone` sat at 0.014-0.025 for twenty epochs against
+# birds' 0.59 from epoch 0, and ignition was that number moving: 0.11 -> 0.82
+# between epochs 20 and 22, in the same two epochs `logit_prior_share` went
+# 0.99 -> 0.61. The 1e-4 arm's spread only crept 0.020 -> 0.030 and its share
+# never left 0.999. So the speaker was image-blind because the images it was
+# handed were nearly identical, and this module's rate mattered through the
+# gradient it sent back into the ViT.
+#
+# The suspect is ShapeWorld's black background meeting the ViT's biases. ~94% of
+# each image is exactly 0.0, so most patches tokenise to zero, and the
+# embedding feedforward's biases turn every one into the same learned constant.
+# ~240 copies of one key outbid the content in every head. From 2026-09-27 every
+# ViT feedforward is bias-free and every ViT carries four register tokens -- see
+# `vision.BIAS_FREE_LINEAR` and `[sender_feature_model] utility_tokens` -- so a
+# rerun of this folder is a rerun on a different backbone, and its arms are not
+# comparable with either earlier pass. What to watch first on a rerun is whether
+# `train_referent_spread_backbone` opens early on ShapeWorld, and whether
+# ignition then arrives colour-led, with `train_acc_md_shape` rising after
+# `train_acc_md_color` flattens.
+#
 # **One repeat, for the same reason as everywhere else in the set.** n = 1
 # across seven serial sweeps is the budget. Between-arm gaps here are the size
 # of within-arm epoch-to-epoch wobble -- birds' top three spanned 0.006 on the
