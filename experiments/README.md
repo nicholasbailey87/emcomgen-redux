@@ -42,11 +42,11 @@ must be updated with each result before the next is launched.
 | `lr_sweep_1_cnn` | 1 / 2 | `ResNet56`, `ResNet18` | `implementation_lr.{sender,receiver}_vision` |
 | `lr_sweep_2_sender_vit` | 3 / 4 | the speaker's ViT | `implementation_lr.sender_vision.{ShapeWorldViT,BirdsViT}` |
 | `lr_sweep_3_attention_prototyper` | 5 / 6 | `AttentionPrototyper` | `implementation_lr.sender_prototyper.AttentionPrototyper` |
-| `lr_sweep_4_sender_transformer_autoregressive_lm` | 7 / 8 | `SenderTransformerAutoregressiveLM` | `implementation_lr.sender_language_model.SenderTransformerAutoregressiveLM` |
+| `lr_sweep_4_sender_transformer_autoregressive_lm` | 8 | `SenderTransformerAutoregressiveLM` | `implementation_lr.sender_language_model.SenderTransformerAutoregressiveLM` |
 | `lr_sweep_5_receiver_vit` | 9 / 10 | the listener's ViT | `implementation_lr.receiver_vision.{ShapeWorldViT,BirdsViT}` |
 | `lr_sweep_6_attention_discriminator` | 11 / 12 | `AttentionDiscriminator` | `implementation_lr.receiver_discriminator.AttentionDiscriminator` |
-| `lr_sweep_7_receiver_cross_attention_lm` | 13 / 14 | `ReceiverCrossAttentionLM` | `implementation_lr.receiver_language_model.ReceiverCrossAttentionLM` |
-| `lr_sweep_8_sender_transformer_bidirectional_lm` | 15 / 16 | `SenderTransformerBidirectionalLM` | `implementation_lr.sender_language_model.SenderTransformerBidirectionalLM` |
+| `lr_sweep_7_receiver_cross_attention_lm` | 14 | `ReceiverCrossAttentionLM` | `implementation_lr.receiver_language_model.ReceiverCrossAttentionLM` |
+| `lr_sweep_8_sender_transformer_bidirectional_lm` | 16 | `SenderTransformerBidirectionalLM` | `implementation_lr.sender_language_model.SenderTransformerBidirectionalLM` |
 
 **Sweeps 1-3 have landed and sweep 4 is where the chain is.** Sweep 3 ran twice,
 because the module changed under it: its first pass measured an
@@ -62,7 +62,18 @@ the folder is deleted and the four above it came down by one, in step with the
 ladder. The chain is eight again since 2026-09-27, when sweep 8 was appended for
 rungs 15 and 16; it is a new folder and not that one.
 
-Ten arms each at 30 epochs and one repeat, restated in every config because
+**The language-model sweeps -- 4, 7 and 8 -- run on birds only**, from
+2026-09-27. On ShapeWorld a run sits in the colour-only minimum until the
+uniform mixture happens to roll it out, so when a ShapeWorld arm learns shape
+says more about that roll than about the rate; birds has no such stall and has
+been the readable half of every sweep. The language models are the same size on
+both datasets to within 0.1%, and a class carries one rate everywhere, so the
+birds rate is used on the ShapeWorld rung too. Sweep 4's ShapeWorld arms ran
+before the change and are the check that this transfers; if they disagree with
+its birds arms, 7 and 8 get their ShapeWorld arms back. These three folders hold
+five birds arms, `01`-`05`.
+
+Ten arms each, or five for those three, at 30 epochs and one repeat, restated in every config because
 `scripts/job_utils.py` reads both out of the file rather than out of the merged
 config. Sweeps 2, 3, 5 and 6 run 1e-5, 2e-5, 5e-5, 1e-4 and 2e-4 on both
 datasets. Sweep 1 has eleven arms on an asymmetric grid, four over 1e-5 to 1e-4
@@ -77,7 +88,7 @@ epoch 1. Sweep 7 took the same grid so the two can be read side by side, and
 sweep 8, the other arm of sweep 4's class, takes it for the same reason. Each
 folder's preamble says why it departs from the standard grid.
 
-**ShapeWorld comes first in every sweep**, with no exceptions: `01`-`05` are
+**ShapeWorld comes first in every sweep that runs it**: `01`-`05` are
 the ShapeWorld arms and `06`-`10` the birds ones (`01`-`04` and `05`-`09` in
 sweep 1). That matches the ablation's own numbering, where the ShapeWorld rung
 of each pair is the odd one and the birds rung the even one, so a sweep runs

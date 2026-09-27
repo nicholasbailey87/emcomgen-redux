@@ -1,11 +1,21 @@
 # lr_sweep_7_receiver_cross_attention_lm: what learning rate `ReceiverCrossAttentionLM` wants, in
 # the presence of everything below it on the ladder.
 #
-# Ten arms. `[optimiser.implementation_lr.receiver_language_model] ReceiverCrossAttentionLM` moves over 2e-6,
-# 5e-6, 1e-5, 2e-5 and 5e-5 on both datasets -- `01`-`05` are the five
-# ShapeWorld arms, copying ablation rung 13, and `06`-`10` the five birds
-# arms, copying rung 14. Nothing else differs between the arms, and nothing
+# Five arms. `[optimiser.implementation_lr.receiver_language_model] ReceiverCrossAttentionLM` moves over 2e-6,
+# 5e-6, 1e-5, 2e-5 and 5e-5 on birds -- `01`-`05`, copying ablation rung 14. Nothing else differs between the arms, and nothing
 # else differs from the rung each one copies.
+#
+# **Birds only, from 2026-09-27.** This sweep tunes a language model, and on
+# ShapeWorld a language-model rate is read through a confound birds does not
+# have: a ShapeWorld run sits in the colour-only minimum for a stretch and then
+# escapes only when the uniform mixture happens to roll it out, so when an arm
+# learns shape says more about that roll than about the rate. Birds has no such
+# stall, and its arms have been the readable half of every sweep. The class and
+# its rate are shared across datasets, and the language model is the same size
+# on both to within 0.1%, so the birds rate is carried to the ShapeWorld rung.
+# Whether a birds rate survives on ShapeWorld is checked first on sweep 4,
+# which ran both datasets before this change. If sweep 4's two datasets
+# disagree, this sweep needs its ShapeWorld arms back.
 #
 # **Sweep 7 of eight.** `lr_sweep_1_cnn` did the two CNN backbones and is
 # where the reasoning for the whole set is written down. The short version:
@@ -133,9 +143,7 @@
 # it is too low, and both are visible per-module because the clip groups and the
 # rate groups are the same table. Then `train_eval_mode_acc` against
 # `train_shuffled_message_acc`, whose gap is the message and nothing else and is
-# the honest measure of whether a protocol exists at all. On the ShapeWorld arms
-# `train_acc_md_shape` against `train_acc_md_color` is the standing question and
-# is what decided `lr_sweep_1_cnn`.
+# the honest measure of whether a protocol exists at all.
 #
 # `epochs` and `repeats` are restated in every file: `scripts/job_utils.py` reads
 # both straight out of the file rather than out of the merged config. `[slurm]`
@@ -144,12 +152,15 @@
 #
 # ---
 #
-# **This arm: `ReceiverCrossAttentionLM` at 2e-6 on ShapeWorld**, copying ablation rung 13.
+# **This arm: `ReceiverCrossAttentionLM` at 2e-6 on CUB**, copying ablation rung 14.
 
 name = "lr_sweep_7_receiver_cross_attention_lm"
 
+[data]
+dataset = "../data/cub"
+
 [sender]
-feature_model = "ShapeWorldViT"
+feature_model = "BirdsViT"
 prototyper = "AttentionPrototyper"
 language_model = "SenderTransformerAutoregressiveLM"
 
@@ -160,7 +171,7 @@ heads = 5    # head_dim 64, as everywhere
 layers = 7
 
 [receiver]
-feature_model = "ShapeWorldViT"
+feature_model = "BirdsViT"
 language_model = "ReceiverCrossAttentionLM"
 discriminator = "AttentionDiscriminator"
 
@@ -190,15 +201,13 @@ epochs = 30
 repeats = 1
 
 [slurm]
-# At 30 epochs the 24 h allows 48 min/epoch. Sweep 4 timed 7.1
-# min/epoch on ShapeWorld with a `ResNet56` listener; this rung swaps that for a
-# ViT listener and has not been timed, so the margin is an estimate.
+# At 30 epochs the 24 h allows 48 min/epoch. Sweep 4 timed 3.7 min/epoch on
+# birds with a `ResNet18` listener; this rung swaps that for a ViT listener and
+# has not been timed, so the margin is an estimate.
 #
 # Sized for the heaviest job in the set, a 100-epoch birds arm on a ViT trunk,
 # and read from the first config by filename only -- so this block governs the
-# whole array and belongs here and nowhere else. It sits in a ShapeWorld file
-# and is sized for a birds one, because the array is one submission and the
-# ceiling has to clear its slowest member. Unchanged when the arms went from 60
+# whole array and belongs here and nowhere else. Unchanged when the arms went from 60
 # epochs to 100: it is the allowance `ablation_birds` carries for a 100-epoch
 # birds ViT run, which is the job these arms copy. That leaves ~14 min/epoch
 # against the ~3.4 min/epoch `lr_sweep_1_cnn` measured on the CNN trunks; a ViT

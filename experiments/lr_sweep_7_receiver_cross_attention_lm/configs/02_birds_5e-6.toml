@@ -1,17 +1,19 @@
-# lr_sweep_7_receiver_cross_attention_lm arm: `ReceiverCrossAttentionLM` at 5e-6 on ShapeWorld.
+# lr_sweep_7_receiver_cross_attention_lm arm: `ReceiverCrossAttentionLM` at 5e-6 on CUB.
 #
-# See `01_shapeworld_2e-6.toml` for what this experiment measures and why.
-# This file differs from that one in the swept rate, and in carrying no
-# `[data]` block, since ShapeWorld is the default dataset.
+# See `01_birds_2e-6.toml` for what this experiment measures and why.
+# This file differs from that one in the swept rate alone.
 #
 # ---
 #
-# **This arm: `ReceiverCrossAttentionLM` at 5e-6 on ShapeWorld**, copying ablation rung 13.
+# **This arm: `ReceiverCrossAttentionLM` at 5e-6 on CUB**, copying ablation rung 14.
 
 name = "lr_sweep_7_receiver_cross_attention_lm"
 
+[data]
+dataset = "../data/cub"
+
 [sender]
-feature_model = "ShapeWorldViT"
+feature_model = "BirdsViT"
 prototyper = "AttentionPrototyper"
 language_model = "SenderTransformerAutoregressiveLM"
 
@@ -22,7 +24,7 @@ heads = 5    # head_dim 64, as everywhere
 layers = 7
 
 [receiver]
-feature_model = "ShapeWorldViT"
+feature_model = "BirdsViT"
 language_model = "ReceiverCrossAttentionLM"
 discriminator = "AttentionDiscriminator"
 

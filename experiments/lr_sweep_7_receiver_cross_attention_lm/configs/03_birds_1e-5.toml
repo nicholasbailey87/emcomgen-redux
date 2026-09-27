@@ -1,7 +1,7 @@
 # lr_sweep_7_receiver_cross_attention_lm arm: `ReceiverCrossAttentionLM` at 1e-5 on CUB.
 #
-# See `01_shapeworld_2e-6.toml` for what this experiment measures and why.
-# This file differs from that one in the swept rate.
+# See `01_birds_2e-6.toml` for what this experiment measures and why.
+# This file differs from that one in the swept rate alone.
 #
 # ---
 #

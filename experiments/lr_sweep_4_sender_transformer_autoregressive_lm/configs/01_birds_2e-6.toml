@@ -2,12 +2,28 @@
 # `SenderTransformerAutoregressiveLM` wants, in the presence of everything below
 # it on the ladder.
 #
-# Ten arms. `[optimiser.implementation_lr.sender_language_model]
+# Five arms. `[optimiser.implementation_lr.sender_language_model]
 # SenderTransformerAutoregressiveLM` moves over 2e-6, 5e-6, 1e-5, 2e-5 and 5e-5
-# on both datasets -- `01`-`05` are the five ShapeWorld arms, copying ablation
-# rung 07, and `06`-`10` the five birds arms, copying rung 08. Nothing else
+# on birds -- `01`-`05`, copying ablation rung 8. Nothing else
 # differs between the arms, and nothing else differs from the rung each one
 # copies.
+#
+# **Birds only, from 2026-09-27.** This sweep tunes a language model, and on
+# ShapeWorld a language-model rate is read through a confound birds does not
+# have: a ShapeWorld run sits in the colour-only minimum for a stretch and then
+# escapes only when the uniform mixture happens to roll it out, so when an arm
+# learns shape says more about that roll than about the rate. Birds has no such
+# stall, and its arms have been the readable half of every sweep. The class and
+# its rate are shared across datasets, and the language model is the same size
+# on both to within 0.1%, so the birds rate is carried to the ShapeWorld rung.
+# Whether it survives there is checked against this sweep's own ShapeWorld
+# arms, which ran before this change and are the one place a ShapeWorld
+# language-model rate has been measured. If the two datasets disagree, sweeps 7
+# and 8 need their ShapeWorld arms back.
+#
+# The ShapeWorld arms, `01`-`05` before this change, ran under the folder's
+# old name, `lr_sweep_4_sender_transformer_lm`, and the preamble below still
+# discusses them; the birds arms were `06`-`10` there and are `01`-`05` here.
 #
 # **Renamed on 2026-09-27**, from `lr_sweep_4_sender_transformer_lm`, when
 # `SenderTransformerLM` was split into an autoregressive and a bidirectional
@@ -187,9 +203,7 @@
 # exists at all. `train_clip_sender_language_model` in both directions -- a
 # spike says the rate is too high and a decay toward AdamW's `eps` floor says it
 # is too low, and both are visible per-module because the clip groups and the
-# rate groups are the same table. On the ShapeWorld arms `train_acc_md_shape`
-# against `train_acc_md_color` is the standing question and is what decided
-# `lr_sweep_1_cnn`, subject to the paragraph above.
+# rate groups are the same table.
 #
 # Read `test_topsim_*` against `test_unique_message_count` and never on its own.
 # The first pass's highest ShapeWorld topsim belonged to its *only* live arm on
@@ -204,12 +218,15 @@
 #
 # ---
 #
-# **This arm: `SenderTransformerAutoregressiveLM` at 2e-6 on ShapeWorld**, copying ablation rung 07.
+# **This arm: `SenderTransformerAutoregressiveLM` at 2e-6 on CUB**, copying ablation rung 08.
 
 name = "lr_sweep_4_sender_transformer_autoregressive_lm"
 
+[data]
+dataset = "../data/cub"
+
 [sender]
-feature_model = "ShapeWorldViT"
+feature_model = "BirdsViT"
 prototyper = "AttentionPrototyper"
 language_model = "SenderTransformerAutoregressiveLM"
 
@@ -233,13 +250,11 @@ repeats = 1
 [slurm]
 # Sized for the heaviest job in the set and read from the first config by
 # filename only -- so this block governs the whole array and belongs here and
-# nowhere else. The ceiling has to clear the array's slowest member, which is a
-# ShapeWorld arm rather than a birds one (sized when these were 60 epochs; at 30
-# it has six times the margin): the first pass timed 7.1
-# min/epoch on ShapeWorld against 3.7 on birds, so 60 epochs is 7.1 h here and
-# 3.7 h there. The 24 h stands unchanged from when this was a 100-epoch birds
-# allowance at a guessed ~14 min/epoch; the guess was twice the measurement, and
-# what was a thin margin is now a threefold one.
+# nowhere else. The first pass timed 3.7 min/epoch on birds, so 30 epochs is
+# under 2 h against the 24 h here. The ceiling was set for the ShapeWorld arms
+# this array no longer holds, which ran at 7.1 min/epoch, and before that for a
+# 100-epoch birds allowance; it is kept rather than trimmed, because an
+# over-long ceiling costs only queue priority.
 time = "24:00:00"
 cpus_per_task = 6
 gpus_per_task = 1

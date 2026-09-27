@@ -1,16 +1,19 @@
-# lr_sweep_8_sender_transformer_bidirectional_lm arm: `SenderTransformerBidirectionalLM` at 5e-6 on ShapeWorld.
+# lr_sweep_8_sender_transformer_bidirectional_lm arm: `SenderTransformerBidirectionalLM` at 1e-5 on CUB.
 #
-# See `01_shapeworld_2e-6.toml` for what this experiment measures and why.
-# This file differs from that one in the swept rate.
+# See `01_birds_2e-6.toml` for what this experiment measures and why.
+# This file differs from that one in the swept rate alone.
 #
 # ---
 #
-# **This arm: `SenderTransformerBidirectionalLM` at 5e-6 on ShapeWorld**, copying ablation rung 15.
+# **This arm: `SenderTransformerBidirectionalLM` at 1e-5 on CUB**, copying ablation rung 16.
 
 name = "lr_sweep_8_sender_transformer_bidirectional_lm"
 
+[data]
+dataset = "../data/cub"
+
 [sender]
-feature_model = "ShapeWorldViT"
+feature_model = "BirdsViT"
 prototyper = "AttentionPrototyper"
 language_model = "SenderTransformerBidirectionalLM"
 
@@ -21,7 +24,7 @@ heads = 5    # head_dim 64, as everywhere
 layers = 7
 
 [receiver]
-feature_model = "ShapeWorldViT"
+feature_model = "BirdsViT"
 language_model = "ReceiverCrossAttentionLM"
 discriminator = "AttentionDiscriminator"
 
@@ -42,7 +45,7 @@ bidirectional = true
 [optimiser.implementation_lr.sender_language_model]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-SenderTransformerBidirectionalLM = 5e-6
+SenderTransformerBidirectionalLM = 1e-5
 
 [scheduler]
 epochs = 30
