@@ -92,6 +92,12 @@
 #
 # ## 60 epochs, one repeat, and why this sweep alone
 #
+# **Back to 30 from 2026-09-27.** The argument below was about a flat start of
+# twenty-plus epochs, and the bias-free ViT removed it: the first run on
+# `f626a07` beat chance on `test_acc` at epoch 1 and began learning shape by
+# epoch 6. Thirty now covers ignition with most of the run left to measure.
+# What follows is kept as the record of why this sweep was briefly 60.
+#
 # **The budget was 25 and then 30 on the argument that these sweeps rank colour
 # learning and colour is settled by about epoch 10. That argument is false on
 # this rung.** The one live ShapeWorld arm sat at chance for twenty-one epochs
@@ -211,7 +217,7 @@ bidirectional = false
 SenderTransformerLM = 2e-6
 
 [scheduler]
-epochs = 60
+epochs = 30
 
 [experiment]
 repeats = 1
@@ -220,7 +226,8 @@ repeats = 1
 # Sized for the heaviest job in the set and read from the first config by
 # filename only -- so this block governs the whole array and belongs here and
 # nowhere else. The ceiling has to clear the array's slowest member, which is a
-# 60-epoch ShapeWorld arm rather than a birds one: the first pass timed 7.1
+# ShapeWorld arm rather than a birds one (sized when these were 60 epochs; at 30
+# it has six times the margin): the first pass timed 7.1
 # min/epoch on ShapeWorld against 3.7 on birds, so 60 epochs is 7.1 h here and
 # 3.7 h there. The 24 h stands unchanged from when this was a 100-epoch birds
 # allowance at a guessed ~14 min/epoch; the guess was twice the measurement, and

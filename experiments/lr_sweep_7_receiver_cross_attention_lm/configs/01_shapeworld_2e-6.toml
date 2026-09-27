@@ -29,14 +29,16 @@
 # predates every change since August, so this sweep is also the first
 # clean look at the full stack.
 #
-# **The grid and the budget, from 2026-09-27: 2e-6 to 5e-5 at 60 epochs**,
+# **The grid and the budget, from 2026-09-27: 2e-6 to 5e-5 at 30 epochs**,
 # which is `lr_sweep_4_sender_transformer_lm`'s grid and length exactly, so the
 # two sweeps can be read side by side. Everything below about 1e-5 to 2e-4 and
 # about 20, 25 and 30 epochs is the history of how this folder got here and no
 # longer describes it. The move is sweep 4's result carried over: its first
 # pass over 1e-5 to 2e-4 was a cliff, dead above 1e-5 on ShapeWorld and above
 # 5e-5 on birds, and what ignited at the bottom took twenty epochs or more to do
-# it. See sweep 4's first file for the numbers and for why 60.
+# it. See sweep 4's first file for the numbers. Both sweeps were briefly 60 for
+# that slow ignition, and went back to 30 once the bias-free ViT ignited at
+# epoch 1.
 #
 # The same day the ViT feedforwards went bias-free and every ViT gained four
 # register tokens (`vision.BIAS_FREE_LINEAR`, `utility_tokens = 4`). This rung
@@ -182,13 +184,13 @@ bidirectional = true
 ReceiverCrossAttentionLM = 2e-6
 
 [scheduler]
-epochs = 60
+epochs = 30
 
 [experiment]
 repeats = 1
 
 [slurm]
-# At 60 epochs from 2026-09-27 the 24 h allows 24 min/epoch. Sweep 4 timed 7.1
+# At 30 epochs the 24 h allows 48 min/epoch. Sweep 4 timed 7.1
 # min/epoch on ShapeWorld with a `ResNet56` listener; this rung swaps that for a
 # ViT listener and has not been timed, so the margin is an estimate.
 #
