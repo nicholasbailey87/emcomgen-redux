@@ -974,9 +974,12 @@ class GumbelChannel:
 
         There is no floor. A speaker with nothing to say is pushed flatter --
             docs/channel.md records the old parameter sliding 0.9094 -> 0.6547 on
-            rung 10 -- and that is self-regulation rather than a failure mode,
-            because `scale_without_attenuating` means a small scale is a noisy
-            channel and not a starved one. The ceiling is `MAX_LOGIT_SCALE`, and
+            rung 10 -- and that is self-regulation rather than a failure mode.
+            The scale is a plain product, so its value does multiply the
+            gradient into the speaker's stack, but AdamW cancels a factor that
+            changes slowly against its second-moment average, and in practice
+            the scale climbs to the ceiling in every run rather than sliding
+            (see docs/anecdotes.md, round eleven). The ceiling is `MAX_LOGIT_SCALE`, and
             it is applied by `project_channel` after the optimiser step rather
             than by a `clamp` in `forward`. See that method.
 
@@ -1112,16 +1115,13 @@ class GumbelChannel:
         Returns:
             A hard one-hot of the same shape
         """
-        # Through `scale_without_attenuating`, restoring what `7b10d47` did
-        #     before the parameter was deleted: the forward value is
-        #     `logit_scale * normalised` exactly as it reads, but
-        #     `d/dnormalised` is 1 rather than `logit_scale`, so the scale's
-        #     value never multiplies the speaker's whole stack. The scale keeps
-        #     its own true partial and so is as free to slide as it ever was.
+        # A plain product. It went through `scale_without_attenuating` from
+        #     2026-08-31 until round eleven removed that helper; see
+        #     docs/anecdotes.md.
         # Unscaled when `normalise_logits` is off: the scale does not exist
         #     there, and raw logits already carry a magnitude of their own.
         scaled = mask_reserved_tokens(
-            model_util.scale_without_attenuating(normalised, self.logit_scale)
+            self.logit_scale * normalised
             if self.normalises_logits else normalised
         )
 
@@ -1184,11 +1184,10 @@ class GumbelChannel:
             `outputs2vocab` rows 0-3 and the stack behind them are never trained
             toward tokens that cannot be emitted.
 
-        **`log_logit_scale` takes its gradient inside the sampler**, where
-            `scale_without_attenuating` gives `d(scaled)/d(normalised) = 1` and
-            the scale its own true partial. That is what the identity branch
-            needed its surrogate to reproduce, and here it is simply the graph.
-            See docs/channel.md.
+        **`log_logit_scale` takes its gradient inside the sampler**, as the
+            ordinary partial of `logit_scale * normalised`. That is what the
+            identity branch needed its surrogate to reproduce, and here it is
+            simply the graph. See docs/channel.md.
         """
         # `normalised` is the raw logits when `normalise_logits` is off. The
         #     name is kept because everything downstream of here -- the sampler,

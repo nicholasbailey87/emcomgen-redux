@@ -937,10 +937,11 @@ was between August and 2026-09-07. `4248fca` reasoned about the straight-through
 Gumbel Jacobian, and that Jacobian is back: the `estimator = "identity"` branch
 that had made the reasoning moot since `681ef0b` was withdrawn when
 `experiments/lr_sweep_1_cnn/` came in. What still holds is the other half, which
-never depended on the estimator — Hyperion's GPUs report `is_bf16_supported()`,
-so `model_util.scale_without_attenuating` is inert by its own docstring and where
+never depended on the estimator — AdamW cancels a constant factor on a
+parameter's gradient, and Hyperion's GPUs report `is_bf16_supported()`, so where
 a volume scalar sits relative to the backward pass does not change what the
-optimiser sees. Note this is the *listener's* volume either way, and the listener
+optimiser sees. (That is also why `model_util.scale_without_attenuating` was
+removed on 2026-09-27; see [anecdotes.md](anecdotes.md).) Note this is the *listener's* volume either way, and the listener
 reads the message embedding on a continuous path: the estimator is the speaker's
 exposure alone.
 

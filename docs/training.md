@@ -327,8 +327,7 @@ overhaul.
 **`logit_scale_lr`** — ungated, moving the `log_logit_scale` both speakers
 carry. The counterpart of `score_scale_lr` at the other end of the channel, and
 on the same rate for that reason: both are lone scalars in front of a normalised
-quantity, and both reach the loss through
-`model_util.scale_without_attenuating`. It was deleted on 2026-08-30 with the
+quantity, and both reach the loss as a plain product. It was deleted on 2026-08-30 with the
 parameter and restored on 2026-08-31 — see [channel.md](channel.md) for why a
 ceiling answers the argument for deleting it and a closed form does not.
 

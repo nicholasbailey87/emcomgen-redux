@@ -523,9 +523,8 @@ SPLIT_LEARNING_RATES = (
     (
         # The speaker's channel scale, and the counterpart of `score_scale_lr`
         #     above: both are lone scalars sitting in front of a normalised
-        #     quantity, both reach the loss through
-        #     `model_util.scale_without_attenuating`, and both share a rate for
-        #     that reason. It opens at 1.0 and is bounded above at
+        #     quantity as a plain product, and both share a rate for that
+        #     reason. It opens at 1.0 and is bounded above at
         #     `sender.MAX_LOGIT_SCALE` by `train.py`'s projection, which is not a
         #     reason to slow it down: the point of projecting rather than
         #     clamping is that sitting at the bound costs nothing and leaving it

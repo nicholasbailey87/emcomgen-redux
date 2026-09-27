@@ -153,6 +153,13 @@ symmetric in one respect: the speaker's is bounded above at 2.0 by a projection
 after the optimiser step, because a channel scale has a natural ceiling where a
 volume does not. See docs/channel.md and tests/test_exploration.py.
 
+**Round eleven, 2026-09-27, took the helper out of both ends for good.** The
+speaker's scale climbs to its 2.0 ceiling in every run and stays there, so the
+factor the helper hid lay in [1, 2]; the listener's volume is off by default
+under the hinge; Hyperion runs bfloat16, and `GradScaler` answers underflow on
+the float16 fallback. Round seven's argument stands, and the test below asserts
+it again. See docs/anecdotes.md.
+
 Consequences the tests below follow. `bilinear.weight` carries volume as well as
 direction again, so `bilinear_weight_norm` is not the drift column it briefly
 was. `decision` still has no bias, now because `score_bias` is the module's one
@@ -1289,9 +1296,9 @@ def test_the_readout_still_carries_gradient_to_the_message():
 
 
 # --------------------------------------------------------------------------
-# The property the sixth round exists for: the volume is absent from the
-#     backward pass into everything upstream of it. See
-#     `model_util.scale_without_attenuating`.
+# Round seven's property, restored by round eleven: the volume is a plain
+#     product, so it multiplies the backward pass into everything upstream of
+#     it, and AdamW is what cancels that.
 # --------------------------------------------------------------------------
 
 def _message_gradient(listener, scale):
@@ -1310,51 +1317,27 @@ def _message_gradient(listener, scale):
 
 
 @BOTH
-def test_the_gradient_reaching_the_message_does_not_track_the_volume(build):
+def test_the_gradient_reaching_the_message_tracks_the_volume(build):
     """
-    Round nine, and the reversal of what this test asserted for rounds seven and
-        eight. `ScoreVolume.readout` puts the volume through
-        `model_util.scale_without_attenuating`, so a listener turning itself
-        down no longer scales down what reaches the speaker.
+    Round eleven, restoring what rounds seven and eight asserted. A scalar at the
+        front of the score multiplies every gradient behind it, so a listener
+        turning itself down scales down what reaches the speaker. That coupling
+        never reaches the optimiser: AdamW updates by `m / sqrt(v)`, so a
+        constant factor on a parameter's gradient cancels before it becomes a
+        step. Rounds six and nine hid the volume from the backward pass with
+        `scale_without_attenuating`; see docs/anecdotes.md for why round eleven
+        removed it.
 
-    What this test used to say, and why it is not simply wrong. A scalar at the
-        front of the score multiplies every gradient behind it, and round seven
-        established that the coupling never reaches the optimiser: AdamW updates
-        by `m / sqrt(v)`, so a constant factor on a parameter's gradient cancels
-        before it becomes a step, per parameter and independently of what any
-        other parameter's gradient is doing. That still holds. It is why the
-        change this test now pins may well turn out to be inert.
-
-    What round seven's argument does not cover is that AdamW and
-        `clip_gradients` both run *after* the backward pass. `train.py` takes
-        the forward under `autocast`, so under `float16` a gradient the volume
-        has divided down can underflow to zero before either of them sees it,
-        and nothing recovers a zero. Under `bfloat16` it cannot, so on a GPU
-        that reports `is_bf16_supported()` this is expected to change nothing
-        and round seven stands unamended.
-
-    So this is a probe with a live null, not a correction. It is pinned as a
-        test because the forward value is unchanged -- `score_scale * scores +
-        score_bias` either way -- and that is the part a reader needs to be able
-        to trust while the question is open. The volume is as free to slide as
-        it was; only its reach backwards is gone.
-
-    Asserted against the thresholds it replaces rather than at equality. Two
-        orders of magnitude of volume used to cost two orders of magnitude of
-        message gradient; it now costs about 6%, and the residual is real
-        rather than slop. `_message_gradient` differentiates
-        `binary_cross_entropy_with_logits` of the readout, and the readout's
-        *value* still carries `s`, so `sigma(s*u + b) - y` still moves with it.
-        That dependence is the loss's and is deliberately kept -- it is the same
-        saturation the old assertion stopped short of. What has gone is the
-        readout's own Jacobian, which is the whole factor at issue.
+    Pinned so that a reader can see the factor is real and unhidden. The bounds
+        are the ones round seven used, and hold with room: the gradient falls
+        roughly in proportion to the volume, less a little because the loss's
+        own `sigma(s*u + b) - y` moves with `s` too.
     """
     listener = build().eval()
     at_one = _message_gradient(listener, 1.0)
 
-    # Where the old readout was below 0.1 and 0.5 of `at_one`.
-    assert _message_gradient(listener, 1e-2) > 0.9 * at_one
-    assert _message_gradient(listener, 1e-1) > 0.9 * at_one
+    assert _message_gradient(listener, 1e-2) < 0.1 * at_one
+    assert _message_gradient(listener, 1e-1) < 0.5 * at_one
 
 
 def test_the_readout_does_not_reweight_games_by_their_own_margin():

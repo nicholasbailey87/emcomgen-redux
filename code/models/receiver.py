@@ -81,8 +81,8 @@ class ScoreVolume:
     """
     The listener's one degree of freedom over how loudly it states a conclusion.
         The counterpart of the speaker's `GumbelChannel.logit_scale`: both are
-        lone learned scalars in front of a normalised quantity, both go through
-        `model_util.scale_without_attenuating`, and both take the same rate.
+        lone learned scalars in front of a normalised quantity, both are plain
+        products, and both take the same rate.
         The speaker's is bounded above by projection where this one is not --
         a volume has no natural ceiling, a channel scale does. See
         docs/architecture.md and docs/channel.md.
@@ -253,19 +253,16 @@ class ScoreVolume:
             calibration puts it. Both are reachable configurations rather than
             accidents of one flag.
 
-        **The volume goes on through `scale_without_attenuating`**, so the
-            forward value is `score_scale * scores + score_bias` as it reads,
-            but `d/dscores` is 1 rather than `score_scale`. The volume still
-            learns, still slides, and the listener is as able to go quiet as it
-            was -- what changes is only that its slide stops multiplying down
-            the gradients behind it. See that function for why this is round
-            nine of the same idea and for the one thing round seven's argument
-            does not cover.
+        **The volume is a plain product**, so `d/dscores` is `score_scale`
+            and a listener turning itself down scales down what reaches the
+            speaker. Round seven's argument is why that is harmless: AdamW
+            cancels a uniform factor on a parameter's gradient. Rounds six and
+            nine hid the volume from the backward pass with
+            `scale_without_attenuating`; round eleven removed that helper. See
+            docs/anecdotes.md.
         """
         if self.learns_score_scale:
-            scores = model_util.scale_without_attenuating(
-                scores, self.score_scale
-            )
+            scores = self.score_scale * scores
 
         if self.learns_score_bias:
             scores = scores + self.score_bias

@@ -363,8 +363,8 @@ the other side. It did not show up inside 100 epochs. See docs/training.md.
 2026-09-14. Not a ninth readout attempt — the readout's story ends at eight. This
 is the next round in the argument over `model_util.scale_without_attenuating`
 itself, which attempts six and seven are about and which round nine put back on
-both channel scalars on 2026-08-31 (recorded in that function's docstring and in
-`tests/test_score_scale.py`'s preamble rather than here). The helper now also
+both channel scalars on 2026-08-31 (recorded in that function's docstring, deleted
+in round eleven, and in `tests/test_score_scale.py`'s preamble rather than here). The helper now also
 carries `ExampleContrast.contrast_gate`.
 
 **What prompted it.** `lr_sweep_4_sender_contrast`, 30 epochs, ten arms, swept
@@ -425,8 +425,8 @@ shut gate, and its gradient not tracking the gate in size or in sign.
 `AttentionPrototyper` and there is no `contrast_gate`, no `contrast_gate_lr`, no
 `scale_without_attenuating` on the speaker's referent path, and no
 `tests/test_contrast.py`. The round above is kept in full because the argument in
-it is sound and the same helper is still live on both channel scalars; what
-changed is that its subject stopped existing.
+it is sound and the same helper was then still live on both channel scalars
+(round eleven removed it); what changed is that its subject stopped existing.
 
 **The re-run, which is what the round above was waiting for.**
 `lr_sweep_4_sender_contrast` at `ab4e64e`, ten arms, 30 epochs, with the helper
@@ -481,6 +481,47 @@ a later change cannot add capacity here quietly.
 DEFAULT.toml was measured on a module of 2,050 parameters and the module is sixty
 times larger; no rung above the prototyper is meaningful until that lands.
 
+
+### Round eleven: the helper is removed
+
+2026-09-27. `model_util.scale_without_attenuating` is gone from both channel
+scalars and from the repo. Both are plain products again: the speaker's
+`logit_scale * normalised` and the listener's `score_scale * scores`.
+
+**Why.** Every round from six to nine argued the helper on magnitude, and round
+seven's answer to that was never refuted — AdamW's `m/√v` cancels a constant
+factor per parameter, and per-module clipping binds at recorded speaker norms.
+Round nine kept it only for `float16` underflow, which Hyperion's `bfloat16`
+does not have and which `GradScaler` already handles on the fallback. What
+settled it is how the speaker's scale actually behaves: in every run it creeps
+up to `MAX_LOGIT_SCALE` = 2.0 and stays there (16 epochs in the latest run at a
+base rate of 5e-6, against about 2.2 for a sign-consistent gradient at
+`logit_scale_lr` 2e-3). So the factor the helper hid lay between 1 and 2 —
+amplification, not attenuation. The listener's volume has been off by default
+since the hinge.
+
+**What is given up.** Adam's second moment averages over ~1,000 steps
+(β₂ = 0.999), and the creep takes ~2,500, so while the scale is climbing √v lags
+the growing gradient and the speaker's steps run up to ~1.3× larger than they
+did with the helper. Once the scale pins, nothing. Too small to resolve at n = 1,
+so the removal was made without a run.
+
+**The measurement, kept for the record.** Gradient norm into the raw logits on
+the decoder arm at a fixed seed:
+
+| `logit_scale` | 0.05 | 0.25 | 1.0 | 4.0 | 20.0 |
+|---|---|---|---|---|---|
+| plain product | 3.3e-8 | 1.5e-7 | 4.9e-7 | 1.7e-7 | 5.7e-8 |
+| through the helper | 6.6e-7 | 6.0e-7 | 4.9e-7 | 4.4e-8 | 2.8e-9 |
+
+The helper's advantage was entirely below a scale of 1, which no run occupies
+for long. It also did nothing for the Gumbel noise floor: channel fidelity is
+set by the forward value `logit_scale · normalised` against the noise's fixed
+sd of 1.283, and the helper never touched the forward pass.
+
+`tests/test_score_scale.py` asserts round seven's property again — the message
+gradient tracks the volume — and the two speaker tests that pinned the helper's
+backward behaviour were deleted with it.
 
 ## Frozen logit spread: NaN through a masked gradient
 

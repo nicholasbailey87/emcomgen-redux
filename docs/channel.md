@@ -161,79 +161,32 @@ now is a ceiling, `MAX_LOGIT_SCALE` = 2.0, applied by projection rather than by
 a `clamp` — see [the ceiling](#the-ceiling-and-why-projection-and-not-a-clamp)
 below.
 
-**And it goes through the helper again.** `7b10d47` first put the gain through
-`model_util.scale_without_attenuating` — same forward, `∂/∂normalised` forced to
-1 — so that a scale sliding down would not multiply down every gradient reaching
-`outputs2vocab`, the stack and the vision model. Round seven took it out on the
-grounds that the coupling never reached the optimiser; `b72e5e6` put the
-listener's volume back through it and the speaker's gain follows.
+**It is a plain product.** From `7b10d47` until 2026-09-27 the gain went
+through `model_util.scale_without_attenuating` — same forward, `∂/∂normalised`
+forced to 1 — so that a scale sliding down would not multiply down every
+gradient reaching `outputs2vocab`, the stack and the vision model. Round eleven
+removed the helper; [anecdotes.md](anecdotes.md) has the argument and the
+measurement of what it did.
 
-The argument for taking it out is right as far as it goes. AdamW updates by
-`m / √v`, so a uniform factor on a parameter's gradient scales the numerator and
-the denominator alike and cancels; `train.py`'s `clip_gradients` is per-submodule
-and renormalises each module to `clip_grad_norm` whenever it binds, which at
-recorded speaker norms of ~10 against a ceiling of 1.0 it does. Do not reinstate
-the "it changes a ratio between modules" reasoning — AdamW normalises each
-parameter separately, so that ratio is exactly what it removes.
+The short form. AdamW updates by `m / √v`, so a uniform factor on a parameter's
+gradient cancels, and `train.py`'s `clip_gradients` renormalises each module to
+`clip_grad_norm` whenever it binds, which at recorded speaker norms of ~10
+against a ceiling of 1.0 it does. The one gap in that, underflow under
+`float16`, does not arise on Hyperion's `bfloat16` and is `GradScaler`'s job on
+the fallback. And the scale does not slide in practice: in every run it climbs
+to `MAX_LOGIT_SCALE` and stays there, so the factor the helper hid was between 1
+and 2. What is left is Adam's second-moment lag while the scale is still
+climbing, worth at most ~1.3× on the speaker's steps, and nothing once it pins.
 
-What it does not cover is AMP. Both AdamW and `clip_gradients` act *after* the
-backward pass, and under `float16` a gradient the scale has divided down can
-underflow to zero before either sees it. That is the failure
-[anecdotes.md](anecdotes.md) records as skipped steps, and it is the reason the
-helper is on both ends of the channel now.
-
-**This is what makes an unfloored scale safe.** With `∂scaled/∂normalised = 1`
-from the helper, the scale's value never multiplies the speaker's stack, while
-the scale keeps a real partial of its own:
+The gradient into the raw logits is a product of three factors:
 
 ```
-d(scaled)/d(normalised)  =  1                          (not logit_scale)
-dL/dlog_logit_scale      =  ⟨dL/dy·J, normalised⟩ · scale   (real and nonzero)
+dL/draw  =  J_gumbel(scaled)  ×  logit_scale  ×  d(normalised)/d(raw)
 ```
 
-A scale that slides quiet therefore makes the channel *noisier*, not the stack
-behind it *starved*, so there is nothing to floor: the small value never
-multiplies the speaker's whole stack, and the parameter still has a true partial
-of its own to learn on.
-
-Note this is a statement about the *helper*, not about the end-to-end gradient,
-which is not scale-free — `J_gumbel` is itself a function of the scaled logits.
-The next paragraph is where that is separated out. Under the withdrawn identity
-branch the two coincided, because `J` was `I`, and the "independent of the scale"
-claim that used to stand here was that branch's rather than the helper's.
-
-**The gain sits between `layer_norm_logits` and `mask_reserved_tokens`,**
-upstream of the sampler; `gumbel_softmax(hard=True)` keeps its own
-straight-through untouched. The
-gradient into the raw logits is a product of three factors:
-
-```
-dL/draw  =  J_gumbel(scaled)  ×  d(scaled)/d(normalised)  ×  d(normalised)/d(raw)
-```
-
-and the helper changes the middle one from `logit_scale` to 1, at every scale.
-That is the whole of what it does, and it is exact.
-
-The end-to-end number is not flat, because `J_gumbel` is itself a function of
-`scaled` — the soft surrogate is `softmax((scaled + g) / tau)`, which saturates
-as the scale grows. That is the saturation, it belongs to the sampler, and it is
-deliberately kept. Measured on the decoder arm at a fixed seed, gradient norm
-into the raw logits:
-
-| `logit_scale` | 0.05 | 0.25 | 1.0 | 4.0 | 20.0 |
-|---|---|---|---|---|---|
-| plain product | 3.3e-8 | 1.5e-7 | 4.9e-7 | 1.7e-7 | 5.7e-8 |
-| through the helper | 6.6e-7 | 6.0e-7 | 4.9e-7 | 4.4e-8 | 2.8e-9 |
-
-Downwards — the direction every failing run travels — the plain product loses an
-order of magnitude as the scale falls 20× and the helper does not.
-
-Upwards the plain product looks better, and the tempting reading of that is
-wrong. The helper does not attenuate more at high scale; it does the same thing
-it does everywhere. What the plain product has above ~1.0 is a factor
-`logit_scale` that happens to *offset* the sampler saturating, so removing it
-exposes an attenuation that was always the sampler's. No run on this ladder has
-been there.
+`J_gumbel` is itself a function of `scaled` — the soft surrogate is
+`softmax((scaled + g) / tau)`, which saturates as the scale grows. That is the
+saturation, it belongs to the sampler, and `MAX_LOGIT_SCALE` is what bounds it.
 
 ### `eps = 1e-12`, and why that is load-bearing
 
@@ -372,10 +325,9 @@ message carrying nothing — so the slide is the objective working, and it rever
 when the speaker has something to say.
 
 What made it *look* like a runaway is that a plain product multiplies the whole
-speaker's stack by the scale on the way back, so a quiet speaker starved the
-gradients that would have given it something to say.
-`model_util.scale_without_attenuating` removes exactly that, and it is why the
-scale is bounded above and not below. Read `train_logit_scale` as
+speaker's stack by the scale on the way back, so a quiet speaker seemed to
+starve the gradients that would have given it something to say. AdamW cancels
+that factor, which is why the scale is bounded above and not below. Read `train_logit_scale` as
 `train_score_scale` is read: a dip and a return is a speaker declining to commit,
 a monotone slide with no return is a collapse.
 
@@ -622,9 +574,8 @@ is the factor the Jacobian turns on. The saturation signature in
 docs/training.md — the speaker's stack flattening while survival climbs — is live
 and bounded rather than impossible.
 
-`log_logit_scale` takes its gradient inside the sampler, where
-`scale_without_attenuating` gives `∂scaled/∂normalised = 1` and the scale its own
-true partial. The identity branch needed a separate tap on the scaled logits to
+`log_logit_scale` takes its gradient inside the sampler, as the ordinary
+partial of `logit_scale · normalised`. The identity branch needed a separate tap on the scaled logits to
 achieve that, because its sampler ran under `no_grad`; here it is simply the
 graph.
 
@@ -713,9 +664,7 @@ magnitude.
 Both decode loops do this:
 
 ```python
-logits = mask_reserved_tokens(
-    model_util.scale_without_attenuating(normalised, self.logit_scale)
-)
+logits = mask_reserved_tokens(self.logit_scale * normalised)
 ```
 
 rather than scaling the already-masked tensor. `d(logits · scale)/d(scale)`
