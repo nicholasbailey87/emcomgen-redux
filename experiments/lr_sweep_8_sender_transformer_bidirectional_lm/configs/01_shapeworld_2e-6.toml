@@ -1,0 +1,95 @@
+# lr_sweep_8_sender_transformer_bidirectional_lm: what learning rate
+# `SenderTransformerBidirectionalLM` wants, in the presence of everything below
+# it on the ladder.
+#
+# Ten arms. `[optimiser.implementation_lr.sender_language_model]
+# SenderTransformerBidirectionalLM` moves over 2e-6, 5e-6, 1e-5, 2e-5 and 5e-5
+# on both datasets -- `01`-`05` are the five ShapeWorld arms, copying ablation
+# rung 15, and `06`-`10` the five birds arms, copying rung 16. Nothing else
+# differs between the arms, and nothing else differs from the rung each one
+# copies. 30 epochs, one repeat.
+#
+# **Sweep 8 of eight, and last in the serial chain.** The reasoning for the
+# chain is in `lr_sweep_1_cnn`'s first file; the reasoning for this grid and
+# budget is in `lr_sweep_4_sender_transformer_autoregressive_lm`'s, which swept
+# the other arm of the same implementation over the same five rates for the
+# same 30 epochs, so the two can be read side by side. This sweep takes every
+# other rate from DEFAULT.toml and restates none of them, so DEFAULT.toml must
+# already carry the results of sweeps 4 to 7 before it is launched. Launching
+# early does not fail; it silently measures this arm against an untuned stack.
+#
+# **What to read.** `train_logit_prior_share` first: it is how sweep 4's dead
+# arms died -- the logits going entirely to an input-independent prior, after
+# which there is no gradient out -- and a parallel speaker, which cannot
+# condition one symbol on another, has less to hold it off that minimum than the
+# causal one did. Then `train_realised_survival`, which separated sweep 4's live
+# arms from its dead ones on its own, and `train_logit_scale`, which should
+# creep to its cap of 2 as it does everywhere else; a scale that stays low with
+# survival high is the channel starving rather than the rate.
+#
+# `epochs` and `repeats` are restated in every file: `scripts/job_utils.py` reads
+# both straight out of the file rather than out of the merged config. `[slurm]`
+# is read from the *first* config in the folder only, sorted by filename, so the
+# block below governs the whole array.
+#
+# ---
+#
+# **This arm: `SenderTransformerBidirectionalLM` at 2e-6 on ShapeWorld**, copying ablation rung 15.
+
+name = "lr_sweep_8_sender_transformer_bidirectional_lm"
+
+[sender]
+feature_model = "ShapeWorldViT"
+prototyper = "AttentionPrototyper"
+language_model = "SenderTransformerBidirectionalLM"
+
+[sender_language_model]
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+layers = 7
+
+[receiver]
+feature_model = "ShapeWorldViT"
+language_model = "ReceiverCrossAttentionLM"
+discriminator = "AttentionDiscriminator"
+
+[receiver_discriminator]
+d_model = 256
+heads = 4
+ff_inner_size = 320
+layers = 3
+
+[receiver_language_model]
+d_model = 256
+heads = 4
+ff_inner_size = 320
+token_embedding_size = 256
+layers = 6
+bidirectional = true
+
+[optimiser.implementation_lr.sender_language_model]
+# The one key this sweep moves. Every other rate is DEFAULT.toml's,
+# including the ones earlier sweeps in this set have already settled.
+SenderTransformerBidirectionalLM = 2e-6
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+# Copied from `lr_sweep_7_receiver_cross_attention_lm`, whose arms are these
+# arms with the other speaker arm: the same two ViTs and the same listener. At
+# 30 epochs the 24 h allows 48 min/epoch. The parallel speaker skips the causal
+# arm's per-symbol loop, so it should be no slower than sweep 7's arms; neither
+# has been timed at this length.
+#
+# Sized for the heaviest job in the set, a birds arm on two ViT trunks, and read
+# from the first config by filename only -- so this block governs the whole
+# array and belongs here and nowhere else.
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

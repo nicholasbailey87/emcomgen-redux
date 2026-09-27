@@ -1,14 +1,14 @@
-# lr_sweep_5_receiver_vit arm: the listener's ViT backbone at 1e-4 on ShapeWorld.
+# lr_sweep_4_sender_transformer_autoregressive_lm arm: `SenderTransformerAutoregressiveLM` at 1e-5 on ShapeWorld.
 #
-# See `01_shapeworld_1e-5.toml` for what this experiment measures and why.
+# See `01_shapeworld_2e-6.toml` for what this experiment measures and why.
 # This file differs from that one in the swept rate, and in carrying no
-# `[data]` block, since ShapeWorld is the default dataset.
+# `[slurm]` block, which is read from the first config by filename alone.
 #
 # ---
 #
-# **This arm: the listener's ViT backbone at 1e-4 on ShapeWorld**, copying ablation rung 09.
+# **This arm: `SenderTransformerAutoregressiveLM` at 1e-5 on ShapeWorld**, copying ablation rung 07.
 
-name = "lr_sweep_5_receiver_vit"
+name = "lr_sweep_4_sender_transformer_autoregressive_lm"
 
 [sender]
 feature_model = "ShapeWorldViT"
@@ -21,13 +21,10 @@ d_model = 320
 heads = 5    # head_dim 64, as everywhere
 layers = 7
 
-[receiver]
-feature_model = "ShapeWorldViT"
-
-[optimiser.implementation_lr.receiver_vision]
+[optimiser.implementation_lr.sender_language_model]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-ShapeWorldViT = 1e-4
+SenderTransformerAutoregressiveLM = 1e-5
 
 [scheduler]
 epochs = 30

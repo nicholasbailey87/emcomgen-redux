@@ -257,6 +257,12 @@ folders rather than structure, and the table above is the fallback wherever no
 class rate applies — which is the other six groups at every rung, and
 `sender_prototyper` too on the rungs running `AveragePrototyper`.
 
+A fourth group, `sender_language_model`, carries a key for each Transformer
+speaker arm — `SenderTransformerAutoregressiveLM` and
+`SenderTransformerBidirectionalLM` — both still at the base 1e-4 until sweeps 4
+and 8 report. The two arms are separate classes precisely so that these can
+differ; see [architecture.md](architecture.md).
+
 **The whole table halved on 2026-08-31, along with the base `lr`.** The shape is
 unchanged; only its scale moved. jayelm tuned at 1e-4, which is where the grid
 was pinned until then, so the speaker now sits at his rate and the listener — the
@@ -341,7 +347,7 @@ an epoch and was the setting from 2026-08-28 to 2026-08-31; it is the fallback i
 2e-3 proves slow.
 
 **`polarity_embedding_lr`** — gated on `isinstance(language_model,
-SenderTransformerLM)`. Deliberately its own key rather than shared with the
+SenderTransformerLM)`, which both Transformer arms are. Deliberately its own key rather than shared with the
 listener's `score_scale_lr`: the tag lives on one speaker and turning up a rate
 shared with the listener's volume would move something the ablation is trying to
 hold still. It was originally kept separate from `logit_scale_lr` for the same

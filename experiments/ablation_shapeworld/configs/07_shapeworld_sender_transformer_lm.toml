@@ -1,15 +1,16 @@
 # Rung 7: rung 5 with a Transformer sender language model.
 #
 # The speaker is an autoregressive Transformer: a learned query array
-# cross-attends the two prototypes into a latent array, six blocks run over that
+# cross-attends the two prototypes into a latent array, seven blocks run over that
 # array under a causal mask, and the message is its tail -- one slot per content
 # symbol, each read and then overwritten by the symbol it produced, so the next
 # slot is conditioned on it. The slots ahead of the message are never
 # overwritten, so every symbol reads the referents through them.
 #
-# 5,854,089 parameters against the GRU baseline's 5,764,923 on ShapeWorld, and
-# 5,859,855 against 5,774,073 on CUB -- 1.015x on both, which is what the shared
-# 320-wide ViT below it buys. See `[sender_language_model] layers`.
+# 6,758,354 parameters against the GRU baseline's 6,813,499 on ShapeWorld, and
+# 6,764,120 against 6,822,649 on CUB -- 0.992x and 0.991x. The width is the
+# language model's own 320, independent of the ViT below it, since the adapter
+# brings the prototypes to it. See `[sender_language_model] layers`.
 #
 # This is the rung the rebalancing was for. At the old widths it was 533,943
 # parameters against the GRU's 6,813,499 -- 12.8x smaller -- because
@@ -18,8 +19,8 @@
 # not architecture.
 #
 # The GRU baseline is autoregressive too, so this rung moves the language model's
-# architecture and not its generation regime. See `[sender_language_model]`
-# below for the parallel arm, which is no longer a rung of its own.
+# architecture and not its generation regime. The parallel arm, which moves only
+# the regime, is the top rung: 15 on ShapeWorld, 16 on birds.
 #
 # It also no longer moves *how the concept arrives*, which it silently used to.
 # `SenderGRULM` builds its initial hidden state from the prototypes through
@@ -35,7 +36,7 @@ name = "ablation_shapeworld"
 [sender]
 feature_model = "ShapeWorldViT"
 prototyper = "AttentionPrototyper"
-language_model = "SenderTransformerLM"
+language_model = "SenderTransformerAutoregressiveLM"
 
 [sender_language_model]
 # The two must equal *each other*, and neither has anything to do with the
@@ -96,25 +97,20 @@ heads = 5    # head_dim 64, as everywhere
 # 5 / 6 / 7 blocks, flat inside the noise. See docs/anecdotes.md.
 layers = 7
 
-# `false` selects the causal arm: the blocks run over the latent array under a
-# causal mask and the message slots in its tail are generated in order, each
-# read and then overwritten by its symbol so the next one is conditioned on it.
-# `true` selects the parallel arm, which runs the same blocks unmasked and reads
-# the whole tail in one shot.
+# The causal arm, chosen by `language_model = "SenderTransformerAutoregressiveLM"`
+# above rather than by `bidirectional`, which this class overrides. The blocks
+# run over the latent array under a causal mask and the message slots in its
+# tail are generated in order, each read and then overwritten by its symbol so
+# the next one is conditioned on it.
 #
-# `false` here, because the GRU baseline at rung 1 is autoregressive too: this
-# rung then moves the language model's architecture and nothing else. `true`
-# would move the generation regime at the same time, and whatever the
-# combination measured could not be attributed to either.
-#
-# The parallel arm is no longer a rung of its own. It used to sit beside the top
-# of the ladder as a fork; to measure it again, copy the topmost rung and flip
-# this key. A difference then covers the generation regime and nothing else,
-# which is new: the two arms used to be different architectures at different
-# sizes, and are now the same blocks at the same size under different masks.
-# They differ by `token_embedding` alone -- 5,760 parameters, which only the
-# causal arm needs because only it reads a symbol back.
-bidirectional = false
+# Causal because the GRU baseline at rung 1 is autoregressive too: rung 7 then
+# moves the language model's architecture and nothing else. The parallel arm,
+# `SenderTransformerBidirectionalLM`, would move the generation regime at the
+# same time, and whatever the combination measured could not be attributed to
+# either. It is at the top of the ladder instead -- rungs 15 and 16 -- where it
+# moves the regime alone. The two arms are the same blocks at the same size and
+# differ by `token_embedding` alone, which only the causal arm needs because
+# only it reads a symbol back.
 
 [scheduler]
 epochs = 100

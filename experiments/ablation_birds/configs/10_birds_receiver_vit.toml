@@ -28,7 +28,7 @@ dataset = "../data/cub"
 [sender]
 feature_model = "BirdsViT"
 prototyper = "AttentionPrototyper"
-language_model = "SenderTransformerLM"
+language_model = "SenderTransformerAutoregressiveLM"
 
 [sender_language_model]
 # The two must equal *each other*, and neither has anything to do with the
@@ -52,32 +52,27 @@ token_embedding_size = 320
 d_model = 320
 heads = 5    # head_dim 64, as everywhere
 
-# 6 blocks and `ff_inner_size = 512`, which together hold the speaker's language
-# model at 1.015x the GRU baseline's. The blocks lost their cross-attention
+# 7 blocks and `ff_inner_size = 512`, which together hold the speaker's language
+# model at 0.991x the GRU baseline's. The blocks lost their cross-attention
 # sublayer when the referents moved into the stack's input, so they are cheaper
-# and there are more of them. The argument is at rung 7; this rung is not
+# and there are more of them. The argument is at rung 8; this rung is not
 # supposed to touch the speaker at all.
 layers = 7
 
-# `false` selects the causal arm: the blocks run over the latent array under a
-# causal mask and the message slots in its tail are generated in order, each
-# read and then overwritten by its symbol so the next one is conditioned on it.
-# `true` selects the parallel arm, which runs the same blocks unmasked and reads
-# the whole tail in one shot.
+# The causal arm, chosen by `language_model = "SenderTransformerAutoregressiveLM"`
+# above rather than by `bidirectional`, which this class overrides. The blocks
+# run over the latent array under a causal mask and the message slots in its
+# tail are generated in order, each read and then overwritten by its symbol so
+# the next one is conditioned on it.
 #
-# `false` here, because the GRU baseline at rung 1 is autoregressive too: this
-# rung then moves the language model's architecture and nothing else. `true`
-# would move the generation regime at the same time, and whatever the
-# combination measured could not be attributed to either.
-#
-# The parallel arm is no longer a rung of its own. It used to sit beside the top
-# of the ladder as a fork; to measure it again, copy the topmost rung and flip
-# this key. A difference then covers the generation regime and nothing else,
-# which is new: the two arms used to be different architectures at different
-# sizes, and are now the same blocks at the same size under different masks.
-# They differ by `token_embedding` alone -- 5,760 parameters, which only the
-# causal arm needs because only it reads a symbol back.
-bidirectional = false
+# Causal because the GRU baseline at rung 2 is autoregressive too: rung 8 then
+# moves the language model's architecture and nothing else. The parallel arm,
+# `SenderTransformerBidirectionalLM`, would move the generation regime at the
+# same time, and whatever the combination measured could not be attributed to
+# either. It is at the top of the ladder instead -- rungs 15 and 16 -- where it
+# moves the regime alone. The two arms are the same blocks at the same size and
+# differ by `token_embedding` alone, which only the causal arm needs because
+# only it reads a symbol back.
 
 [receiver]
 feature_model = "BirdsViT"

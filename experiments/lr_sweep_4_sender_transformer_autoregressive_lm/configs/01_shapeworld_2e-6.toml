@@ -1,13 +1,22 @@
-# lr_sweep_4_sender_transformer_lm: what learning rate `SenderTransformerLM` wants, in
-# the presence of everything below it on the ladder.
+# lr_sweep_4_sender_transformer_autoregressive_lm: what learning rate
+# `SenderTransformerAutoregressiveLM` wants, in the presence of everything below
+# it on the ladder.
 #
-# Ten arms. `[optimiser.implementation_lr.sender_language_model] SenderTransformerLM` moves over 2e-6,
-# 5e-6, 1e-5, 2e-5 and 5e-5 on both datasets -- `01`-`05` are the five
-# ShapeWorld arms, copying ablation rung 07, and `06`-`10` the five birds
-# arms, copying rung 08. Nothing else differs between the arms, and nothing
-# else differs from the rung each one copies.
+# Ten arms. `[optimiser.implementation_lr.sender_language_model]
+# SenderTransformerAutoregressiveLM` moves over 2e-6, 5e-6, 1e-5, 2e-5 and 5e-5
+# on both datasets -- `01`-`05` are the five ShapeWorld arms, copying ablation
+# rung 07, and `06`-`10` the five birds arms, copying rung 08. Nothing else
+# differs between the arms, and nothing else differs from the rung each one
+# copies.
 #
-# **Sweep 4 of seven.** `lr_sweep_1_cnn` did the two CNN backbones and is
+# **Renamed on 2026-09-27**, from `lr_sweep_4_sender_transformer_lm`, when
+# `SenderTransformerLM` was split into an autoregressive and a bidirectional
+# subclass so that each arm could take a rate of its own. The class these arms
+# run is the same code under the new name. The arms that ran before the rename
+# wrote their results under the old folder name, and that is where to find
+# them.
+#
+# **Sweep 4 of eight.** `lr_sweep_1_cnn` did the two CNN backbones and is
 # where the reasoning for the whole set is written down. The short version:
 # every rung of the ablation introduces a component whose learning rate has
 # never been measured, `[optimiser] lr`'s 1e-4 is jayelm's default tuned on a
@@ -195,26 +204,25 @@
 #
 # ---
 #
-# **This arm: `SenderTransformerLM` at 2e-6 on ShapeWorld**, copying ablation rung 07.
+# **This arm: `SenderTransformerAutoregressiveLM` at 2e-6 on ShapeWorld**, copying ablation rung 07.
 
-name = "lr_sweep_4_sender_transformer_lm"
+name = "lr_sweep_4_sender_transformer_autoregressive_lm"
 
 [sender]
 feature_model = "ShapeWorldViT"
 prototyper = "AttentionPrototyper"
-language_model = "SenderTransformerLM"
+language_model = "SenderTransformerAutoregressiveLM"
 
 [sender_language_model]
 token_embedding_size = 320
 d_model = 320
 heads = 5    # head_dim 64, as everywhere
 layers = 7
-bidirectional = false
 
 [optimiser.implementation_lr.sender_language_model]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-SenderTransformerLM = 2e-6
+SenderTransformerAutoregressiveLM = 2e-6
 
 [scheduler]
 epochs = 30

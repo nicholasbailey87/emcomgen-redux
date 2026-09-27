@@ -23,6 +23,7 @@ import glob
 import os
 
 import pytest
+import toml
 import torch
 
 import _bootstrap  # noqa: F401
@@ -269,10 +270,10 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         #     adapters and two norms, and its composed bilinear path moved from
         #     `[receiver_language_model] d_model` down to the slot's own
         #     `d_model`. 3,891,782 -> 2,384,198.
-        #   * that same module is now *the same size on rungs 13 and 15*, where
+        #   * that same module is now *the same size on rungs 11 and 13*, where
         #     it used to differ by a `memory_adapter` reading a 1024-wide GRU
         #     state against a 256-wide one. The memory still has to be brought to
-        #     `d_model`; it is an interface one stage upstream, so the 13 -> 15
+        #     `d_model`; it is an interface one stage upstream, so the 11 -> 13
         #     step is clean on this module and the difference has moved into
         #     `receiver.interfaces`.
         #
@@ -305,7 +306,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # **These two are a capacity-matching argument, and that is new.** The
         # baseline's GRU encoder is 4,687,872 -- jayelm's 1 layer unidirectional
         # at 1024 -- against 4,702,646 for `ReceiverCrossAttentionLM` at rung
-        # 15's 6 blocks, which is +0.3%. Both numbers are pinned here so that a
+        # 13's 6 blocks, which is +0.3%. Both numbers are pinned here so that a
         # config change to either arm breaks this test rather than quietly
         # reopening the gap.
         #
@@ -352,7 +353,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # size drift.
         #
         # ShapeWorld: the top of the ladder. The speaker's language model is the
-        # causal arm at seven blocks -- see rung 9's `layers` for why seven, and
+        # causal arm at seven blocks -- see rung 7's `layers` for why seven, and
         # for the two depths before it.
         ("13_shapeworld_receiver_cross_attention_lm.toml", "sender.feat_model", 874_417),
         ("13_shapeworld_receiver_cross_attention_lm.toml", "receiver.feature_model", 874_417),
@@ -368,6 +369,12 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # against CUB's 229,632 at the 320-wide birds ViT. The referent side is
         # where the two datasets' ViT widths show up.
         ("13_shapeworld_receiver_cross_attention_lm.toml", "receiver.interfaces", 131_328),
+        # The parallel speaker on top of rung 13, and the same size as the
+        # causal one bar `token_embedding` -- 5,760 on ShapeWorld and 7,680 on
+        # CUB, which only the causal arm has because only it reads a symbol
+        # back. That gap is the whole of what these two pin against rungs 13
+        # and 14.
+        ("15_shapeworld_sender_transformer_bidirectional_lm.toml", "sender.language_model", 6_752_594),
         # CUB: the CNN/GRU baseline.
         ("02_birds_baseline.toml", "sender.feat_model", 11_176_512),
         ("02_birds_baseline.toml", "sender.language_model", 6_822_649),
@@ -402,12 +409,13 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # `linear_in` being double width, and gains 4 * 320, for -14,912.
         ("14_birds_receiver_cross_attention_lm.toml", "sender.feat_model", 10_612_078),
         ("14_birds_receiver_cross_attention_lm.toml", "sender.language_model", 6_764_120),
+        ("16_birds_sender_transformer_bidirectional_lm.toml", "sender.language_model", 6_756_440),
         ("14_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
         ("14_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 2_384_196),
-        # Rung 13's discriminator, pinned because it used to be the number that
-        # made the 13 -> 15 step unclean and now is not: it is *equal* to rung
-        # 15's. The gap was a `memory_adapter` bringing the GRU's 1024-wide
-        # output down to 256 where rung 15 read a 256-wide message directly, and
+        # Rung 11's discriminator, pinned because it used to be the number that
+        # made the 11 -> 13 step unclean and now is not: it is *equal* to rung
+        # 13's. The gap was a `memory_adapter` bringing the GRU's 1024-wide
+        # output down to 256 where rung 13 read a 256-wide message directly, and
         # that adapter is `Receiver`'s message interface now -- so the two rungs
         # differ in `receiver.interfaces`, pinned separately below, and not in
         # the module under test. It was 3,891,782 before the hoist, and
@@ -442,13 +450,13 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # parameters that are no longer there.
         ("11_shapeworld_attention_discriminator.toml", "receiver.discriminator", 2_384_196),
         ("12_birds_attention_discriminator.toml", "receiver.discriminator", 2_384_196),
-        # Where the 13 -> 15 difference went: `final_feat_dim` -> 256 for the
+        # Where the 11 -> 13 difference went: `final_feat_dim` -> 256 for the
         # referents and 1024 -> 256 for the GRU's state. The language model
         # declares no referent width on this rung, so there are two interfaces
         # here and three there, and the message interface is the expensive one.
         #
         # ShapeWorld reads 295,168 -- 128 * 256 plus 1024 * 256 + 256 -- against
-        # rung 15's 131,328. CUB reads 344,320 against rung 16's 229,632, which
+        # rung 13's 131,328. CUB reads 344,320 against rung 14's 229,632, which
         # is the same arithmetic at 320.
         ("11_shapeworld_attention_discriminator.toml", "receiver.interfaces", 295_168),
         ("12_birds_attention_discriminator.toml", "receiver.interfaces", 344_320),
@@ -626,14 +634,19 @@ def test_nothing_that_should_be_undecayed_is_decayed(config_file):
         # seven when the speaker's adapter widened the *baseline* -- `init_h` reads
         # `2 * referent_width`, which the adapter took from the backbone's 512
         # to the GRU's own 1024. This rung's stack runs at its own `d_model` and
-        # did not move with it. See rung 9's `layers`.
+        # did not move with it. See rung 7's `layers`.
         ("01_shapeworld_baseline.toml", "07_shapeworld_sender_transformer_lm.toml", 0.05),
         ("02_birds_baseline.toml", "08_birds_sender_transformer_lm.toml", 0.05),
-        # The same speaker at the top of the ladder, which nothing above rung 9
-        # is supposed to touch. If these two diverge from the pair above, a
+        # The same speaker on rungs 13 and 14, which nothing between rung 7 and
+        # there is supposed to touch. If these two diverge from the pair above, a
         # listener rung has reached into the speaker.
         ("01_shapeworld_baseline.toml", "13_shapeworld_receiver_cross_attention_lm.toml", 0.05),
         ("02_birds_baseline.toml", "14_birds_receiver_cross_attention_lm.toml", 0.05),
+        # The parallel arm at the same depth, 0.991x and 0.990x. Matched without
+        # a depth change of its own, which is what lets rungs 15 and 16 move the
+        # generation regime and nothing else.
+        ("01_shapeworld_baseline.toml", "15_shapeworld_sender_transformer_bidirectional_lm.toml", 0.05),
+        ("02_birds_baseline.toml", "16_birds_sender_transformer_bidirectional_lm.toml", 0.05),
     ],
 )
 def test_the_speakers_language_models_are_matched(baseline, transformer, tolerance):
@@ -654,13 +667,16 @@ def test_the_speakers_language_models_are_matched(baseline, transformer, toleran
 
 
 # Both agents: the rotary modules are the speaker's decoder self-attention at
-# rung 9 and, on top of that, the listener's two stacks at rung 15, so neither
+# rung 7 and, on top of that, the listener's two stacks at rung 13, so neither
 # rung covers the other.
 @pytest.mark.parametrize(
     "config_file",
     [
         "07_shapeworld_sender_transformer_lm.toml",
         "13_shapeworld_receiver_cross_attention_lm.toml",
+        # The parallel speaker's self-attention is a different mask over the
+        # same stack, so it is covered only if it is built.
+        "15_shapeworld_sender_transformer_bidirectional_lm.toml",
     ],
 )
 def test_every_rope_attention_takes_all_its_heads(config_file):
@@ -692,3 +708,26 @@ def test_every_rope_attention_takes_all_its_heads(config_file):
         checked += 1
 
     assert checked, "no rotary attention in this pair; the test proved nothing"
+
+
+@pytest.mark.parametrize(
+    "config_file,bidirectional",
+    [
+        ("13_shapeworld_receiver_cross_attention_lm.toml", False),
+        ("14_birds_receiver_cross_attention_lm.toml", False),
+        ("15_shapeworld_sender_transformer_bidirectional_lm.toml", True),
+        ("16_birds_sender_transformer_bidirectional_lm.toml", True),
+    ],
+)
+def test_the_speakers_class_chooses_its_arm(config_file, bidirectional):
+    """
+    The Transformer speaker's arm is its class. Neither rung states
+    `[sender_language_model] bidirectional`, so both inherit DEFAULT.toml's
+    `false` -- which the bidirectional class must override rather than read.
+    """
+    config, pair = _pair(config_file)
+
+    stated = toml.load(rung(config_file)).get("sender_language_model", {})
+    assert "bidirectional" not in stated
+    assert config["sender_language_model"]["bidirectional"] is False
+    assert pair.sender.language_model.bidirectional is bidirectional

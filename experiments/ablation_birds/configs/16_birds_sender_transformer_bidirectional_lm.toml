@@ -1,34 +1,37 @@
-# Rung 14: rung 12 with the cross-attention message encoder.
+# Rung 16: rung 14 with the parallel speaker.
 #
-# The other half of the listener, and the last rung to move it. The top of the
-# ladder is now rung 15 on ShapeWorld and 16 on birds, which move the speaker.
+# One change: `[sender] language_model` goes from
+# `SenderTransformerAutoregressiveLM` to `SenderTransformerBidirectionalLM`. The
+# speaker stops generating its message one symbol at a time and reads the whole
+# of it off the latent array in one pass. Every other key is rung 14's.
 #
-# `ReceiverCrossAttentionLM` reads the message with a decoder stack that
-# cross-attends into the candidate set, so the meaning it refines is
-# discriminative rather than absolute -- its output is referent-conditioned by
-# construction, which is the point of the ordering.
+# **Why it sits at the top.** This step is Transformer to Transformer, so the
+# only thing it moves is the generation regime: the two classes are one
+# implementation, `SenderTransformerLM`, running the same blocks under a causal
+# mask or none. Placed at rung 8 -- where the GRU gives way to a Transformer --
+# it would have moved the regime and the architecture in one step, and whatever
+# the combination measured could not be attributed to either. Appended rather
+# than inserted, so rungs 1 to 14 keep their numbers.
 #
-# Against rung 12 this moves the message encoder only, the discriminator having
-# moved there. The two encoders are now parameter-matched, which they were not
-# when this rung was written: the GRU it replaces is 4,687,872 and this stack is
-# 4,702,646 at the 6 blocks stated below, +0.3%. That match is why `layers` is 6
-# here and 3 on `[receiver_discriminator]`, and it is bought at jayelm's width
-# rather than at a shared 256 -- see `layers` in `DEFAULT.toml`. It used to be
-# 28,262,400 against 2,466,139, so the 12 -> 14 step was a 26M parameter change
-# as well as an architecture one.
+# **Parameter-matched to the rung below.** The speaker's language model is
+# 6,756,440 here against 6,764,120 on rung 14; the difference is the causal arm's
+# `token_embedding`, which the parallel arm has no use for because it never
+# reads a symbol back. Against the GRU baseline's 6,822,649 that is 0.990x, inside
+# the band `test_the_speakers_language_models_are_matched` pins.
 #
-# **The step is now clean on the discriminator too.** It used to shrink across
-# it, 2,990,663 to 2,548,295, because `AttentionDiscriminator` owned a
-# `memory_adapter` that read a 1024-wide GRU state on rung 12 and a 256-wide
-# encoded message here. That adapter is `Receiver`'s message interface now, so
-# the discriminator is 2,384,196 on both rungs and the difference has moved into
-# `receiver.interfaces` -- 344,320 on rung 12 against 229,632 here. The encoder
-# parity number improved for the mirror reason: this stack owned a
-# `referent_adapter` that the GRU had nothing corresponding to, and that is an
-# interface now as well.
+# **What to watch.**
 #
-# Parameter parity between the encoders does not make the listeners identical in
-# size, and is not meant to.
+# * A drop here may be the channel rather than the regime. The causal speaker
+#   reads each committed symbol back, so a symbol the Gumbel noise or the
+#   uniform mixture flipped is something the rest of the message is conditioned
+#   on and can work around. The parallel speaker has already emitted every
+#   symbol by then and cannot compensate. Read `train_realised_survival` against
+#   rung 14's before reading accuracy as a verdict on the regime.
+# * Order. The parallel arm has no left-to-right structure to impose on its
+#   message, so the gap between `test_avg_topsim_s6` (hard Levenshtein, order
+#   matters) and `test_avg_topsim_s4` (hard 1-gram MoverScore, order ignored) is
+#   the column to set against rung 14's. A gap that closes says the causal
+#   speaker's structure was carried by order.
 
 name = "ablation_birds"
 
@@ -38,7 +41,7 @@ dataset = "../data/cub"
 [sender]
 feature_model = "BirdsViT"
 prototyper = "AttentionPrototyper"
-language_model = "SenderTransformerAutoregressiveLM"
+language_model = "SenderTransformerBidirectionalLM"
 
 [sender_language_model]
 # The two must equal *each other*, and neither has anything to do with the
@@ -63,26 +66,14 @@ d_model = 320
 heads = 5    # head_dim 64, as everywhere
 
 # 7 blocks and `ff_inner_size = 512`, which together hold the speaker's language
-# model at 0.991x the GRU baseline's. The blocks lost their cross-attention
-# sublayer when the referents moved into the stack's input, so they are cheaper
-# and there are more of them. The argument is at rung 8; this rung is not
-# supposed to touch the speaker at all.
+# model at 0.990x the GRU baseline's on this arm. The argument is at rung 8.
 layers = 7
 
-# The causal arm, chosen by `language_model = "SenderTransformerAutoregressiveLM"`
+# The parallel arm, chosen by `language_model = "SenderTransformerBidirectionalLM"`
 # above rather than by `bidirectional`, which this class overrides. The blocks
-# run over the latent array under a causal mask and the message slots in its
-# tail are generated in order, each read and then overwritten by its symbol so
-# the next one is conditioned on it.
-#
-# Causal because the GRU baseline at rung 2 is autoregressive too: rung 8 then
-# moves the language model's architecture and nothing else. The parallel arm,
-# `SenderTransformerBidirectionalLM`, would move the generation regime at the
-# same time, and whatever the combination measured could not be attributed to
-# either. It is at the top of the ladder instead -- rungs 15 and 16 -- where it
-# moves the regime alone. The two arms are the same blocks at the same size and
-# differ by `token_embedding` alone, which only the causal arm needs because
-# only it reads a symbol back.
+# run over the latent array unmasked and the message is its tail, read in one
+# shot. `layers` is rung 14's: the two arms are parameter-matched at equal
+# depth, so no depth change is needed to hold the match.
 
 [receiver]
 feature_model = "BirdsViT"

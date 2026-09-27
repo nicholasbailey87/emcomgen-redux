@@ -10,6 +10,12 @@ Speaker models: a GRU language model as in "Emergent Communication of
     overwriting each slot with its symbol as it commits. See
     docs/architecture.md.
 
+A config never names `SenderTransformerLM` itself: it names one of the two
+    subclasses, `SenderTransformerAutoregressiveLM` or
+    `SenderTransformerBidirectionalLM`, which fix the flag. The arm is then a
+    class name, and a class name is what `[optimiser.implementation_lr]` keys a
+    rate on, so the two arms can hold different rates.
+
 The channel -- `layer_norm_logits`, `logit_scale`, `uniform_weight`, the
     straight-through Gumbel estimator and their diagnostics -- is documented in
     docs/channel.md.
@@ -1438,6 +1444,10 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
             autoregressive decoder (False) or Perceiver IO (True). See
             docs/architecture.md.
 
+        The shared implementation. Configs select one of the two subclasses
+            below, which set `bidirectional` themselves; `parse_config` refuses
+            this name, whose one rate key would cover both arms.
+
         https://arxiv.org/abs/2502.20604
         """
         super().__init__()
@@ -1918,6 +1928,28 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
         self.outputs2vocab.reset_parameters()
         self.reset_channel_scale()
         self.reset_channel_diagnostics()
+
+
+class SenderTransformerAutoregressiveLM(SenderTransformerLM):
+    def __init__(self, referent_embedding_size, **kwargs):
+        """
+        The causal arm of `SenderTransformerLM`: generates the message one
+            symbol at a time and reads each back. Any `bidirectional` in
+            `kwargs` is overridden -- the class is the choice.
+        """
+        kwargs["bidirectional"] = False
+        super().__init__(referent_embedding_size, **kwargs)
+
+
+class SenderTransformerBidirectionalLM(SenderTransformerLM):
+    def __init__(self, referent_embedding_size, **kwargs):
+        """
+        The parallel arm of `SenderTransformerLM` (Perceiver IO): reads the
+            whole message off the latent array in one pass. Any `bidirectional`
+            in `kwargs` is overridden -- the class is the choice.
+        """
+        kwargs["bidirectional"] = True
+        super().__init__(referent_embedding_size, **kwargs)
 
 
 # The keys of `Sender.interfaces`, in build order -- which is also RNG order,

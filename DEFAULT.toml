@@ -1491,11 +1491,22 @@ ShapeWorldViT = 5e-5
 [optimiser.implementation_lr.sender_prototyper]
 AttentionPrototyper = 2e-5
 
+# The Transformer speaker's two arms, one rate each. They were one class,
+# `SenderTransformerLM`, behind `[sender_language_model] bidirectional`, and so
+# shared a single key; the split on 2026-09-27 into two subclasses over the same
+# implementation is what lets each arm carry a rate of its own. Both still sit
+# at the base 1e-4 -- jayelm's rate, and unswept for either.
+[optimiser.implementation_lr.sender_language_model]
+# Swept in `experiments/lr_sweep_4_sender_transformer_autoregressive_lm/`.
+SenderTransformerAutoregressiveLM = 1e-4
+# Swept in `experiments/lr_sweep_8_sender_transformer_bidirectional_lm/`.
+SenderTransformerBidirectionalLM = 1e-4
+
 # The listener's backbone takes the same rates as the speaker's. That is what
 # `lr_sweep_1_cnn` measured -- `sender_vision` and `receiver_vision` moved
 # together in every arm -- so stating them apart here would be claiming a
 # distinction the sweep did not make. The two are separately keyable, and the
-# receiver ViT gets its own sweep at rung 11 rather than inheriting the
+# receiver ViT gets its own sweep at rung 9 rather than inheriting the
 # speaker's, because those two arrive at different rungs.
 [optimiser.implementation_lr.receiver_vision]
 ResNet56 = 5e-5
@@ -2094,27 +2105,30 @@ tau = 1.0                     # Gumbel-softmax tau. Gradient shaping only:
 dropout = 0.1
 layers = 1
 
-# One key, two speakers, and on the Transformer it selects an architecture
-# rather than a mask. In both cases `false` is the causal, left-to-right
-# speaker:
+# Read by `SenderGRULM` alone. `false` is the causal, left-to-right speaker:
 #
-#   false  SenderGRULM          unidirectional `nn.GRU` -- the baseline
-#          SenderTransformerLM  autoregressive Transformer decoder: `layers`
-#                               blocks at message length, each cross-attending
-#                               into the latent array, one symbol sampled at a
-#                               time conditioned on the symbols before it
+#   false  unidirectional `nn.GRU` -- the baseline
+#   true   `nn.GRU(bidirectional=True)`
 #
-#   true   SenderGRULM          `nn.GRU(bidirectional=True)`
-#          SenderTransformerLM  Perceiver IO: `layers` blocks of self-attention
-#                               over the *latent* array, and a learned query
-#                               that reads it back out as every symbol at once
+# The Transformer speakers take their arm from the class instead, and this key
+# is overwritten for them before it is read:
 #
-# `false` here, so the decoder is what a speaker is unless a config says
-# otherwise. The ablation rungs that run the parallel arm say so explicitly --
-# 13 and 14, and see rung 7 for the argument about which arm belongs where.
+#   SenderTransformerAutoregressiveLM  autoregressive Transformer decoder:
+#                               `layers` blocks over the latent array, one
+#                               symbol sampled at a time conditioned on the
+#                               symbols before it -- rungs 7 to 14
+#   SenderTransformerBidirectionalLM   Perceiver IO: `layers` blocks of
+#                               self-attention over the *latent* array, and a
+#                               learned query that reads it back out as every
+#                               symbol at once -- rungs 15 and 16
 #
-# What this no longer does on `SenderTransformerLM` is set `causal` on the
-# latent self-attention stack, which is what it used to mean and which bought
+# The arm is a class rather than this flag so that each can hold its own rate
+# under `[optimiser.implementation_lr.sender_language_model]`, which keys on
+# the class name. The shared implementation, `SenderTransformerLM`, is refused
+# by `parse_config`.
+#
+# What the parallel arm no longer does is run `causal` on the latent
+# self-attention stack, which is what the flag used to mean and which bought
 # nothing. The latent array is not a sequence in time: it is read back out in
 # one shot, so latent index 0 is no earlier than latent index 9 in any sense the
 # task can see, and masking it left to right only hid most of the image from the
@@ -2122,10 +2136,12 @@ layers = 1
 # except the decoder arm's self-attention, over the message, where it means what
 # it says.
 #
-# Note the two arms are not the same size at the same `layers` -- a decoder
-# block carries a cross-attention an encoder block does not -- so a config that
-# flips this and nothing else changes the parameter count by about 43%. See
-# `layers` in rungs 7 and 13.
+# The two arms are parameter-matched at equal `layers`. At the rungs' 7 layers
+# the parallel arm is 6,752,594 on ShapeWorld and 6,756,440 on birds, the
+# decoder 6,758,354 and 6,764,120; the gap is the decoder's token embedding,
+# which it needs to read its own symbols back. (An earlier revision of this
+# comment put the difference at about 43%, from when the decoder arm
+# cross-attended inside every block. It no longer does.)
 bidirectional = false
 heads = 4 # Heads per layer - only applies to Transformer language models
 
@@ -2135,11 +2151,10 @@ heads = 4 # Heads per layer - only applies to Transformer language models
 # ignores it.
 #
 # A learned query array cross-attends into the two prototypes, and this knob sets
-# how many positions that query array has. What happens to the result depends on
-# `bidirectional` above: the parallel arm processes it with a self-attention
-# stack and then reads it back out at the message's length, while the decoder arm
-# treats it as a fixed memory that every block cross-attends into. Either way
-# nothing downstream can see this number -- `message_length` and the receiver are
+# how many positions that query array has. Both arms then run the same blocks
+# over the result and take the message from its tail; the arm, which is the
+# class (see `bidirectional` above), decides only whether those blocks are
+# causally masked. Either way nothing downstream can see this number -- `message_length` and the receiver are
 # untouched by it.
 #
 # It is here because the channel from the referents into the message is narrower
@@ -2184,21 +2199,24 @@ utility_tokens = 4 # Only applies to Transformer language models
 # 512 rather than the 576 every other stack takes, and this is a sizing argument
 # rather than a taste one. When the speaker's blocks stopped cross-attending into
 # a latent memory they lost a sublayer each, about 1.6M parameters across the
-# stack, and the ladder is matched on parameters against rung 1's GRU. Six blocks
-# at 512 restores it at 1.015x on both datasets -- 5,854,089 against 5,764,923 on
-# ShapeWorld, 5,859,855 against 5,774,073 on birds -- which is closer to 1.0 than
-# the 1.029x the ladder carried before. `test_ablation_configs.py` pins both.
+# stack, and the ladder is matched on parameters against rung 1's GRU. At 512
+# the rungs' seven blocks hold it at 0.992x on ShapeWorld and 0.991x on birds --
+# 6,758,354 against 6,813,499, and 6,764,120 against 6,822,649 -- for the causal
+# arm, and the parallel arm is within `token_embedding` of that. Six blocks read
+# 1.015x until the speaker's adapter widened the GRU baseline; see rung 7's
+# `layers`. `test_ablation_configs.py` pins both.
 #
 # Still a multiple of 64, which is what [sender_feature_model] asks for: 8 x 64
 # here against the ViT's 9 x 64. Only Transformer language models read this;
 # `SenderGRULM` ignores it, and `[birds.sender_language_model]` inherits it, so
-# this one key sizes the speaker on every rung from 9 up.
+# this one key sizes the speaker on every rung from 7 up.
 ff_inner_size = 512 # Only applies to Transformer language models
 # 0.1, matching every other stack. It was 0.2 here alone, from when the speaker's
-# language model was the deepest thing in the run relative to what it had to say;
-# at 5 layers over a latent array of 10 or 16 it is now the shallowest of the
-# three transformer stacks, and there is no argument left for regularising it
-# twice as hard as the ViT in front of it.
+# language model was the deepest thing in the run relative to what it had to say.
+# The rungs now run it at 7 blocks over a latent array of 10 or 16, against the
+# ViTs' 6 and 10 and the listener's 6, so it is no longer an outlier on depth and
+# there is no argument left for regularising it twice as hard as the ViT in
+# front of it.
 # Off. Turned off on 2026-08-25 while chasing rung 09's failure to ignite, and
 # this is the stack the argument is actually about.
 #
@@ -2405,7 +2423,7 @@ layers = 1
 bidirectional = false
 message_length = 7 # Only applies to Transformer language models. Should be the same as sender_language_model.message_length
 # Transformer language model only, whose depth is `layers` above, shared with the
-# GRU. 4 heads at 256 wide is what rung 11 sets, for the head dimension of 64
+# GRU. 4 heads at 256 wide is what rung 13 sets, for the head dimension of 64
 # that every attention module in the repo has; 5 is here so the key exists.
 heads = 5 # Only applies to Transformer language models
 utility_tokens = 0 # Only applies to Transformer language models

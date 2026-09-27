@@ -32,8 +32,8 @@ The rest of this file is a reference for the columns of that `metrics.csv`.
 
 ## The learning-rate sweeps are a serial chain
 
-**`lr_sweep_1_cnn` through `lr_sweep_7_receiver_cross_attention_lm`**, one
-folder per rung of the ladder, each measuring the learning rate of the one
+**`lr_sweep_1_cnn` through `lr_sweep_8_sender_transformer_bidirectional_lm`**,
+one folder per rung of the ladder, each measuring the learning rate of the one
 component that rung introduces. They must be run **in order**, and DEFAULT.toml
 must be updated with each result before the next is launched.
 
@@ -42,10 +42,11 @@ must be updated with each result before the next is launched.
 | `lr_sweep_1_cnn` | 1 / 2 | `ResNet56`, `ResNet18` | `implementation_lr.{sender,receiver}_vision` |
 | `lr_sweep_2_sender_vit` | 3 / 4 | the speaker's ViT | `implementation_lr.sender_vision.{ShapeWorldViT,BirdsViT}` |
 | `lr_sweep_3_attention_prototyper` | 5 / 6 | `AttentionPrototyper` | `implementation_lr.sender_prototyper.AttentionPrototyper` |
-| `lr_sweep_4_sender_transformer_lm` | 7 / 8 | `SenderTransformerLM` | `implementation_lr.sender_language_model.SenderTransformerLM` |
+| `lr_sweep_4_sender_transformer_autoregressive_lm` | 7 / 8 | `SenderTransformerAutoregressiveLM` | `implementation_lr.sender_language_model.SenderTransformerAutoregressiveLM` |
 | `lr_sweep_5_receiver_vit` | 9 / 10 | the listener's ViT | `implementation_lr.receiver_vision.{ShapeWorldViT,BirdsViT}` |
 | `lr_sweep_6_attention_discriminator` | 11 / 12 | `AttentionDiscriminator` | `implementation_lr.receiver_discriminator.AttentionDiscriminator` |
 | `lr_sweep_7_receiver_cross_attention_lm` | 13 / 14 | `ReceiverCrossAttentionLM` | `implementation_lr.receiver_language_model.ReceiverCrossAttentionLM` |
+| `lr_sweep_8_sender_transformer_bidirectional_lm` | 15 / 16 | `SenderTransformerBidirectionalLM` | `implementation_lr.sender_language_model.SenderTransformerBidirectionalLM` |
 
 **Sweeps 1-3 have landed and sweep 4 is where the chain is.** Sweep 3 ran twice,
 because the module changed under it: its first pass measured an
@@ -58,21 +59,23 @@ withdrawn first-pass numbers for the record.
 There were eight sweeps until then. `lr_sweep_4_sender_contrast` tuned
 `module_lr.sender_contrast`, which named a module group that no longer exists;
 the folder is deleted and the four above it came down by one, in step with the
-ladder.
+ladder. The chain is eight again since 2026-09-27, when sweep 8 was appended for
+rungs 15 and 16; it is a new folder and not that one.
 
-Ten arms each -- 1e-5, 2e-5, 5e-5, 1e-4 and 2e-4 on both datasets -- at 30
-epochs and one repeat, restated in every config because `scripts/job_utils.py`
-reads both out of the file rather than out of the merged config. Two folders
-depart from that and each says why in its own preamble. Sweep 1 has eleven arms
-on an asymmetric grid, four over 1e-5 to 1e-4 on ShapeWorld and seven over 5e-6
-to 5e-4 on birds, and it also settled the gradient estimator. **Sweep 4 is on
-its second pass**, over
-2e-6 to 5e-5 at 60 epochs: its first pass found a cliff rather than a slope --
-every arm above it finishing on one message for the whole test set -- with the
-only live ShapeWorld arm sitting at the bottom of the grid, and with ignition on
-that arm arriving at epoch 21 of 30. The grid moved down a decade and the budget
-doubled to cover the delay. Neither change propagates to sweeps 5-7, which stay
-at 30 on the old grid until something about those rungs says otherwise.
+Ten arms each at 30 epochs and one repeat, restated in every config because
+`scripts/job_utils.py` reads both out of the file rather than out of the merged
+config. Sweeps 2, 3, 5 and 6 run 1e-5, 2e-5, 5e-5, 1e-4 and 2e-4 on both
+datasets. Sweep 1 has eleven arms on an asymmetric grid, four over 1e-5 to 1e-4
+on ShapeWorld and seven over 5e-6 to 5e-4 on birds, and it also settled the
+gradient estimator. **Sweeps 4, 7 and 8 run a decade lower, 2e-6 to 5e-5.**
+Sweep 4's first pass over the standard grid found a cliff rather than a slope --
+every arm above the cliff finishing on one message for the whole test set --
+with the only live ShapeWorld arm at 1e-5 and its ignition arriving at epoch 21
+of 30. Its second pass moved the grid down and briefly doubled the budget to 60
+for the slow ignition, and went back to 30 once the bias-free ViT ignited at
+epoch 1. Sweep 7 took the same grid so the two can be read side by side, and
+sweep 8, the other arm of sweep 4's class, takes it for the same reason. Each
+folder's preamble says why it departs from the standard grid.
 
 **ShapeWorld comes first in every sweep**, with no exceptions: `01`-`05` are
 the ShapeWorld arms and `06`-`10` the birds ones (`01`-`04` and `05`-`09` in
@@ -175,6 +178,20 @@ Anything written before a renumbering -- run directories, the `docs/` prose,
 `diagnostics/README.md`, commit messages -- names rungs in the scheme of its day,
 so read those numbers against these tables rather than against the current
 configs.
+
+### Fourteen to sixteen, 2026-09-27: appended, not renumbered
+
+Rungs 15 (ShapeWorld) and 16 (birds) were added on top of 13 and 14, and
+nothing below them moved, so every rung number from 1 to 14 still names the
+same file. Each is its parent with the speaker's language model switched from
+`SenderTransformerAutoregressiveLM` to `SenderTransformerBidirectionalLM`: the
+same blocks at the same size under a different mask, so the step moves the
+generation regime and nothing else. `SenderTransformerLM` was split into those
+two classes the same day so that each arm could hold its own rate, and
+`lr_sweep_4_sender_transformer_lm` was renamed to
+`lr_sweep_4_sender_transformer_autoregressive_lm` -- its earlier arms' results
+are under the old name. The pair is not the sixteen-rung scheme's 15 and 16,
+which were the cross-attention listener and are 13 and 14 now.
 
 ### Second renumbering: sixteen rungs to **fourteen**, 2026-09-16
 

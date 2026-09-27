@@ -16,14 +16,13 @@ dataset = "../data/cub"
 [sender]
 feature_model = "BirdsViT"
 prototyper = "AttentionPrototyper"
-language_model = "SenderTransformerLM"
+language_model = "SenderTransformerAutoregressiveLM"
 
 [sender_language_model]
 token_embedding_size = 320
 d_model = 320
 heads = 5    # head_dim 64, as everywhere
 layers = 7
-bidirectional = false
 
 [receiver]
 feature_model = "BirdsViT"

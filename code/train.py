@@ -1446,9 +1446,9 @@ if __name__ == "__main__":
     #     key-match. Checkpoints written from here on carry plain keys, so they
     #     match neither -- this is a re-run, not a resume.
     #
-    # The feature models only. `SenderTransformerLM` and `SenderGRULM` decode
-    #     autoregressively and would break into graphs at every step, and the
-    #     comparers are small; the backbones are ~90% of a ViT rung and have no
+    # The feature models only. `SenderTransformerAutoregressiveLM` and
+    #     `SenderGRULM` decode autoregressively and would break into graphs at
+    #     every step, and the comparers are small; the backbones are ~90% of a ViT rung and have no
     #     data-dependent control flow at all. Compiling the module rather than
     #     its `forward` also means `Sender.speak` -- the eval-pass entry point
     #     -- gets the compiled backbone too, since it goes through the same

@@ -7,7 +7,7 @@
 # arms, copying rung 12. Nothing else differs between the arms, and nothing
 # else differs from the rung each one copies.
 #
-# **Sweep 6 of seven.** `lr_sweep_1_cnn` did the two CNN backbones and is
+# **Sweep 6 of eight.** `lr_sweep_1_cnn` did the two CNN backbones and is
 # where the reasoning for the whole set is written down. The short version:
 # every rung of the ablation introduces a component whose learning rate has
 # never been measured, `[optimiser] lr`'s 1e-4 is jayelm's default tuned on a
@@ -18,9 +18,9 @@
 # through.
 #
 # **This sweep takes its rates from DEFAULT.toml and restates none of them.**
-# It inherits every rate the first six sweeps found. That is
+# It inherits every rate the first five sweeps found. That is
 # deliberate and it is also a constraint on when this can run: the sweeps are
-# serial, and DEFAULT.toml must already carry sweep 6's result before this one
+# serial, and DEFAULT.toml must already carry sweep 5's result before this one
 # is launched. Launching out of order does not fail, it silently measures this
 # component against an untuned stack. See `experiments/README.md`.
 #
@@ -134,14 +134,13 @@ name = "lr_sweep_6_attention_discriminator"
 [sender]
 feature_model = "ShapeWorldViT"
 prototyper = "AttentionPrototyper"
-language_model = "SenderTransformerLM"
+language_model = "SenderTransformerAutoregressiveLM"
 
 [sender_language_model]
 token_embedding_size = 320
 d_model = 320
 heads = 5    # head_dim 64, as everywhere
 layers = 7
-bidirectional = false
 
 [receiver]
 feature_model = "ShapeWorldViT"

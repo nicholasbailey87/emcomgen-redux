@@ -1,6 +1,8 @@
 # Rung 13: rung 11 with the cross-attention message encoder.
 #
-# The other half of the listener, and the top of the ladder.
+# The other half of the listener, and the last rung to move it. The top of the
+# ladder is now rung 15 on ShapeWorld and 16 on birds, which move the speaker.
+#
 # `ReceiverCrossAttentionLM` reads the message with a decoder stack that
 # cross-attends into the candidate set, so the meaning it refines is
 # discriminative rather than absolute -- its output is referent-conditioned by
@@ -12,15 +14,15 @@
 # 4,702,646 at the 6 blocks stated below, +0.3%. That match is why `layers` is 6
 # here and 3 on `[receiver_discriminator]`, and it is bought at jayelm's width
 # rather than at a shared 256 -- see `layers` in `DEFAULT.toml`. It used to be
-# 28,262,400 against 2,466,139, so the 13 -> 15 step was a 26M parameter change
+# 28,262,400 against 2,466,139, so the 11 -> 13 step was a 26M parameter change
 # as well as an architecture one.
 #
 # **The step is now clean on the discriminator too.** It used to shrink across
 # it, 2,990,663 to 2,548,295, because `AttentionDiscriminator` owned a
 # `memory_adapter` that read a 1024-wide GRU state on rung 11 and a 256-wide
 # encoded message here. That adapter is `Receiver`'s message interface now, so
-# the discriminator is 2,384,198 on both rungs and the difference has moved into
-# `receiver.interfaces` -- 344,320 on rung 11 against 229,632 here. The encoder
+# the discriminator is 2,384,196 on both rungs and the difference has moved into
+# `receiver.interfaces` -- 295,168 on rung 11 against 131,328 here. The encoder
 # parity number improved for the mirror reason: this stack owned a
 # `referent_adapter` that the GRU had nothing corresponding to, and that is an
 # interface now as well.
@@ -33,7 +35,7 @@ name = "ablation_shapeworld"
 [sender]
 feature_model = "ShapeWorldViT"
 prototyper = "AttentionPrototyper"
-language_model = "SenderTransformerLM"
+language_model = "SenderTransformerAutoregressiveLM"
 
 [sender_language_model]
 # The two must equal *each other*, and neither has anything to do with the
@@ -57,32 +59,27 @@ token_embedding_size = 320
 d_model = 320
 heads = 5    # head_dim 64, as everywhere
 
-# 6 blocks and `ff_inner_size = 512`, which together hold the speaker's language
-# model at 1.015x the GRU baseline's. The blocks lost their cross-attention
+# 7 blocks and `ff_inner_size = 512`, which together hold the speaker's language
+# model at 0.992x the GRU baseline's. The blocks lost their cross-attention
 # sublayer when the referents moved into the stack's input, so they are cheaper
 # and there are more of them. The argument is at rung 7; this rung is not
 # supposed to touch the speaker at all.
 layers = 7
 
-# `false` selects the causal arm: the blocks run over the latent array under a
-# causal mask and the message slots in its tail are generated in order, each
-# read and then overwritten by its symbol so the next one is conditioned on it.
-# `true` selects the parallel arm, which runs the same blocks unmasked and reads
-# the whole tail in one shot.
+# The causal arm, chosen by `language_model = "SenderTransformerAutoregressiveLM"`
+# above rather than by `bidirectional`, which this class overrides. The blocks
+# run over the latent array under a causal mask and the message slots in its
+# tail are generated in order, each read and then overwritten by its symbol so
+# the next one is conditioned on it.
 #
-# `false` here, because the GRU baseline at rung 1 is autoregressive too: this
-# rung then moves the language model's architecture and nothing else. `true`
-# would move the generation regime at the same time, and whatever the
-# combination measured could not be attributed to either.
-#
-# The parallel arm is no longer a rung of its own. It used to sit beside the top
-# of the ladder as a fork; to measure it again, copy the topmost rung and flip
-# this key. A difference then covers the generation regime and nothing else,
-# which is new: the two arms used to be different architectures at different
-# sizes, and are now the same blocks at the same size under different masks.
-# They differ by `token_embedding` alone -- 5,760 parameters, which only the
-# causal arm needs because only it reads a symbol back.
-bidirectional = false
+# Causal because the GRU baseline at rung 1 is autoregressive too: rung 7 then
+# moves the language model's architecture and nothing else. The parallel arm,
+# `SenderTransformerBidirectionalLM`, would move the generation regime at the
+# same time, and whatever the combination measured could not be attributed to
+# either. It is at the top of the ladder instead -- rungs 15 and 16 -- where it
+# moves the regime alone. The two arms are the same blocks at the same size and
+# differ by `token_embedding` alone, which only the causal arm needs because
+# only it reads a symbol back.
 
 [receiver]
 feature_model = "ShapeWorldViT"

@@ -32,7 +32,7 @@
 # and the very keys this pass wrote into DEFAULT.toml then overrode them, so
 # every later reading of this folder was reading one rate nine times.
 #
-# **This is sweep 1 of seven.** Each rung of the ablation introduces a
+# **This is sweep 1 of eight.** Each rung of the ablation introduces a
 # component whose rate is an untested guess, so `lr_sweep_2_sender_vit`
 # onwards repeat this one rung at a time, in the presence of the components
 # below them, with DEFAULT.toml updated from each before the next is

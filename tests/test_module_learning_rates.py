@@ -264,6 +264,13 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
         },
         "receiver_vision": {"ResNet56": 5e-5, "ResNet18": 1e-4},
         "sender_prototyper": {"AttentionPrototyper": 2e-5},
+        # Both unswept, at the base, and stated so that each Transformer
+        #     speaker arm has a key of its own to receive sweep 4's and sweep
+        #     8's results.
+        "sender_language_model": {
+            "SenderTransformerAutoregressiveLM": 1e-4,
+            "SenderTransformerBidirectionalLM": 1e-4,
+        },
     }
 
 
@@ -310,6 +317,60 @@ def test_the_implementation_rate_beats_the_group_rate_for_the_class_in_use():
         if p.requires_grad
     }
     assert rates == {3e-6}
+
+
+@pytest.mark.parametrize(
+    "config_file,arm",
+    [
+        ("13_shapeworld_receiver_cross_attention_lm.toml", "SenderTransformerAutoregressiveLM"),
+        ("15_shapeworld_sender_transformer_bidirectional_lm.toml", "SenderTransformerBidirectionalLM"),
+    ],
+)
+def test_the_two_transformer_speaker_arms_take_separate_rates(config_file, arm):
+    """
+    Why the arms are two classes. A rate is keyed on the class name, so the two
+        arms of one implementation can be tuned apart -- and a rate stated for
+        the arm not in use must reach nothing.
+    """
+    flat = dict(parse_config.get_config()["optimiser"]["module_lr"])
+    rates = {
+        "SenderTransformerAutoregressiveLM": 3e-6,
+        "SenderTransformerBidirectionalLM": 7e-6,
+    }
+
+    config, built = _build(
+        config_file,
+        optimiser={
+            "module_lr": flat,
+            "implementation_lr": {"sender_language_model": rates},
+        },
+    )
+
+    assert config["optimiser"]["resolved_module_lrs"]["sender_language_model"] == rates[arm]
+
+    lr_of = _lr_by_id(built["optimiser"])
+    claimed = builder.claimed_separately
+    seen = {
+        lr_of[id(p)]
+        for name, p in built["pair"].sender.language_model.named_parameters()
+        if p.requires_grad and not claimed(name, p)
+    }
+    assert seen == {rates[arm]}
+
+
+def test_the_shared_transformer_speaker_is_not_selectable():
+    """
+    `SenderTransformerLM` is the implementation both arms share, and a config
+        naming it would take one rate for two arms and pick between them by
+        `bidirectional`. `validate_config` refuses it and names the subclasses.
+    """
+    config = parse_config.get_config()
+    config["sender"]["language_model"] = "SenderTransformerLM"
+
+    with pytest.raises(
+        parse_config.InvalidConfig, match="SenderTransformerBidirectionalLM"
+    ):
+        parse_config.validate_config(config)
 
 
 @pytest.mark.parametrize(

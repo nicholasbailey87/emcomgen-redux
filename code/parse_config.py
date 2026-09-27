@@ -170,7 +170,19 @@ def validate_config(config: dict) -> bool:
             "`sender_language_model` message length must be the same as "
             "`receiver_language_model` message length."
         )
-    
+
+    # The Transformer speaker's arm is chosen by class, because a class name is
+    # what `[optimiser.implementation_lr]` keys a rate on. The shared base
+    # would take one rate for two arms and read `bidirectional` to pick
+    # between them, which is the ambiguity the subclasses exist to remove.
+    if config['sender']['language_model'] == "SenderTransformerLM":
+        raise InvalidConfig(
+            '`[sender] language_model = "SenderTransformerLM"` is not '
+            'selectable: name "SenderTransformerAutoregressiveLM" or '
+            '"SenderTransformerBidirectionalLM", which fix the arm and each '
+            "take a learning rate of their own."
+        )
+
     # The channel and readout flags, checked here for the same reason and in
     # the same style. All three default to today's behaviour in the modules that
     # read them, so a missing key would run the default arm silently rather than
