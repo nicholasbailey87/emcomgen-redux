@@ -1,11 +1,11 @@
-# lr_sweep_4_sender_transformer_autoregressive_lm arm: `SenderTransformerAutoregressiveLM` at 5e-5 on CUB.
+# lr_sweep_4_sender_transformer_autoregressive_lm arm: `SenderTransformerAutoregressiveLM` at 2e-6 on CUB.
 #
-# See `01_birds_2e-6.toml` for what this experiment measures and why.
+# See `01_birds_frozen.toml` for what this experiment measures and why.
 # This file differs from that one in the swept rate alone.
 #
 # ---
 #
-# **This arm: `SenderTransformerAutoregressiveLM` at 5e-5 on CUB**, copying ablation rung 08.
+# **This arm: `SenderTransformerAutoregressiveLM` at 2e-6 on CUB**, copying ablation rung 08.
 
 name = "lr_sweep_4_sender_transformer_autoregressive_lm"
 
@@ -26,7 +26,7 @@ layers = 7
 [optimiser.implementation_lr.sender_language_model]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-SenderTransformerAutoregressiveLM = 5e-5
+SenderTransformerAutoregressiveLM = 2e-6
 
 [scheduler]
 epochs = 30

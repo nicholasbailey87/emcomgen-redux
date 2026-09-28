@@ -2,11 +2,17 @@
 # `SenderTransformerAutoregressiveLM` wants, in the presence of everything below
 # it on the ladder.
 #
-# Five arms. `[optimiser.implementation_lr.sender_language_model]
-# SenderTransformerAutoregressiveLM` moves over 2e-6, 5e-6, 1e-5, 2e-5 and 5e-5
-# on birds -- `01`-`05`, copying ablation rung 8. Nothing else
-# differs between the arms, and nothing else differs from the rung each one
-# copies.
+# Eight arms, smallest rate first, on birds, copying ablation rung 8.
+# `[optimiser.implementation_lr.sender_language_model]
+# SenderTransformerAutoregressiveLM` is frozen at 1e-12 in `01`, a control, and
+# moves over 5e-7, 1e-6, 2e-6, 5e-6, 1e-5, 2e-5 and 5e-5 in `02`-`08`. Nothing
+# else differs between the arms, and nothing else differs from the rung each
+# one copies.
+#
+# `01`-`03` were added on 2026-09-28, after the other five had run, and the
+# folder was renumbered then so that the grid reads in order. The five that ran
+# are `04`-`08` here; they were `01`-`05` for a day and `06`-`10` before that,
+# which is what their results are filed under (see below).
 #
 # **Birds only, from 2026-09-27.** This sweep tunes a language model, and on
 # ShapeWorld a language-model rate is read through a confound birds does not
@@ -23,7 +29,7 @@
 #
 # The ShapeWorld arms, `01`-`05` before this change, ran under the folder's
 # old name, `lr_sweep_4_sender_transformer_lm`, and the preamble below still
-# discusses them; the birds arms were `06`-`10` there and are `01`-`05` here.
+# discusses them; the birds arms were `06`-`10` there and are `04`-`08` here.
 #
 # **Renamed on 2026-09-27**, from `lr_sweep_4_sender_transformer_lm`, when
 # `SenderTransformerLM` was split into an autoregressive and a bidirectional
@@ -218,7 +224,30 @@
 #
 # ---
 #
-# **This arm: `SenderTransformerAutoregressiveLM` at 2e-6 on CUB**, copying ablation rung 08.
+# **A control, not a rate.** Added on 2026-09-28. The second pass ranked birds
+# monotonically in favour of the bottom of the grid -- last-five-epoch
+# `test_acc` 0.609, 0.579, 0.577, 0.560, 0.527 from 2e-6 up -- with training
+# accuracy falling as the rate rose, which is not what an optimum looks like.
+# The reading is that the speaker does best by barely moving and the rate is
+# avoiding a pathology rather than tuning anything. This arm tests that
+# directly: if it matches 2e-6, the language model is working as an untrained
+# code the rest of the system learns to read.
+#
+# 1e-12 rather than 0, because `validate_config` requires a positive rate and
+# there is no freeze switch. AdamW moves a parameter by at most ~`lr` a step, so
+# over ~4,700 steps no weight travels more than ~5e-9 -- frozen for every
+# purpose here. Decoupled weight decay scales with `lr` and is inert with it.
+#
+# What freezes with it: everything in the `sender_language_model` group,
+# including `polarity_embedding`, whose own key equals the base rate and so is
+# not split out -- it takes the module's rate, as it does on every arm of this
+# sweep. What does *not*: `log_logit_scale`, which is its own group at
+# `logit_scale_lr` 2e-3 on every arm, so the channel scale still learns here as
+# it does elsewhere.
+#
+# ---
+#
+# **This arm: `SenderTransformerAutoregressiveLM` at 1e-12 (frozen) on CUB**, copying ablation rung 08.
 
 name = "lr_sweep_4_sender_transformer_autoregressive_lm"
 
@@ -239,7 +268,7 @@ layers = 7
 [optimiser.implementation_lr.sender_language_model]
 # The one key this sweep moves. Every other rate is DEFAULT.toml's,
 # including the ones earlier sweeps in this set have already settled.
-SenderTransformerAutoregressiveLM = 2e-6
+SenderTransformerAutoregressiveLM = 1e-12
 
 [scheduler]
 epochs = 30
