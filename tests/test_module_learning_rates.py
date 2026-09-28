@@ -53,10 +53,11 @@ BIRDS_FEATS = (3, 224, 224)
 
 RUNGS = all_rungs()
 
-# `(suffix, config key)` for every group `SPLIT_LEARNING_RATES` creates. Five
+# `(suffix, config key)` for every group `SPLIT_LEARNING_RATES` creates. Four
 #     keys against three scalar clip groups, and the mismatch is deliberate:
-#     `score_bias` and `polarity_embedding` take a rate of their own but clip
-#     with the module whose output they modify. See `SCALAR_GROUPS`.
+#     `score_bias` takes a rate of its own but clips with the module whose
+#     output it modifies. See `SCALAR_GROUPS`. `polarity_embedding` was a fifth
+#     until 2026-09-28, when the speaker's tag was frozen.
 #
 #     The speaker's channel scale heads this list again. It was briefly a
 #     constant -- between 2026-08-30 and 2026-08-31 -- and is a parameter once
@@ -65,7 +66,6 @@ SCALAR_OVERRIDES = (
     ("log_logit_scale", "logit_scale_lr"),
     ("log_score_scale", "score_scale_lr"),
     ("score_bias", "score_bias_lr"),
-    ("polarity_embedding", "polarity_embedding_lr"),
     ("mix_logit", "mix_logit_lr"),
 )
 
@@ -189,9 +189,7 @@ def test_the_default_rates_are_flat_at_jayelms_own():
         re-tiers it is a different position, and this is where a reader is told
         which happened. It applies to all fourteen rungs at once either way.
 
-    One consequence worth knowing, and it is why `polarity_embedding_lr` is
-        pinned away from base in `tests/test_score_scale.py`: `build_models`
-        splits a scalar into its own optimiser group only `if lr != base_lr`,
+    One consequence worth knowing: `build_models` splits a scalar into its own optimiser group only `if lr != base_lr`,
         so every `*_lr` key that happens to equal the base is now inert. The
         rate each parameter runs at is unchanged either way -- an unsplit
         parameter sits in its module's group at exactly the rate resolved for
@@ -264,11 +262,10 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
         },
         "receiver_vision": {"ResNet56": 5e-5, "ResNet18": 1e-4},
         "sender_prototyper": {"AttentionPrototyper": 2e-5},
-        # Both unswept, at the base, and stated so that each Transformer
-        #     speaker arm has a key of its own to receive sweep 4's and sweep
-        #     8's results.
+        # The causal arm at 2e-6 from sweep 4, on both datasets. The parallel
+        #     arm is unswept and at the base until sweep 8 reports.
         "sender_language_model": {
-            "SenderTransformerAutoregressiveLM": 1e-4,
+            "SenderTransformerAutoregressiveLM": 2e-6,
             "SenderTransformerBidirectionalLM": 1e-4,
         },
     }
@@ -618,10 +615,10 @@ def test_the_scalar_overrides_survive_the_module_groups_with_the_channel_normali
 ):
     """
     The disjointness `claimed_separately` buys, read off the built pair. The
-        three scaling scalars are held out of their module's group, and the two
-        that are not -- `score_bias` and `polarity_embedding` -- are moved back
-        out by `split_out_parameter` afterwards, so all five end at the rate
-        their own key names whatever their module's rate is.
+        three scaling scalars are held out of their module's group, and the one
+        that is not -- `score_bias` -- is moved back out by
+        `split_out_parameter` afterwards, so all four end at the rate their own
+        key names whatever their module's rate is.
 
     `log_logit_scale` is one of the four, and the one whose module rate differs
         most from its own on every rung: it sits inside `sender_language_model`

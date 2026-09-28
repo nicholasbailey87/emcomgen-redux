@@ -226,11 +226,10 @@ def implementation_of(config, group):
 #     exactly the reason above: it is one 0-d tensor that would otherwise sit
 #     inside `sender_language_model`, and be renormalised against a whole
 #     module's norm.
-#     `score_bias` is an offset and `polarity_embedding` is a 2-d tag, and both
-#     belong to the norm of the module producing the output they modify. Both
-#     still take a rate of their own through `SPLIT_LEARNING_RATES` -- a clip
-#     group and a learning rate are separate questions, and this table answers
-#     only the first.
+#     `score_bias` is an offset, and belongs to the norm of the module producing
+#     the output it modifies. It still takes a rate of its own through
+#     `SPLIT_LEARNING_RATES` -- a clip group and a learning rate are separate
+#     questions, and this table answers only the first.
 #
 # The gate is on the architecture rather than on finding the parameter, exactly
 #     as `SPLIT_LEARNING_RATES`'s is: a `BilinearDiscriminator` has no mixing
@@ -435,18 +434,16 @@ def split_out_module(optimiser, module, lr, config_key,
 
 # `(config key, parameter suffix, applies to)`, in the order the groups are
 #     added. The test gates on the architecture rather than on finding the
-#     parameter: a GRU speaker has no polarity tag, and
-#     a `BilinearDiscriminator` has no mixing weight, so for those the key is
-#     inapplicable rather than broken. See docs/training.md -- and do not read a
-#     gate as a verdict on the parameter.
+#     parameter: a `BilinearDiscriminator` has no mixing weight, so for that
+#     one the key is inapplicable rather than broken. See docs/training.md --
+#     and do not read a gate as a verdict on the parameter.
+#
+# `polarity_embedding_lr` was the first entry until 2026-09-28, when the
+#     speaker's polarity tag was frozen: it never moved at any rate swept, and
+#     its key, equal to the base rate, was not being applied at all -- the split
+#     below only happens `if lr != base_lr`, so the tag had been taking its
+#     module's rate instead.
 SPLIT_LEARNING_RATES = (
-    (
-        "polarity_embedding_lr",
-        "polarity_embedding",
-        lambda pair: isinstance(
-            pair.sender.language_model, sender.SenderTransformerLM
-        ),
-    ),
     (
         # The listener's volume: a lone scalar in front of a normalised
         #     quantity, whose whole travel is bounded by `lr * steps` and which
@@ -531,8 +528,7 @@ SPLIT_LEARNING_RATES = (
         #     is free.
         #
         # On every architecture: both speakers mix in `GumbelChannel`, so unlike
-        #     `polarity_embedding_lr` and `mix_logit_lr` no *speaker* lacks the
-        #     parameter.
+        #     `mix_logit_lr` no *speaker* lacks the parameter.
         #
         # There is one arm that lacks it, and it is a config setting rather
         #     than an architecture: `normalise_logits = false` removes the
@@ -787,10 +783,10 @@ def build_models(dataloaders, config):
     #     claims lone named tensors, and the two are disjoint by construction
     #     rather than by ordering: `claimed_separately` holds back the four
     #     scaling scalars here as well as in `group_parameters`, so the only
-    #     tensors both loops can reach are `score_bias` and
-    #     `polarity_embedding`, which are deliberately in their module's clip
-    #     group and take their rate from the key below. Running the modules
-    #     first means those two end up at the rate their own key names.
+    #     tensor both loops can reach is `score_bias`, which is deliberately in
+    #     its module's clip group and takes its rate from the key below.
+    #     Running the modules first means it ends up at the rate its own key
+    #     names.
     module_lrs, resolved_module_lrs = resolve_module_learning_rates(
         config, pair, base_lr
     )
@@ -802,7 +798,7 @@ def build_models(dataloaders, config):
     #     module this pair does not have is absent, so this says which groups
     #     existed as well as what rate each ran at. Note the rate here is the
     #     module's own parameters got: the scalars that clip separately kept
-    #     theirs, and `score_bias` and `polarity_embedding` move again below.
+    #     theirs, and `score_bias` moves again below.
     config['optimiser']['resolved_module_lrs'] = resolved_module_lrs
 
     for config_key, suffix, applies_to in SPLIT_LEARNING_RATES:

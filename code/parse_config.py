@@ -281,6 +281,14 @@ def validate_config(config: dict) -> bool:
             "`[optimiser.implementation_lr.sender_prototyper]` keyed by class",
         ),
         (
+            'optimiser',
+            'polarity_embedding_lr',
+            "the speaker's polarity tag is frozen since 2026-09-28 "
+            "(`requires_grad=False`), so there is no rate to set. It never "
+            "moved at any rate `lr_sweep_4` ran, and this key, at the base "
+            "rate, was never applied: the tag took its module's rate",
+        ),
+        (
             'data',
             'augment_flip',
             "the geometry is set per agent since 2026-09-09. Use "

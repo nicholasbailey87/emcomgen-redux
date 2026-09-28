@@ -249,7 +249,7 @@ def test_without_the_tag_the_prototypes_are_interchangeable():
     assert torch.allclose(forwards, backwards, atol=1e-5)
 
 
-def test_a_learned_tag_tells_the_prototypes_apart():
+def test_the_tag_tells_the_prototypes_apart():
     speaker = _speaker().eval()
     with torch.no_grad():
         speaker.polarity_embedding.normal_(std=0.5)
@@ -263,22 +263,26 @@ def test_a_learned_tag_tells_the_prototypes_apart():
     assert not torch.allclose(forwards, backwards, atol=1e-5)
 
 
-def test_the_two_tag_rows_receive_different_gradients():
+def test_the_tag_is_frozen():
     """
-    The rows open as independent draws and have to stay free to move relative to
-    each other. They do because the gradient at each row is the gradient of the
-    sequence position it was added to, and the two prototypes differ in content
-    -- nothing ties the rows together after the init, so the draw is a starting
-    point rather than a constraint.
+    The tag is a fixed random draw since 2026-09-28: it never moved at any rate
+        `lr_sweep_4` ran, so it no longer learns at all. A `Parameter` with
+        `requires_grad=False`, so it stays in `state_dict` and in parameter
+        counts while `get_optimiser` skips it. The rows still differ -- that is
+        what the draw is for -- and the gradient still flows *through* the tag
+        to the prototypes it is added to, just not into it.
     """
     speaker = _speaker()
 
-    speaker.encode(_prototypes()).pow(2).sum().backward()
-    gradient = speaker.polarity_embedding.grad
+    assert not speaker.polarity_embedding.requires_grad
 
-    assert gradient is not None
-    assert (gradient != 0).any()
-    assert not torch.allclose(gradient[0], gradient[1])
+    before = speaker.polarity_embedding.detach().clone()
+    positive, negative = (p.requires_grad_() for p in _prototypes())
+    speaker.encode((positive, negative)).pow(2).sum().backward()
+
+    assert speaker.polarity_embedding.grad is None
+    assert torch.equal(speaker.polarity_embedding, before)
+    assert positive.grad is not None and (positive.grad != 0).any()
 
 
 def test_the_separation_diagnostic_reports_the_gap():

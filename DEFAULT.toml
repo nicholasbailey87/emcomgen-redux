@@ -909,11 +909,8 @@ eps = 1e-12
 # the scale stops. Every arm of `lr_sweep_1_cnn` ended pinned against it. See
 # `sender.sample_symbols` and docs/channel.md.
 #
-# `polarity_embedding_lr` is deliberately not in this group and sits at the
-# speaker's module rate, 1e-4. It is a 2-d tag rather than a scalar, it has no
-# traverse to cover since it opens as an antipodal draw at
-# `referent_layer_norm`'s own scale, and its own block below says why it wants
-# to be separable from the channel.
+# The speaker's polarity tag is not in this group, and since 2026-09-28 it takes
+# no rate at all: it is frozen. See below.
 
 # The speaker's channel scale, `GumbelChannel.log_logit_scale`, reported as
 # `train_logit_scale`. Stored as a log and read through `exp`, so it is strictly
@@ -1028,70 +1025,15 @@ score_scale_lr = 2e-3
 # there just as it does anywhere else.
 score_bias_lr = 2e-3
 
-# The same elevated rate, for `SenderTransformerLM.polarity_embedding` -- the
-# learned tag that tells that speaker which of its two prototypes is the
-# positive concept. Deliberately a second key rather than a reuse of the one
-# above: `log_score_scale` belongs to the listener and this tag to one speaker,
-# so a shared rate would tie two questions the ablation wants to ask separately.
-# One of them is also Transformer-only.
-#
-# It was originally here for the same reason the speaker's channel scale once
-# had a rate of its own: the tag was zero-initialised, so it had a distance to
-# cover before it did anything at all, and that traverse sat in the window
-# where the GRU speaker gets its polarities free from `init_h`. The tag now
-# opens as an antipodal draw at `referent_layer_norm`'s own scale, so there is
-# no distance to cover and that argument is retired.
-#
-# What is left is a rate the tag can still move at, in whichever direction the
-# loss wants. It opens at `2 * sqrt(d_model)`, which on rung 8's 320-wide
-# speaker is 35.8, against the 13.2 that rung 10 -- the one rung on this ladder
-# that learns -- reached from a zero init by epoch 29. So the opening is a
-# factor of 2.7 high rather than the order of magnitude it might look, and
-# whether what follows is a descent or a further climb is an open question this
-# key does not decide.
-#
-# It still wants to be a key of its own for the reason above: it is
-# Transformer-only, and hurrying it through a rate shared with the listener's
-# volume would move something the ablation is trying to hold still. Separable is
-# not the same as elevated, and the two questions
-# were being answered by one number.
-#
-# Demoted to the speaker's module rate on 2026-08-29, from the 2e-3 it carried
-# while it was one of the lone scalars, and halved with the rest of the table on
-# 2026-08-31. The elevation was the retired traverse's, and nothing replaced the
-# argument when the traverse went: 2e-3 was 20x the base rate of the day and 10x
-# the group the parameter physically sits in, held there by inheritance rather
-# than by a claim. 1e-4 is `[optimiser.module_lr] sender_language_model`, which
-# is the clip group `polarity_embedding` belongs to and the rate every other
-# speaker tensor takes. A tag that wants to be separable from the channel does
-# not thereby want to be separable from the module it lives in.
-#
-# The two arguments for elevating an embedding both fail here. muP's rule is
-# that embedding-like tensors take a Theta(1) rate rather than 1/fan_in -- do
-# not scale them *down* with width, not scale them up -- and muP is gone from
-# this repo since `dc16734` in any case. The other is sparse vocabulary tables,
-# where a row is updated only on the steps its token appears and the rate is
-# raised to compensate; this is two rows, tagging positive against negative on
-# every example of every batch, which is the least sparse embedding in the
-# model.
-#
-# There is still no arithmetic here, because there is no target to compute one
-# against. How large a tag the cross-attention wants is set by whatever scale
-# `referent_layer_norm` hands it, which is a property of the trained backbone.
-# `polarity_separation` in metrics.csv is the readout, and it is what says the
-# old rate was not binding: under the zero init rung 10 ran 0.098 at epoch 0,
-# crossing 1.0 at epoch 4, 6.1 by epoch 7, 13.2 by 29, with `train_acc` leaving
-# chance in the same epoch the tag crossed 1.0 and plateauing when it did --
-# the lockstep that is why the init changed. Under the antipodal init the tag
-# opens at 23.5-24 and barely moves: 24.03 -> 23.93 over rung 9's thirty epochs
-# and 23.46 -> 21.91 over rung 10's. Neither trace is straining against a
-# ceiling, so this drop is expected to be readable in `polarity_separation` as
-# no change at all. If it is not, the tag was doing more than those traces show
-# and this key is where to put it back.
-#
-# Applies only to `SenderTransformerLM`; `build_models` skips it for a GRU
-# speaker, which is told its polarities apart by `init_h`.
-polarity_embedding_lr = 1e-4
+# `polarity_embedding_lr` is gone, since 2026-09-28. The speaker's polarity tag
+# is frozen at its random draw (`requires_grad=False`): `polarity_separation`
+# read 27.05 from first epoch to last on every arm of `lr_sweep_4`, frozen
+# through 2e-5, and 27.05 -> 27.03 at 5e-5, so learning it bought nothing
+# measurable. The key was also never doing what it said. `build_models` splits
+# a scalar out only when its rate differs from the base, and at 1e-4 this one
+# did not, so the tag took its module's rate -- 2e-6 on the sweep's best arm.
+# `validate_config` refuses the key now. The argument for its rate, from the
+# zero-init era through the antipodal draw, is in git history before that date.
 
 # `AttentionDiscriminator.mix_logit`, the weight on the attention path,
 # reported as `train_mix_alpha`. Named `mix_*` and not `alpha_*` because this
@@ -1494,12 +1436,39 @@ AttentionPrototyper = 2e-5
 # The Transformer speaker's two arms, one rate each. They were one class,
 # `SenderTransformerLM`, behind `[sender_language_model] bidirectional`, and so
 # shared a single key; the split on 2026-09-27 into two subclasses over the same
-# implementation is what lets each arm carry a rate of its own. Both still sit
-# at the base 1e-4 -- jayelm's rate, and unswept for either.
+# implementation is what lets each arm carry a rate of its own.
+#
+# **`SenderTransformerAutoregressiveLM` at 2e-6, on both datasets, from
+# `experiments/lr_sweep_4_sender_transformer_autoregressive_lm/`.** The second
+# pass (git `4c7fc07`, 30 epochs, one repeat) ran 2e-6 to 5e-5 on both
+# datasets; the third (after `d32ed58`) ran birds alone from a frozen control at
+# 1e-12 up to 2e-5. Last-five-epoch `test_acc` on birds, second pass, from 2e-6
+# up: 0.609, 0.579, 0.577, 0.560, 0.527 -- monotone, the winner on the grid's
+# edge, and training accuracy falling as the rate rose. ShapeWorld was flat,
+# 0.646 to 0.671, and also best at 2e-6, which is why one number serves both.
+# The third pass put the floor under it: frozen 0.574, 5e-7 0.588, 1e-6 0.526,
+# 2e-6 0.580, 1e-5 0.572, 2e-5 0.505 -- 2e-6 first on `test_same_acc` (0.704)
+# and on distinct test messages (75).
+#
+# **Read this as the rate that avoids a pathology, not an optimum.** The frozen
+# arm reaches `test_same_acc` 0.672, so most of the protocol is built with the
+# language model not learning at all; 2e-6 adds about three points and most of
+# the vocabulary. What the higher rates cost is growth: at 2e-6 the number of
+# distinct test messages climbs from ~34 at epoch 10 to 76 at 30, at 2e-5 it
+# stays at 10-20 throughout, and the arms are indistinguishable on accuracy for
+# the first ten epochs. So a high rate does not break the bootstrap, it stops
+# the code from growing afterwards, which is why a language-model-only warm-up
+# was not built. The third pass's 1e-6 arm sits 0.05 below both neighbours,
+# which is the size of the run-to-run noise at n = 1: seeds are owed.
+#
+# The speaker's polarity tag took this group's rate on every arm of the sweep,
+# its own key being inert at the base, and did not move at any of them. It is
+# frozen since 2026-09-28; see `[optimiser]`.
 [optimiser.implementation_lr.sender_language_model]
 # Swept in `experiments/lr_sweep_4_sender_transformer_autoregressive_lm/`.
-SenderTransformerAutoregressiveLM = 1e-4
-# Swept in `experiments/lr_sweep_8_sender_transformer_bidirectional_lm/`.
+SenderTransformerAutoregressiveLM = 2e-6
+# Unswept, at the base; to be swept in
+# `experiments/lr_sweep_8_sender_transformer_bidirectional_lm/`.
 SenderTransformerBidirectionalLM = 1e-4
 
 # The listener's backbone takes the same rates as the speaker's. That is what

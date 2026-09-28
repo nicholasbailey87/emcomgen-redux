@@ -1569,18 +1569,26 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
                 self.d_model
             )
 
-        # A learned tag marking which row of the prototype sequence is the
+        # A fixed tag marking which row of the prototype sequence is the
         #     positive concept and which is the negative one. Row 0 is positive,
         #     row 1 negative. Without it this speaker cannot read that order at
         #     all: the cross-attention below is bit-identical under swapping the
         #     two keys.
         #
-        # Added after the norm, initialised as an antipodal pair at the
-        #     normed prototype's own scale, and not otherwise scale-pinned; the
-        #     name must keep "embedding" in it or `gradboard` will start decaying
-        #     it. See docs/architecture.md for all four.
+        # Added after the norm and drawn at the normed prototype's own scale.
+        #     See docs/architecture.md.
+        #
+        # **Frozen since 2026-09-28.** It was learned, under its own
+        #     `polarity_embedding_lr`, and in practice never moved:
+        #     `polarity_separation` read 27.05 from first epoch to last on every
+        #     arm of `lr_sweep_4`, frozen through 2e-5, and 27.05 -> 27.03 at
+        #     5e-5. A random tag does the job the learned one was doing. Kept a
+        #     `Parameter` with `requires_grad=False` rather than a buffer, as
+        #     `ViT2`'s rotary `freqs` are, so it stays in `state_dict` and in
+        #     every parameter count while `get_optimiser` skips it -- no rate, no
+        #     weight decay, and no key that could be silently inert.
         self.polarity_embedding = nn.Parameter(
-            torch.zeros(2, self.d_model)
+            torch.zeros(2, self.d_model), requires_grad=False
         )
 
         # Every broccoli argument is set explicitly, including the inert ones.

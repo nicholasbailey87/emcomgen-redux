@@ -112,9 +112,8 @@ selected ids out of every existing group, then `add_param_group`.
 **Why after the fact rather than asking `get_optimiser` for it:** that function
 keys its groups on `(lr, weight_decay)` and takes a single `lr`. The parameters
 this is used for currently share a group with every other undecayed parameter —
-`log_score_scale` because it is 0-dimensional, and `polarity_embedding` because
-`gradboard`'s `EXCLUDE_FROM_WEIGHT_DECAY` matches "embedding" — so both fall to
-the `weight_decay = 0.0` branch, and retagging that group would drag the biases
+`log_score_scale` because it is 0-dimensional, and `score_bias` because it is a
+bias — so both fall to the `weight_decay = 0.0` branch, and retagging that group would drag the biases
 and norms along with it.
 
 **It must run before `PASS` is constructed.** The scheduler deep-copies the
@@ -221,10 +220,9 @@ every step that binds, to a parameter whose whole travel is already bounded by
 `pool_score_norm` leaving the plateau in the same epoch, so what constrains them
 constrains the run.
 
-**Why `score_bias` and `polarity_embedding` are not.** An offset is not a scale
-and a 2-d tag is not a scalar; both belong to the norm of the module producing
-the output they modify. Both still take a rate of their own through
-`SPLIT_LEARNING_RATES`, which is why the mapping from clip group to config key
+**Why `score_bias` is not.** An offset is not a scale; it belongs to the norm of
+the module producing the output it modifies. It still takes a rate of its own
+through `SPLIT_LEARNING_RATES`, which is why the mapping from clip group to config key
 is not 1:1 — a clip group and a learning rate are separate questions.
 
 ### Per-module learning rates
@@ -258,9 +256,9 @@ class rate applies — which is the other six groups at every rung, and
 `sender_prototyper` too on the rungs running `AveragePrototyper`.
 
 A fourth group, `sender_language_model`, carries a key for each Transformer
-speaker arm — `SenderTransformerAutoregressiveLM` and
-`SenderTransformerBidirectionalLM` — both still at the base 1e-4 until sweeps 4
-and 8 report. The two arms are separate classes precisely so that these can
+speaker arm: `SenderTransformerAutoregressiveLM` at 2e-6 from sweep 4, and
+`SenderTransformerBidirectionalLM` still at the base 1e-4 until sweep 8
+reports. The two arms are separate classes precisely so that these can
 differ; see [architecture.md](architecture.md).
 
 **The whole table halved on 2026-08-31, along with the base `lr`.** The shape is
@@ -346,20 +344,13 @@ There is no warm-up in front of it any more — `warm_up_epochs` is 0 since
 an epoch and was the setting from 2026-08-28 to 2026-08-31; it is the fallback if
 2e-3 proves slow.
 
-**`polarity_embedding_lr`** — gated on `isinstance(language_model,
-SenderTransformerLM)`, which both Transformer arms are. Deliberately its own key rather than shared with the
-listener's `score_scale_lr`: the tag lives on one speaker and turning up a rate
-shared with the listener's volume would move something the ablation is trying to
-hold still. It was originally kept separate from `logit_scale_lr` for the same
-reason, that scalar existing on *both* speakers. Since `2026-08-29` the tag
-takes the speaker's module rate, `1e-4`, against the other scalars' `2e-3`.
-
-Gated on the speaker class rather than on finding the parameter, because the two
-failures need different answers. A GRU speaker has no polarity tag by
-construction — it reads `torch.cat(prototypes, 1)` and is told which is which —
-so the key is simply inapplicable, exactly as `heads` and `ff_ratio` are, and
-skipping is right. A Transformer speaker *missing* the parameter is a rename, and
-`split_out_parameter` raises.
+**`polarity_embedding_lr` is gone, since 2026-09-28.** The Transformer
+speaker's polarity tag is frozen at its random draw (`requires_grad=False`), so
+it is in no optimiser group and takes no rate. It never moved: `polarity_separation`
+read 27.05 from first epoch to last on every arm of `lr_sweep_4`, and 27.05 →
+27.03 at 5e-5. The key was also inert before it went — at the base rate, below
+the `lr != base_lr` threshold for a split, so the tag had been taking its
+module's rate. `validate_config` refuses it now.
 
 **`score_scale_lr`** — ungated, since `7b10d47`. `ScoreVolume` puts one
 `log_score_scale` on every discriminator, so one key and one suffix reach both,
@@ -850,8 +841,8 @@ and deliberately: it is a `group → lr` mapping over the groups that were
 constructed, so a group whose module this pair does not build is absent and its
 presence is itself a fact about the run. Read it as the answer to "which module
 was trained at what rate", and note what it does not cover — the three scaling
-scalars keep their own rate whatever their module's is, and `score_bias` and
-`polarity_embedding` are moved again afterwards by `SPLIT_LEARNING_RATES`.
+scalars keep their own rate whatever their module's is, and `score_bias` is
+moved again afterwards by `SPLIT_LEARNING_RATES`.
 
 **Measure against the pinned dependency, not the installed one.** The version
 string in site-packages can match `dependency_versions` while the commit does

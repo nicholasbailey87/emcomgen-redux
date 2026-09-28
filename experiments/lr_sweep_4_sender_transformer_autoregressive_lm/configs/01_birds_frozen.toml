@@ -238,10 +238,10 @@
 # over ~4,700 steps no weight travels more than ~5e-9 -- frozen for every
 # purpose here. Decoupled weight decay scales with `lr` and is inert with it.
 #
-# What freezes with it: everything in the `sender_language_model` group,
-# including `polarity_embedding`, whose own key equals the base rate and so is
-# not split out -- it takes the module's rate, as it does on every arm of this
-# sweep. What does *not*: `log_logit_scale`, which is its own group at
+# What freezes with it: everything in the `sender_language_model` group. When
+# this arm ran that included `polarity_embedding`, whose own key equalled the
+# base rate and so was not split out; the tag is frozen outright since
+# 2026-09-28, on every arm. What does *not*: `log_logit_scale`, which is its own group at
 # `logit_scale_lr` 2e-3 on every arm, so the channel scale still learns here as
 # it does elsewhere.
 #

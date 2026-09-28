@@ -187,11 +187,10 @@ under [the polarity embedding](#the-polarity-embedding): it is added to
 referents that arrive from a parameter-free norm, so that is the scale of what
 it marks.
 
-The name is deliberate twice over. It keeps `"embedding"` in it, which is what
-holds it out of `gradboard`'s weight decay; and it is *not* `polarity_embedding`,
-because `SPLIT_LEARNING_RATES` selects by name suffix and anything ending that
-way — `prototyper_polarity_embedding` included — would silently join the speaker
-tag's parameter group.
+The name keeps `"embedding"` in it, which is what holds it out of `gradboard`'s
+weight decay. (It was also kept clear of `polarity_embedding` while the speaker's
+tag had a rate of its own selected by name suffix; that tag is frozen since
+2026-09-28 and the split is gone.)
 
 #### The tag rides the block's input, values included
 
@@ -298,8 +297,7 @@ rate. `[optimiser.implementation_lr]` keys a rate on the class name in the
 config, so one class meant one rate for two arms; two classes give each arm its
 own key. `parse_config` refuses `language_model = "SenderTransformerLM"`, and
 `[sender_language_model] bidirectional` is now read only by `SenderGRULM`.
-`isinstance(..., SenderTransformerLM)` still matches both arms, which is what
-the gates on `polarity_embedding` rely on. Rungs 7 to 14 run the causal arm;
+`isinstance(..., SenderTransformerLM)` still matches both arms. Rungs 7 to 14 run the causal arm;
 rungs 15 and 16 are 13 and 14 with the parallel one.
 
 **`false` — causal (`SenderTransformerAutoregressiveLM`).** The blocks are masked left to right, and the
@@ -390,7 +388,15 @@ longer share checkpoints.
 
 #### The polarity embedding
 
-A learned tag marking which row of the prototype sequence is the positive
+**Frozen since 2026-09-28.** The tag is now a fixed random draw, a `Parameter`
+with `requires_grad=False` that stays in `state_dict` and in parameter counts but
+is in no optimiser group. Learned, it never moved: `polarity_separation` read
+27.05 from first epoch to last on every arm of `lr_sweep_4`, and 27.05 → 27.03
+at 5e-5. Its rate key, `polarity_embedding_lr`, is gone with it. What follows on
+the init and the name describes the tag while it learned; the case for having a
+tag at all is unchanged.
+
+A tag marking which row of the prototype sequence is the positive
 concept and which is the negative one. Row 0 is positive, row 1 negative,
 matching the order `Sender.speak` and `Sender.forward` hand over and
 `Sender.get_prototypes` asserts.
@@ -463,8 +469,8 @@ Design details, each load-bearing:
   `sqrt(in_features)/sqrt(d_base)` — which is a force on the tag that answers to
   neither the loss nor the scale of what it is added to. Renaming it to anything
   without
-  "embedding" in it reintroduces that silently. `polarity_embedding_lr` in
-  `[optimiser]` is the other half of the same concern.
+  "embedding" in it reintroduced that silently. Moot since the tag was frozen:
+  a parameter outside the optimiser is decayed by nothing.
 
 #### The causal arm's sampling loop
 

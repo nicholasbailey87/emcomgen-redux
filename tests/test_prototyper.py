@@ -317,9 +317,9 @@ def test_the_label_tag_is_load_bearing():
 
 def test_the_tag_opens_antipodally_at_unit_scale():
     """
-    Row 0 positive, row 1 negative, drawn once and negated -- the same
-    initialisation as `SenderTransformerLM.polarity_embedding`, and for the same
-    reason: it is added to referents that arrive from a parameter-free norm, so
+    Row 0 positive, row 1 negative, drawn once and negated -- the
+    initialisation `SenderTransformerLM.polarity_embedding` used to have, and for
+    the same reason: it is added to referents that arrive from a parameter-free norm, so
     unit per-element variance puts it at the scale of what it marks with no
     constant to choose.
     """
@@ -331,17 +331,15 @@ def test_the_tag_opens_antipodally_at_unit_scale():
     assert abs(positive.std().item() - 1.0) < 3.0 / math.sqrt(2 * D_MODEL)
 
 
-def test_the_tag_is_not_named_for_the_speaker_split():
+def test_the_tag_is_named_as_an_embedding():
     """
-    `SPLIT_LEARNING_RATES` selects parameters by name suffix, so a tag called
-    `polarity_embedding` -- or anything ending in it -- would silently join the
-    speaker's `polarity_embedding_lr` group. It still has to contain
+    Unlike the speaker's polarity tag, which is frozen since 2026-09-28, this
+    one learns, so its name matters to the optimiser: it has to contain
     "embedding", which is what keeps `gradboard` from decaying it.
     """
     names = [name for name, _ in _prototyper().named_parameters()]
 
     assert "label_embedding" in names
-    assert not any(name.endswith("polarity_embedding") for name in names)
     assert all("embedding" in name for name in names if "label" in name)
 
 
