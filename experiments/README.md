@@ -48,6 +48,13 @@ must be updated with each result before the next is launched.
 | `lr_sweep_7_receiver_cross_attention_lm` | 14 | `ReceiverCrossAttentionLM` | `implementation_lr.receiver_language_model.ReceiverCrossAttentionLM` |
 | `lr_sweep_8_sender_transformer_bidirectional_lm` | 16 | `SenderTransformerBidirectionalLM` | `implementation_lr.sender_language_model.SenderTransformerBidirectionalLM` |
 
+**`lr_sweep_9_sender_gru_lm` sits outside the chain.** It tunes the baseline GRU
+speaker on rung 2, birds only, from a frozen control up to 2e-4, so that rung 8
+compares two tuned speakers rather than a tuned Transformer against jayelm's
+inherited 1e-4. Nothing on rung 2 waits on sweeps 5-8, so it can run at any
+time. If it moves the GRU's rate a long way, sweeps 1-3, which ran with the GRU
+at 1e-4, are owed a re-check.
+
 **Sweeps 1-3 have landed and sweep 4 is where the chain is.** Sweep 3 ran twice,
 because the module changed under it: its first pass measured an
 `AttentionPrototyper` that was two scoring directions and two biases, the class
