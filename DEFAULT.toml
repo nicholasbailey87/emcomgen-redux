@@ -1474,12 +1474,14 @@ SenderTransformerBidirectionalLM = 1e-4
 # The listener's backbone takes the same rates as the speaker's. That is what
 # `lr_sweep_1_cnn` measured -- `sender_vision` and `receiver_vision` moved
 # together in every arm -- so stating them apart here would be claiming a
-# distinction the sweep did not make. The two are separately keyable, and the
-# receiver ViT gets its own sweep at rung 9 rather than inheriting the
-# speaker's, because those two arrive at different rungs.
+# distinction the sweep did not make. The two are separately keyable.
+#
+# Both receiver ViTs at 5e-5, from `experiments/lr_sweep_5_receiver_vit/`.
 [optimiser.implementation_lr.receiver_vision]
 ResNet56 = 5e-5
 ResNet18 = 1e-4
+BirdsViT = 5e-5
+ShapeWorldViT = 5e-5
 
 [scheduler]
 epochs = 100

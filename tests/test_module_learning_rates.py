@@ -260,7 +260,12 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
             "BirdsViT": 5e-5,
             "ShapeWorldViT": 5e-5,
         },
-        "receiver_vision": {"ResNet56": 5e-5, "ResNet18": 1e-4},
+        "receiver_vision": {
+            "ResNet56": 5e-5,
+            "ResNet18": 1e-4,
+            "BirdsViT": 5e-5,
+            "ShapeWorldViT": 5e-5,
+        },
         "sender_prototyper": {"AttentionPrototyper": 2e-5},
         # The causal arm at 2e-6 from sweep 4, on both datasets. The parallel
         #     arm is unswept and at the base until sweep 8 reports.
