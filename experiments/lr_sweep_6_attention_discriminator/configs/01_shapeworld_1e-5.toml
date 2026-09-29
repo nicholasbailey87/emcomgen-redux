@@ -7,6 +7,11 @@
 # arms, copying rung 12. Nothing else differs between the arms, and nothing
 # else differs from the rung each one copies.
 #
+# `11`-`14` were added on 2026-09-29 below the grid: a frozen control at 1e-12
+# and 5e-6, on ShapeWorld (`11`, `12`) and birds (`13`, `14`). They are
+# numbered after the original ten rather than in rate order because those ten
+# were already running.
+#
 # **Sweep 6 of eight.** `lr_sweep_1_cnn` did the two CNN backbones and is
 # where the reasoning for the whole set is written down. The short version:
 # every rung of the ablation introduces a component whose learning rate has
