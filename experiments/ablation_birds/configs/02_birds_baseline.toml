@@ -45,7 +45,7 @@
 # in an experiment must carry them even when they restate the default. `[slurm]`
 # is read from the *first* config in the folder only (sorted by filename), which
 # in this experiment is this file, so the block here governs the birds array --
-# it is sized for the heaviest job in the set, which is rung 14.
+# it is sized for the heaviest job in the set, which is rung 16.
 
 name = "ablation_birds"
 

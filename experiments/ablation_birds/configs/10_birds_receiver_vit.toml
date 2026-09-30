@@ -14,7 +14,8 @@
 # discriminator reads the referent embeddings through a bias-free bilinear
 # projection, so changing the referent width from 512 to 320 rescales that
 # projection and nothing else -- 524,289 parameters down to 327,681 -- and the
-# message encoder is untouched. Rungs 11 and 13 replace the two halves in turn.
+# message encoder is untouched. Rung 12 replaces the encoder, rung 16 the
+# discriminator.
 #
 # (Both of those halved when `[receiver_language_model]` was restored to
 # jayelm's 1 layer unidirectional: the projection's fan-in is the GRU's
@@ -41,7 +42,7 @@ language_model = "SenderTransformerAutoregressiveLM"
 #
 # The comment this replaces said both keys "must equal
 # `sender_feature_model.d_model`". That was true of the speaker before the
-# adapter landed and has been false since; verified by building rung 11 with a
+# adapter landed and has been false since; verified by building a ShapeWorld rung with a
 # 128-wide vision model under a 320-wide language model. It is worth naming
 # rather than deleting, because ShapeWorld's ViT2 is 128 wide now -- narrowed to
 # match `ResNet56` -- and under the old reading that narrowing would have
@@ -69,7 +70,7 @@ layers = 7
 # moves the language model's architecture and nothing else. The parallel arm,
 # `SenderTransformerBidirectionalLM`, would move the generation regime at the
 # same time, and whatever the combination measured could not be attributed to
-# either. It is at the top of the ladder instead -- rungs 15 and 16 -- where it
+# either. It comes later instead -- rungs 13 and 14 -- where it
 # moves the regime alone. The two arms are the same blocks at the same size and
 # differ by `token_embedding` alone, which only the causal arm needs because
 # only it reads a symbol back.

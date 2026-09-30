@@ -602,7 +602,7 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     from a zero init that column went 0.098 → 13.19 over thirty epochs, with
     `train_acc` leaving chance in the same epoch the tag crossed 1.0. A learning
     run wants a tag of order 10, so the new opening is a factor of 2.7 high, not
-    the order of magnitude that rungs 11 and 12 would suggest — those never
+    the order of magnitude that the old rungs 11 and 12 would suggest — those never
     learned, so their 0.16 to 0.79 is where a *dead* run leaves it.
     NaN for `SenderGRULM`, which is handed the distinction by `init_h` — it
     reads `torch.cat(prototypes, 1)`, so each polarity gets its own weight

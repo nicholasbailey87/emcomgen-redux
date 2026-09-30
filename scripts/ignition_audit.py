@@ -67,7 +67,7 @@ use it.
     python scripts/ignition_audit.py \
         --configs experiments/ablation_shapeworld/configs/05_shapeworld_attention_prototyper.toml \
                   experiments/ablation_shapeworld/configs/07_shapeworld_sender_transformer_lm.toml \
-                  experiments/ablation_shapeworld/configs/11_shapeworld_attention_discriminator.toml \
+                  experiments/ablation_shapeworld/configs/15_shapeworld_attention_discriminator.toml \
         --steps 800 --out results/ignition_audit
 
 Real data, real optimiser, real `accumulator_steps`, and the same bf16 autocast

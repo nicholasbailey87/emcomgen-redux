@@ -187,7 +187,7 @@ def parse_args():
     )
     parser.add_argument(
         "--config",
-        default=rung("14_birds_receiver_cross_attention_lm.toml"),
+        default=rung("16_birds_attention_discriminator.toml"),
     )
     parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument(

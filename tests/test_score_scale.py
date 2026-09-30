@@ -216,7 +216,7 @@ def _comparer(referent_dim=REFERENT_DIM, **overrides):
     )
 
 
-CROSS_RUNG = "13_shapeworld_receiver_cross_attention_lm.toml"
+CROSS_RUNG = "15_shapeworld_attention_discriminator.toml"
 
 # The keys that belong to the discriminator's table rather than the language
 #     model's, so `_cross_comparer` can take one flat kwargs like the builder it
@@ -240,7 +240,7 @@ def _cross_comparer(referent_dim=REFERENT_DIM, dropout=0.0, **overrides):
     The attention arm: `ReceiverCrossAttentionLM` feeding
         `AttentionDiscriminator`.
 
-    Built from rung 11 rather than from DEFAULT, which cannot construct the
+    Built from rung 15 rather than from DEFAULT, which cannot construct the
         encoder: DEFAULT's `[receiver_language_model] d_model = 1024` is the
         GRU's width and does not divide its `heads = 5`. See the note beside
         `d_model` in DEFAULT.toml.
@@ -1551,7 +1551,7 @@ def test_an_attention_rung_with_a_normalised_channel_asks_for_the_mix_weight_rat
         it used to own itself now comes from `ScoreVolume` like the volume does.
     """
     config, pair, optimiser = _pair_and_optimiser(
-        "14_birds_receiver_cross_attention_lm.toml",
+        "16_birds_attention_discriminator.toml",
         receiver_discriminator=READOUT_ON,
         sender_language_model={"normalise_logits": True},
     )

@@ -297,8 +297,8 @@ rate. `[optimiser.implementation_lr]` keys a rate on the class name in the
 config, so one class meant one rate for two arms; two classes give each arm its
 own key. `parse_config` refuses `language_model = "SenderTransformerLM"`, and
 `[sender_language_model] bidirectional` is now read only by `SenderGRULM`.
-`isinstance(..., SenderTransformerLM)` still matches both arms. Rungs 7 to 14 run the causal arm;
-rungs 15 and 16 are 13 and 14 with the parallel one.
+`isinstance(..., SenderTransformerLM)` still matches both arms. Rungs 7 to 12 run the causal arm;
+rungs 13 and 14 are 11 and 12 with the parallel one, and 15 and 16 keep it.
 
 **`false` — causal (`SenderTransformerAutoregressiveLM`).** The blocks are masked left to right, and the
 tail slots are read in order: run the stack, read slot `first_message_slot + i`,
@@ -316,7 +316,7 @@ needs, because only it reads a symbol back. At 7 layers the parallel arm is
 6,752,594 on ShapeWorld and 6,756,440 on birds against the causal arm's
 6,758,354 and 6,764,120, and both are within 1% of the GRU baseline. So a
 difference between them covers the generation regime and nothing else, which is
-what rungs 15 and 16 measure.
+what rungs 13 and 14 measure.
 
 #### What this replaced, and why
 
@@ -727,7 +727,7 @@ with no view of what it is being compared against.
 
 **Default 1 layer, unidirectional, 1024 wide** — jayelm's listener exactly, and
 4,687,872 parameters. Parameter parity with the transformer arm is bought at
-*that* width, by taking `ReceiverCrossAttentionLM` to 6 blocks on rungs 15 and 16
+*that* width, by taking `ReceiverCrossAttentionLM` to 6 blocks on rungs 11 to 16
 for 4,702,646, which is +0.3%.
 
 That was +2.1% before the interfaces were hoisted, and the gap was almost
@@ -1029,8 +1029,8 @@ GRU state would not.
 
 It owned that adapter and that norm itself, as `memory_adapter` and
 `memory_layer_norm`, until the interfaces were hoisted. The same tensors, one
-stage upstream — with the consequence that this module is now **the same size on
-rungs 13 and 15**, where it used to differ by a `memory_adapter` reading a
+stage upstream — with the consequence that this module is now **the same size
+whichever encoder feeds it**, where it used to differ by a `memory_adapter` reading a
 1024-wide GRU state against a 256-wide encoded message. The difference has moved
 into `Receiver.interfaces`.
 
@@ -1330,7 +1330,7 @@ reach it.
 
 One consequence: on a ShapeWorld ViT rung the speaker's backbone now contains no
 BatchNorm at all, so `calibrate_batch_norm` has nothing to re-estimate on that
-side. The listener still runs `ResNet56` until rung 11.
+side. The listener still runs `ResNet56` until rung 9.
 
 The reason for two names is `[optimiser.implementation_lr]`, which is keyed by
 the class named in the config, so one name could hold one rate for two

@@ -324,8 +324,8 @@ def test_the_implementation_rate_beats_the_group_rate_for_the_class_in_use():
 @pytest.mark.parametrize(
     "config_file,arm",
     [
-        ("13_shapeworld_receiver_cross_attention_lm.toml", "SenderTransformerAutoregressiveLM"),
-        ("15_shapeworld_sender_transformer_bidirectional_lm.toml", "SenderTransformerBidirectionalLM"),
+        ("11_shapeworld_receiver_cross_attention_lm.toml", "SenderTransformerAutoregressiveLM"),
+        ("13_shapeworld_sender_transformer_bidirectional_lm.toml", "SenderTransformerBidirectionalLM"),
     ],
 )
 def test_the_two_transformer_speaker_arms_take_separate_rates(config_file, arm):

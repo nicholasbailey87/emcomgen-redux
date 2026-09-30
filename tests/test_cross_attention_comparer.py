@@ -55,14 +55,14 @@ from _bootstrap import build_listener, rung
 REFERENT_DIM = 320
 BATCH, N_OBJ = 32, 20
 
-CROSS_RUNG = "13_shapeworld_receiver_cross_attention_lm.toml"
+CROSS_RUNG = "15_shapeworld_attention_discriminator.toml"
 
 
 def _listener(language_model_overrides=None, discriminator_overrides=None):
     """
     The attention arm end to end: `ReceiverCrossAttentionLM` feeding
         `AttentionDiscriminator`, composed the way `Receiver` composes them and
-        built from rung 11, which is the config that states widths for both.
+        built from rung 15, which is the config that states widths for both.
     """
     return build_listener(
         "ReceiverCrossAttentionLM",

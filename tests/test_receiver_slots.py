@@ -63,7 +63,7 @@ BATCH, N_OBJ, SEQ = 6, 10, 7
 #     coincidence.
 TOKEN_DIM = 37
 
-CROSS_RUNG = "13_shapeworld_receiver_cross_attention_lm.toml"
+CROSS_RUNG = "15_shapeworld_attention_discriminator.toml"
 
 
 def _inputs(listener, seed=0):
@@ -295,7 +295,10 @@ def test_the_default_gru_is_jayelms():
 
 @pytest.mark.parametrize(
     "config_file",
-    [CROSS_RUNG, "14_birds_receiver_cross_attention_lm.toml"],
+    [
+        "11_shapeworld_receiver_cross_attention_lm.toml",
+        "12_birds_receiver_cross_attention_lm.toml",
+    ],
 )
 def test_the_two_listener_arms_are_parameter_matched(config_file):
     """
@@ -360,7 +363,7 @@ ALL_FOUR = pytest.mark.parametrize(
 
 def _four_cell(language_model, discriminator, **kwargs):
     """
-    Every cell from rung 11, which is the only config that states widths both
+    Every cell from rung 15, which is the only config that states widths both
         slots can build: DEFAULT's `[receiver_language_model] d_model = 1024`
         does not divide its `heads = 5`, and that key is the GRU's.
     """

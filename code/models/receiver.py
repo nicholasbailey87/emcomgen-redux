@@ -794,16 +794,20 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
             twice at two widths: its own stack at `d_model`, and the raw tensor
             handed to the `BilinearDiscriminator` it composes, at whatever
             `referent_embedding_size` the config set -- 1024 against 320 on
-            rungs 13 and 14. That second consumer was invisible to `Receiver`.
+            the old rungs 13 and 14. That second consumer was invisible to
+            `Receiver`.
             The composed module is now built at `d_model` on both operands and
             reads the same tensors the stack does, so the slot declares one
             referent width and one message width and both are true.
 
             The cost is stated rather than hidden: the bilinear arm here is
-            about an order of magnitude smaller than it was, so rung 13 is no
-            longer "rung 11 plus attention" at the same bilinear capacity. The
-            bootstrapping argument above is unchanged in form and weaker in
-            capacity.
+            about an order of magnitude smaller than it was, so the old rung 13
+            was no longer "rung 11 plus attention" at the same bilinear
+            capacity. The bootstrapping argument above is unchanged in form and
+            weaker in capacity. Since this module moved to the top of the
+            ladder (rungs 15 and 16, 2026-09-30) the rung below it runs a
+            standalone `BilinearDiscriminator` over the same 256-wide encoder
+            output, 65,536 parameters, which is the size of the arm here.
 
         Neither branch is standardised, so `a` is a weight and not a share:
             a loud branch can dominate a heavily-weighted quiet one. That is
@@ -979,8 +983,8 @@ class AttentionDiscriminator(ScoreVolume, nn.Module):
         #     number under every configuration.
         #
         # At `d_model` on both operands, because it reads the same two tensors
-        #     the stack does. See the class docstring for what that changes
-        #     about rungs 13 and 14.
+        #     the stack does. See the class docstring for what that changed
+        #     and how it compares with the rung below.
         self.bilinear = BilinearDiscriminator(
             self.d_model,
             self.d_model,

@@ -24,8 +24,8 @@
 # on both to within 0.1%, so the birds rate is carried to the ShapeWorld rung.
 # Whether it survives there is checked against this sweep's own ShapeWorld
 # arms, which ran before this change and are the one place a ShapeWorld
-# language-model rate has been measured. If the two datasets disagree, sweeps 7
-# and 8 need their ShapeWorld arms back.
+# language-model rate has been measured. If the two datasets disagree, sweeps 6
+# and 7 need their ShapeWorld arms back.
 #
 # The ShapeWorld arms, `01`-`05` before this change, ran under the folder's
 # old name, `lr_sweep_4_sender_transformer_lm`, and the preamble below still
@@ -162,6 +162,9 @@
 #
 # **Except sweep 7, from 2026-09-27**, which now runs this grid at this length
 # so the two transformer-LM sweeps read side by side. Sweeps 5 and 6 stay at 30.
+# (Numbers as they were then. Since 2026-09-30 that sweep is 6, the
+# cross-attention encoder's, and the other 6 is now 8, the attention
+# discriminator's; see `experiments/README.md`.)
 #
 # ## The second pass ran on a different ViT
 #

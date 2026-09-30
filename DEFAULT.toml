@@ -1468,7 +1468,7 @@ AttentionPrototyper = 2e-5
 # Swept in `experiments/lr_sweep_4_sender_transformer_autoregressive_lm/`.
 SenderTransformerAutoregressiveLM = 2e-6
 # Unswept, at the base; to be swept in
-# `experiments/lr_sweep_8_sender_transformer_bidirectional_lm/`.
+# `experiments/lr_sweep_7_sender_transformer_bidirectional_lm/`.
 SenderTransformerBidirectionalLM = 1e-4
 
 # The listener's backbone takes the same rates as the speaker's. That is what
@@ -2087,11 +2087,11 @@ layers = 1
 #   SenderTransformerAutoregressiveLM  autoregressive Transformer decoder:
 #                               `layers` blocks over the latent array, one
 #                               symbol sampled at a time conditioned on the
-#                               symbols before it -- rungs 7 to 14
+#                               symbols before it -- rungs 7 to 12
 #   SenderTransformerBidirectionalLM   Perceiver IO: `layers` blocks of
 #                               self-attention over the *latent* array, and a
 #                               learned query that reads it back out as every
-#                               symbol at once -- rungs 15 and 16
+#                               symbol at once -- rungs 13 to 16
 #
 # The arm is a class rather than this flag so that each can hold its own rate
 # under `[optimiser.implementation_lr.sender_language_model]`, which keys on
@@ -2363,7 +2363,7 @@ d_model = 1024
 # 15 comparison spanned an 11.5x listener.
 #
 # So parity is now sought at jayelm's width instead, and the transformer arm is
-# the one that moves. This GRU is 4,687,872 here; rungs 15 and 16 take
+# the one that moves. This GRU is 4,687,872 here; rungs 11 to 16 take
 # `ReceiverCrossAttentionLM` to 6 layers for 4,702,646, which is +0.3%. It was
 # +2.1% until that stack's `referent_adapter` became one of `Receiver`'s
 # interfaces -- the GRU had nothing corresponding to it, so the comparison was an
@@ -2394,7 +2394,7 @@ layers = 1
 bidirectional = false
 message_length = 7 # Only applies to Transformer language models. Should be the same as sender_language_model.message_length
 # Transformer language model only, whose depth is `layers` above, shared with the
-# GRU. 4 heads at 256 wide is what rung 13 sets, for the head dimension of 64
+# GRU. 4 heads at 256 wide is what rungs 11 to 16 set, for the head dimension of 64
 # that every attention module in the repo has; 5 is here so the key exists.
 heads = 5 # Only applies to Transformer language models
 utility_tokens = 0 # Only applies to Transformer language models
@@ -2546,7 +2546,7 @@ bias_score = false
 #
 # 320 at 5 heads for the head dimension of 64 that every attention module in the
 # repo has. A default should be the smallest thing that runs, not a guess at a
-# good shape; rung 11 states 256 and 4 alongside its sizing argument.
+# good shape; rung 15 states 256 and 4 alongside its sizing argument.
 d_model = 320
 layers = 1
 heads = 5
