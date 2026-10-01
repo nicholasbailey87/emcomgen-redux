@@ -1483,6 +1483,10 @@ ResNet18 = 1e-4
 BirdsViT = 5e-5
 ShapeWorldViT = 5e-5
 
+# From `experiments/lr_sweep_6_receiver_cross_attention_lm/`.
+[optimiser.implementation_lr.receiver_language_model]
+ReceiverCrossAttentionLM = 1e-5
+
 [scheduler]
 epochs = 100
 
