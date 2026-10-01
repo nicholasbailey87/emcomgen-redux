@@ -6,6 +6,11 @@
 # rung 2 and nothing in sweeps 1-9 waits on it. Its results on the cluster are
 # filed under the old name.
 #
+# **DEFAULT.toml put every speaker language model at 2e-6 and every listener
+# one at 5e-5 on 2026-10-01**, so the GRU speaker's default is now this sweep's
+# `02` arm, and the listener GRU runs at 5e-5 on every arm rather than 1e-4.
+# This sweep is what checks that 2e-6 suits the GRU too.
+#
 # Six arms on birds, smallest rate first, copying ablation rung 2.
 # `[optimiser.implementation_lr.sender_language_model] SenderGRULM` is frozen at
 # 1e-12 in `01`, a control, and moves over 2e-6, 1e-5, 5e-5, 1e-4 and 2e-4 in

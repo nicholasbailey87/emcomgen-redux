@@ -1427,12 +1427,18 @@ AttentionPrototyper = 2e-5
 # The speaker's polarity tag took this group's rate on every arm of the sweep,
 # its own key being inert at the base, and did not move at any of them. It is
 # frozen since 2026-09-28; see `[optimiser]`.
+# **One rate for every speaker language model, 2e-6, from 2026-10-01.** A rung
+# that swaps one language model for another then moves the architecture and not
+# the rate as well. 2e-6 is `SenderTransformerAutoregressiveLM`'s, swept in
+# `experiments/lr_sweep_4_sender_transformer_autoregressive_lm/`; the other two
+# take it unmeasured. `SenderGRULM` was at the base 1e-4 until this change, and
+# `experiments/lr_sweep_10_sender_gru_lm/` is what checks the assumption -- if
+# the GRU wants something far from 2e-6, the baseline is handicapped against
+# rung 8 and this table should split again.
 [optimiser.implementation_lr.sender_language_model]
-# Swept in `experiments/lr_sweep_4_sender_transformer_autoregressive_lm/`.
+SenderGRULM = 2e-6
 SenderTransformerAutoregressiveLM = 2e-6
-# Unswept, at the base; to be swept in
-# `experiments/lr_sweep_8_sender_transformer_bidirectional_lm/`.
-SenderTransformerBidirectionalLM = 1e-4
+SenderTransformerBidirectionalLM = 2e-6
 
 # The listener's backbone takes the same rates as the speaker's. That is what
 # `lr_sweep_1_cnn` measured -- `sender_vision` and `receiver_vision` moved
@@ -1446,18 +1452,20 @@ ResNet18 = 1e-4
 BirdsViT = 5e-5
 ShapeWorldViT = 5e-5
 
+# **One rate for every listener language model, 5e-5, from 2026-10-01**, for
+# the same reason as the speaker's table above. The evidence is thin and flat:
+# `experiments/lr_sweep_6_receiver_transformer_autoregressive_lm/` ranked its
+# five birds arms, 2e-6 to 5e-5, within about two points of `test_acc` of each
+# other (0.600 at 2e-6, 0.591 at 5e-5, n = 1, all still climbing at epoch 30),
+# so no rate on that grid is distinguishable. The old sweep 6 put
+# `ReceiverCrossAttentionLM` at 1e-5 under the causal speaker, in the same flat
+# region. `ReceiverGRULM` was at the base 1e-4 until this change and has never
+# been swept, so rungs 1-10 moved with it.
 [optimiser.implementation_lr.receiver_language_model]
-# Unswept, at the base; to be swept in
-# `experiments/lr_sweep_6_receiver_transformer_autoregressive_lm/`.
-ReceiverTransformerAutoregressiveLM = 1e-4
-# Unswept, at the base; to be swept in
-# `experiments/lr_sweep_7_receiver_transformer_bidirectional_lm/`.
-ReceiverTransformerBidirectionalLM = 1e-4
-# Measured under the causal speaker, when this was the old sweep 6
-# (`lr_sweep_6_receiver_cross_attention_lm`, rung 12 as it then was). It is to
-# be re-swept over the parallel speaker in
-# `experiments/lr_sweep_9_receiver_cross_attention_lm/`.
-ReceiverCrossAttentionLM = 1e-5
+ReceiverGRULM = 5e-5
+ReceiverTransformerAutoregressiveLM = 5e-5
+ReceiverTransformerBidirectionalLM = 5e-5
+ReceiverCrossAttentionLM = 5e-5
 
 [scheduler]
 epochs = 100

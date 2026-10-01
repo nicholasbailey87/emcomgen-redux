@@ -265,21 +265,19 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
             "BirdsViT": 5e-5,
             "ShapeWorldViT": 5e-5,
         },
-        # The two Transformer encoder arms are unswept and at the base until
-        #     sweeps 6 and 7 report. The cross-attention encoder's 1e-5 is the
-        #     old sweep 6's, measured under the causal speaker, and stands until
-        #     sweep 9 re-measures it over the parallel one.
+        # One rate per side since 2026-10-01: 5e-5 for every listener language
+        #     model and 2e-6 for every speaker one. See DEFAULT.toml.
         "receiver_language_model": {
-            "ReceiverTransformerAutoregressiveLM": 1e-4,
-            "ReceiverTransformerBidirectionalLM": 1e-4,
-            "ReceiverCrossAttentionLM": 1e-5,
+            "ReceiverGRULM": 5e-5,
+            "ReceiverTransformerAutoregressiveLM": 5e-5,
+            "ReceiverTransformerBidirectionalLM": 5e-5,
+            "ReceiverCrossAttentionLM": 5e-5,
         },
         "sender_prototyper": {"AttentionPrototyper": 2e-5},
-        # The causal arm at 2e-6 from sweep 4, on both datasets. The parallel
-        #     arm is unswept and at the base until sweep 8 reports.
         "sender_language_model": {
+            "SenderGRULM": 2e-6,
             "SenderTransformerAutoregressiveLM": 2e-6,
-            "SenderTransformerBidirectionalLM": 1e-4,
+            "SenderTransformerBidirectionalLM": 2e-6,
         },
     }
 
