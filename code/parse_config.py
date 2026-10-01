@@ -183,6 +183,15 @@ def validate_config(config: dict) -> bool:
             "take a learning rate of their own."
         )
 
+    # The listener's Transformer encoder, for the same reason.
+    if config['receiver']['language_model'] == "ReceiverTransformerLM":
+        raise InvalidConfig(
+            '`[receiver] language_model = "ReceiverTransformerLM"` is not '
+            'selectable: name "ReceiverTransformerAutoregressiveLM" or '
+            '"ReceiverTransformerBidirectionalLM", which fix the arm and each '
+            "take a learning rate of their own."
+        )
+
     # The channel and readout flags, checked here for the same reason and in
     # the same style. All three default to today's behaviour in the modules that
     # read them, so a missing key would run the default arm silently rather than

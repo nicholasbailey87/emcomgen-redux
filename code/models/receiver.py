@@ -13,21 +13,27 @@ declares the widths it wants and `Receiver` delivers each input at that width
 in a stated distribution. See `model_util.LinearInterface` for the rule -- it
 is the speaker's `adapter` too. Both slots are named in `[receiver]` and
 configured from `[receiver_language_model]` and
-`[receiver_discriminator]`, which makes four legal combinations:
+`[receiver_discriminator]`: four language models by one discriminator.
 
-                             BilinearDiscriminator  AttentionDiscriminator
-    ReceiverGRULM            the historical baseline        new
-    ReceiverCrossAttentionLM           new             the attention rung
+                                         BilinearDiscriminator
+    ReceiverGRULM                        the historical baseline
+    ReceiverTransformerAutoregressiveLM  the GRU's reading regime, attention
+    ReceiverTransformerBidirectionalLM   the whole message at once
+    ReceiverCrossAttentionLM             reads the candidates too
 
-The two new cells are the point. Before this split, one `comparer` key chose
-both halves at once, so a rung that swapped the GRU comparer for the
+The split exists so a rung moves one half at a time. Before it, one `comparer`
+key chose both halves at once, so a rung that swapped the GRU comparer for the
 cross-attention one changed the message encoder *and* the comparison, and
 "attention helps" could not be attributed to either. See docs/architecture.md.
 
-**Exactly one message encoder, always.** `AttentionDiscriminator` carries an
-internal bilinear path, and that is a second *comparison*, not a second
-encoder: it reads whatever the language model produced. No configuration builds
-two encoders, and if one ever looks necessary the slot contract is wrong.
+There used to be a second discriminator, an attention discriminator in which the
+candidates read each other. It was removed on 2026-10-01: like
+`ReceiverCrossAttentionLM` it can score "which cluster" without reading the
+message, and `train_shuffled_message_acc` showed it doing so. See
+docs/anecdotes.md.
+
+**Exactly one message encoder, always.** No configuration builds two, and if
+one ever looks necessary the slot contract is wrong.
 """
 
 import math
@@ -50,31 +56,6 @@ LAYER_NORM_EPS = model_util.LAYER_NORM_EPS
 # Every broccoli module below is constructed with its full argument list, even
 #     where an argument is inert under the current settings, because broccoli's
 #     defaults are not a stable interface. See docs/broccoli.md.
-
-
-def standardise(scores):
-    """
-    Per game: remove the mean over candidates and scale to unit spread.
-
-    A telemetry helper, and nothing else. `AttentionDiscriminator` runs it over
-        each branch separately, which is what makes `path_agreement` a Pearson r
-        and lets `mix_share` compare two unstandardised branches like with like.
-
-    It was briefly on the live path, as `ScoreVolume.readout`'s shape half. That
-        is what put each game's own margin in the denominator of the gradient
-        going back upstream -- see `ScoreVolume` for what it cost. Measuring a
-        correlation with it is fine; deciding with it is not, and the difference
-        is that the telemetry block runs under `no_grad`.
-
-    `unbiased=False` because this is a population statistic over the candidate
-        set, not an estimate from a sample of it, and the clamp keeps a game
-        whose candidates happen to score identically from dividing by zero. A
-        clamp is safe here in a way it is not on a parameter: nothing learns
-        through this bound.
-    """
-    centred = scores - scores.mean(1, keepdim=True)
-    spread = centred.std(dim=1, keepdim=True, unbiased=False)
-    return centred / spread.clamp(min=1e-6)
 
 
 class ScoreVolume:
@@ -105,19 +86,14 @@ class ScoreVolume:
 
     **Why there is an offset at all.** `train.py` decides on `lis_scores > 0`,
         so the threshold is a fixed origin and the listener has to place its
-        scores against it. Before this pair of parameters lived together only
-        `AttentionDiscriminator` could: it had a `mix_bias`, and rungs 1-12 --
-        every rung on the bilinear arm -- had no bias anywhere, `bilinear`
-        being built `bias=False` and the readout a bare multiply. The bilinear
-        score for candidate `j` is `LN(r_j) . proj`, so the only way to move
-        all candidates together was for `proj` to align with whatever direction
-        the candidates have in common, which is data-dependent and spends
-        discriminative capacity in that direction. `mix_bias` is retired into
-        this one: two constants across candidates are one degree of freedom
-        split across two parameters.
+        scores against it. Without this the bilinear arm had no bias anywhere,
+        `bilinear` being built `bias=False` and the readout a bare multiply.
+        The bilinear score for candidate `j` is `LN(r_j) . proj`, so the only
+        way to move all candidates together was for `proj` to align with
+        whatever direction the candidates have in common, which is
+        data-dependent and spends discriminative capacity in that direction.
 
-    **Why downstream of the volume**, which is the whole reason `mix_bias` sat
-        where it did. An offset applied before the scale is multiplied by it, so
+    **Why downstream of the volume.** An offset applied before the scale is multiplied by it, so
         the threshold would slide every time the listener changed how loudly it
         spoke -- and `score_scale` moves fast, at `score_scale_lr`. Downstream,
         it is an offset on the score itself and the two parameters say
@@ -170,9 +146,7 @@ class ScoreVolume:
     The volume is therefore shared with the weights again.
         `bilinear_weight_norm` means volume as well as direction, as it did
         before `7b10d47`: nothing downstream divides a rescaling of
-        `bilinear.weight` back out. Inside `AttentionDiscriminator` the branch
-        magnitudes also set the mix, so there the norms are doubly
-        load-bearing.
+        `bilinear.weight` back out.
     """
 
     def _init_score_volume(self, scale=True, bias=True):
@@ -196,17 +170,7 @@ class ScoreVolume:
             `1/sqrt(3)` under any width and any backbone, so it is design and
             not a hypothesis. See that method.
 
-        `False` also reaches here from inside `AttentionDiscriminator`, for
-            *both* gates, to the bilinear path it composes -- because a volume
-            there is degenerate with the one that module already has: the
-            composed path is one of two branches multiplied by `1 - mix_weight`
-            and then read out through this mixin downstream, so a scale on the
-            branch and a move in `mix_logit` express the same thing and the pair
-            would drift against each other. The same argument covers the offset:
-            an inner constant is annihilated by nothing and is simply degenerate
-            with the outer one. One volume and one offset per discriminator.
-
-        Absent rather than frozen, either way, so `split_out_parameter`'s suffix
+        Absent rather than frozen, so `split_out_parameter`'s suffix
             match and `SCALAR_GROUPS`' membership see the truth.
         """
         self.learns_score_scale = scale
@@ -242,10 +206,7 @@ class ScoreVolume:
             docstring, including why the offset is second.
 
         Each half is applied only if it exists, so this is the identity on a
-            discriminator built with both gates off -- which is what
-            `AttentionDiscriminator` builds its composed bilinear path as. Its
-            caller owns both scalars for the whole module and a second pair here
-            would be degenerate with them.
+            discriminator built with both gates off.
 
         The two are independent: `scale_score = false, bias_score = true` gives
             `scores + score_bias`, a threshold on an uncalibrated-loudness
@@ -307,11 +268,10 @@ class ReceiverGRULM(nn.Module):
             ignored is therefore structural rather than a convention: there is
             no tensor to ignore.
 
-        Returns a length-1 sequence rather than a bare vector so either
-            discriminator can consume either language model.
+        Returns a length-1 sequence rather than a bare vector so the slot
+            contract is one shape for every language model.
             `BilinearDiscriminator` takes the last position, which is the
-            identity here; `AttentionDiscriminator` takes it as cross-attention
-            memory, where a length-1 memory is perfectly legal.
+            identity here.
 
         Args:
             referent_embedding_size: recorded and not used. This slot reads no
@@ -399,6 +359,190 @@ class ReceiverGRULM(nn.Module):
 
     def reset_parameters(self):
         self.gru.reset_parameters()
+
+
+class ReceiverTransformerLM(nn.Module):
+    def __init__(
+        self,
+        referent_embedding_size,
+        **kwargs
+    ):
+        """
+        Read the message with a Transformer encoder and pool it to one vector.
+            The Transformer counterpart of `ReceiverGRULM`, in two arms selected
+            by `bidirectional`: a causal stack (False) or an unmasked one (True).
+
+        The shared implementation, following `SenderTransformerLM`. Configs
+            select one of the two subclasses below, which set `bidirectional`
+            themselves; `parse_config` refuses this name, whose one rate key
+            would cover both arms.
+
+        **It never sees the candidates.** Like the GRU, and unlike
+            `ReceiverCrossAttentionLM`, this is an absolute encoding of the
+            message: `referent_input_size` is `None`, so `Receiver` builds no
+            referent interface for it and passes `None` in. That is the point of
+            the class. A message encoder that cross-attends into the candidate
+            set gets a summary of the set whatever the tokens say, and scoring
+            against it is the concept game's clustering shortcut --
+            `lr_sweep_6_receiver_cross_attention_lm` measured
+            `train_shuffled_message_acc` at ~0.65 against live ~0.75 on every
+            arm. See docs/architecture.md.
+
+        Readout is a `broccoli.vit.SequencePool` on both arms, returned as a
+            length-1 sequence, so `BilinearDiscriminator`'s last-slot read is the
+            identity here as it is for the GRU. The causal arm's pool reads every
+            position, each of which has seen only its prefix -- the pool is
+            where the whole message is first combined, which is what a causal
+            reading regime under a learned readout amounts to.
+
+        Args:
+            referent_embedding_size: recorded and not used. This slot reads no
+                referents at all. Kept on the signature because it is the slot
+                contract's shape.
+        """
+        super().__init__()
+        self.referent_embedding_size = referent_embedding_size
+        self.token_embedding_size = kwargs["token_embedding_size"]
+        self.d_model = kwargs["d_model"]
+        self.message_length = kwargs["message_length"]
+        self.layers = kwargs["layers"]
+        self.heads = kwargs["heads"]
+        self.utility_tokens = kwargs["utility_tokens"]
+        self.bidirectional = kwargs["bidirectional"]
+        self.ff_inner_size = kwargs["ff_inner_size"]
+        self.activation = model_util.get_activation(kwargs["activation"])
+        self.relative_position_embedding = kwargs["relative_position_embedding"]
+        self.pre_norm = kwargs["pre_norm"]
+        self.post_norm = kwargs["post_norm"]
+        self.return_bos_tokens = kwargs["return_bos_tokens"]
+        self.knocking_heads = kwargs["knocking_heads"]
+        self.depthwise_linear_stochastic_depth = kwargs[
+            "depthwise_linear_stochastic_depth"
+        ]
+        self.ff_inner_dropout = kwargs["ff_inner_dropout"]
+        self.ff_outer_dropout = kwargs["ff_outer_dropout"]
+        self.self_attention_dropout = kwargs["self_attention_dropout"]
+
+        # The encoder form: two sublayers to the block, self-attention and a
+        #     feedforward, and nothing to cross-attend into. See docs/broccoli.md.
+        self.alpha, self.beta = model_util.resolve_residual_scaling(
+            kwargs["alpha"], kwargs["beta"], self.layers, decoder=False,
+        )
+
+        # Suppressed unless the stack is deep enough for a depth ramp to mean
+        #     anything, as on `ReceiverCrossAttentionLM`.
+        self.stochastic_depth = (
+            kwargs["stochastic_depth"] if self.layers > 1 else 0.0
+        )
+
+        # Reads the token embeddings, this slot's raw input; not an interface
+        #     in `Receiver`'s sense. See `ReceiverCrossAttentionLM`.
+        self.message_adapter = nn.Linear(
+            self.token_embedding_size,
+            self.d_model
+        )
+
+        self.encoder = broccoli.transformer.TransformerEncoder(
+            self.message_length,
+            self.d_model,
+            self.layers,
+            self.heads,
+            # Pinned False, and no longer a config option; every stack here
+            #     runs rotary. See docs/broccoli.md.
+            absolute_position_embedding=False,
+            relative_position_embedding=self.relative_position_embedding,
+            # Pinned at 1.0, not configurable -- see `ViT2` for the argument.
+            positional_heads=1.0,
+            # Derived from the data: this stack reads the message.
+            source_size=(self.message_length,),
+            # `ff_ratio` None so that `ff_inner_size` is the live knob; note
+            #     broccoli's `ViT` resolves the two the other way round.
+            ff_ratio=None,
+            ff_inner_size=self.ff_inner_size,
+            activation=self.activation,
+            activation_kwargs=None,
+            ff_linear_module_up=None,
+            ff_linear_module_down=None,
+            # Pinned rather than promoted: this argument can never take effect.
+            #     Use the inner/outer knobs instead. See docs/broccoli.md.
+            ff_dropout=0.0,
+            ff_inner_dropout=self.ff_inner_dropout,
+            ff_outer_dropout=self.ff_outer_dropout,
+            msa_dropout=self.self_attention_dropout,
+            stochastic_depth=self.stochastic_depth,
+            depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
+            # The whole of what the two arms differ by.
+            causal=not self.bidirectional,
+            linear_module=nn.Linear,
+            bos_tokens=self.utility_tokens,
+            knocking_heads=self.knocking_heads,
+            return_bos_tokens=self.return_bos_tokens,
+            pre_norm=self.pre_norm,
+            post_norm=self.post_norm,
+            msa_scaling="d",
+            alpha=self.alpha,
+            beta=self.beta,
+        )
+
+        self.pool = broccoli.vit.SequencePool(self.d_model)
+
+    @property
+    def referent_input_size(self):
+        """`None`: this slot never reads the candidates. See the class docstring."""
+        return None
+
+    @property
+    def message_input_size(self):
+        """`None`: this slot is the message encoder. See `ReceiverGRULM`."""
+        return None
+
+    @property
+    def output_size(self):
+        return self.d_model
+
+    def encode(
+        self,
+        messages: torch.Tensor, # (batch, seq_len, token_embedding_size)
+        ) -> torch.Tensor: # -> (batch, seq_len, d_model)
+        """
+        The per-position outputs, before the pool. Separate from `forward` so a
+            test can check the causal arm's mask where it acts.
+        """
+        return self.encoder(self.message_adapter(messages))
+
+    def forward(
+        self,
+        messages: torch.Tensor, # (batch, seq_len, token_embedding_size)
+        referents: torch.Tensor, # ignored, and `None` from `Receiver`
+        ) -> torch.Tensor: # -> (batch, 1, d_model)
+        return self.pool(self.encode(messages)).unsqueeze(1)
+
+    def reset_parameters(self):
+        self.message_adapter.reset_parameters()
+        self.encoder.reset_parameters()
+        self.pool.reset_parameters()
+
+
+class ReceiverTransformerAutoregressiveLM(ReceiverTransformerLM):
+    def __init__(self, referent_embedding_size, **kwargs):
+        """
+        The causal arm of `ReceiverTransformerLM`: each position reads only the
+            symbols before it, as the GRU does. Any `bidirectional` in `kwargs`
+            is overridden -- the class is the choice.
+        """
+        kwargs["bidirectional"] = False
+        super().__init__(referent_embedding_size, **kwargs)
+
+
+class ReceiverTransformerBidirectionalLM(ReceiverTransformerLM):
+    def __init__(self, referent_embedding_size, **kwargs):
+        """
+        The unmasked arm of `ReceiverTransformerLM`: every position reads the
+            whole message. Any `bidirectional` in `kwargs` is overridden -- the
+            class is the choice.
+        """
+        kwargs["bidirectional"] = True
+        super().__init__(referent_embedding_size, **kwargs)
 
 
 class ReceiverCrossAttentionLM(nn.Module):
@@ -579,8 +723,6 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
         self,
         referent_embedding_size,
         message_width,
-        score_scale=True,
-        score_bias=True,
         **kwargs
     ):
         """
@@ -609,19 +751,10 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
                 one the `1/sqrt(d)` calibration is taken over. Declared upstream
                 as `referent_input_size`, so `Receiver` projects the backbone's
                 output to it. `build_models` passes
-                `[receiver_language_model] d_model`; `AttentionDiscriminator`
-                passes its own `d_model` for the path it composes.
+                `[receiver_language_model] d_model`.
             message_width: the width the message is read at, declared upstream
                 as `message_input_size`. `build_models` passes the language
                 model's `output_size`, which makes that interface square.
-            score_scale: build the learnable volume. False only from inside
-                `AttentionDiscriminator`; see `ScoreVolume._init_score_volume`.
-            score_bias: build the learnable offset, and False from the same one
-                place and for the same reason. These are the *composition*
-                gates, distinct from the config's `scale_score` / `bias_score`
-                in `kwargs`: either one alone is enough to leave a scalar
-                unbuilt, and they are separate arguments because a composed path
-                is not a configuration choice.
 
         **This module owns no norms.** Both operands arrive normalised, because
             `Receiver` delivers every input to a slot in a stated distribution
@@ -654,12 +787,9 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
         self.referent_embedding_size = referent_embedding_size
         self.message_width = message_width
 
-        # Two gates each way: the composition arguments -- `AttentionDiscrimin-
-        #     ator` passes False for the path it owns -- and the config's keys.
-        #     Either one alone is enough to leave a scalar unbuilt.
         self._init_score_volume(
-            score_scale and kwargs.get("scale_score", True),
-            score_bias and kwargs.get("bias_score", True),
+            kwargs.get("scale_score", True),
+            kwargs.get("bias_score", True),
         )
 
         self.bilinear = nn.Linear(
@@ -694,7 +824,8 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
         ) -> torch.Tensor: # -> (batch, n_objects)
         """
         The last slot is the identity for `ReceiverGRULM`, which returns one and
-            has already taken its final state. For a stack that returns one
+            has already taken its final state, and for `ReceiverTransformerLM`,
+            which returns one because it has already pooled. For a stack that returns one
             position per symbol it is the reserved EOS position: the speaker's
             messages are fixed length, so EOS is positionally determined and
             carries no information of its own, and its input embedding is
@@ -736,447 +867,6 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
         #     moved to `Receiver`, which resets its own interfaces.
         self.bilinear.reset_parameters()
         self.reset_score_volume()
-
-
-class AttentionDiscriminator(ScoreVolume, nn.Module):
-    def __init__(
-        self,
-        referent_embedding_size,
-        message_width,
-        **kwargs
-    ):
-        """
-        Score the candidates with a decoder stack that reads the encoded
-            message as memory, mixed with a bilinear score over the same
-            message:
-
-            score = readout((1 - a) * bilinear + a * attention) + bias
-            a     = mix_floor + (1 - mix_floor) * sigmoid(mix_logit)
-
-        `referent_decoder` runs `layers` blocks: cross-attention into the
-            message *first*, then the candidates read each other, then a
-            feedforward -- so the message crosses into the scored stream once
-            per block rather than once in total, and the candidates compare
-            message-informed representations. `decision` is a plain
-            `nn.Linear(d_model, 1)`.
-
-        **Why the mix.** The attention path alone does not bootstrap. Under a
-            nuisance level where the bilinear comparison reaches 0.938 it sits
-            at 0.469 with its polarity tag barely moving, because at
-            initialisation nothing in the pair yet looks like a pattern and
-            uniformity is the cheapest thing a listener can do. This gives the
-            speaker a gradient worth having from step zero and lets attention
-            take over if it earns it -- the recipe `AttentionPrototyper`
-            already follows: open at the simple behaviour and depart only if it
-            pays. See docs/architecture.md.
-
-        **Where the volume lives.** One `log_score_scale`, from `ScoreVolume`,
-            downstream of the mix -- the same readout `BilinearDiscriminator`
-            uses, so there is one volume mechanism on the listener rather than
-            two. The composed bilinear path is built with both composition gates
-            off because it now feeds this readout instead of being one: it
-            calibrates its score and hands it over raw, and the mix is what
-            reaches the volume and the offset.
-
-        `scale_score` and `bias_score` therefore act here, on the outer readout,
-            and not on the branch. With both off this module returns
-            `(1 - a) * bilinear + a * attention` unaltered -- still calibrated,
-            because the `1/sqrt(d)` inside the composed path is unconditional.
-            The stack's input and memory norms are untouched by either key, as
-            they always were -- but they are `Receiver`'s interface norms now
-            rather
-            than this module's own, so the exemption is no longer written here
-            as a special case. A post-norm decoder normalises its own stream but
-            never its memory, and both of this stack's inputs are memory or
-            stream it did not produce.
-
-        **One referent width.** This module used to consume the candidates
-            twice at two widths: its own stack at `d_model`, and the raw tensor
-            handed to the `BilinearDiscriminator` it composes, at whatever
-            `referent_embedding_size` the config set -- 1024 against 320 on
-            the old rungs 13 and 14. That second consumer was invisible to
-            `Receiver`.
-            The composed module is now built at `d_model` on both operands and
-            reads the same tensors the stack does, so the slot declares one
-            referent width and one message width and both are true.
-
-            The cost is stated rather than hidden: the bilinear arm here is
-            about an order of magnitude smaller than it was, so the old rung 13
-            was no longer "rung 11 plus attention" at the same bilinear
-            capacity. The bootstrapping argument above is unchanged in form and
-            weaker in capacity. Since this module moved to the top of the
-            ladder (rungs 15 and 16, 2026-09-30) the rung below it runs a
-            standalone `BilinearDiscriminator` over the same 256-wide encoder
-            output, 65,536 parameters, which is the size of the arm here.
-
-        Neither branch is standardised, so `a` is a weight and not a share:
-            a loud branch can dominate a heavily-weighted quiet one. That is
-            deliberate. Standardising per branch would make `a` mean composition
-            exactly and close off the escape of turning one branch down, which
-            is the failure `mix_share` against `mix_alpha` exists to catch --
-            the first is the share the score is actually made of, the second the
-            share `mix_logit` asked for.
-
-        Neither is this the change that once stopped four rungs learning. That
-            was the attention readout pinned to a *fixed gain*, which cannot go
-            quiet while the message is still noise and so forces a listener to
-            commit before there is anything to commit to (see
-            docs/anecdotes.md). This listener can go as quiet as BCE asks it to,
-            and the bilinear path carries the decision through the opening, so
-            nothing has to be confident early.
-
-        The floor is in the parameterisation and **never a `clamp`**:
-            `clamp`'s gradient is zero below the bound, so a mix that drifted
-            under the floor would weld there permanently. With the floor in
-            place the attention path always contributes and so always receives
-            gradient.
-
-        The bilinear path is a second *comparison*, not a second encoder: it
-            reads whatever `message_repr` the language model handed over. See
-            this module's docstring for why that invariant matters.
-
-        Args:
-            referent_embedding_size: recorded and not used. Both of this
-                module's widths are its own `d_model` -- see
-                `referent_input_size` -- so what `build_models` passes here
-                (`[receiver_language_model] d_model`) sizes nothing. Kept on the
-                signature because it is the slot contract's shape and dropping
-                it would make the two discriminators take different arguments.
-            message_width: recorded and not used, for the same reason.
-        """
-        super().__init__()
-        self.referent_embedding_size = referent_embedding_size
-        self.message_width = message_width
-
-        # Gated on the config keys rather than only dropped from `forward`. An
-        #     ungated volume under `scale_score = false` would be a parameter
-        #     that exists, is claimed by `SCALAR_GROUPS`, and never receives
-        #     gradient -- which is exactly the state `builder.py`'s "an
-        #     applicable group matches a parameter" invariant exists to make
-        #     impossible. Same for the offset and `split_out_parameter`.
-        self._init_score_volume(
-            kwargs.get("scale_score", True),
-            kwargs.get("bias_score", True),
-        )
-
-        self.d_model = kwargs["d_model"]
-        self.layers = kwargs["layers"]
-        self.heads = kwargs["heads"]
-        self.ff_inner_size = kwargs["ff_inner_size"]
-        self.activation = model_util.get_activation(kwargs["activation"])
-        self.pre_norm = kwargs["pre_norm"]
-        self.post_norm = kwargs["post_norm"]
-        self.knocking_heads = kwargs["knocking_heads"]
-        self.depthwise_linear_stochastic_depth = kwargs[
-            "depthwise_linear_stochastic_depth"
-        ]
-        self.ff_inner_dropout = kwargs["ff_inner_dropout"]
-        self.ff_outer_dropout = kwargs["ff_outer_dropout"]
-        self.self_attention_dropout = kwargs["self_attention_dropout"]
-        self.cross_attention_dropout = kwargs["cross_attention_dropout"]
-        self.mix_floor = kwargs["mix_floor"]
-        self.mix_logit_init = kwargs["mix_logit_init"]
-
-        if not 0.0 <= self.mix_floor < 1.0:
-            raise ValueError(
-                "`mix_floor` is the attention path's minimum share of the "
-                f"score and must be in [0, 1), got {self.mix_floor}."
-            )
-
-        self.alpha, self.beta = model_util.resolve_residual_scaling(
-            kwargs["alpha"], kwargs["beta"], self.layers, decoder=True,
-        )
-
-        self.stochastic_depth = (
-            kwargs["stochastic_depth"] if self.layers > 1 else 0.0
-        )
-
-        # The projection and norm that used to sit here -- `referent_adapter`,
-        #     `referent_layer_norm`, `memory_adapter`, `memory_layer_norm` --
-        #     are `Receiver`'s interfaces now, built from the two widths this
-        #     module declares below. The memory in particular still has to be
-        #     brought to `d_model` from whatever the language model emits at
-        #     (2 * d_model for a bidirectional GRU, its own d_model for the
-        #     decoder stack, and no arithmetic makes those agree); it is the
-        #     same `nn.Linear` and the same norm, one stage upstream.
-
-        # `causal=False` is not negotiable, and `relative_position_embedding`
-        #     is False for the same reason: referent order is the label vector,
-        #     so anything able to index its own sequence axis could ignore the
-        #     message. `test_no_stage_can_read_the_referent_ordering` pins it.
-        #
-        # `cross_first`, so what the self-attention compares has already been
-        #     informed by the message. That self-attention is the only stage at
-        #     which a score can depend on the rest of the set, and the only
-        #     route to the concept game's clustering shortcut.
-        self.referent_decoder = transformer_decoder.TransformerDecoder(
-            # `seq_len` sizes the causal mask, which is off here, and the
-            #     absolute position embedding, which is not built.
-            None,
-            # `memory_len` sizes nothing, and could not be stated here in any
-            #     case: the message representation is one position long from a
-            #     GRU and `message_length` long from the decoder stack.
-            None,
-            self.d_model,
-            self.layers,
-            self.heads,
-            absolute_position_embedding=False,
-            relative_position_embedding=False,
-            positional_heads=1.0,
-            source_size=None,
-            ff_ratio=None,
-            ff_inner_size=self.ff_inner_size,
-            activation=self.activation,
-            activation_kwargs=None,
-            ff_dropout=0.0,
-            ff_inner_dropout=self.ff_inner_dropout,
-            ff_outer_dropout=self.ff_outer_dropout,
-            msa_dropout=self.self_attention_dropout,
-            cross_attention_dropout=self.cross_attention_dropout,
-            stochastic_depth=self.stochastic_depth,
-            depthwise_linear_stochastic_depth=self.depthwise_linear_stochastic_depth,
-            linear_module=nn.Linear,
-            bos_tokens=0,
-            knocking_heads=False,
-            return_bos_tokens=False,
-            pre_norm=self.pre_norm,
-            post_norm=self.post_norm,
-            msa_scaling="d",
-            alpha=self.alpha,
-            beta=self.beta,
-            causal=False,
-            cross_first=True,
-        )
-
-        # A weight whose magnitude is free, and no bias. The bias was removed
-        #     once, restored, and removed again when the readout's centring
-        #     would have annihilated it. The centring has since gone and the
-        #     bias stays off, for a third reason: it adds the same constant to
-        #     every candidate, and so does `ScoreVolume.score_bias`, so the two
-        #     would be degenerate and free to drift against each other. One
-        #     offset per module, and it is the one on the readout, where every
-        #     discriminator has it and `train.py` logs it. This is where
-        #     `mix_bias` used to be named. See docs/anecdotes.md.
-        #
-        # It reads straight off the referent stack's last post-norm, which is an
-        #     `RMSNorm` and so already equalises the candidates' lengths -- no
-        #     object can be read loudly for being large.
-        self.decision = nn.Linear(self.d_model, 1, bias=False)
-
-        # The other path. A whole `BilinearDiscriminator`, composed rather than
-        #     reimplemented, so the `a -> mix_floor` limit of this module is
-        #     the module that was measured bootstrapping and not a lookalike.
-        #     It reads `message_repr`; it owns no encoder.
-        #
-        # Built without a volume and without an offset: this branch is
-        #     multiplied by `1 - mix_weight` and read out through this module's
-        #     own `score_scale` and `score_bias`, so a scalar here would say
-        #     what `mix_logit` already says and a constant here would be
-        #     annihilated by nothing and be degenerate with the outer one. See
-        #     `ScoreVolume._init_score_volume`.
-        #
-        # The config's own keys are deliberately *not* forwarded. They belong to
-        #     the readout that reaches the decision, which is this module's, and
-        #     passing them down would only be able to turn off scalars that are
-        #     already off. What the branch keeps unconditionally is the
-        #     `1/sqrt(d)` calibration, which is why the mix opens at a stated
-        #     number under every configuration.
-        #
-        # At `d_model` on both operands, because it reads the same two tensors
-        #     the stack does. See the class docstring for what that changed
-        #     and how it compares with the rung below.
-        self.bilinear = BilinearDiscriminator(
-            self.d_model,
-            self.d_model,
-            score_scale=False,
-            score_bias=False,
-        )
-
-        # `mix_logit_init` -4.0 puts `a` at 0.116 for the default floor of
-        #     0.1 -- open essentially at the bilinear comparison, with the
-        #     attention path present enough to be learning.
-        self.mix_logit = nn.Parameter(
-            torch.tensor(float(self.mix_logit_init))
-        )
-
-        # No offset here. It was `mix_bias`, a scalar added after the readout,
-        #     and it is now `ScoreVolume.score_bias` -- the same scalar, the
-        #     same position, applied by the same `readout`, but on both
-        #     discriminators rather than only this one. `BilinearDiscriminator`
-        #     had no bias anywhere, so rungs 1-12 could not place their scores
-        #     against `train.py`'s fixed `lis_scores > 0` threshold at all. The
-        #     argument for the position -- downstream of the volume, so the
-        #     threshold does not slide every time the listener changes how
-        #     loudly it speaks -- is in `ScoreVolume`'s docstring, where it now
-        #     belongs. `mix_bias` also had no config key and no metrics column;
-        #     `score_bias` has both.
-        #
-        # This is also where a `log_mix_scale` used to sit, carrying the volume
-        #     for the whole module. There is again exactly one volume scalar
-        #     here, but it is `ScoreVolume.log_score_scale` -- the same one the
-        #     bilinear arm has, under the same config key, applied the same way.
-
-        # Metrics only: set on every `forward`, read by `train.py`. See
-        #     docs/measurement.md.
-        #
-        # The raw mixing weight. Bounded below by `mix_floor` and above by 1.
-        #     Note this is the *weight*, not the share: with the branches
-        #     unstandardised a loud branch can dominate a heavily-weighted quiet
-        #     one, so "was attention used" is `mix_share` below and this is the
-        #     parameter that would like it to be.
-        self.mix_alpha = float("nan")
-
-        # The realised share of the attention path, measured from the branches
-        #     standardised per game -- which is what `mix_alpha` alone would
-        #     mean if `forward` standardised them separately.
-        self.mix_share = float("nan")
-
-        # `corr(attention_hat, bilinear_hat)` within a game. Necessary because
-        #     an attention path that is never used and one that has learned to
-        #     imitate the bilinear path look identical from accuracy and from
-        #     `mix_alpha` alone, and they are different findings.
-        self.path_agreement = float("nan")
-
-        # The standard deviation of the scores, and independent again now that
-        #     the readout does not pin it: it is `score_scale` times the mixed
-        #     branches' own spread, so it reads the volume and what the module
-        #     is actually doing with it together, where `score_scale` alone
-        #     reads only the parameter.
-        self.decision_spread = float("nan")
-
-        # Excess kurtosis of the scores. Negative means bimodal, which is what
-        #     discriminating looks like; sustained positive alongside chance
-        #     accuracy is a listener with nothing to say.
-        #
-        # Kurtosis is invariant to the scale, so this reads shape where
-        #     `decision_spread` reads magnitude. The two were briefly redundant,
-        #     while the readout pinned the spread and left only this free.
-        self.decision_kurtosis = float("nan")
-
-    @property
-    def referent_input_size(self):
-        """
-        `d_model`, and one width for the whole slot: the stack and the composed
-            bilinear path read the same tensor. See the class docstring.
-        """
-        return self.d_model
-
-    @property
-    def message_input_size(self):
-        """
-        `d_model`. The encoded message is this stack's cross-attention memory
-            and the composed bilinear path's second operand, at the same width
-            and from the same interface.
-        """
-        return self.d_model
-
-    @property
-    def mix_weight(self):
-        """
-        The weight on the attention path, in `[mix_floor, 1)`. Read here rather
-            than recomputed at the use site so `forward` and the metrics column
-            cannot drift apart.
-
-        Not the same thing as the attention path's *share* of the score, which
-            it was while `forward` standardised both branches. `mix_share`
-            measures that.
-        """
-        return (
-            self.mix_floor
-            + (1.0 - self.mix_floor) * torch.sigmoid(self.mix_logit)
-        )
-
-    def forward(
-        self,
-        referents: torch.Tensor, # (batch, n_objects, d_embedding)
-        message_repr: torch.Tensor # (batch, slots, message_width)
-        ) -> torch.Tensor: # -> (batch, n_objects)
-        """
-        The two paths are mixed at their own magnitudes and the mix is scaled,
-            not standardised. A branch can therefore escape being learned by
-            turning itself down -- watch `mix_share` against `mix_alpha`, which
-            is the only place `standardise` still runs, under `no_grad` in the
-            telemetry block below where `path_agreement` and `mix_share` need
-            it.
-
-        Note this module's opening is not the bilinear arm's calibrated
-            `1/sqrt(3)`: the attention branch arrives at whatever magnitude
-            `decision` gives it and the mix is a weighted sum of the two. It is
-            a fixed number per architecture rather than a moving one -- measure
-            it with a forward pass if a rung needs its openings matched.
-        """
-        # Each candidate reads the message, then the candidates read each other,
-        #     once per block. Read out through `decision`; that last post-norm
-        #     is an `RMSNorm`, so the candidates reach it at equal length.
-        #
-        # Both arguments arrive at `d_model` and normalised, from `Receiver`'s
-        #     interfaces. Nothing is adapted here.
-        refined = self.referent_decoder(referents, message_repr)
-        attention = self.decision(refined).squeeze(-1)
-
-        # The same two tensors, which is the point of one declared width per
-        #     input rather than a second consumer at a width of its own.
-        bilinear = self.bilinear(referents, message_repr)
-
-        weight = self.mix_weight
-        mixed = (1.0 - weight) * bilinear + weight * attention
-        scores = self.readout(mixed)
-
-        # `.item()` in a forward pass costs a sync and a graph break under
-        #     `torch.compile`, which is on. Paid deliberately -- a metric nobody
-        #     can read is how the last collapse ran unnoticed.
-        with torch.no_grad():
-            self.mix_alpha = weight.item()
-
-            # Standardised here and nowhere else. Per game, both branches are
-            #     zero-mean and unit-spread, so the mean of their product over
-            #     candidates *is* Pearson's r, and the weighted spreads compare
-            #     like with like.
-            attention_hat = standardise(attention)
-            bilinear_hat = standardise(bilinear)
-
-            self.path_agreement = (bilinear_hat * attention_hat).mean().item()
-
-            # Which branch the score is actually made of, as opposed to which
-            #     one `mix_logit` asked for. The two came apart when the
-            #     branches stopped arriving at unit spread.
-            attention_part = weight * attention.detach().float().std()
-            bilinear_part = (1.0 - weight) * bilinear.detach().float().std()
-            total = attention_part + bilinear_part
-            self.mix_share = (
-                (attention_part / total).item() if total > 1e-6
-                else float("nan")
-            )
-
-        detached = scores.detach().float()
-        spread = detached.std()
-        self.decision_spread = spread.item()
-
-        # Guarded because the fourth standardised moment divides by `spread` to
-        #     the fourth, and a collapsed readout makes that 0/0. NaN is the
-        #     honest value there; `decision_spread` names that state.
-        if spread > 1e-6:
-            standardised = (detached - detached.mean()) / spread
-            self.decision_kurtosis = (standardised ** 4).mean().item() - 3.0
-        else:
-            self.decision_kurtosis = float("nan")
-
-        # Note `train.py` reads `lis_scores > 0`, so accuracy is invariant to
-        #     any positive rescale of the readout, which is why the accuracy
-        #     column cannot see a volume collapse. `score_scale` can.
-        #
-        # The threshold is a fixed zero again, not each game's own mean score:
-        #     the readout no longer centres, so `score_bias` moves the threshold
-        #     against a fixed origin rather than against a moving one. `train_acc`
-        #     is not comparable across this change in either direction.
-        return scores
-
-    def reset_parameters(self):
-        self.referent_decoder.reset_parameters()
-        self.decision.reset_parameters()
-        self.bilinear.reset_parameters()
-        self.reset_score_volume()
-        nn.init.constant_(self.mix_logit, float(self.mix_logit_init))
 
 
 # --------------------------------------------------------------------------
@@ -1322,10 +1012,9 @@ class Receiver(nn.Module):
             `Receiver` held one adapter of its own upstream of the lot, each
             slot held its own projection and norm, `BilinearDiscriminator` held
             no projection at all and took the referent width as its own output
-            width, and
-            `AttentionDiscriminator` consumed the referents *twice at two
-            widths* -- a second consumer that `Receiver` could not see, which is
-            what made the arrangement hard to change. The objection to sharing
+            width, and the since-removed attention discriminator consumed the
+            referents *twice at two widths* -- a second consumer that `Receiver`
+            could not see, which is what made the arrangement hard to change. The objection to sharing
             was that `Receiver` would have to work out which slots wanted which
             width, which is reaching into slot internals. Under a declaration it
             works nothing out: it reads what the slot states.

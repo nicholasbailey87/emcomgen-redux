@@ -468,10 +468,32 @@ def test_reset_parameters_clears_the_measured_survival_and_keeps_the_channel_sca
     assert speaker.logit_scale == scale
 
 
-def test_attention_listener_reset_covers_its_interfaces():
+@pytest.mark.parametrize(
+    "language_model,stages,interfaces",
+    [
+        (
+            "ReceiverCrossAttentionLM",
+            ("message_adapter", "message_decoder"),
+            (
+                R.LANGUAGE_MODEL_REFERENTS,
+                R.DISCRIMINATOR_REFERENTS,
+                R.DISCRIMINATOR_MESSAGE,
+            ),
+        ),
+        (
+            "ReceiverTransformerBidirectionalLM",
+            ("message_adapter", "encoder", "pool"),
+            (R.DISCRIMINATOR_REFERENTS, R.DISCRIMINATOR_MESSAGE),
+        ),
+    ],
+    ids=["cross", "transformer"],
+)
+def test_attention_listener_reset_covers_its_interfaces(
+    language_model, stages, interfaces
+):
     """
     The baseline rungs use `ReceiverGRULM + BilinearDiscriminator`, so the
-    pair-level test above never reaches these two classes. `reset_parameters`
+    pair-level test above never reaches the Transformer language models. `reset_parameters`
     used to omit both adapters and the referent norm -- i.e. everything mapping
     the listener's two inputs into `d_model` -- while re-drawing everything
     downstream of them.
@@ -484,38 +506,26 @@ def test_attention_listener_reset_covers_its_interfaces():
     from _bootstrap import build_listener, rung
 
     listener = build_listener(
-        "ReceiverCrossAttentionLM",
-        "AttentionDiscriminator",
+        language_model,
+        "BilinearDiscriminator",
         512,
-        # Rung 15 rather than DEFAULT, whose `[receiver_language_model] d_model`
+        # Rung 17 rather than DEFAULT, whose `[receiver_language_model] d_model`
         # is the GRU's 1024 and does not divide its `heads = 5`.
-        config_file=rung("15_shapeworld_attention_discriminator.toml"),
-        # So neither stack is a single block, where a depth ramp would be inert.
+        config_file=rung("17_shapeworld_receiver_cross_attention_lm.toml"),
+        # So the stack is not a single block, where a depth ramp would be inert.
         language_model_overrides=dict(layers=2),
-        discriminator_overrides=dict(layers=2),
     )
 
     _perturb(listener)
     listener.reset_parameters()
 
     slots = {
-        "language_model": (
-            "message_adapter",
-            "message_decoder",
-        ),
-        "discriminator": (
-            "referent_decoder",
-            "decision",
-            "bilinear",
-        ),
+        "language_model": stages,
+        "discriminator": ("bilinear",),
         # Every width change and every norm on the listener's input path, named
         # literally so that adding an interface without resetting it fails here
         # even though `Receiver.reset_parameters` iterates.
-        "interfaces": (
-            R.LANGUAGE_MODEL_REFERENTS,
-            R.DISCRIMINATOR_REFERENTS,
-            R.DISCRIMINATOR_MESSAGE,
-        ),
+        "interfaces": interfaces,
     }
     for slot, names in slots.items():
         container = getattr(listener, slot)
@@ -552,7 +562,7 @@ def _pair_with_gradients(prototyper="AveragePrototyper"):
         is part of `AttentionPrototyper` now, so the arm that used to be
         `contrast = true` is this class.
 
-        The partition itself is asserted over all fourteen rungs in
+        The partition itself is asserted over every rung in
         `tests/test_module_learning_rates.py`, which needs no backward pass;
         what needs one is everything below about the norms.
     """

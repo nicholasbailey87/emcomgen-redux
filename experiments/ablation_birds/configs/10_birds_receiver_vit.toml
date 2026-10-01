@@ -14,8 +14,8 @@
 # discriminator reads the referent embeddings through a bias-free bilinear
 # projection, so changing the referent width from 512 to 320 rescales that
 # projection and nothing else -- 524,289 parameters down to 327,681 -- and the
-# message encoder is untouched. Rung 12 replaces the encoder, rung 16 the
-# discriminator.
+# message encoder is untouched. Rung 12 replaces the encoder; the
+# discriminator stays bilinear on every rung.
 #
 # (Both of those halved when `[receiver_language_model]` was restored to
 # jayelm's 1 layer unidirectional: the projection's fan-in is the GRU's
@@ -70,7 +70,7 @@ layers = 7
 # moves the language model's architecture and nothing else. The parallel arm,
 # `SenderTransformerBidirectionalLM`, would move the generation regime at the
 # same time, and whatever the combination measured could not be attributed to
-# either. It comes later instead -- rungs 13 and 14 -- where it
+# either. It comes later instead -- rungs 15 and 16 -- where it
 # moves the regime alone. The two arms are the same blocks at the same size and
 # differ by `token_embedding` alone, which only the causal arm needs because
 # only it reads a symbol back.

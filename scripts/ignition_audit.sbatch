@@ -10,12 +10,12 @@
 #
 # Submit from the repository root:
 #
-#     sbatch --array=0-2 scripts/ignition_audit.sbatch
+#     sbatch --array=0-1 scripts/ignition_audit.sbatch
 #
 # and, to change the step count or the rungs, either edit the CONFIGS array
 # below or pass them through:
 #
-#     sbatch --array=0-2 --export=ALL,STEPS=800 scripts/ignition_audit.sbatch
+#     sbatch --array=0-1 --export=ALL,STEPS=800 scripts/ignition_audit.sbatch
 #
 # Results land in results/ignition_audit/<config stem>.csv, logs in
 # experiments/ablation/logs/.
@@ -43,21 +43,20 @@ PYTHON="$HOME/.pyenv/versions/myenv/bin/python"
 PROJECT_DIR="${SLURM_SUBMIT_DIR}"
 
 #===============================================================================
-# The rungs, and why these three
+# The rungs, and why these two
 #===============================================================================
 #
 #   07  SenderGRULM   + BilinearDiscriminator   -- ignites at ~epoch 10
 #   09  SenderTransformerLM + BilinearDiscriminator -- never ignites
-#   13  SenderTransformerLM + AttentionDiscriminator -- ignites at ~epoch 20
 #
-# 11 is the control: same speaker as 07, different listener, opposite outcome.
-# So a per-group gradient norm across the three separates "the speaker cannot
-# use the signal" from "the listener never supplies one".
+# There was a third: SenderTransformerLM under the attention discriminator,
+# which ignited at ~epoch 20 and was the control -- same speaker as 09,
+# different listener, opposite outcome. That class was removed on 2026-10-01,
+# and the control with it.
 
 CONFIGS=(
     "05_shapeworld_attention_prototyper"
     "07_shapeworld_sender_transformer_lm"
-    "11_shapeworld_attention_discriminator"
 )
 
 STEPS="${STEPS:-1800}"

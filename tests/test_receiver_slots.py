@@ -11,17 +11,17 @@ split almost exactly in half along that line -- `BilinearGRUComparer` was a
 swapped one for the other moved both halves at once, and "does attention help
 compositionality" could not be attributed to either.
 
-The slots make that a 2x2:
-
-                             BilinearDiscriminator  AttentionDiscriminator
-    ReceiverGRULM             the historical arm            new
-    ReceiverCrossAttentionLM           new            the attention arm
+The slots are four language models over one discriminator,
+`BilinearDiscriminator`: `ReceiverGRULM`, the two arms of
+`ReceiverTransformerLM`, and `ReceiverCrossAttentionLM`. There used to be a
+second discriminator, an attention stack in which the candidates read each
+other; it was removed on 2026-10-01, and its tests with it.
 
 The first section below is the safety net for the refactor: at `dropout = 0` and
 one unidirectional layer, `ReceiverGRULM + BilinearDiscriminator` must reproduce
 the pre-split module bit for bit. It is the only pairing that can be pinned that
-exactly -- the other three did not exist -- so everything else here is a
-property test.
+exactly -- the others did not exist -- so everything else here is a property
+test.
 
 It has to be at `dropout = 0` because the mask moved, twice. `Receiver` draws
 one mask per referent interface, downstream of that interface's norm, where the
@@ -46,6 +46,7 @@ import _bootstrap
 from _bootstrap import build_listener, config_section, rung
 
 from models import receiver as R
+import parse_config
 
 
 # The two readout scalars, asked for rather than inherited. DEFAULT.toml turned
@@ -63,7 +64,7 @@ BATCH, N_OBJ, SEQ = 6, 10, 7
 #     coincidence.
 TOKEN_DIM = 37
 
-CROSS_RUNG = "15_shapeworld_attention_discriminator.toml"
+CROSS_RUNG = "17_shapeworld_receiver_cross_attention_lm.toml"
 
 
 def _inputs(listener, seed=0):
@@ -296,8 +297,8 @@ def test_the_default_gru_is_jayelms():
 @pytest.mark.parametrize(
     "config_file",
     [
-        "11_shapeworld_receiver_cross_attention_lm.toml",
-        "12_birds_receiver_cross_attention_lm.toml",
+        "17_shapeworld_receiver_cross_attention_lm.toml",
+        "18_birds_receiver_cross_attention_lm.toml",
     ],
 )
 def test_the_two_listener_arms_are_parameter_matched(config_file):
@@ -345,6 +346,44 @@ def test_the_two_listener_arms_are_parameter_matched(config_file):
     assert cross.output_size == 256
 
 
+@pytest.mark.parametrize(
+    "config_file,language_model",
+    [
+        ("11_shapeworld_receiver_transformer_autoregressive_lm.toml",
+         "ReceiverTransformerAutoregressiveLM"),
+        ("12_birds_receiver_transformer_autoregressive_lm.toml",
+         "ReceiverTransformerAutoregressiveLM"),
+        ("13_shapeworld_receiver_transformer_bidirectional_lm.toml",
+         "ReceiverTransformerBidirectionalLM"),
+        ("14_birds_receiver_transformer_bidirectional_lm.toml",
+         "ReceiverTransformerBidirectionalLM"),
+    ],
+)
+def test_the_transformer_encoders_are_parameter_matched_to_the_gru(
+    config_file, language_model
+):
+    """
+    The speaker language model's depth and feedforward -- 7 blocks at
+        `ff_inner_size = 512` -- at the listener's width of 256: 4,673,344 for
+        encoder, message adapter and `SequencePool` against the GRU's 4,687,872,
+        0.997x. Identical on both arms, the mask being the only difference.
+    """
+    gru = build_listener(
+        "ReceiverGRULM", "BilinearDiscriminator", REFERENT_DIM
+    ).language_model
+    encoder = build_listener(
+        language_model, "BilinearDiscriminator", REFERENT_DIM,
+        config_file=rung(config_file),
+    ).language_model
+
+    n_gru = sum(p.numel() for p in gru.parameters())
+    n_encoder = sum(p.numel() for p in encoder.parameters())
+
+    assert n_encoder == 4_673_344
+    assert abs(n_encoder / n_gru - 1.0) < 0.05
+    assert encoder.output_size == 256
+
+
 # --------------------------------------------------------------------------
 # The slot contract.
 # --------------------------------------------------------------------------
@@ -353,19 +392,27 @@ ALL_FOUR = pytest.mark.parametrize(
     "language_model,discriminator",
     [
         ("ReceiverGRULM", "BilinearDiscriminator"),
-        ("ReceiverGRULM", "AttentionDiscriminator"),
+        ("ReceiverTransformerAutoregressiveLM", "BilinearDiscriminator"),
+        ("ReceiverTransformerBidirectionalLM", "BilinearDiscriminator"),
         ("ReceiverCrossAttentionLM", "BilinearDiscriminator"),
-        ("ReceiverCrossAttentionLM", "AttentionDiscriminator"),
     ],
-    ids=["gru+bilinear", "gru+attention", "cross+bilinear", "cross+attention"],
+    ids=["gru", "causal", "bidirectional", "cross"],
+)
+
+# The language models that read the message alone. Only the cross-attention
+#     encoder declares a referent width.
+READS_THE_MESSAGE_ALONE = (
+    "ReceiverGRULM",
+    "ReceiverTransformerAutoregressiveLM",
+    "ReceiverTransformerBidirectionalLM",
 )
 
 
 def _four_cell(language_model, discriminator, **kwargs):
     """
-    Every cell from rung 15, which is the only config that states widths both
-        slots can build: DEFAULT's `[receiver_language_model] d_model = 1024`
-        does not divide its `heads = 5`, and that key is the GRU's.
+    Every cell from rung 17, which states widths every slot can build:
+        DEFAULT's `[receiver_language_model] d_model = 1024` does not divide its
+        `heads = 5`, and that key is the GRU's.
     """
     return build_listener(
         language_model, discriminator, REFERENT_DIM,
@@ -405,9 +452,10 @@ def test_every_pairing_scores_on_the_message(language_model, discriminator):
 @ALL_FOUR
 def test_the_language_model_returns_a_sequence(language_model, discriminator):
     """
-    `(batch, slots, output_size)` from both, so either discriminator can
-        consume either language model. The GRU returns its final state as a
-        length-1 sequence; a length-1 cross-attention memory is legal.
+    `(batch, slots, output_size)` from every one, so the discriminator reads
+        one shape. The GRU returns its final state and the Transformer encoders
+        their pooled vector, each as a length-1 sequence; the cross-attention
+        stack returns one slot per symbol.
     """
     listener = _four_cell(language_model, discriminator).eval()
     referents, messages = _inputs(listener)
@@ -421,7 +469,7 @@ def test_the_language_model_returns_a_sequence(language_model, discriminator):
     assert representation.shape[0] == BATCH
     assert representation.shape[-1] == listener.language_model.output_size
 
-    expected_slots = 1 if language_model == "ReceiverGRULM" else SEQ
+    expected_slots = 1 if language_model in READS_THE_MESSAGE_ALONE else SEQ
     assert representation.shape[1] == expected_slots
 
 
@@ -431,7 +479,7 @@ def test_the_discriminator_is_sized_from_the_language_model(
 ):
     """
     Not from a config key restating the width. `2 * d_model` for a
-        bidirectional GRU and `d_model` for the decoder stack, and no
+        bidirectional GRU and `d_model` for the Transformer stacks, and no
         arithmetic makes those agree, so a key would only ever be a key that
         could be wrong.
     """
@@ -445,27 +493,23 @@ def test_the_discriminator_is_sized_from_the_language_model(
     assert interface.adapter.in_features == width
     assert interface.output_size == listener.discriminator.message_input_size
 
-    if discriminator == "BilinearDiscriminator":
-        # This arm declares the encoder's own width, so the interface is
-        #     square and `bilinear` still reads at `output_size`.
-        assert listener.discriminator.message_input_size == width
-        assert listener.discriminator.bilinear.in_features == width
-    else:
-        # This one declares `d_model`, and the composed bilinear path reads the
-        #     same tensor the stack does rather than a second copy at a width of
-        #     its own.
-        d_model = listener.discriminator.d_model
-        assert listener.discriminator.message_input_size == d_model
-        assert listener.discriminator.bilinear.bilinear.in_features == d_model
+    # The discriminator declares the encoder's own width, so the interface is
+    #     square and `bilinear` still reads at `output_size`.
+    assert listener.discriminator.message_input_size == width
+    assert listener.discriminator.bilinear.in_features == width
 
 
 @ALL_FOUR
-def test_the_gru_slot_ignores_the_candidate_set(language_model, discriminator):
+def test_only_the_cross_attention_slot_reads_the_candidate_set(
+    language_model, discriminator
+):
     """
     Half of the uniform signature's cost, and it is paid deliberately: the GRU
-        takes `referents` and does nothing with it, because dispatching on
-        class at the call site would be worse. The cross-attention encoder
-        reads them, which is its entire point.
+        and the Transformer encoders take `referents` and do nothing with it,
+        because dispatching on class at the call site would be worse. The
+        cross-attention encoder reads them, which is its entire point -- and
+        the reason it is the top rung, since a set summary lets it score
+        "which cluster" without the message.
     """
     listener = _four_cell(language_model, discriminator).eval()
     referents, messages = _inputs(listener)
@@ -481,7 +525,7 @@ def test_the_gru_slot_ignores_the_candidate_set(language_model, discriminator):
             messages, listener.deliver(R.LANGUAGE_MODEL_REFERENTS, perturbed)
         )
 
-    if language_model == "ReceiverGRULM":
+    if language_model in READS_THE_MESSAGE_ALONE:
         # And structurally, not just numerically: this slot declares no
         #     referent width, so there is no interface and `Receiver` hands it
         #     `None`. There is no tensor for it to ignore.
@@ -562,10 +606,10 @@ def test_each_referent_interface_draws_its_own_mask(
     masked = [
         tensor for tensor in seen.values() if tensor is not None
     ]
-    # One per referent interface: the GRU declares no referent width, so on
-    #     those two pairings the language model is handed `None` and there is
-    #     one mask rather than two.
-    expected = 1 if language_model == "ReceiverGRULM" else 2
+    # One per referent interface: only the cross-attention encoder declares a
+    #     referent width, so on the other pairings the language model is handed
+    #     `None` and there is one mask rather than two.
+    expected = 1 if language_model in READS_THE_MESSAGE_ALONE else 2
     assert len(masked) == expected
     assert (seen["language_model"] is None) == (expected == 1)
 
@@ -618,216 +662,168 @@ def test_the_mask_removes_features_and_not_candidates(
         assert (surviving < 1.0).all(), f"{name} masked no candidate at all"
 
 
-def test_no_discriminator_reads_the_token_embedding():
+@ALL_FOUR
+def test_no_discriminator_reads_the_token_embedding(
+    language_model, discriminator
+):
     """
-    The one-encoder invariant, checked structurally. `AttentionDiscriminator`
-        carries a bilinear path, and that is a second *comparison*: it reads
-        whatever the language model produced. Nothing in either discriminator
-        may be sized from `token_embedding_size`, which is what a second
-        encoder would need.
+    The one-encoder invariant, checked structurally. The discriminator reads
+        whatever the language model produced, and nothing in it may be sized
+        from `token_embedding_size`, which is what a second encoder would need.
     """
-    for discriminator in ("BilinearDiscriminator", "AttentionDiscriminator"):
-        listener = build_listener(
-            "ReceiverCrossAttentionLM",
-            discriminator,
-            REFERENT_DIM,
-            config_file=rung(CROSS_RUNG),
-            language_model_overrides=dict(token_embedding_size=TOKEN_DIM),
-        )
-
-        assert not any(
-            isinstance(module, nn.GRU)
-            for module in listener.discriminator.modules()
-        )
-        assert not any(
-            TOKEN_DIM in tuple(parameter.shape)
-            for parameter in listener.discriminator.parameters()
-        ), f"{discriminator} is sized from the token embedding"
-
-
-# --------------------------------------------------------------------------
-# The mix.
-# --------------------------------------------------------------------------
-
-def _attention_discriminator(**overrides):
-    return build_listener(
-        "ReceiverCrossAttentionLM",
-        "AttentionDiscriminator",
+    listener = build_listener(
+        language_model,
+        discriminator,
         REFERENT_DIM,
         config_file=rung(CROSS_RUNG),
-        discriminator_overrides=overrides,
-    ).discriminator
-
-
-def test_the_mix_opens_essentially_at_the_bilinear_comparison():
-    """
-    0.116 at the default floor and logit, which is the configuration measured
-        bootstrapping under nuisance. The attention path is present enough to
-        be learning and not enough to be deciding.
-    """
-    discriminator = _attention_discriminator()
-    assert discriminator.mix_weight.item() == pytest.approx(0.116, abs=5e-3)
-
-
-@pytest.mark.parametrize("logit", [-50.0, -8.0, 0.0, 8.0, 50.0])
-def test_the_mix_stays_inside_its_bounds(logit):
-    discriminator = _attention_discriminator()
-    with torch.no_grad():
-        discriminator.mix_logit.fill_(logit)
-
-    weight = discriminator.mix_weight.item()
-    assert discriminator.mix_floor <= weight <= 1.0
-
-
-def test_the_floor_is_a_parameterisation_and_not_a_clamp():
-    """
-    The bug this design is built around. `torch.clamp` has zero gradient below
-        its bound, so a mixing weight that drifted under the floor would weld
-        there permanently and the attention path could never come back. Cost an
-        afternoon in the prototype.
-
-    Well below the floor's logit the sigmoid form still moves: strictly above
-        the floor, and with a gradient that is small but not zero. The clamp it
-        is contrasted with would give exactly the floor and exactly zero.
-    """
-    discriminator = _attention_discriminator()
-    with torch.no_grad():
-        discriminator.mix_logit.fill_(-8.0)
-
-    weight = discriminator.mix_weight
-    assert weight.item() > discriminator.mix_floor
-
-    weight.backward()
-    assert discriminator.mix_logit.grad is not None
-    assert discriminator.mix_logit.grad.item() > 0.0
-
-    under_a_clamp = torch.tensor(-8.0, requires_grad=True)
-    clamped = torch.clamp(under_a_clamp, min=discriminator.mix_floor)
-    clamped.backward()
-    assert clamped.item() == pytest.approx(discriminator.mix_floor)
-    assert under_a_clamp.grad.item() == 0.0
-
-
-def test_the_attention_path_gets_gradient_at_the_opening_mix():
-    """
-    Why the floor exists at all. At a weight of exactly 0 the whole
-        `referent_decoder` would receive nothing and could never earn its way
-        in, whatever it might have learned.
-    """
-    listener = build_listener(
-        "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
-        config_file=rung(CROSS_RUNG),
-    ).train()
-    referents, messages = _inputs(listener)
-
-    listener(referents, messages).sum().backward()
-
-    decoder_gradients = [
-        parameter.grad
-        for parameter in listener.discriminator.referent_decoder.parameters()
-        if parameter.grad is not None
-    ]
-    assert decoder_gradients
-    assert any(gradient.abs().max() > 0.0 for gradient in decoder_gradients)
-    assert listener.discriminator.mix_logit.grad.abs().item() > 0.0
-    # The branch weights are the volume now, so they are what must be receiving
-    #     gradient where `log_mix_scale` used to be checked.
-    assert listener.discriminator.decision.weight.grad.abs().max() > 0.0
-    assert (
-        listener.discriminator.bilinear.bilinear.weight.grad.abs().max() > 0.0
+        language_model_overrides=dict(token_embedding_size=TOKEN_DIM),
     )
 
+    assert not any(
+        isinstance(module, nn.GRU)
+        for module in listener.discriminator.modules()
+    )
+    assert not any(
+        TOKEN_DIM in tuple(parameter.shape)
+        for parameter in listener.discriminator.parameters()
+    ), f"{discriminator} is sized from the token embedding"
 
-def test_standardise_runs_in_the_telemetry_and_not_in_the_forward_path():
-    """
-    One job now, where it used to have two.
 
-    `485b38e` took it out of `ScoreVolume.readout`. It had been dividing each
-        game by the spread of its own candidate scores, which put the game's own
-        margin in the denominator; both of `BilinearDiscriminator`'s operands
-        arrive layer-normed, so the score is already backbone-independent and
-        already opens at `1/sqrt(3)` without it. What remains is the telemetry
-        block, where it runs per branch and gives `path_agreement` its Pearson-r
-        reading and `mix_share` its like-for-like comparison.
+# --------------------------------------------------------------------------
+# The Transformer encoders.
+# --------------------------------------------------------------------------
 
-    So the forward path must *not* leave a per-game spread of 1 -- that was the
-        signature of the centring, and the test asserted it until this commit --
-        while `standardise`'s own arithmetic stays pinned, because both
-        telemetry readings depend on it.
-    """
-    listener = build_listener(
-        "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
-        config_file=rung(CROSS_RUNG),
+TRANSFORMER_ENCODERS = pytest.mark.parametrize(
+    "language_model",
+    ["ReceiverTransformerAutoregressiveLM", "ReceiverTransformerBidirectionalLM"],
+    ids=["causal", "bidirectional"],
+)
+
+
+def _encoder(language_model):
+    return build_listener(
+        language_model, "BilinearDiscriminator", REFERENT_DIM,
+        config_file=rung(
+            "11_shapeworld_receiver_transformer_autoregressive_lm.toml"
+        ),
     ).eval()
+
+
+@TRANSFORMER_ENCODERS
+def test_the_transformer_encoders_never_see_the_candidates(language_model):
+    """
+    The point of the class. Like the GRU, and unlike the cross-attention
+        encoder, it declares no referent width, so `Receiver` builds it no
+        interface and the encoding of a message is the same whatever it is
+        compared against.
+
+    Two different candidate sets with the same message, through the listener's
+        own delivery and then handed in directly: one pooled vector, identical
+        both times.
+    """
+    listener = _encoder(language_model)
+    encoder = listener.language_model
     referents, messages = _inputs(listener)
+    others = torch.randn_like(referents) * 3.0 + 1.0
 
-    # Not standardised: the readout is a volume, so the spread the score comes
-    #     out at is the one the branches and `score_scale` made, not 1.
+    assert encoder.referent_input_size is None
+    assert encoder.message_input_size is None
+    assert encoder.output_size == encoder.d_model
+    assert R.LANGUAGE_MODEL_REFERENTS not in listener.interfaces
+
     with torch.no_grad():
-        scores = listener(referents, messages)
-    spreads = scores.std(1, unbiased=False)
-    assert not torch.allclose(spreads, torch.ones_like(spreads), atol=1e-2)
-
-    scores = torch.randn(BATCH, N_OBJ) * 17.0 + 4.0
-    standardised = R.standardise(scores)
-
-    assert torch.allclose(
-        standardised.mean(1), torch.zeros(BATCH), atol=1e-5
-    )
-    assert torch.allclose(
-        standardised.std(1, unbiased=False), torch.ones(BATCH), atol=1e-5
-    )
-
-
-def test_standardising_survives_a_game_whose_candidates_all_score_alike():
-    """
-    The clamp inside `standardise` is safe where the one on `mix_logit` would
-        not be: nothing learns through this bound, and 0/0 is the alternative.
-    """
-    scores = torch.full((BATCH, N_OBJ), 3.0)
-    assert torch.isfinite(R.standardise(scores)).all()
-
-
-def test_path_agreement_is_the_within_game_correlation():
-    """
-    The claim the metric rests on: both operands are already per-game zero-mean
-        and unit-spread, so the mean of their product *is* Pearson's r.
-    """
-    generator = torch.Generator().manual_seed(2)
-    first = torch.randn(BATCH, N_OBJ, generator=generator)
-    second = torch.randn(BATCH, N_OBJ, generator=generator)
-
-    reported = (R.standardise(first) * R.standardise(second)).mean().item()
-
-    by_hand = []
-    for game in range(BATCH):
-        a = first[game] - first[game].mean()
-        b = second[game] - second[game].mean()
-        by_hand.append(
-            (a * b).sum().item() / (a.norm().item() * b.norm().item())
+        first = encoder(
+            messages, listener.deliver(R.LANGUAGE_MODEL_REFERENTS, referents)
         )
+        second = encoder(
+            messages, listener.deliver(R.LANGUAGE_MODEL_REFERENTS, others)
+        )
+        handed_in = encoder(messages, others)
 
-    assert reported == pytest.approx(sum(by_hand) / len(by_hand), abs=1e-5)
+    assert first.shape == (BATCH, 1, encoder.d_model)
+    assert torch.equal(first, second)
+    assert torch.equal(first, handed_in)
 
 
-def test_the_mix_columns_are_set_on_every_forward():
-    listener = build_listener(
-        "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
-        config_file=rung(CROSS_RUNG),
-    ).eval()
-    discriminator = listener.discriminator
-
-    assert math.isnan(discriminator.mix_alpha)
-    assert math.isnan(discriminator.path_agreement)
+@TRANSFORMER_ENCODERS
+def test_the_transformer_encoders_pool_to_one_slot(language_model):
+    """
+    A `SequencePool` over every position, returned as a length-1 sequence, so
+        `BilinearDiscriminator`'s last-slot read is the identity here as it is
+        for the GRU -- and not the last position of the stack.
+    """
+    encoder = _encoder(language_model).language_model
+    _, messages = _inputs(_encoder(language_model))
 
     with torch.no_grad():
-        listener(*_inputs(listener))
+        positions = encoder.encode(messages)
+        pooled = encoder(messages, None)
 
-    assert discriminator.mix_alpha == pytest.approx(
-        discriminator.mix_weight.item()
+    assert positions.shape == (BATCH, SEQ, encoder.d_model)
+    assert torch.allclose(pooled[:, 0, :], encoder.pool(positions), atol=1e-6)
+    assert not torch.allclose(pooled[:, 0, :], positions[:, -1, :], atol=1e-4)
+
+
+@pytest.mark.parametrize("changed", [2, 4, SEQ - 1])
+def test_the_causal_encoder_reads_only_prefixes(changed):
+    """
+    The causal arm's mask, checked where it acts: before the pool, a position's
+        output depends on that position and the ones before it, so changing a
+        later token moves nothing earlier. The unmasked arm, built from the same
+        seed, is the control -- the same change reaches every position there.
+    """
+    causal = _encoder("ReceiverTransformerAutoregressiveLM").language_model
+    unmasked = _encoder("ReceiverTransformerBidirectionalLM").language_model
+    _, messages = _inputs(_encoder("ReceiverTransformerAutoregressiveLM"))
+
+    edited = messages.clone()
+    edited[:, changed, :] = torch.randn_like(edited[:, changed, :])
+
+    with torch.no_grad():
+        before, after = causal.encode(messages), causal.encode(edited)
+        open_before, open_after = unmasked.encode(messages), unmasked.encode(edited)
+
+    assert torch.allclose(
+        before[:, :changed, :], after[:, :changed, :], atol=1e-6
     )
-    assert -1.0 <= discriminator.path_agreement <= 1.0
-    assert math.isfinite(discriminator.decision_spread)
+    assert not torch.allclose(
+        before[:, changed:, :], after[:, changed:, :], atol=1e-4
+    )
+    assert not torch.allclose(
+        open_before[:, :changed, :], open_after[:, :changed, :], atol=1e-4
+    )
+
+
+@TRANSFORMER_ENCODERS
+def test_the_class_chooses_the_encoders_arm(language_model):
+    """
+    The arm is the class, as on the speaker: `bidirectional` in the config is
+        overridden, whichever way it points. Rung 17 states `true` for the
+        cross-attention encoder, which is the case worth checking.
+    """
+    built = build_listener(
+        language_model, "BilinearDiscriminator", REFERENT_DIM,
+        config_file=rung(CROSS_RUNG),
+    ).language_model
+
+    assert built.bidirectional is (
+        language_model == "ReceiverTransformerBidirectionalLM"
+    )
+
+
+def test_the_shared_transformer_encoder_is_not_selectable():
+    """
+    `ReceiverTransformerLM` is the implementation both arms share, and a config
+        naming it would take one rate for two arms. `validate_config` refuses it
+        and names the subclasses, as it does `SenderTransformerLM`.
+    """
+    config = parse_config.get_config()
+    config["receiver"]["language_model"] = "ReceiverTransformerLM"
+
+    with pytest.raises(
+        parse_config.InvalidConfig, match="ReceiverTransformerBidirectionalLM"
+    ):
+        parse_config.validate_config(config)
 
 
 def test_the_bilinear_readout_takes_the_eos_slot():
@@ -843,7 +839,7 @@ def test_the_bilinear_readout_takes_the_eos_slot():
         a causal stack reaches it having read the whole message.
     """
     listener = build_listener(
-        "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
+        "ReceiverCrossAttentionLM", "BilinearDiscriminator", REFERENT_DIM,
         config_file=rung(CROSS_RUNG),
     ).eval()
     referents, messages = _inputs(listener)
@@ -862,7 +858,7 @@ def test_the_bilinear_readout_takes_the_eos_slot():
     assert slots.shape[1] == listener.message_length
     assert not torch.allclose(slots[:, -1, :], slots.mean(1), atol=1e-5)
 
-    bilinear = listener.discriminator.bilinear
+    bilinear = listener.discriminator
     with torch.no_grad():
         taken = bilinear(adapted, slots)
         from_eos = bilinear(adapted, slots[:, -1:, :])
@@ -872,93 +868,21 @@ def test_the_bilinear_readout_takes_the_eos_slot():
     assert not torch.allclose(taken, from_mean, atol=1e-5)
 
 
-def test_the_two_arms_build_the_same_bilinear_comparison():
+def _standardise(scores):
     """
-    The comparison is the same module either way -- same class, same weights --
-        which is the invariant `AttentionDiscriminator`'s docstring claims when
-        it says the mix's `a -> mix_floor` limit is the module that was measured
-        bootstrapping and not a lookalike.
-
-    They differ by their readout, and only there. The composed path is built
-        with both of `BilinearDiscriminator`'s composition gates off, so it gets
-        neither a volume nor an offset. Both would be degenerate with the outer
-        module's. The branch is
-        multiplied by `1 - mix_weight` and read out downstream, so a scale on it
-        says what `mix_logit` already says, and an inner constant across
-        candidates says what the outer `score_bias` already says.
+    The per-game standardisation `receiver.standardise` did, kept here as the
+        arithmetic behind the test below. The helper itself went on 2026-10-01
+        with the attention discriminator, its last caller.
     """
-    attention = _attention_discriminator(**READOUT_ON)
-    bilinear = build_listener(
-        "ReceiverGRULM", "BilinearDiscriminator", REFERENT_DIM,
-        discriminator_overrides=dict(READOUT_ON),
-    ).discriminator
-
-    assert type(attention.bilinear) is type(bilinear)
-    assert bilinear.learns_score_scale
-    assert not attention.bilinear.learns_score_scale
-
-    readout_scalars = ("log_score_scale", "score_bias")
-
-    def _weights(module):
-        return sorted(
-            name for name, _ in module.named_parameters()
-            if not name.endswith(readout_scalars)
-        )
-
-    assert _weights(attention.bilinear) == _weights(bilinear)
-    assert not any(
-        name.endswith(readout_scalars)
-        for name, _ in attention.bilinear.named_parameters()
-    )
-    # And the outer module has exactly one of each.
-    assert sorted(
-        name for name, _ in attention.named_parameters()
-        if name.endswith(readout_scalars)
-    ) == ["log_score_scale", "score_bias"]
-
-
-def test_the_composed_bilinear_weight_reaches_the_mixed_score():
-    """
-    The composed path's weight sets its branch's share of the score. That is
-        what keeps `mix_share` different from `mix_alpha`, and it is why the
-        branch norms stay load-bearing on this arm.
-
-    Since `485b38e` the score's *spread* moves with it too. It used not to --
-        the readout standardised, so a rescale of one branch changed the mix and
-        nothing else, and this test asserted the spread held to within 2%. With
-        the centring gone the volume is shared with the weights again on both
-        arms: `bilinear_weight_norm` means magnitude as well as direction, and
-        that is exactly what makes it readable as a metric.
-    """
-    listener = build_listener(
-        "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
-        config_file=rung(CROSS_RUNG),
-    ).eval()
-    referents, messages = _inputs(listener)
-    discriminator = listener.discriminator
-
-    with torch.no_grad():
-        before = listener(referents, messages)
-        opening_share = discriminator.mix_share
-        discriminator.bilinear.bilinear.weight.mul_(37.0)
-        after = listener(referents, messages)
-
-    assert not torch.allclose(before, after, atol=1e-5)
-    assert discriminator.mix_share < opening_share
-    assert (
-        after.std(1, unbiased=False).mean().item()
-        > 10.0 * before.std(1, unbiased=False).mean().item()
-    )
+    centred = scores - scores.mean(1, keepdim=True)
+    spread = centred.std(dim=1, keepdim=True, unbiased=False)
+    return centred / spread.clamp(min=1e-6)
 
 
 def test_a_scale_on_a_standardised_path_would_have_been_inert():
     """
     Why the readout no longer standardises, kept as the measurement behind
-        `485b38e` rather than as a live justification. It used to be the reason
-        `AttentionDiscriminator` builds its composed path without a volume;
-        that reason is now degeneracy with `mix_logit`,
-        which is asserted in
-        `test_the_two_arms_build_the_same_bilinear_comparison` above.
+        `485b38e` rather than as a live justification.
 
     `standardise` subtracts a mean and divides by a spread, both homogeneous of
         degree one in a positive multiplier, so anything in front of it that
@@ -976,7 +900,7 @@ def test_a_scale_on_a_standardised_path_would_have_been_inert():
 
     for scale in (0.01, 1.0, 37.0):
         assert torch.allclose(
-            R.standardise(scale * scores), R.standardise(scores), atol=1e-6
+            _standardise(scale * scores), _standardise(scores), atol=1e-6
         )
 
     # The same claim on the module itself, which is where it would have bitten,
@@ -986,7 +910,7 @@ def test_a_scale_on_a_standardised_path_would_have_been_inert():
     message_repr = torch.randn(BATCH, 1, 64)
 
     gradients = {}
-    for name, wrap in (("standardised", R.standardise), ("raw", lambda x: x)):
+    for name, wrap in (("standardised", _standardise), ("raw", lambda x: x)):
         torch.manual_seed(7)
         discriminator = R.BilinearDiscriminator(REFERENT_DIM, 64)
         wrap(discriminator(referents, message_repr)).pow(2).sum().backward()
@@ -1008,19 +932,15 @@ def test_the_pair_can_still_go_quiet():
         message carries anything, which is what took out the fixed-gain
         readout.
 
-    It has lived in `log_mix_scale`, then in the two branch weights, and is now
-        `ScoreVolume.log_score_scale` -- one cheap knob on an elevated learning
-        rate again. Being cheap was the objection, on the grounds that the same
+    It is `ScoreVolume.log_score_scale` -- one cheap knob on an elevated
+        learning rate. Being cheap was the objection, on the grounds that the same
         scalar multiplied the gradient going back to the speaker; that objection
         did not survive AdamW's `m / sqrt(v)` and per-submodule clipping, both
         of which divide a uniform factor out. See test_score_scale.py.
 
-    What this does not pin, deliberately, is that neither path can go quiet
-        *alone*. Standardising each branch would guarantee it; nothing does, and
-        `mix_share` against `mix_alpha` is what watches it.
     """
     listener = build_listener(
-        "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
+        "ReceiverCrossAttentionLM", "BilinearDiscriminator", REFERENT_DIM,
         config_file=rung(CROSS_RUNG),
         discriminator_overrides=dict(READOUT_ON),
     ).eval()
@@ -1035,13 +955,6 @@ def test_the_pair_can_still_go_quiet():
     assert quiet.std().item() < 0.05 * loud.std().item()
 
 
-def test_mix_floor_is_validated():
-    with pytest.raises(ValueError, match="mix_floor"):
-        _attention_discriminator(mix_floor=1.0)
-    with pytest.raises(ValueError, match="mix_floor"):
-        _attention_discriminator(mix_floor=-0.1)
-
-
 # --------------------------------------------------------------------------
 # Resetting.
 # --------------------------------------------------------------------------
@@ -1050,8 +963,8 @@ def test_mix_floor_is_validated():
 def test_reset_parameters_leaves_nothing_trained(language_model, discriminator):
     """
     Every submodule holding a parameter, the scalars included. A reset that
-        skipped `mix_logit` would restart a run with the previous one's
-        opinion about attention. See docs/anecdotes.md.
+        skipped one would restart a run with the previous one's opinion
+        surviving in it. See docs/anecdotes.md.
     """
     listener = _four_cell(language_model, discriminator)
     before = {
@@ -1084,29 +997,23 @@ def test_reset_parameters_leaves_nothing_trained(language_model, discriminator):
     assert not unchanged, f"reset_parameters missed {unchanged}"
 
 
-def test_resetting_returns_the_mix_and_the_readout_to_their_opening():
+def test_resetting_returns_the_readout_to_its_opening():
     """
-    The offset resets through `ScoreVolume.reset_score_volume` now rather than
-        through this module's own `reset_parameters`, which is the point of
-        moving it: `BilinearDiscriminator` gets the same reset from the same
-        place, where before it had no offset to reset.
+    The offset and the volume reset through `ScoreVolume.reset_score_volume`.
     """
     listener = build_listener(
-        "ReceiverCrossAttentionLM", "AttentionDiscriminator", REFERENT_DIM,
+        "ReceiverCrossAttentionLM", "BilinearDiscriminator", REFERENT_DIM,
         config_file=rung(CROSS_RUNG),
         discriminator_overrides=dict(READOUT_ON),
     )
     discriminator = listener.discriminator
-    opening = discriminator.mix_weight.item()
 
     with torch.no_grad():
-        discriminator.mix_logit.fill_(3.0)
         discriminator.score_bias.fill_(1.0)
         discriminator.log_score_scale.fill_(2.0)
 
     discriminator.reset_parameters()
 
-    assert discriminator.mix_weight.item() == pytest.approx(opening)
     assert discriminator.score_bias.item() == 0.0
     assert discriminator.score_scale.item() == pytest.approx(1.0)
 

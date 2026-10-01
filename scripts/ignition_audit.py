@@ -54,20 +54,19 @@ consistency step by step, which was the sharpest single number here. It was
 dropped when the parameter was, and the parameter came back on 2026-08-31 while
 the reading did not; the `scale_grad` columns are still gone. Restoring them is
 the obvious next thing to do here, and the question about any other lone scalar
--- `log_score_scale`, `mix_logit` -- would be
-asked the same way, and this script does not currently ask it.
+-- `log_score_scale` -- would be asked the same way, and this script does not currently ask it.
 
-Rung 13 is the control that makes this worth running. It has the *same speaker
-as rung 09* -- `SenderTransformerLM`, 320 wide, four layers -- and differs only
-in the listener's discriminator, and it ignites. So whatever kills 09 is not
-the speaker's architecture on its own, and a per-group gradient norm should say
+The control that made this worth running was the old rung 13: the *same
+speaker as rung 09* -- `SenderTransformerLM`, 320 wide, four layers -- under the
+attention discriminator, and it ignited. That discriminator was removed on
+2026-10-01, so the control is gone with it and the audit now compares the GRU
+and Transformer speakers alone. A per-group gradient norm should still say
 whether the listener is failing to supply signal or the speaker is failing to
 use it.
 
     python scripts/ignition_audit.py \
         --configs experiments/ablation_shapeworld/configs/05_shapeworld_attention_prototyper.toml \
                   experiments/ablation_shapeworld/configs/07_shapeworld_sender_transformer_lm.toml \
-                  experiments/ablation_shapeworld/configs/15_shapeworld_attention_discriminator.toml \
         --steps 800 --out results/ignition_audit
 
 Real data, real optimiser, real `accumulator_steps`, and the same bf16 autocast

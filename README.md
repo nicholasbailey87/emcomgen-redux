@@ -253,37 +253,22 @@ CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
     (the default) resolves them at construction from that stack's own `layers`,
     as `(2N)^(1/4)` and `(8N)^(-1/4)`; a number pins them instead, and `1.0` is
     the no-scaling identity every run before this used. The cross-attention
-    listener's two slots each resolve their own, from their own table's `layers`
-    — and in the decoder form, `(3N)^(1/4)` and `(12N)^(-1/4)`, since those
-    blocks carry a cross-attention branch as well.
+    listener's stack resolves its own from `[receiver_language_model] layers`
+    — in the decoder form, `(3N)^(1/4)` and `(12N)^(-1/4)`, since its blocks
+    carry a cross-attention branch as well.
     Derived rather than configured because two constants restated
     per config is an invitation to leave them at values belonging to a depth the
     stack no longer has.
 - `[receiver] language_model` / `[receiver] discriminator`: the listener's two
-    slots, and they are chosen independently. `ReceiverGRULM` reads the message
-    with a GRU; `ReceiverCrossAttentionLM` reads it with a decoder stack that
-    cross-attends into the candidate set, so what it encodes is discriminative
-    rather than absolute. `BilinearDiscriminator` scores each candidate by
-    `obj·W·m`; `AttentionDiscriminator` scores them with a second decoder stack
-    reading the encoded message, interpolated with a bilinear score over that
-    same encoding.
-    One key used to choose both halves at once, so a rung swapping the GRU
-    comparer for the cross-attention one changed the encoder *and* the
-    comparison and "attention helps" could not be attributed to either.
-    Exactly one message encoder is built whatever the pairing:
-    `AttentionDiscriminator`'s bilinear path is a second *comparison*, reading
-    whatever the language model produced.
-- `[receiver_discriminator] mix_floor` / `mix_logit_init`: the attention
-    path's minimum share of the score, and where that share opens.
-    `AttentionDiscriminator` returns
-    `s · [(1 − a)·bilinear + a·attention] + bias` with both paths standardised
-    per game, and `a = mix_floor + (1 − mix_floor)·sigmoid(mix_logit)`.
-    The defaults, 0.1 and −4.0, open it at 0.116 — essentially *as* the bilinear
-    comparison, which is the configuration measured bootstrapping where the
-    attention stacks alone do not. The floor exists so the attention path always
-    receives gradient, and it is in the parameterisation and never a `clamp`,
-    whose gradient is zero below its bound. Watch `train_mix_alpha` and
-    `train_path_agreement` together.
+    slots. `ReceiverGRULM` reads the message with a GRU;
+    `ReceiverTransformerAutoregressiveLM` and `ReceiverTransformerBidirectionalLM`
+    read it with a Transformer encoder, causal or unmasked, pooled to one vector;
+    `ReceiverCrossAttentionLM` reads it with a decoder stack that cross-attends
+    into the candidate set. Only the last sees the candidates, which also lets it
+    score "which cluster" without the message, so it is the top rung. The
+    discriminator is `BilinearDiscriminator`, scoring each candidate by
+    `obj·W·m`, on every rung; an attention discriminator was removed on
+    2026-10-01 for the same shortcut. Exactly one message encoder is built.
 - `[receiver] dropout`: the listener's **only** dropout, and the
     counterpart of the sender's `prototype_dropout`. `Receiver` owns every
     interface between the backbone and a slot, and the mask is the last stage of
@@ -554,15 +539,9 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     downwards — true, and the problem: `train_bilinear_weight_norm` travelled
     1.3% of its norm in thirty epochs on rung 09 and 0.6% on rung 10, against
     the 0.9021 → 0.3731 the scalar it replaced managed.
-- `train_bilinear_weight_norm`, `train_decision_weight_norm` — the branch
-    weights' norms, and they mean different things on the two arms. On the
-    bilinear arm the readout standardises the module's whole output, so
-    `bilinear.weight` is exactly scale-invariant and learns direction alone:
-    read the norm as *drift*, and expect slow monotone growth, since with
-    `weight_decay = 0.0` a scale-invariant weight's gradient is orthogonal to it
-    and its effective learning rate decays as it grows. On the attention arm the
-    branches mix at their own magnitudes before the readout, so both norms still
-    set what the score is made of and `train_mix_share` is where that shows.
+- `train_bilinear_weight_norm` — the comparison matrix's norm. Nothing
+    downstream divides a rescaling of it back out, so it carries volume as well
+    as direction; see docs/measurement.md.
 - `train_sampling_tau` — the temperature handed to `gumbel_softmax`, which is the
     configured `tau` and nothing else. Flat for the whole of any run. It shapes
     the soft sample the `"gumbel"` estimator differentiates and is invariant in

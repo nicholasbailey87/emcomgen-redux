@@ -1,0 +1,119 @@
+# Rung 11: rung 9 with a Transformer message encoder, causal.
+#
+# `ReceiverTransformerAutoregressiveLM` reads the message with a Transformer
+# encoder under a causal mask and pools the positions to one vector with a
+# `SequencePool`. It replaces `ReceiverGRULM` and moves nothing else: the
+# discriminator is still `BilinearDiscriminator`, reading the pooled vector.
+#
+# **The encoder never sees the candidates.** Like the GRU it reads the message
+# alone, so `Receiver` builds it no referent interface and hands it `None`.
+# That is the point of this rung and the next. The cross-attention encoder that
+# used to stand here reads the candidate set, and a set summary lets a listener
+# score "which cluster" whatever the tokens say:
+# `lr_sweep_6_receiver_cross_attention_lm` measured
+# `train_shuffled_message_acc` climbing to ~0.65 (test ~0.58) against live
+# accuracy ~0.75 / ~0.63 on every birds arm.
+# It is now rung 17, last; see there.
+#
+# **Causal first**, because the GRU it replaces is causal: this rung moves the
+# architecture and not the reading regime. Rung 13 then moves the regime alone,
+# with the same blocks and no mask.
+#
+# **The encoders are parameter-matched and the listeners are not.** The encoder,
+# its message adapter and its pool are 4,673,344 against the GRU's 4,687,872,
+# 0.997x. But `output_size` is 256 against the GRU's 1024, and both things
+# downstream are sized from it: the bilinear discriminator falls from 1,048,576
+# to 65,536 and `receiver.interfaces` from 1,180,672 to 98,560. The listener
+# is 5,716,465 here against rung 9's 7,800,537.
+
+name = "ablation_shapeworld"
+
+[sender]
+feature_model = "ShapeWorldViT"
+prototyper = "AttentionPrototyper"
+language_model = "SenderTransformerAutoregressiveLM"
+
+[sender_language_model]
+# The two must equal *each other*, and neither has anything to do with the
+# vision model's width. `SenderTransformerLM` layer-norms the incoming
+# prototypes at its own `d_model` and separately rejects
+# `token_embedding_size != referent_embedding_size`, so these two are pinned
+# together -- but the referents arrive already at this `d_model`:
+# `builder.build_models` sets `sender_referent_width` from *this* table and the
+# speaker's adapter brings `final_feat_dim` to it, whatever the backbone emits.
+#
+# The comment this replaces said both keys "must equal
+# `sender_feature_model.d_model`". That was true of the speaker before the
+# adapter landed and has been false since; verified by building a ShapeWorld rung with a
+# 128-wide vision model under a 320-wide language model. It is worth naming
+# rather than deleting, because ShapeWorld's ViT2 is 128 wide now -- narrowed to
+# match `ResNet56` -- and under the old reading that narrowing would have
+# dragged this stack, and the whole capacity match against the GRU baseline,
+# down with it. Rung 3 still comes before this one, but for the ordering of the
+# ladder rather than for a width constraint.
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+
+# 7 blocks and `ff_inner_size = 512`, which together hold the speaker's language
+# model at 0.992x the GRU baseline's. The blocks lost their cross-attention
+# sublayer when the referents moved into the stack's input, so they are cheaper
+# and there are more of them. The argument is at rung 7; this rung is not
+# supposed to touch the speaker at all.
+layers = 7
+
+# The causal arm, chosen by `language_model = "SenderTransformerAutoregressiveLM"`
+# above rather than by `bidirectional`, which this class overrides. The blocks
+# run over the latent array under a causal mask and the message slots in its
+# tail are generated in order, each read and then overwritten by its symbol so
+# the next one is conditioned on it.
+#
+# Causal because the GRU baseline at rung 1 is autoregressive too: rung 7 then
+# moves the language model's architecture and nothing else. The parallel arm,
+# `SenderTransformerBidirectionalLM`, would move the generation regime at the
+# same time, and whatever the combination measured could not be attributed to
+# either. It comes later instead -- rungs 15 and 16 -- where it
+# moves the regime alone. The two arms are the same blocks at the same size and
+# differ by `token_embedding` alone, which only the causal arm needs because
+# only it reads a symbol back.
+
+[receiver]
+feature_model = "ShapeWorldViT"
+language_model = "ReceiverTransformerAutoregressiveLM"
+
+[receiver_language_model]
+# The speaker language model's depth and feedforward -- 7 blocks at
+# `ff_inner_size = 512`, rung 7's -- at the listener's width of 256 and 4 heads,
+# head_dim 64 as everywhere. That holds the encoder, its message adapter and its
+# `SequencePool` at 4,673,344 against the GRU's 4,687,872, 0.997x. The match is
+# bought by sizing the arm under test rather than by touching the published
+# baseline; see `layers` in `DEFAULT.toml`.
+#
+# `token_embedding_size` *is* restated here: the listener's embedding table is
+# built from this key in `builder.py` and then adapted into `d_model`, so
+# matching the two keeps the adapter square.
+#
+# DeepNorm's constants follow the `"deepnorm"` sentinel from `layers`, in the
+# encoder form: two sublayers to the block, nothing to cross-attend into.
+d_model = 256
+heads = 4
+ff_inner_size = 512
+token_embedding_size = 256
+layers = 7
+
+# The causal arm, chosen by the class rather than by `bidirectional`, which
+# this class overrides. Each position reads only the symbols before it, as the
+# GRU's state does; the `SequencePool` readout is where the whole message is
+# first combined.
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

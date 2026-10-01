@@ -4,6 +4,14 @@ Findings and failures, with the numbers. Several current design choices only mak
 sense as the survivors of something that did not work, and this is where those
 are recorded.
 
+**`AttentionDiscriminator` was removed on 2026-10-01**, with `mix_logit`,
+`mix_floor`, `mix_logit_init`, `mix_logit_lr` and its metrics columns. It could
+score birds games without the message through its candidate self-attention
+(`train_shuffled_message_acc` 0.53-0.56), and `ReceiverCrossAttentionLM` turned
+out to do the same harder (~0.65 against live ~0.75 on
+`lr_sweep_6_receiver_cross_attention_lm`). Everything below that names it is
+history.
+
 ## The listener readout: eight attempts, and what each one was actually about
 
 The longest story in the codebase. It concerns the attention listener's

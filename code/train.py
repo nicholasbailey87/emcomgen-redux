@@ -965,11 +965,7 @@ def run(
             # per-game mean is `mean_j(LN(r_j)) . proj`, which varies by game --
             # so a bias that moves while accuracy does not means the offset was
             # per-game and no scalar reaches it.
-            #
-            # `mix_alpha` is the mixing *weight* and `mix_share` is the share
-            # of the score each path actually contributes. They would agree only
-            # if `forward` standardised the branches, which it deliberately does
-            # not, so both are reported -- a gap is a loud or quiet branch.
+
             if training:
                 discriminator = pair.receiver.discriminator
 
@@ -1008,25 +1004,6 @@ def run(
                         bilinear_weight_norm=(
                             discriminator.bilinear.weight.norm().item()
                         ),
-                        batch_size=batch_size,
-                    )
-                elif isinstance(
-                    discriminator, models.receiver.AttentionDiscriminator
-                ):
-                    stats.update(
-                        score_scale=score_scale,
-                        score_bias=score_bias,
-                        mix_alpha=discriminator.mix_alpha,
-                        mix_share=discriminator.mix_share,
-                        bilinear_weight_norm=(
-                            discriminator.bilinear.bilinear.weight.norm().item()
-                        ),
-                        decision_weight_norm=(
-                            discriminator.decision.weight.norm().item()
-                        ),
-                        path_agreement=discriminator.path_agreement,
-                        decision_spread=discriminator.decision_spread,
-                        decision_kurtosis=discriminator.decision_kurtosis,
                         batch_size=batch_size,
                     )
                 else:

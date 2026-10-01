@@ -20,8 +20,9 @@ The encoder constants everywhere, including for the stacks that have a
 cross-attention near them. DeepNorm's decoder form assumes cross-attention
 inside every block; where it runs once, outside the residual path whose depth is
 being corrected for, the encoder form is the right one -- `SenderTransformerLM`
-uses it to build the sequence its encoder reads. The listener's two stacks are
-built from `DecoderBlock` and do take the decoder form; see
+uses it to build the sequence its encoder reads, and so does the listener's
+`ReceiverTransformerLM`. The cross-attention listener's stack is built from
+`DecoderBlock` and does take the decoder form; see
 `test_the_listener_asks_for_the_decoder_form`.
 """
 
@@ -113,9 +114,9 @@ def test_sender_transformer_lm_resolves_from_its_own_depth(layers, bidirectional
     stack's input -- so both are two-branch stacks and both take `decoder=False`.
 
     Reading the decoder constants for a two-branch block would open the stack
-    scaled for a residual path longer than the one it has. The listener still has
-    genuine three-branch stacks; `test_the_listener_asks_for_the_decoder_form`
-    covers those.
+    scaled for a residual path longer than the one it has. The cross-attention
+    listener still has a genuine three-branch stack;
+    `test_the_listener_asks_for_the_decoder_form` covers it.
     """
     language_model = S.SenderTransformerLM(
         64,
@@ -144,69 +145,45 @@ def test_the_two_deepnorm_forms_are_not_the_same():
         )
 
 
-def _listener(referent_dim=64, **overrides):
+def _listener(language_model="ReceiverCrossAttentionLM", referent_dim=64,
+              layers=1, **residual):
     """
-    The attention arm, with each slot's `layers` and residual keys settable
-        separately -- which is the whole subject of this section. Keys are
-        routed by name because both tables carry `alpha`, `beta` and `layers`
-        and mean different stacks by them.
+    One listener language model at a settable depth and residual scaling, over
+        `BilinearDiscriminator`, which has no stack of its own.
     """
     return build_listener(
-        "ReceiverCrossAttentionLM",
-        "AttentionDiscriminator",
+        language_model,
+        "BilinearDiscriminator",
         referent_dim,
         language_model_overrides=dict(
-            d_model=64, heads=4,
-            layers=overrides.get("message_layers", 1),
-            **{
-                key: overrides[key]
-                for key in ("alpha", "beta")
-                if key in overrides
-            },
-        ),
-        discriminator_overrides=dict(
-            d_model=64, heads=4,
-            layers=overrides.get("referent_layers", 1),
-            **{
-                key: overrides[key]
-                for key in ("alpha", "beta")
-                if key in overrides
-            },
+            d_model=64, heads=4, layers=layers, **residual,
         ),
     )
 
 
 @pytest.mark.parametrize("layers", [1, 2, 4, 7])
-def test_the_listener_resolves_each_stack_from_its_own_depth(layers):
+def test_the_listener_resolves_from_its_own_depth(layers):
     """
-    Two stacks, two depths, two pairs. The depth key of one must not reach the
-    other's scaling -- there was once a single key that was a total split
-    between two stacks, so asking for one more block moved two. They are now in
-    separate config tables, which makes the mistake unstateable rather than
-    merely untested; the test stays because the tables could be merged again.
+    The cross-attention stack's scaling follows its own `layers`. There was once
+    a single key that was a total split between two stacks, so asking for one
+    more block moved two; the test stays so that cannot come back.
     """
-    listener = _listener(message_layers=layers, referent_layers=1)
-    language_model = listener.language_model
-    discriminator = listener.discriminator
+    language_model = _listener(layers=layers).language_model
 
     assert (language_model.alpha, language_model.beta) == (
         model_util.deepnorm_constants(layers, decoder=True)
-    )
-    assert (discriminator.alpha, discriminator.beta) == (
-        model_util.deepnorm_constants(1, decoder=True)
     )
 
 
 @pytest.mark.parametrize("layers", [1, 4, 10])
 def test_the_listener_asks_for_the_decoder_form(layers):
     """
-    Both stacks are built from `DecoderBlock`, which has three residual branches
-    to a block rather than two, so they take `(3N)^0.25` and `(12N)^-0.25`. The
-    encoder form would scale their branches as if a block held two sublayers,
-    which is the wrong constant by a factor that grows with depth.
+    The cross-attention stack is built from `DecoderBlock`, which has three
+    residual branches to a block rather than two, so it takes `(3N)^0.25` and
+    `(12N)^-0.25`. The encoder form would scale its branches as if a block held
+    two sublayers, which is the wrong constant by a factor that grows with depth.
     """
-    listener = _listener(message_layers=layers, referent_layers=layers)
-    language_model = listener.language_model
+    language_model = _listener(layers=layers).language_model
 
     assert (language_model.alpha, language_model.beta) != (
         model_util.deepnorm_constants(layers, decoder=False)
@@ -215,29 +192,49 @@ def test_the_listener_asks_for_the_decoder_form(layers):
     assert language_model.beta == pytest.approx((12 * layers) ** -0.25)
 
 
-def test_a_pinned_number_reaches_both_stacks():
+@pytest.mark.parametrize("layers", [1, 4, 7])
+@pytest.mark.parametrize(
+    "arm",
+    ["ReceiverTransformerAutoregressiveLM", "ReceiverTransformerBidirectionalLM"],
+)
+def test_the_listener_transformer_encoder_takes_the_encoder_form(arm, layers):
     """
-    Pinning is documented as passing straight through, and there are two places
-    for it to pass through to.
+    `ReceiverTransformerLM` never cross-attends -- it reads the message alone --
+    so its blocks have two residual branches and it takes `decoder=False`, on
+    both arms, exactly as the speaker's stack does.
     """
-    listener = _listener(
-        message_layers=4, referent_layers=2, alpha=2.0, beta=0.25
+    language_model = _listener(arm, layers=layers).language_model
+
+    assert (language_model.alpha, language_model.beta) == (
+        model_util.deepnorm_constants(layers, decoder=False)
     )
 
-    assert (listener.language_model.alpha, listener.language_model.beta) == (
+
+@pytest.mark.parametrize(
+    "language_model",
+    ["ReceiverCrossAttentionLM", "ReceiverTransformerBidirectionalLM"],
+)
+def test_a_pinned_number_reaches_the_stack(language_model):
+    """
+    Pinning is documented as passing straight through, in either form.
+    """
+    built = _listener(language_model, layers=4, alpha=2.0, beta=0.25)
+
+    assert (built.language_model.alpha, built.language_model.beta) == (
         2.0, 0.25
     )
-    assert (listener.discriminator.alpha, listener.discriminator.beta) == (
-        2.0, 0.25
-    )
 
 
-def test_the_listener_still_runs_at_its_resolved_scaling():
+@pytest.mark.parametrize(
+    "language_model",
+    ["ReceiverCrossAttentionLM", "ReceiverTransformerAutoregressiveLM"],
+)
+def test_the_listener_still_runs_at_its_resolved_scaling(language_model):
     """
     Construction is not the risk on its own -- these multiply tensors inside
     every block, so a resolved value has to survive a forward pass.
     """
-    listener = _listener(referent_dim=32, message_layers=2, referent_layers=2)
+    listener = _listener(language_model, referent_dim=32, layers=2)
     scores = listener(
         torch.randn(2, 6, 32),
         torch.randn(

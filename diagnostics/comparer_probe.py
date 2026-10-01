@@ -59,8 +59,9 @@ import models.builder   # noqa: E402
 import models.receiver  # noqa: E402
 import parse_config     # noqa: E402
 
-# Rung 16 is a birds rung, so it lives under `experiments/ablation_birds/` since
-#     the ladder was split into a ShapeWorld and a birds experiment. Within that
+# Rung 17 is a ShapeWorld rung, so it lives under
+#     `experiments/ablation_shapeworld/` since the ladder was split into a
+#     ShapeWorld and a birds experiment. Within that
 #     experiment `configs/` is the live SLURM queue, not the ladder's canonical
 #     home -- `scripts/run_experiment.sh` builds the job array from it, so rungs
 #     get moved a level up to take them out of the queue. Look in both, as
@@ -68,8 +69,9 @@ import parse_config     # noqa: E402
 DEFAULT_CONFIG = next(
     path for path in (
         os.path.join(
-            os.path.dirname(__file__), "..", "experiments", "ablation_birds",
-            directory, "16_birds_attention_discriminator.toml",
+            os.path.dirname(__file__), "..", "experiments",
+            "ablation_shapeworld", directory,
+            "17_shapeworld_receiver_cross_attention_lm.toml",
         )
         for directory in ("configs", "")
     )
@@ -183,8 +185,6 @@ def main():
     batch = config["data"]["batch_size"]
     n_obj = config["data"]["n_examples"]
     lr = args.lr if args.lr is not None else config["optimiser"]["lr"]
-    has_kurtosis = hasattr(discriminator, "decision_kurtosis")
-    has_mix = hasattr(discriminator, "mix_alpha")
 
     # +4 for PAD, SOS, EOS and UNK, matching `models.builder`.
     vocabulary = config["sender_language_model"]["vocabulary"] + 4
@@ -298,16 +298,6 @@ def main():
             f"  step {step:5d}  loss {loss.item():.4f}  acc {acc:.4f}  "
             f"score_sd {s.std().item():.3f}  excess_kurt {kurtosis:+7.2f}"
         )
-        if has_kurtosis:
-            line += (
-                f"  [module: spread {discriminator.decision_spread:.3f} "
-                f"kurt {discriminator.decision_kurtosis:+.2f}]"
-            )
-        if has_mix:
-            line += (
-                f"  [mix a {discriminator.mix_alpha:.3f} "
-                f"agree {discriminator.path_agreement:+.3f}]"
-            )
         print(line)
 
     print(f"\n  best accuracy {best_acc:.4f} over {args.steps} steps")

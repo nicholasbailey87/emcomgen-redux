@@ -16,7 +16,7 @@
 # replaces, on the speaker, a broccoli `FeedforwardBlock` (SwiGLU, inner size
 # twice the output width, affine `RMSNorm`); and on the listener, a single
 # `ReferentAdapter` upstream of four differently-owned projections and norms,
-# one of which -- `AttentionDiscriminator`'s composed bilinear path -- consumed
+# one of which -- the attention discriminator's composed bilinear path -- consumed
 # the referents a second time at a second width. Parameter counts move on every
 # listener module. No trajectory recorded before this pools with one recorded
 # after it, on either dataset. See docs/architecture.md.

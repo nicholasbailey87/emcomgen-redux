@@ -271,8 +271,8 @@ opens at **1.0**, has **no floor**, and is bounded above at **2.0**
 It does not exist at all under `normalise_logits = false`, and everything in
 this section is about a run with the norm on. The clip group and the rate are
 gated on the same attribute, so on that arm `logit_scale_lr` is live and inert
-rather than broken — the same arrangement `mix_logit_lr` has on a bilinear
-listener.
+rather than broken — the same arrangement `score_scale_lr` has under
+`scale_score = false`.
 
 ### The ceiling, and why projection and not a `clamp`
 

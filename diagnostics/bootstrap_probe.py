@@ -187,7 +187,7 @@ def parse_args():
     )
     parser.add_argument(
         "--config",
-        default=rung("16_birds_attention_discriminator.toml"),
+        default=rung("17_shapeworld_receiver_cross_attention_lm.toml"),
     )
     parser.add_argument("--steps", type=int, default=2000)
     parser.add_argument(
@@ -200,14 +200,6 @@ def parse_args():
     )
     parser.add_argument("--concepts", type=int, default=50)
     parser.add_argument("--noise", type=float, default=0.5)
-    parser.add_argument(
-        "--cross-beta", type=float, default=1.0,
-        help="multiply the LISTENER's referent-stack cross-attention branch by "
-             "this, which is the same as giving that branch its own beta. 2.45 "
-             "undamps it to beta 1.0 at three blocks, leaving the other two "
-             "branches and the message stack at DeepNorm. Cross-attention "
-             "comparer only",
-    )
     parser.add_argument(
         "--vision", choices=("frozen", "learnable"), default="frozen",
         help="`frozen` gives both agents a feature space in which the concepts "
@@ -301,33 +293,6 @@ def build(config_path, concepts, noise, lr=None, vision="frozen",
     return config, pair, optimiser
 
 
-
-def scale_message_crossing(pair, factor):
-    """
-    Give the referent stack's cross-attention branch its own beta.
-
-    `DecoderBlock._residual` multiplies all three branches by one `self.beta`,
-        so DeepNorm damps the crossing that carries the message by exactly as
-        much as the candidates' self-attention and the feedforward -- and
-        `alpha = beta = 1.0` in the config undamps all three, in both stacks,
-        including the message stack's crossing, which reads the candidates and
-        runs the other way. That is four changes to test one idea.
-
-    Scaling this branch's output by `factor` is identical to running it at
-        `factor * beta` and leaves everything else at DeepNorm's values. The
-        message stack is untouched: the question is how much message reaches
-        the scored stream, not how much the message reads.
-    """
-    if factor == 1.0:
-        return 0
-    blocks = pair.receiver.discriminator.referent_decoder.blocks
-    for block in blocks:
-        block.cross_attention.register_forward_hook(
-            lambda module, args, output, k=factor: output * k
-        )
-    return len(blocks)
-
-
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
@@ -357,18 +322,6 @@ def main():
               f"{args.input_dim}-d input, {args.nuisance_dim}-d nuisance "
               f"subspace at scale {args.nuisance}\n")
 
-    # The listener's own columns, where it has them. `decision_kurtosis` reads
-    #     the shape of its scores: negative means bimodal, which is what
-    #     discriminating looks like; sustained positive alongside a flat `acc`
-    #     means a listener with nothing to say. `mix_alpha` is how much of the
-    #     score is the attention path, and it is the column this probe exists
-    #     to watch: the attention arm on its own reaches 0.469 under nuisance 8
-    #     where the bilinear one reaches 0.938, so what has to be seen is
-    #     whether attention gets taken up once the mix carries the bootstrap.
-    discriminator = pair.receiver.discriminator
-    has_kurtosis = hasattr(discriminator, "decision_kurtosis")
-    has_mix = hasattr(discriminator, "mix_alpha")
-
     # The speaker's mixing block, when the rung has one. `mix` is how much of
     #     what the pooling sees the block put there, and `within` how much of
     #     that is example-level rather than one vector for a game or a polarity.
@@ -381,18 +334,9 @@ def main():
               f"{pair.sender.prototyper.d_model} wide over "
               f"{n_obj} referents\n")
 
-    if args.cross_beta != 1.0:
-        scaled = scale_message_crossing(pair, args.cross_beta)
-        print(f"  crossing : referent-stack cross-attention x{args.cross_beta} "
-              f"over {scaled} blocks -- effective beta "
-              f"{discriminator.beta * args.cross_beta:.3f} on that branch, "
-              f"{discriminator.beta:.3f} on the other two\n")
-
     header = (
         f"{'step':>6} {'loss':>7} {'acc':>7} {'pool_eff':>9} {'pool_norm':>10} "
         f"{'polarity':>9} {'lgt_scale':>10} {'survival':>9} {'spread':>7}"
-        + (f" {'kurtosis':>9}" if has_kurtosis else "")
-        + (f" {'mix_a':>7} {'agree':>7}" if has_mix else "")
         + (f" {'mix':>7} {'within':>7}" if mixes else "")
     )
     print(header)
@@ -474,13 +418,6 @@ def main():
             f"{language_model.realised_survival:9.4f} "
             f"{language_model.logit_spread:7.4f}"
         )
-        if has_kurtosis:
-            line += f" {discriminator.decision_kurtosis:+9.2f}"
-        if has_mix:
-            line += (
-                f" {discriminator.mix_alpha:7.3f}"
-                f" {discriminator.path_agreement:+7.3f}"
-            )
         if mixes:
             line += (
                 f" {prototyper.prototyper_mix_share:7.3f}"

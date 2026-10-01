@@ -220,9 +220,9 @@ def implementation_of(config, group):
 #     parameters the run's ignition waits on. Alone in a group, a scalar is
 #     clipped by its own magnitude or not at all.
 #
-# Why these four and not the other two. These are the scalars that *scale*
-#     something: a score volume, a mixing weight, a gate, and the speaker's
-#     channel. `log_logit_scale` is the last of those and needs the group for
+# Why these and not others. These are the scalars that *scale* something:
+#     the listener's score volume and the speaker's channel. `log_logit_scale`
+#     is the second of those and needs the group for
 #     exactly the reason above: it is one 0-d tensor that would otherwise sit
 #     inside `sender_language_model`, and be renormalised against a whole
 #     module's norm.
@@ -231,19 +231,18 @@ def implementation_of(config, group):
 #     `SPLIT_LEARNING_RATES` -- a clip group and a learning rate are separate
 #     questions, and this table answers only the first.
 #
-# The gate is on the architecture rather than on finding the parameter, exactly
-#     as `SPLIT_LEARNING_RATES`'s is: a `BilinearDiscriminator` has no mixing
-#     weight, so for that one the group is inapplicable rather than missing, and
-#     `group_parameters` raises if an applicable one matches nothing.
+# The gate is on the module rather than on finding the parameter, exactly as
+#     `SPLIT_LEARNING_RATES`'s is: where a config leaves a scalar unbuilt the
+#     group is inapplicable rather than missing, and `group_parameters` raises
+#     if an applicable one matches nothing.
 SCALAR_GROUPS = (
     # Both of these are now gated on a config flag as well as on the
     #     architecture. `[receiver_discriminator] scale_score = false` leaves
     #     the listener with no volume and `[sender_language_model]
     #     normalise_logits = false` leaves the speaker with no channel scale,
     #     so on those rungs the group is inapplicable rather than missing --
-    #     the same distinction `mix_logit` already makes, read off the module
-    #     that owns the parameter rather than off the config, so the gate and
-    #     the parameter cannot disagree.
+    #     read off the module that owns the parameter rather than off the
+    #     config, so the gate and the parameter cannot disagree.
     #
     # Note `bias_score` has no entry here and needs none: `score_bias` is an
     #     offset rather than a scale and belongs to its module's clip norm, as
@@ -257,12 +256,6 @@ SCALAR_GROUPS = (
     (
         "log_logit_scale",
         lambda pair: pair.sender.language_model.normalises_logits,
-    ),
-    (
-        "mix_logit",
-        lambda pair: isinstance(
-            pair.receiver.discriminator, receiver.AttentionDiscriminator
-        ),
     ),
 )
 
@@ -290,7 +283,7 @@ def claimed_separately(name, parameter=None):
         rate `SPLIT_LEARNING_RATES` gives them rather than inheriting their
         module's. A module group that also claimed them would clip them twice --
         once alone and once inside the module's norm, which they would inflate
-        on the way -- and would make `mix_logit_lr = lr` mean "follow the
+        on the way -- and would make `score_scale_lr = lr` mean "follow the
         discriminator" rather than the documented "no override".
 
     Args:
@@ -433,9 +426,9 @@ def split_out_module(optimiser, module, lr, config_key,
 
 
 # `(config key, parameter suffix, applies to)`, in the order the groups are
-#     added. The test gates on the architecture rather than on finding the
-#     parameter: a `BilinearDiscriminator` has no mixing weight, so for that
-#     one the key is inapplicable rather than broken. See docs/training.md --
+#     added. The test gates on the module rather than on finding the
+#     parameter: a listener built with `scale_score = false` has no volume, so
+#     for that one the key is inapplicable rather than broken. See docs/training.md --
 #     and do not read a gate as a verdict on the parameter.
 #
 # `polarity_embedding_lr` was the first entry until 2026-09-28, when the
@@ -465,13 +458,9 @@ SPLIT_LEARNING_RATES = (
         #     norms of ~10 against a ceiling of 1.0 it does. A fast calibration
         #     is just a fast calibration.
         #
-        # One key covers both discriminators: `ScoreVolume` puts the same
-        #     `log_score_scale` on each, so the `mix_scale_lr` that used to
-        #     move `AttentionDiscriminator`'s own scalar has no successor.
-        #
         # Inapplicable, not broken, under `scale_score = false`: there is no
         #     volume for it to move. The key stays live and simply has no
-        #     effect, exactly as `mix_logit_lr` does on a bilinear listener.
+        #     effect.
         "score_scale_lr",
         "log_score_scale",
         lambda pair: pair.receiver.discriminator.learns_score_scale,
@@ -482,13 +471,9 @@ SPLIT_LEARNING_RATES = (
         #     that places the scores against that origin, and like the volume it
         #     is a lone scalar whose whole travel is bounded by `lr * steps`.
         #
-        # One key covers both discriminators, exactly as `score_scale_lr` does
-        #     and for the same reason: `ScoreVolume` puts the same `score_bias`
-        #     on each. It replaces `AttentionDiscriminator.mix_bias`, which had
-        #     no key at all and so sat at the base rate -- at today's 5e-5 and
-        #     the 156.25 steps an epoch both datasets run, that would bound its
-        #     whole travel at 0.23 over thirty epochs, against a score whose own
-        #     opening spread is 0.577.
+        # At the base rate -- 5e-5 and the 156.25 steps an epoch both datasets
+        #     run -- its whole travel would be bounded at 0.23 over thirty
+        #     epochs, against a score whose own opening spread is 0.577.
         #
         # Its **own** condition, which it did not used to have. A single
         #     `normalise_score` built both scalars or neither, so this predicate
@@ -507,17 +492,6 @@ SPLIT_LEARNING_RATES = (
         lambda pair: pair.receiver.discriminator.learns_score_bias,
     ),
     (
-        # Moves the parameter reported as `train_mix_alpha`. Named for the
-        #     parameter rather than the column so the suffix beside it is
-        #     obviously the same thing. A mixing weight and not a volume, which
-        #     is why it survived the round that took the volumes out.
-        "mix_logit_lr",
-        "mix_logit",
-        lambda pair: isinstance(
-            pair.receiver.discriminator, receiver.AttentionDiscriminator
-        ),
-    ),
-    (
         # The speaker's channel scale, and the counterpart of `score_scale_lr`
         #     above: both are lone scalars sitting in front of a normalised
         #     quantity as a plain product, and both share a rate for that
@@ -527,8 +501,8 @@ SPLIT_LEARNING_RATES = (
         #     clamping is that sitting at the bound costs nothing and leaving it
         #     is free.
         #
-        # On every architecture: both speakers mix in `GumbelChannel`, so unlike
-        #     `mix_logit_lr` no *speaker* lacks the parameter.
+        # On every architecture: both speakers mix in `GumbelChannel`, so no
+        #     *speaker* lacks the parameter.
         #
         # There is one arm that lacks it, and it is a config setting rather
         #     than an architecture: `normalise_logits = false` removes the
@@ -710,9 +684,9 @@ def build_models(dataloaders, config):
     # The width `BilinearDiscriminator` compares at, and nothing else's now:
     #     the listener holds no adapter of its own, and every slot that reads the
     #     referents is sized from the width it declares rather than from this
-    #     key. `ReceiverCrossAttentionLM` and `AttentionDiscriminator` both
-    #     declare their own `d_model`, so for them this is inert -- it is the
-    #     bilinear arm's comparison width. See `model_util.LinearInterface`.
+    #     key. `ReceiverCrossAttentionLM` declares its own `d_model` and the
+    #     other language models read no referents, so for them this is inert
+    #     -- it is the bilinear arm's comparison width. See `model_util.LinearInterface`.
     receiver_referent_width = config['receiver_language_model']['d_model']
     receiver_language_model = receiver_language_model_class(
         receiver_referent_width,

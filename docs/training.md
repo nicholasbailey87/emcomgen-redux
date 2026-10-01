@@ -166,17 +166,16 @@ cover a container rather than a single module — `sender_adapter` is
 `receiver_adapter` is `Receiver.interfaces`, the listener's three — so that a
 module declaring a width of its own does not cost the header a column.
 
-`SCALAR_GROUPS` names the three scaling scalars — `log_score_scale`,
-`log_logit_scale`, `mix_logit` — each of which is a group of one
-tensor. The speaker's channel scale is the second of those: a lone 0-d tensor
+`SCALAR_GROUPS` names the two scaling scalars — `log_score_scale` and
+`log_logit_scale` — each of which is a group of one tensor. (A third, the
+attention discriminator's mixing weight, went with that class on 2026-10-01.) The speaker's channel scale is the second of those: a lone 0-d tensor
 inside `sender_language_model`, which would otherwise be renormalised against a
 whole module's norm. `claimed_separately` holds them out of their module's group
 on both
 sides, so a scalar is never clipped twice, never inflates its module's norm, and
 never inherits its module's rate.
 
-**Every entry is gated, and two of the gates are now config rather than
-architecture.** `mix_logit` needs an `AttentionDiscriminator`;
+**Every entry is gated, and both gates are config rather than architecture.**
 `log_score_scale` needs
 `[receiver_discriminator] scale_score` — which builds that one scalar and
 nothing else, the `1/√d` calibration being unconditional — and `log_logit_scale`
@@ -322,11 +321,9 @@ permanently.
 
 ### The overrides, and why each is gated the way it is
 
-Note this subsection still names `BilinearGRUComparer` and
-`TransformerCrossAttentionComparer` below, which the listener split replaced with
-`BilinearDiscriminator` and `AttentionDiscriminator`, and it predates
-`mix_logit_lr`. The reasoning holds; the names want a pass with the rung
-overhaul.
+Note this subsection may still name `BilinearGRUComparer` and
+`TransformerCrossAttentionComparer`, which the listener split replaced. The
+reasoning holds; the names want a pass with the rung overhaul.
 
 **`logit_scale_lr`** — ungated, moving the `log_logit_scale` both speakers
 carry. The counterpart of `score_scale_lr` at the other end of the channel, and
@@ -352,22 +349,18 @@ read 27.05 from first epoch to last on every arm of `lr_sweep_4`, and 27.05 →
 the `lr != base_lr` threshold for a split, so the tag had been taking its
 module's rate. `validate_config` refuses it now.
 
-**`score_scale_lr`** — ungated, since `7b10d47`. `ScoreVolume` puts one
-`log_score_scale` on every discriminator, so one key and one suffix reach both,
-and the `mix_scale_lr` that once moved `AttentionDiscriminator`'s own scalar has
-no successor. It was briefly gated on the bilinear class, when the other arm's
+**`score_scale_lr`** — ungated by class, since `7b10d47`. `ScoreVolume` puts
+one `log_score_scale` on the discriminator, under one key and one suffix. It was
+briefly gated on the bilinear class, when the other arm's
 readout was a plain `nn.Linear(d_model, 1)` whose weight carried the volume and
 there was no lone scalar for a rate to apply to.
 
 **`score_bias_lr`** — ungated for the same reason, and added by the commit that
-gave `ScoreVolume` a `score_bias` beside its volume. One offset per
-discriminator, so one key and one suffix reach both, and
-`AttentionDiscriminator.mix_bias` — which had no key at all — has no successor
-either. Elevated to 2e-3 like every other lone scalar here: a 0-d parameter moves
-about `lr` per step whatever its gradient, so its whole travel is bounded by
-`lr × steps`, and at the base rate `mix_bias` could cover only 0.23 in thirty
-birds epochs — at today's 5e-5 and 156.25 steps — against a score opening at
-0.577 spread.
+gave `ScoreVolume` a `score_bias` beside its volume. Elevated to 2e-3 like
+every other lone scalar here: a 0-d parameter moves about `lr` per step whatever
+its gradient, so its whole travel is bounded by `lr × steps`, and at the base
+rate it could cover only 0.23 in thirty birds epochs — at 5e-5 and 156.25
+steps — against a score opening at 0.577 spread.
 
 Elevated, and that was once the accusation: at 2e-3 the listener could squash its
 own logits fast, which multiplied down the gradient reaching the speaker. The
@@ -524,12 +517,12 @@ steps, not batches.
 
 Adam's update is bounded at roughly ±lr per step regardless of gradient
 magnitude, so a lone scalar cannot travel further than `lr × steps` (the reason
-`score_scale_lr` and `mix_logit_lr` are elevated at all). Averaging `accumulator_steps` microbatches
+`score_scale_lr` and `logit_scale_lr` are elevated at all). Averaging `accumulator_steps` microbatches
 into one update buys a better gradient *estimate*, which a single scalar does not
 need, and costs it the moves it would otherwise have made.
 
 So when a run's takeoff waits on one of these scalars — `log_score_scale`,
-`mix_logit` — raising the effective batch delays it in
+`log_logit_scale` — raising the effective batch delays it in
 direct proportion, at identical compute. That is a real trade against whatever
 the larger batch was for, and on ShapeWorld the reference setup's batch of 128
 (32 × `accumulator_steps` 4) is four times the traverse cost of the same compute

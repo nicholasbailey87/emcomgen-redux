@@ -1,8 +1,8 @@
 # Rung 2: CUB with the GRU/CNN baseline agents. The bottom of `ablation_birds`,
-# which is the even half of the sixteen-rung ladder -- see rung 1, in
+# which is the even half of the eighteen-rung ladder -- see rung 1, in
 # `ablation_shapeworld`, for the ladder in full and for why the two arms are
 # separate experiments. The rungs kept their ladder numbers across the split, so
-# this folder runs 2, 4, 6, ..., 16 and the gaps are the ShapeWorld arm.
+# this folder runs 2, 4, 6, ..., 18 and the gaps are the ShapeWorld arm.
 #
 # Naming the dataset is the only structural change needed.
 # `parse_config.get_config` switches to the `[birds.*]` family off the *name* of
@@ -45,7 +45,7 @@
 # in an experiment must carry them even when they restate the default. `[slurm]`
 # is read from the *first* config in the folder only (sorted by filename), which
 # in this experiment is this file, so the block here governs the birds array --
-# it is sized for the heaviest job in the set, which is rung 16.
+# it is sized for the heaviest job in the set, which is rung 18.
 
 name = "ablation_birds"
 

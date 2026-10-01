@@ -632,20 +632,18 @@ a rename into a silently-NaN column, and a silently-NaN column is how the
 cross-attention listener's collapse went unnoticed for a whole smoke test. A
 discriminator with no branch here raises rather than running unmeasured.
 
-Both read out the same way — `ScoreVolume`'s `log_score_scale` and `score_bias`,
-a volume then an offset, in front of a score whose two operands are
-layer-normed — and differ only in what else they have to report:
+There is one discriminator, `BilinearDiscriminator`, read out through
+`ScoreVolume`'s `log_score_scale` and `score_bias` — a volume then an offset, in
+front of a score whose two operands are layer-normed. Its columns are
+`score_scale`, `score_bias` and `bilinear_weight_norm`.
 
-| | volume | shape | mix |
-|---|---|---|---|
-| `BilinearDiscriminator` | `score_scale`, `score_bias`, `bilinear_weight_norm` | — | — |
-| `AttentionDiscriminator` | `score_scale`, `score_bias`, `decision_spread`, `bilinear_weight_norm`, `decision_weight_norm` | `decision_kurtosis` | `mix_alpha`, `mix_share`, `path_agreement` |
+The attention discriminator, removed on 2026-10-01, also reported
+`decision_spread`, `decision_weight_norm`, `decision_kurtosis`, `mix_alpha`,
+`mix_share` and `path_agreement`. Those columns exist in metrics files written
+before that date and in no file after it; [anecdotes.md](anecdotes.md) has how
+they were read.
 
-**`score_scale`** — both classes, one per discriminator.
-`AttentionDiscriminator` composes a `BilinearDiscriminator` built with neither
-scalar, because that branch is multiplied by `1 − mix_weight` and read out
-through the module's own pair, so a scale on it would say what `mix_logit`
-already says and a constant on it what the outer offset already says.
+**`score_scale`** — the listener's volume.
 
 Under `[receiver_discriminator] scale_score = false` there is no volume, and
 `score_scale` and `train_clip_log_score_scale` read NaN; `bilinear_weight_norm`
@@ -654,22 +652,40 @@ is then the only volume column left. `bias_score = false` does the same for
 NaN while the other reads a value.
 
 **The `1/√d` is unconditional and no key removes it**, so the paragraph below
-about a score calibrated to open at 0.577 applies on every arm. The operand
+about a score calibrated to open at 0.577 applies on every rung. The operand
 norms are `Receiver`'s interface norms and likewise unconditional, which is what
 makes that calibration exact rather than approximate. See
 [architecture.md](architecture.md).
 
-On the bilinear arm it multiplies a score calibrated to open at `1/√3` = 0.577
-at every width and under every backbone, so the column is comparable across
-rungs without further arithmetic. On the attention arm it multiplies a mix whose
-opening depends on what `decision` emits — a fixed number per architecture, but
-not that one.
+It multiplies a score calibrated to open at `1/√3` = 0.577 at every width and
+under every backbone, so the column is comparable across rungs without further
+arithmetic.
 
-**`score_bias`** — both classes, one per discriminator, withheld from the
-composed bilinear path alongside the volume and gated in the config by
-`[receiver_discriminator] bias_score`, which is its own key and not the volume's.
-The offset half of the readout: `train.py` decides on `lis_scores > 0`, so this
-is the parameter that places the scores against that fixed origin.
+A **monotone descent towards zero** is the finding: BCE reduces a loss it cannot
+otherwise reduce by becoming less confident, and nothing in this readout stops it.
+Wandering is not that.
+
+**Under `loss = "hinge"`, the default since 2026-09-11, `score_scale` is usually
+not there at all.** Inside the margin the loss does not depend on the scale, so
+the descent has nothing pulling it — and an arm that takes a hinge should be
+clearing `[receiver_discriminator] scale_score` anyway, since a volume in front
+of a fixed margin is a margin. `experiments/hinge_vs_bce/` does, and its hinge
+arm reads NaN in this column for every row where its BCE twin slid
+0.997 → 0.122. Read the descent as a `bce` diagnostic; on a hinge arm that still
+carries the scalar, watch it for the opposite motion — growth until only errors
+sit inside the margin, which is the perceptron loss without the name. Nothing in the loss rewards the magnitude in either
+direction on a run that is learning; rung 10 carries the identical exposure and
+its `score_scale` falls 0.856 → 0.238 across thirty epochs while `train_acc`
+climbs. Sign-consistent descent alongside a flat `train_acc` is what to act on.
+
+Note the decision boundary is `scores = 0` and `train.py` reads `lis_scores > 0`,
+so accuracy is invariant to any positive rescale of the readout. That is why the
+accuracy column could not see the original collapse and still cannot.
+
+**`score_bias`** — gated in the config by `[receiver_discriminator]
+bias_score`, which is its own key and not the volume's. The offset half of the
+readout: `train.py` decides on `lis_scores > 0`, so this is the parameter that
+places the scores against that fixed origin.
 
 Read it *against* `train_acc`, and not as bigger-is-better. Games are balanced
 10 positive / 10 negative, so the loss-optimal global offset is about zero, and
@@ -679,12 +695,9 @@ A scalar cannot reach a *per-game* offset, the bilinear score's per-game mean
 being `mean_j(LN(r_j)) · proj`, so a bias that moves while accuracy does not
 means the offset was per-game and the readout is what needs changing.
 
-It replaced `AttentionDiscriminator.mix_bias`, which had neither a column nor a
-config key — it sat at the base `lr`, which at today's 5e-5 and 156.25 steps an
-epoch would bound its entire thirty-epoch travel at 0.23 against a score opening
-at 0.577 spread.
-An unmeasured parameter is how the readout's collapse went unnoticed the first
-time; this is the correction.
+At the base `lr` -- 5e-5 and 156.25 steps an epoch when this was written -- its
+entire thirty-epoch travel would be bounded at 0.23 against a score opening at
+0.577 spread, which is why it has `score_bias_lr`.
 
 `score_scale` says how confidently the listener acts on a message. It used to
 have a counterpart on the speaker — a learned `logit_scale`, saying how audibly
@@ -705,138 +718,31 @@ gradient cancels in AdamW's `m / √v`, and `clip_gradients` renormalises each
 submodule on top of that. Two rounds of design went into removing that coupling
 before it was measured — see [anecdotes.md](anecdotes.md), round seven.
 
-**`bilinear_weight_norm`, `decision_weight_norm`** — the branch weights' norms,
-and volume columns on both arms. Nothing downstream divides a rescaling of
-either back out, so a weight that grows is a listener getting louder, exactly as
-`score_scale` growing is.
+**`bilinear_weight_norm`** — the comparison matrix's norm, and a volume column.
+Nothing downstream divides a rescaling of it back out, so a weight that grows is
+a listener getting louder, exactly as `score_scale` growing is.
 
 The two say the same thing at different speeds, and that is the point rather
 than a redundancy. A 320×320 matrix under Adam spends its step turning and only
-a fraction of it radially: between `a9a6a9c` and `7b10d47`, when the matrices
+a fraction of it radially: between `a9a6a9c` and `7b10d47`, when the matrix
 held the volume alone, `bilinear_weight_norm` travelled 1.3% of its norm in
 thirty epochs on rung 09 and 0.6% on rung 10, against the 59% the scalar it had
 replaced managed. Read the scalar for what the listener is doing now and the
-norms for where it has settled.
-
-On `AttentionDiscriminator` the branches also mix at their own magnitudes, so
-there the norms additionally set what the score is made of, and `mix_share`
-against `mix_alpha` is where that shows.
-
-**`mix_alpha`** — `AttentionDiscriminator` only, and the column the whole split
-exists to produce. The attention path's share of the score:
-
-```
-score = score_scale * ( (1 - a) * bilinear + a * attention ) + score_bias
-a     = mix_floor + (1 - mix_floor) * sigmoid(mix_logit)
-```
-
-Bounded in `[mix_floor, 1)`, so it reads directly as *was attention used* —
-which is the chapter's question, and one no previous column could answer. It
-opens at 0.116 (floor 0.1, logit −4.0), essentially at the bilinear comparison,
-and departs only if attention earns it. `mix_logit_lr` is elevated to 2e-3 so
-the traverse is affordable inside a run; see DEFAULT.toml for that arithmetic.
-
-**`path_agreement`** — same class, and it must be read *with* `mix_alpha`, never
-instead of it. The within-game correlation between the two paths' standardised
-scores. Both operands are already per-game zero-mean and unit-spread, so the
-mean of their product is Pearson's r exactly.
-
-The reason it exists: an attention path that is never used and one that has
-learned to imitate the bilinear path look identical from accuracy and from
-`mix_alpha` alone, and they are different findings. The prototype's pinned arm
-ended at 0.811, so this is not hypothetical. Read the four combinations:
-
-| `mix_alpha` | `path_agreement` | reading |
-|---|---|---|
-| at the floor | high | attention imitates the bilinear path; it is not being used and has nothing else to say |
-| at the floor | low | attention is saying something different and losing the argument |
-| climbing | high | attention is being taken up but has not yet found anything distinct |
-| climbing | low | attention is being taken up *for* something the bilinear path cannot express — the outcome the design is aimed at |
-
-**`mix_share`** — `AttentionDiscriminator` only, and the column to read *beside*
-`mix_alpha` rather than instead of it. `mix_alpha` is the weight `mix_logit`
-asked for; this is the share the score is actually made of, measured from the
-two branches standardised per game — in the telemetry block, under `no_grad`,
-which is the only place `standardise` still runs. They agreed only while
-`forward` standardised each branch, and it deliberately does not: that would
-make `mix_alpha` mean composition exactly, at the cost of closing the escape of
-turning one branch down rather than learning it. A gap between the two is a loud
-or quiet branch.
-
-**`decision_spread`** — `AttentionDiscriminator` only. The standard deviation of
-the returned scores, and independent of `score_scale` again now that the readout
-does not pin it: it is the scale times whatever spread the mixed branches
-actually have. `score_scale` alone reads the parameter; this reads the parameter
-and what the module is doing with it together. It was briefly redundant, while
-the readout standardised and the two measured the same thing.
-
-A **monotone descent towards zero** is the finding: BCE reduces a loss it cannot
-otherwise reduce by becoming less confident, and nothing in this readout stops it.
-Wandering is not that.
-
-**Under `loss = "hinge"`, the default since 2026-09-11, this column is usually
-not there at all.** Inside the margin the loss does not depend on the scale, so
-the descent has nothing pulling it — and an arm that takes a hinge should be
-clearing `[receiver_discriminator] scale_score` anyway, since a volume in front
-of a fixed margin is a margin. `experiments/hinge_vs_bce/` does, and its hinge
-arm reads NaN in this column for every row where its BCE twin slid
-0.997 → 0.122. Read the descent as a `bce` diagnostic; on a hinge arm that still
-carries the scalar, watch it for the opposite motion — growth until only errors
-sit inside the margin, which is the perceptron loss without the name. Nothing in the loss rewards the magnitude in either
-direction on a run that is learning; rung 10 carries the identical exposure and
-its `score_scale` falls 0.856 → 0.238 across thirty epochs while `train_acc`
-climbs. Sign-consistent descent alongside a flat `train_acc` is what to act on.
-
-Note the decision boundary is `scores = 0` and `train.py` reads `lis_scores > 0`,
-so accuracy is invariant to any positive rescale of the readout. That is why the
-accuracy column could not see the original collapse and still cannot.
-
-**`decision_kurtosis`** — same class, and the one to read first among the shape
-columns. Excess kurtosis
-of the scores. Negative means bimodal, which is what discriminating looks like
-(−2 is the two-point floor); sustained positive alongside `train_acc` at 0.5 is a
-listener with nothing to say.
-
-Measured against this module on a synthetic game — the listener handed a message
-that names the target concept, versus a scrambled one, everything else identical:
-
-```
-informative   acc 1.000   loss 0.127   excess kurtosis  −2.0
-scrambled     acc ~0.50   loss ~0.9    excess kurtosis  +11..+23
-```
-
-`decision_spread` read 2.7–5.1 and 1.4–2.1 across those same two runs —
-overlapping, and so unable to tell them apart on its own.
-
-It is NaN when the scores have collapsed to a constant, where the fourth
-standardised moment is 0/0. NaN is the honest value there: the shape of a point
-mass is not defined, and a silent 0.0 would read as "Gaussian, nothing to see" at
-exactly the moment there is something to see. `decision_spread` is the column
-that names that state.
-
-The routes there are `score_scale` and the branch weights alike, now that the
-readout does not renormalise: anything that drives the mixed score to a constant
-across candidates lands here. A constant attention readout does not, on its own
-— the mix still carries the bilinear path, which keeps discriminating.
-
-The column outlived the design it was built for; see [anecdotes.md](anecdotes.md).
-
-The `.item()` calls in `forward` cost a sync and a graph break under
-`torch.compile`, which is on. Paid deliberately: `AttentionPrototyper` already
-reports `pool_effective_examples` exactly this way, and a metric nobody can read
-is how the last collapse ran for a whole smoke test.
+norm for where it has settled.
 
 ### Gradient norms, on the train pass only
 
 **`train_clip_<group>`** — the gradient norm of one clip group, taken *before*
-clipping, for every group in `models.builder.GROUP_NAMES`. Fourteen named groups
-— nine modules and the three scaling scalars — plus `other`. See
+clipping, for every group in `models.builder.GROUP_NAMES`. Eleven named groups
+— nine modules and the two scaling scalars — plus `other`. The attention
+discriminator's mixing-weight group went with that class on 2026-10-01, so the
+header is one column shorter than in files written before. See
 [training.md](training.md#the-group-table) for what is in each.
 
 Averaged **per optimiser step**, not per example: a gradient norm is a property
 of the step, and the trailing partial accumulation counts once like any other.
 `nan` means the group does not exist on this architecture, or exists and holds
-nothing with a gradient — `mix_logit` on a `BilinearDiscriminator`, or
+nothing with a gradient — `log_score_scale` under `scale_score = false`, or
 `sender_prototyper` under `AveragePrototyper`, which has no parameters at all.
 Every column is present on every rung so that the header survives a resume,
 exactly as the prototyper's own columns are.

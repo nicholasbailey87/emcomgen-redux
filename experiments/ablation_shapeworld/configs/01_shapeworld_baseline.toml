@@ -13,14 +13,31 @@
 #    5,  6  + AttentionPrototyper
 #    7,  8  + SenderTransformerLM
 #    9, 10  + receiver ViT2
-#   11, 12  + ReceiverCrossAttentionLM
-#   13, 14  + SenderTransformerBidirectionalLM, in place of the autoregressive one
-#   15, 16  + AttentionDiscriminator
+#   11, 12  + ReceiverTransformerAutoregressiveLM, in place of ReceiverGRULM
+#   13, 14  + ReceiverTransformerBidirectionalLM, in place of the causal one
+#   15, 16  + SenderTransformerBidirectionalLM, in place of the autoregressive one
+#   17, 18  + ReceiverCrossAttentionLM, in place of the bidirectional encoder
 #
-# **Rungs 11-16 reordered on 2026-09-30.** `AttentionDiscriminator` was 11/12,
-# the cross-attention encoder 13/14 and the parallel speaker 15/16. It moved to
-# the top because its candidate self-attention lets the listener score birds
-# games without the message: on `lr_sweep_6_attention_discriminator` every
+# The discriminator is `BilinearDiscriminator` on every rung.
+#
+# **Rungs 11-18 re-cut on 2026-10-01.** `lr_sweep_6_receiver_cross_attention_lm`
+# found the cross-attention encoder has the attention discriminator's shortcut,
+# stronger: `train_shuffled_message_acc` ~0.65 (test ~0.58) against live
+# accuracy ~0.75 / ~0.63 on every birds arm, where the discriminator had
+# reached ~0.55 / ~0.51. Reading the candidate set gives the encoder a set
+# summary whatever the tokens say. So the attention discriminator was deleted
+# outright, two Transformer encoders that never see the candidates went in at
+# 11-14, the parallel speaker moved up to 15/16 over them, and the
+# cross-attention encoder went to the top at 17/18. The correspondence is old
+# 11 -> new 17 and old 13 -> new 15 (12 -> 18, 14 -> 16 on birds), both rebased
+# onto new listeners; old 15/16 has no successor. Results filed under the old
+# numbers belong to the old order.
+#
+# **Rungs 11-16 reordered on 2026-09-30**, the first of two re-cuts that week.
+# The attention discriminator was 11/12, the cross-attention encoder 13/14 and
+# the parallel speaker 15/16. It moved to the top because its candidate
+# self-attention lets the listener score birds games without the message: on
+# its learning-rate sweep (then sweep 6, later sweep 8, now deleted) every
 # birds arm with the discriminator learning reached `train_shuffled_message_acc`
 # 0.53-0.56, where every other sweep sits at 0.50. The correspondence is old
 # 11-16 -> new 15, 11, 13 (and 16, 12, 14 on birds). Results filed under the
@@ -37,7 +54,7 @@
 # is two experiments -- the odd rungs here in `ablation_shapeworld`, the even
 # ones in `ablation_birds` -- so either arm can be queued, re-run and read
 # without waiting on the other. The numbers did not change with the split, so
-# this folder runs 1, 3, 5, ..., 15 and the gaps are the birds arm.
+# this folder runs 1, 3, 5, ..., 17 and the gaps are the birds arm.
 #
 # **The backbone is `ResNet56` as of 2026-09-06, and this is the third one.**
 # It was `Conv4` (113,088 parameters), then `ResNet18SmallInput` (11,168,832),
@@ -132,7 +149,7 @@
 # config in an experiment must carry them even when they restate the default.
 # `[slurm]` is read from the *first* config in the folder only (sorted by
 # filename), so the block here governs this experiment's whole array -- it is
-# sized for the heaviest job in the set, which is rung 15. The birds arm's array
+# sized for the heaviest job in the set, which is rung 17. The birds arm's array
 # is governed by rung 2's block, not this one.
 
 name = "ablation_shapeworld"

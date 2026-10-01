@@ -32,7 +32,7 @@ The rest of this file is a reference for the columns of that `metrics.csv`.
 
 ## The learning-rate sweeps are a serial chain
 
-**`lr_sweep_1_cnn` through `lr_sweep_8_attention_discriminator`**,
+**`lr_sweep_1_cnn` through `lr_sweep_9_receiver_cross_attention_lm`**,
 one folder per rung of the ladder, each measuring the learning rate of the one
 component that rung introduces. They must be run **in order**, and DEFAULT.toml
 must be updated with each result before the next is launched.
@@ -44,15 +44,17 @@ must be updated with each result before the next is launched.
 | `lr_sweep_3_attention_prototyper` | 5 / 6 | `AttentionPrototyper` | `implementation_lr.sender_prototyper.AttentionPrototyper` |
 | `lr_sweep_4_sender_transformer_autoregressive_lm` | 8 | `SenderTransformerAutoregressiveLM` | `implementation_lr.sender_language_model.SenderTransformerAutoregressiveLM` |
 | `lr_sweep_5_receiver_vit` | 9 / 10 | the listener's ViT | `implementation_lr.receiver_vision.{ShapeWorldViT,BirdsViT}` |
-| `lr_sweep_6_receiver_cross_attention_lm` | 12 | `ReceiverCrossAttentionLM` | `implementation_lr.receiver_language_model.ReceiverCrossAttentionLM` |
-| `lr_sweep_7_sender_transformer_bidirectional_lm` | 14 | `SenderTransformerBidirectionalLM` | `implementation_lr.sender_language_model.SenderTransformerBidirectionalLM` |
-| `lr_sweep_8_attention_discriminator` | 15 / 16 | `AttentionDiscriminator` | `implementation_lr.receiver_discriminator.AttentionDiscriminator` |
+| `lr_sweep_6_receiver_transformer_autoregressive_lm` | 12 | `ReceiverTransformerAutoregressiveLM` | `implementation_lr.receiver_language_model.ReceiverTransformerAutoregressiveLM` |
+| `lr_sweep_7_receiver_transformer_bidirectional_lm` | 14 | `ReceiverTransformerBidirectionalLM` | `implementation_lr.receiver_language_model.ReceiverTransformerBidirectionalLM` |
+| `lr_sweep_8_sender_transformer_bidirectional_lm` | 16 | `SenderTransformerBidirectionalLM` | `implementation_lr.sender_language_model.SenderTransformerBidirectionalLM` |
+| `lr_sweep_9_receiver_cross_attention_lm` | 18 | `ReceiverCrossAttentionLM` | `implementation_lr.receiver_language_model.ReceiverCrossAttentionLM` |
 
-**`lr_sweep_9_sender_gru_lm` sits outside the chain.** It tunes the baseline GRU
+**`lr_sweep_10_sender_gru_lm` sits outside the chain.** It tunes the baseline GRU
 speaker on rung 2, birds only, from a frozen control up to 2e-4, so that rung 8
 compares two tuned speakers rather than a tuned Transformer against jayelm's
-inherited 1e-4. Nothing on rung 2 waits on sweeps 5-8, so it can run at any
-time. If it moves the GRU's rate a long way, sweeps 1-3, which ran with the GRU
+inherited 1e-4. Nothing on rung 2 waits on sweeps 5-9, so it can run at any
+time. It was `lr_sweep_9_sender_gru_lm` until 2026-10-01, and its results on
+the cluster are under that name. If it moves the GRU's rate a long way, sweeps 1-3, which ran with the GRU
 at 1e-4, are owed a re-check.
 
 **Sweeps 1-3 have landed and sweep 4 is where the chain is.** Sweep 3 ran twice,
@@ -67,7 +69,22 @@ There were eight sweeps until then. `lr_sweep_4_sender_contrast` tuned
 `module_lr.sender_contrast`, which named a module group that no longer exists;
 the folder is deleted and the four above it came down by one, in step with the
 ladder. The chain is eight again since 2026-09-27, when sweep 8 was appended for
-rungs 15 and 16; it is a new folder and not that one.
+rungs 15 and 16; it is a new folder and not that one. It is nine since
+2026-10-01, below.
+
+**Sweeps 6-10 were re-cut on 2026-10-01**, with the ablation; rung 1 has why.
+The old sweep 6, `lr_sweep_6_receiver_cross_attention_lm`, settled the
+cross-attention encoder at 1e-5 but found it scoring without the message on
+every arm -- `train_shuffled_message_acc` ~0.65 (test ~0.58) against live
+accuracy ~0.75 / ~0.63 -- which is the attention discriminator's shortcut,
+stronger. So the attention discriminator and its sweep were deleted; sweeps 6
+and 7 are new, one per arm of a Transformer encoder that never sees the
+candidates; the parallel speaker's sweep went 7 -> 8 and now runs over the
+unmasked encoder; the cross-attention encoder's went 6 -> 9 and now runs over
+the parallel speaker; and the GRU speaker's went 9 -> 10. The old sweep 6's
+results, on the cluster under its old name, describe the old stack, and so does
+the 1e-5 still in DEFAULT.toml until sweep 9 replaces it. No other old sweep in
+6-8 had run.
 
 **Sweeps 6-8 were reordered on 2026-09-30**, with the ablation, when the
 attention discriminator moved to the top of the ladder; rung 1 has why. The
@@ -75,36 +92,35 @@ cross-attention encoder's sweep went 7 -> 6, the parallel speaker's 8 -> 7 and
 the attention discriminator's 6 -> 8. The old sweep 6 had run, and its results
 describe the old stack; the other two had not.
 
-**The language-model sweeps -- 4, 6 and 7 -- run on birds only**, from
-2026-09-27. On ShapeWorld a run sits in the colour-only minimum until the
+**The language-model sweeps -- 4, 6, 7, 8 and 9 -- run on birds only**,
+from 2026-09-27. On ShapeWorld a run sits in the colour-only minimum until the
 uniform mixture happens to roll it out, so when a ShapeWorld arm learns shape
 says more about that roll than about the rate; birds has no such stall and has
 been the readable half of every sweep. The language models are the same size on
 both datasets to within 0.1%, and a class carries one rate everywhere, so the
 birds rate is used on the ShapeWorld rung too. Sweep 4's ShapeWorld arms ran
 before the change and are the check that this transfers; if they disagree with
-its birds arms, 6 and 7 get their ShapeWorld arms back. These three folders hold
-five birds arms, `01`-`05`.
+its birds arms, 6 to 9 get their ShapeWorld arms back. These folders hold five
+birds arms, `01`-`05`.
 
-Ten arms each, or five for those three, at 30 epochs and one repeat, restated in every config because
-`scripts/job_utils.py` reads both out of the file rather than out of the merged
-config. Sweeps 2, 3 and 5 run 1e-5, 2e-5, 5e-5, 1e-4 and 2e-4 on both
-datasets. Sweep 8 runs the same five plus 5e-6 and a frozen control at 1e-12,
-fourteen arms, smallest rate first on each dataset. Sweep 1 has eleven arms on an asymmetric grid, four over 1e-5 to 1e-4
+Ten arms each, or five for those, at 30 epochs and one repeat, restated in every
+config because `scripts/job_utils.py` reads both out of the file rather than out
+of the merged config. Sweeps 2, 3 and 5 run 1e-5, 2e-5, 5e-5, 1e-4 and 2e-4 on
+both datasets. Sweep 1 has eleven arms on an asymmetric grid, four over 1e-5 to 1e-4
 on ShapeWorld and seven over 5e-6 to 5e-4 on birds, and it also settled the
-gradient estimator. **Sweeps 4, 6 and 7 run a decade lower, 2e-6 to 5e-5.**
+gradient estimator. **Sweeps 4 and 6-9 run a decade lower, 2e-6 to 5e-5.**
 Sweep 4's first pass over the standard grid found a cliff rather than a slope --
 every arm above the cliff finishing on one message for the whole test set --
 with the only live ShapeWorld arm at 1e-5 and its ignition arriving at epoch 21
 of 30. Its second pass moved the grid down and briefly doubled the budget to 60
 for the slow ignition, and went back to 30 once the bias-free ViT ignited at
-epoch 1. Sweep 6 took the same grid so the two can be read side by side, and
-sweep 7, the other arm of sweep 4's class, takes it for the same reason. Each
+epoch 1. Every later language-model sweep takes the same grid so that they can
+all be read side by side with it. Each
 folder's preamble says why it departs from the standard grid.
 
 **ShapeWorld comes first in every sweep that runs it**: `01`-`05` are
 the ShapeWorld arms and `06`-`10` the birds ones (`01`-`04` and `05`-`09` in
-sweep 1, `01`-`07` and `08`-`14` in sweep 8). That matches the ablation's own numbering, where the ShapeWorld rung
+sweep 1). That matches the ablation's own numbering, where the ShapeWorld rung
 of each pair is the odd one and the birds rung the even one, so a sweep runs
 its two datasets in the same order as the rungs it copies. It also puts the
 dataset with the open question at the front of a serial array, where it is read
@@ -197,12 +213,33 @@ What the split does change:
   documentation -- `train.py` takes the experiment name from the config's path,
   not from that key.
 
-## The ablation ladder was renumbered, twice
+## The ablation ladder was renumbered, several times
 
 Anything written before a renumbering -- run directories, the `docs/` prose,
 `diagnostics/README.md`, commit messages -- names rungs in the scheme of its day,
 so read those numbers against these tables rather than against the current
 configs.
+
+### Sixteen to eighteen, 2026-10-01: re-cut
+
+The attention discriminator was deleted, the day after it had moved to the top
+of the ladder, because the cross-attention encoder turned out to have the same
+shortcut, stronger (see the sweeps above and rung 1). Two Transformer encoders
+that never see the candidates went in below the parallel speaker, and the
+cross-attention encoder went to the top. `BilinearDiscriminator` is the
+discriminator on every rung.
+
+| old (2026-09-30) | new | correspondence |
+| --- | --- | --- |
+| 1-10 | 1-10 | exact |
+| — | 11, 12 `ReceiverTransformerAutoregressiveLM` | new |
+| — | 13, 14 `ReceiverTransformerBidirectionalLM` | new |
+| 13, 14 parallel speaker | 15, 16 | same speaker, rebased onto the unmasked encoder |
+| 11, 12 cross-attention encoder | 17, 18 | same listener, rebased onto the parallel speaker |
+| 15, 16 attention discriminator | — | gone |
+
+No rung from 11 up is configuration-identical to any rung of the 2026-09-30
+order.
 
 ### Fourteen to sixteen, 2026-09-27: appended, not renumbered
 

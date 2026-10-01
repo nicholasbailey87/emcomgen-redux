@@ -1,0 +1,107 @@
+# lr_sweep_6_receiver_transformer_autoregressive_lm: what learning rate
+# `ReceiverTransformerAutoregressiveLM` wants, in the presence of everything
+# below it on the ladder.
+#
+# Five arms. `[optimiser.implementation_lr.receiver_language_model]
+# ReceiverTransformerAutoregressiveLM` moves over 2e-6, 5e-6, 1e-5, 2e-5
+# and 5e-5 on birds -- `01`-`05`, copying ablation rung 12. Nothing else differs
+# between the arms, and nothing else differs from the rung each one copies. 30
+# epochs, one repeat.
+#
+# **Birds only, from 2026-09-27.** This sweep tunes a language model, and on
+# ShapeWorld a language-model rate is read through a confound birds does not
+# have: a ShapeWorld run sits in the colour-only minimum for a stretch and then
+# escapes only when the uniform mixture happens to roll it out, so when an arm
+# learns shape says more about that roll than about the rate. Birds has no such
+# stall, and its arms have been the readable half of every sweep. The class and
+# its rate are shared across datasets, and the language model is the same size
+# on both to within 0.1%, so the birds rate is carried to the ShapeWorld rung.
+# Whether a birds rate survives on ShapeWorld is checked first on sweep 4,
+# which ran both datasets before this change. If sweep 4's two datasets
+# disagree, this sweep needs its ShapeWorld arms back.
+#
+# **Sweep 6 of nine, new on 2026-10-01.** The reasoning for the chain is in
+# `lr_sweep_1_cnn`'s first file; the reasoning for this grid and budget is in
+# `lr_sweep_4_sender_transformer_autoregressive_lm`'s, which swept a language
+# model over the same five rates for the same 30 epochs, so the two can be read
+# side by side. This sweep takes every other rate from DEFAULT.toml and restates
+# none of them, so DEFAULT.toml must already carry sweep 5's result -- both
+# receiver ViTs at 5e-5 -- before it is launched. Launching early does not
+# fail; it silently measures this encoder against an untuned stack.
+#
+# **Why this sweep exists.** Sweep 6 used to be
+# `lr_sweep_6_receiver_cross_attention_lm`, the cross-attention encoder at what
+# was then rung 12. It settled on 1e-5, but every arm showed the clustering
+# shortcut: `train_shuffled_message_acc` climbed to ~0.65 (test ~0.58) against
+# live accuracy ~0.75 / ~0.63. An encoder that reads the candidate set can score
+# "which cluster" whatever the message says. This one never sees the candidates
+# -- like the GRU it replaces, it reads the message alone -- so that route is
+# closed. The old sweep is now `lr_sweep_9_receiver_cross_attention_lm`, re-run
+# over the stack it will actually sit on; rung 1 records the re-cut. The old
+# sweep's results on the cluster keep their old folder name.
+#
+# **What to read.** `train_clip_receiver_language_model` first, in both
+# directions: a spike says the rate is too high and a decay toward AdamW's `eps`
+# floor says it is too low. Then `train_eval_mode_acc` against
+# `train_shuffled_message_acc`, whose gap is the message and nothing else. On
+# this encoder the shuffled accuracy should sit at 0.50; if it climbs, something
+# other than the message is being read, and it is not this encoder.
+#
+# `epochs` and `repeats` are restated in every file: `scripts/job_utils.py` reads
+# both straight out of the file rather than out of the merged config. `[slurm]`
+# is read from the *first* config in the folder only, sorted by filename, so the
+# block below governs the whole array.
+#
+# ---
+#
+# **This arm: `ReceiverTransformerAutoregressiveLM` at 2e-6 on CUB**, copying ablation rung 12.
+
+name = "lr_sweep_6_receiver_transformer_autoregressive_lm"
+
+[data]
+dataset = "../data/cub"
+
+[sender]
+feature_model = "BirdsViT"
+prototyper = "AttentionPrototyper"
+language_model = "SenderTransformerAutoregressiveLM"
+
+[sender_language_model]
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+layers = 7
+
+[receiver]
+feature_model = "BirdsViT"
+language_model = "ReceiverTransformerAutoregressiveLM"
+
+[receiver_language_model]
+d_model = 256
+heads = 4
+ff_inner_size = 512
+token_embedding_size = 256
+layers = 7
+
+[optimiser.implementation_lr.receiver_language_model]
+# The one key this sweep moves. Every other rate is DEFAULT.toml's,
+# including the ones earlier sweeps in this set have already settled.
+ReceiverTransformerAutoregressiveLM = 2e-6
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+# At 30 epochs the 24 h allows 48 min/epoch. Sweep 4 timed 3.7 min/epoch on
+# birds with a `ResNet18` listener; these arms run a ViT listener and have not
+# been timed, so the margin is an estimate.
+#
+# Read from the first config by filename only, so this block governs the whole
+# array and belongs here and nowhere else.
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

@@ -4,10 +4,11 @@ Tests for the listener's score scale in code/models/receiver.py.
 Runnable without pytest:  python tests/test_score_scale.py
 
 The listener is `ReceiverGRULM + BilinearDiscriminator` or
-`ReceiverCrossAttentionLM + AttentionDiscriminator`; this file calls those the
-bilinear arm and the attention arm, and follows each end to end because volume
-is a property of the whole path. The two modules they were split out of are
-named below where the history is theirs.
+`ReceiverCrossAttentionLM + BilinearDiscriminator`; this file calls those the
+bilinear arm and the cross-attention arm, and follows each end to end because
+volume is a property of the whole path. The two modules they were split out of
+are named below where the history is theirs. Much of the history is an attention
+discriminator's, which was removed on 2026-10-01; its tests went with it.
 
 Both used to let the architecture set how loudly the listener stated a
 conclusion, and both have now been stopped from doing it. That is the same
@@ -120,12 +121,11 @@ normalised rather than by normalising the result.
 
 Round eight finished that. Removing the centring made the decision threshold a
 fixed origin -- `train.py` reads `lis_scores > 0` -- and only four of the
-fourteen rungs could place their scores against one. `AttentionDiscriminator`
-had a `mix_bias`; `BilinearDiscriminator`, and so rungs 1-10, had no bias
-anywhere, `bilinear` being built `bias=False`. So `ScoreVolume` gained a
-`score_bias` beside its volume, applied after it, and `mix_bias` retired into
-it: same position, same arithmetic, both arms, and now with a config key at
-`score_bias_lr` and a metrics column. The readout is `s * u + b`.
+fourteen rungs could place their scores against one: the attention
+discriminator had an offset of its own, and `BilinearDiscriminator`, and so
+rungs 1-10, had no bias anywhere, `bilinear` being built `bias=False`. So
+`ScoreVolume` gained a `score_bias` beside its volume, applied after it, with a
+config key at `score_bias_lr` and a metrics column. The readout is `s * u + b`.
 
 It opens at zero and is expected to stay near it, because the games are balanced
 and the loss-optimal global offset is therefore about zero. It is insurance
@@ -162,12 +162,7 @@ it again. See docs/anecdotes.md.
 
 Consequences the tests below follow. `bilinear.weight` carries volume as well as
 direction again, so `bilinear_weight_norm` is not the drift column it briefly
-was. `decision` still has no bias, now because `score_bias` is the module's one
-constant across candidates rather than because a centring would annihilate it --
-a bias there is worth `score_scale * mix_weight * b` on the score, which is what
-`score_bias` says directly. And neither branch is standardised, which is what
-keeps a branch able to go quiet alone and `mix_share` worth reporting beside
-`mix_alpha`.
+was.
 """
 
 import math
@@ -216,31 +211,15 @@ def _comparer(referent_dim=REFERENT_DIM, **overrides):
     )
 
 
-CROSS_RUNG = "15_shapeworld_attention_discriminator.toml"
-
-# The keys that belong to the discriminator's table rather than the language
-#     model's, so `_cross_comparer` can take one flat kwargs like the builder it
-#     replaced. `layers`, `alpha` and `beta` are deliberately absent: both
-#     tables carry them and mean different stacks, so a test that wants one has
-#     to say which. See test_residual_scaling.py.
-_DISCRIMINATOR_KEYS = frozenset(
-    {
-        "d_model", "heads", "ff_inner_size", "stochastic_depth",
-        "self_attention_dropout", "cross_attention_dropout",
-        "ff_inner_dropout", "ff_outer_dropout", "activation",
-        "pre_norm", "post_norm", "knocking_heads",
-        "depthwise_linear_stochastic_depth",
-        "mix_floor", "mix_logit_init",
-    }
-)
+CROSS_RUNG = "17_shapeworld_receiver_cross_attention_lm.toml"
 
 
 def _cross_comparer(referent_dim=REFERENT_DIM, dropout=0.0, **overrides):
     """
-    The attention arm: `ReceiverCrossAttentionLM` feeding
-        `AttentionDiscriminator`.
+    The cross-attention arm: `ReceiverCrossAttentionLM` feeding
+        `BilinearDiscriminator`. Overrides go to the language model.
 
-    Built from rung 15 rather than from DEFAULT, which cannot construct the
+    Built from rung 17 rather than from DEFAULT, which cannot construct the
         encoder: DEFAULT's `[receiver_language_model] d_model = 1024` is the
         GRU's width and does not divide its `heads = 5`. See the note beside
         `d_model` in DEFAULT.toml.
@@ -249,19 +228,14 @@ def _cross_comparer(referent_dim=REFERENT_DIM, dropout=0.0, **overrides):
         tests of a deterministic property and a resampled mask between two
         calls would be measuring dropout.
     """
-    discriminator_overrides = dict(READOUT_ON)
-    discriminator_overrides.update({
-        key: value for key, value in overrides.items()
-        if key in _DISCRIMINATOR_KEYS
-    })
     return build_listener(
         "ReceiverCrossAttentionLM",
-        "AttentionDiscriminator",
+        "BilinearDiscriminator",
         referent_dim,
         config_file=rung(CROSS_RUNG),
         dropout=dropout,
         language_model_overrides=overrides or None,
-        discriminator_overrides=discriminator_overrides or None,
+        discriminator_overrides=dict(READOUT_ON),
     )
 
 
@@ -293,17 +267,6 @@ def _labels():
     return labels
 
 
-def _bilinear_weight(discriminator):
-    """
-    The bilinear comparison's matrix, wherever the arm keeps it. On the
-        attention arm the whole `BilinearDiscriminator` is composed, so it is a
-        level deeper.
-    """
-    if isinstance(discriminator, R.AttentionDiscriminator):
-        return discriminator.bilinear.bilinear.weight
-    return discriminator.bilinear.weight
-
-
 # --------------------------------------------------------------------------
 # The norms, and which of them carry an affine.
 # --------------------------------------------------------------------------
@@ -324,28 +287,6 @@ def test_no_interface_norm_has_an_affine():
         for name, interface in listener.interfaces.items():
             assert interface.norm.weight is None, name
             assert interface.norm.bias is None, name
-
-
-def test_the_last_norm_before_the_attention_readout_keeps_its_gain():
-    """
-    The counterpart of the test above, and the one place a gain is deliberately
-        left open.
-
-    The last thing before `decision` is the referent stack's own post-norm, an
-        `RMSNorm` carrying broccoli's default learnable gain -- not ours to turn
-        off, since the same class is used by every stack in the repo. That gain
-        is a route to global score magnitude and it is deliberately open:
-        `decision_spread` watches it, and two attempts to close it are in
-        docs/anecdotes.md. What the RMSNorm still does structurally is equalise
-        the candidates against *each other*, which is the part that has to hold,
-        so its affine is asserted here as present rather than absent.
-    """
-    listener = _cross_comparer()
-
-    assert (
-        listener.discriminator.referent_decoder.blocks[-1].post_mlp_norm.weight
-        is not None
-    )
 
 
 def test_the_referent_interfaces_have_no_bias_and_the_message_ones_do():
@@ -573,13 +514,12 @@ def test_the_untrained_score_opens_at_a_width_independent_magnitude(
         confidence is the same whichever backbone the rung mounts, rather than
         growing with its width.
 
-    Bought differently on each arm, and that is fine: `/sqrt(referent_dim)`
-        over two layer-normed operands on the bilinear one, the referent
-        stack's last post-norm putting every candidate at unit RMS on the
-        other. What matters is that neither inherits the backbone's magnitude.
-        The band below is left wide rather than tightened to the bilinear arm's
-        exact `1/sqrt(3)`, so that it keeps testing the width and not the
-        readout; `test_the_score_opens_at_one_over_root_three` is the tight one.
+    Both arms end in `BilinearDiscriminator`, so both buy it the same way:
+        `/sqrt(referent_dim)` over two layer-normed operands. What matters is
+        that neither inherits the backbone's magnitude. The band below is left
+        wide rather than tightened to the exact `1/sqrt(3)`, so that it keeps
+        testing the width and not the readout;
+        `test_the_score_opens_at_one_over_root_three` is the tight one.
     """
     listener = build(referent_dim=referent_dim).eval()
     with torch.no_grad():
@@ -596,13 +536,10 @@ def test_untrained_bce_opens_within_reach_of_ln_2(build, referent_dim):
         shouting wrong answers makes muting the fast descent direction, which
         is the state `e3fcabd` was written about.
 
-    Both classes now open close to ln 2 from either side -- bilinear just
-        under, cross-attention at ~0.73 just over. They briefly did not: a fixed
-        `decision_gain` of 2.0 opened the cross-attention comparer at 1.07,
+    Both arms open close to ln 2. They briefly did not: a fixed
+        `decision_gain` of 2.0 once opened the attention comparer at 1.07,
         deliberately worse than chance on the argument that sitting at ln 2
-        should never be free. That argument is what
-        `test_the_readout_opens_below_a_confident_wrong_answer` records the
-        refutation of.
+        should never be free. See docs/anecdotes.md.
     """
     listener = build(referent_dim=referent_dim).eval()
     with torch.no_grad():
@@ -659,14 +596,9 @@ def test_both_gates_off_is_the_identity_and_is_the_default():
 def test_each_discriminator_owns_exactly_one_volume_and_one_offset():
     """
     One of each per arm, under one name, so one config key and one suffix reach
-        both. Neither `log_mix_scale` nor `mix_bias` comes back:
-        `AttentionDiscriminator` uses the same `ScoreVolume` the bilinear arm
-        does, for the offset as well as the volume.
-
-    The offset matters more on the bilinear arm than on the arm it came from.
-        `mix_bias` existed only on `AttentionDiscriminator`, so rungs 1-12 had
-        no bias anywhere -- `bilinear` is built `bias=False` -- and could not
-        place their scores against `train.py`'s fixed `lis_scores > 0` at all.
+        both. Without the offset the bilinear arm has no bias anywhere --
+        `bilinear` is built `bias=False` -- and cannot place its scores against
+        `train.py`'s fixed `lis_scores > 0` at all.
     """
     for build in (_comparer, _cross_comparer):
         named = dict(build().named_parameters())
@@ -675,42 +607,6 @@ def test_each_discriminator_owns_exactly_one_volume_and_one_offset():
 
         assert len(volumes) == 1, sorted(named)
         assert len(offsets) == 1, sorted(named)
-        assert not [name for name in named if "log_mix_scale" in name]
-        assert not [name for name in named if "mix_bias" in name]
-
-
-def test_the_composed_bilinear_path_has_neither_of_its_own():
-    """
-    `AttentionDiscriminator` builds its bilinear path with both of
-        `BilinearDiscriminator`'s composition gates off, one per scalar.
-
-    The reason is degeneracy, for each of them. The composed path is one of two
-        branches multiplied by `1 - mix_weight` and read out through the outer
-        module downstream, so a scale on it says what `mix_logit` already says,
-        and a constant across candidates on it says what the outer `score_bias`
-        already says. Either would still match its `SPLIT_LEARNING_RATES` suffix
-        and still report a value.
-
-    The composition gates are separate from `[receiver_discriminator]
-        scale_score` and `bias_score`, which are the config's and act on the
-        outer readout: this holds whatever those say, which is asserted here by
-        building the default pair, where both config keys are on.
-
-    What the branch keeps is the `1/sqrt(d)` calibration, which is
-        unconditional, so the mix opens at a stated number rather than a
-        width-dependent one.
-
-    Absent rather than frozen, so `split_out_parameter`'s suffix match sees the
-        truth.
-    """
-    attention = _cross_comparer().discriminator
-
-    assert attention.learns_score_scale
-    assert attention.learns_score_bias
-    assert not attention.bilinear.learns_score_scale
-    assert not attention.bilinear.learns_score_bias
-    assert not hasattr(attention.bilinear, "log_score_scale")
-    assert not hasattr(attention.bilinear, "score_bias")
 
 
 def test_both_the_scale_and_the_weight_reach_the_score_magnitude():
@@ -769,8 +665,7 @@ def test_scaling_the_volume_cannot_change_the_decision():
 
 def test_the_offset_is_downstream_of_the_volume():
     """
-    Why `readout` is `score_scale * scores + score_bias` in that order, and the
-        property that made `mix_bias`'s position load-bearing.
+    Why `readout` is `score_scale * scores + score_bias` in that order.
 
     An offset applied *before* the volume would be multiplied by it, so the
         threshold would slide every time the listener changed how loudly it
@@ -866,415 +761,20 @@ def test_reset_parameters_returns_the_volume_to_its_opening():
     """
     for build in (_comparer, _cross_comparer):
         discriminator = build().discriminator
-        opening = _bilinear_weight(discriminator).norm().item()
+        opening = discriminator.bilinear.weight.norm().item()
 
         with torch.no_grad():
             discriminator.log_score_scale.fill_(math.log(37.0))
-            _bilinear_weight(discriminator).mul_(37.0)
+            discriminator.bilinear.weight.mul_(37.0)
         discriminator.reset_parameters()
 
         assert discriminator.score_scale.item() == pytest.approx(1.0)
 
         # Not the same draw, so the norm rather than the tensor: what has to
         #     come back is the scale of the opening, which `fan_in` fixes.
-        assert _bilinear_weight(discriminator).norm().item() == pytest.approx(
+        assert discriminator.bilinear.weight.norm().item() == pytest.approx(
             opening, rel=0.1
         )
-
-
-# --------------------------------------------------------------------------
-# The readout. `AttentionDiscriminator` only.
-#
-# `decision` is a plain `nn.Linear(d_model, 1)` on a layer-normed input, which
-#     is what it was before two attempts to take the volume out of the
-#     listener's hands -- `log_score_scale`, then a fixed-gain BatchNorm. The
-#     second closed the collapse it was written for and stopped four rungs
-#     learning at all.
-#
-# What follows it is the mix, and `ScoreVolume.readout` standardises the mix.
-#     That is not the fixed gain coming back: the volume is a learned scalar
-#     downstream of the standardise rather than a pinned constant, and the
-#     bilinear path carries the decision through the opening so nothing has to
-#     be confident early. Standardising the *mix* rather than each branch is
-#     what leaves the escape of turning one path down open -- `mix_share`
-#     against `mix_alpha` is what watches it.
-#
-# Tests here run in train mode because everything downstream of the readout
-#     (dropout, stochastic depth) is mode-dependent, and because that is the
-#     mode the collapse happens in.
-# --------------------------------------------------------------------------
-
-def _quiet_cross_comparer(**overrides):
-    """
-    The attention arm with every dropout off, so that two calls on the same
-        input differ only through what the test changed. Without this the
-        train-mode masks are resampled between calls and an exact-invariance
-        assertion is measuring dropout.
-
-    Note the keys reach both slots: `_cross_comparer` routes them by name, and
-        the attention dropouts are in both tables under the same names.
-    """
-    return _cross_comparer(
-        referent_dim=320,
-        dropout=0.0,
-        cross_attention_dropout=0.0,
-        self_attention_dropout=0.0,
-        ff_inner_dropout=0.0,
-        ff_outer_dropout=0.0,
-        stochastic_depth=0.0,
-        **overrides,
-    ).train()
-
-
-def test_the_readout_is_a_plain_linear_layer():
-    """
-    The design, stated as what it is not.
-
-    No `log_score_scale`: that was attempt one at holding the volume, and it
-        collapsed on rungs 11 and 12 exactly as it did on the bare layer. No
-        `score_norm` and no `decision_gain`: that was attempt two, which closed
-        the collapse and cost the run its ability to bootstrap -- with the
-        readout standardised, rung 12 sits at accuracy 0.606 in
-        `diagnostics/bootstrap_probe.py` where the same module with a plain
-        readout reaches 0.863 and the bilinear baseline reaches 1.000.
-
-    The bias stays off, and since `485b38e` for a different reason than it was
-        turned off for. It used to be *dead*: the readout centred each game, and
-        a constant added to every candidate is exactly what a centring removes,
-        so it would have taken identically zero gradient. The centring is gone,
-        so it is now merely redundant -- it adds the same constant across
-        candidates that `score_bias` adds, one degree of freedom expressed by two
-        parameters free to drift against each other. One offset per module.
-    """
-    discriminator = _cross_comparer(referent_dim=320).discriminator
-
-    assert not hasattr(discriminator, "score_norm")
-    assert not hasattr(discriminator, "decision_gain")
-    assert isinstance(discriminator.decision, torch.nn.Linear)
-    assert discriminator.decision.out_features == 1
-    assert discriminator.decision.bias is None
-
-    # One scalar volume, downstream of the mix, and none on either branch.
-    assert discriminator.learns_score_scale
-    assert not hasattr(discriminator.bilinear, "log_score_scale")
-    assert not hasattr(discriminator, "log_mix_scale")
-    assert not hasattr(discriminator, "mix_scale")
-
-
-def test_a_bias_on_the_decision_head_is_redundant_with_the_offset():
-    """
-    Why `decision` has none. The measurement behind the docstring above, and it
-        changed with `485b38e`.
-
-    It used to be that a bias there could not move the score at all -- the
-        readout centred each game and a constant across candidates is exactly
-        what a centring removes. Now it moves the score by precisely the amount
-        `score_bias` would have to be moved to match it: the attention branch is
-        multiplied by `mix_weight` and read out through `score_scale`, so a bias
-        of `b` on the head is worth `score_scale * mix_weight * b` on the score,
-        the same constant for every candidate in the game. Two parameters, one
-        degree of freedom.
-    """
-    listener = _quiet_cross_comparer()
-    referents, messages = _inputs(listener)
-    discriminator = listener.discriminator
-    decision = discriminator.decision
-
-    with torch.no_grad():
-        before = listener(referents, messages)
-
-    revived = torch.nn.Linear(
-        decision.in_features, decision.out_features, bias=True
-    )
-    with torch.no_grad():
-        revived.weight.copy_(decision.weight)
-        revived.bias.fill_(11.0)
-    discriminator.decision = revived
-
-    with torch.no_grad():
-        after = listener(referents, messages)
-        expected = (
-            discriminator.score_scale * discriminator.mix_weight * 11.0
-        ).item()
-
-    shift = after - before
-    # A constant across the game, and the one `score_bias` also expresses.
-    assert shift.std(1, unbiased=False).max().item() < 1e-4
-    assert shift.mean().item() == pytest.approx(expected, rel=1e-3)
-
-
-def test_the_readout_opens_below_a_confident_wrong_answer():
-    """
-    What the opening magnitude has to be, now that nothing sets it by
-        construction.
-
-    The standardised readout opened at exactly `decision_gain`, and at 2.0 that
-        put untrained BCE at 1.07 -- deliberately worse than chance, on the
-        argument that there should be no setting at which sitting at ln 2 is
-        free. That argument cost the run its bootstrap: a listener that must
-        commit through a fixed volume from step zero is committing before the
-        message carries anything.
-
-    A plain readout opens where its initialisation puts it, which on rung 11's
-        width is sd ~0.59 and BCE ~0.73 -- just above ln 2, which is the
-        bilinear comparer's regime and the one that bootstraps. Bounded rather
-        than pinned, because the number is now an emergent property of
-        `nn.Linear`'s default init and the referent stack's post-norm output
-        scale, and pinning it would make this a change-detector for PyTorch.
-    """
-    listener = _quiet_cross_comparer()
-    with torch.no_grad():
-        scores = listener(*_inputs(listener))
-
-    loss = F.binary_cross_entropy_with_logits(scores, _labels()).item()
-
-    assert 0.2 < scores.std().item() < 1.5
-    assert math.log(2.0) < loss < 1.0
-
-
-def test_the_decision_head_reaches_both_its_branch_share_and_the_volume():
-    """
-    What the branch weights do, which since `485b38e` is both things.
-
-    They set their branch's magnitude, and the branches are mixed
-        unstandardised, so making one ten times louder changes what the score is
-        *made of* without `mix_logit` moving at all. That gap is the whole
-        reason `mix_share` is reported next to `mix_alpha`.
-
-    They now also set the volume, which they did not while the readout
-        standardised the mix -- this test asserted `decision_spread` held to
-        within 2% of its opening until that centring was removed. It moves now,
-        and that is the intended arrangement: nothing downstream divides a
-        rescale of a branch weight back out, so `decision_weight_norm` and
-        `bilinear_weight_norm` mean magnitude as well as direction and
-        `score_scale` is one voice among several rather than the only one.
-    """
-    listener = _quiet_cross_comparer()
-    discriminator = listener.discriminator
-    referents, messages = _inputs(listener)
-
-    with torch.no_grad():
-        before = listener(referents, messages)
-        opening_spread = discriminator.decision_spread
-        opening_share = discriminator.mix_share
-
-        discriminator.decision.weight.mul_(10.0)
-        after = listener(referents, messages)
-
-    assert not torch.allclose(after, before, rtol=1e-3, atol=1e-3)
-    assert discriminator.mix_share > opening_share
-    # Well short of 10x, and it should be: `mix_logit_init` opens `mix_weight`
-    #     at ~0.116, so a 10x on the attention branch alone reaches the mix
-    #     diluted. Measured at 1.63x. What matters is that it moves at all.
-    assert discriminator.decision_spread > 1.5 * opening_spread
-    # `mix_alpha` is the parameter's own reading, so it is the one thing here
-    #     that must *not* move: it is what `mix_share` is compared against.
-    assert discriminator.mix_alpha == pytest.approx(
-        discriminator.mix_weight.item()
-    )
-
-
-def test_the_listener_can_still_go_quiet():
-    """
-    The freedom the bootstrap needs, and the one thing that must survive every
-        rearrangement of this readout. A pair forced to commit through a fixed
-        volume from step zero is committing before the message carries
-        anything, which is what took four rungs down -- see this module's
-        docstring and docs/anecdotes.md.
-
-    It has been one scalar, then two matrices, and is one scalar again. What is
-        new is that going quiet is now free of consequence upstream: see
-        `test_the_gradient_reaching_the_message_does_not_see_the_volume`. So
-        this is the same freedom, with the reason it was taken away removed.
-    """
-    listener = _quiet_cross_comparer()
-    discriminator = listener.discriminator
-    referents, messages = _inputs(listener)
-
-    with torch.no_grad():
-        before = listener(referents, messages)
-        opening_spread = discriminator.decision_spread
-
-        discriminator.log_score_scale.fill_(math.log(1e-3))
-        quiet = listener(referents, messages)
-
-    assert quiet.std().item() < 0.01 * before.std().item()
-    assert discriminator.decision_spread < 0.01 * opening_spread
-
-
-def test_silencing_both_branches_silences_the_score():
-    """
-    The other half of the above, and why `bilinear_weight_norm` and
-        `decision_weight_norm` *are* volume columns on this arm.
-
-    This asserted the opposite between `7b10d47` and `485b38e`: with the readout
-        standardising the mix, turning both branches down to a thousandth left
-        the score coming back out at `score_scale` regardless, because
-        `standardise` divides by whatever spread survives and 1e-3 is nowhere
-        near its 1e-6 clamp. That is what made the branch norms unreadable as
-        volume, and it is gone.
-    """
-    listener = _quiet_cross_comparer()
-    discriminator = listener.discriminator
-    referents, messages = _inputs(listener)
-
-    with torch.no_grad():
-        before = listener(referents, messages)
-        discriminator.decision.weight.mul_(1e-3)
-        discriminator.bilinear.bilinear.weight.mul_(1e-3)
-        still_loud = listener(referents, messages)
-
-    assert still_loud.std(1, unbiased=False).mean().item() == pytest.approx(
-        1e-3 * before.std(1, unbiased=False).mean().item(), rel=0.05
-    )
-
-
-def test_a_constant_attention_readout_leaves_the_bilinear_path_deciding():
-    """
-    The attention path going flat is not the end state of a collapse: it is one
-        path saying nothing while the other still decides. A constant is the
-        same value for every candidate in a game, so it shifts the whole game's
-        scores together and cannot change which candidate wins -- the bilinear
-        path at `1 - mix_weight` keeps discriminating.
-
-    Note what changed and what did not. `standardise` used to send that constant
-        to exactly zero in the forward path; it now only does so in the
-        telemetry, so `path_agreement` still reads 0.0 while the score itself
-        carries the offset. Either way the offset is common to every candidate
-        in a game, so it cannot decide anything -- what is asserted is the
-        within-game spread, not that the winners match `live`. They need not:
-        silencing the attention path removes a real contribution to the score,
-        and would have under the old arrangement too.
-    """
-    listener = _quiet_cross_comparer()
-    discriminator = listener.discriminator
-
-    class _Constant(torch.nn.Module):
-        def forward(self, x):
-            return torch.full((*x.shape[:-1], 1), 3.7)
-
-    referents, messages = _inputs(listener)
-    with torch.no_grad():
-        live = listener(referents, messages)
-        discriminator.decision = _Constant()
-        flattened = listener(referents, messages)
-
-    # Within a game the constant is common to every candidate, so the spread
-    #     over candidates -- which is what decides -- survives it.
-    within_game = flattened - flattened.mean(1, keepdim=True)
-    assert within_game.std().item() > 0.1 * live.std().item()
-    assert discriminator.path_agreement == pytest.approx(0.0, abs=1e-6)
-
-
-def test_a_listener_with_no_spread_at_all_is_reported_rather_than_hidden():
-    """
-    The end state of a collapse, and what the columns say when it arrives.
-
-    The route there is the scalar again: with the readout standardising, zeroing
-        both branch weights leaves a mix that is identically zero, and
-        `standardise` divides it by its clamped 1e-6 floor rather than by
-        nothing -- so the mix stays at zero and `score_scale` is what decides
-        how loud zero is. Reporting is unchanged: zero spread, and a kurtosis of
-        NaN rather than a 0.0 that would read as "Gaussian, nothing to see".
-    """
-    listener = _quiet_cross_comparer()
-    discriminator = listener.discriminator
-
-    with torch.no_grad():
-        discriminator.log_score_scale.fill_(math.log(1e-12))
-        scores = listener(*_inputs(listener))
-
-    assert discriminator.decision_spread == pytest.approx(0.0, abs=1e-6)
-    assert math.isnan(discriminator.decision_kurtosis)
-
-
-def test_a_mix_with_no_spread_survives_the_readout_without_dividing_by_zero():
-    """
-    The clamp in `standardise`, reached from the forward path rather than
-        constructed by hand. Both branch weights at zero make every candidate in
-        a game score identically, which is the 0/0 the clamp exists for.
-    """
-    listener = _quiet_cross_comparer()
-    discriminator = listener.discriminator
-
-    with torch.no_grad():
-        discriminator.decision.weight.zero_()
-        discriminator.bilinear.bilinear.weight.zero_()
-        scores = listener(*_inputs(listener))
-
-    assert torch.isfinite(scores).all()
-    assert scores.std(dim=1, unbiased=False).max().item() == pytest.approx(
-        0.0, abs=1e-6
-    )
-
-
-def test_the_kurtosis_column_separates_the_shapes_the_spread_column_cannot():
-    """
-    Size and shape are different questions and the readout reports both,
-        because on the runs that mattered only one of them answered.
-
-    The column arrived with the standardised readout, where the escape was
-        specifically through the fourth moment -- under a pinned variance a
-        handful of outliers absorb the budget cheaply while the bulk sits at
-        sigmoid 0.5. That arbitrage went with the pin. What the column reads did
-        not: bimodal scores are what a discriminating listener produces and
-        floor at -2, heavy-tailed ones are what a listener with nothing to say
-        produces, and no amount of reading `decision_spread` distinguishes them.
-
-    Driven here with the two distributions directly rather than through
-        training, and `decision_spread` is asserted *identical* across both --
-        that is the point of the test. On the real runs the two conditions
-        overlapped on it (1.4-2.1 against 2.7-5.1) while kurtosis separated them
-        by sign.
-
-    `mix_logit` is pushed to saturation so the mix is the attention path
-        alone, which is what lets a shape injected at `decision` reach the
-        columns unchanged. Standardising does not disturb the measurement: both
-        columns are read off the final scores, kurtosis is invariant to a
-        positive affine, and `decision_spread` is asserted equal across the two
-        conditions rather than at a particular value.
-    """
-    listener = _quiet_cross_comparer()
-    discriminator = listener.discriminator
-    with torch.no_grad():
-        discriminator.mix_logit.fill_(50.0)
-    assert discriminator.mix_weight.item() == pytest.approx(1.0)
-
-    referents, messages = _inputs(listener)
-
-    class _Shape(torch.nn.Module):
-        def __init__(self, values):
-            super().__init__()
-            self.values = values
-
-        def forward(self, x):
-            return self.values.expand(*x.shape[:-1]).reshape(*x.shape[:-1], 1)
-
-    # Built *per game* rather than over the flattened batch, because
-    #     `standardise` works per game: a shape that lived only in the first and
-    #     last games would leave the rest flat and the spread column would then
-    #     be reading how many games had any variation at all.
-    bimodal = torch.where(torch.arange(N_OBJ) % 2 == 0, 1.0, -1.0)
-
-    # One candidate a game at each of +-7 and the rest at zero, matched to
-    #     `bimodal`'s standard deviation so only the shape differs.
-    heavy = torch.zeros(N_OBJ)
-    heavy[0] = 7.0
-    heavy[-1] = -7.0
-    heavy = heavy * (bimodal.std() / heavy.std())
-
-    readings = {}
-    for name, values in (("bimodal", bimodal), ("heavy", heavy)):
-        discriminator.decision = _Shape(values)
-        with torch.no_grad():
-            listener(referents, messages)
-        readings[name] = (
-            discriminator.decision_spread, discriminator.decision_kurtosis
-        )
-
-    assert readings["bimodal"][1] == pytest.approx(-2.0, abs=0.05)
-    assert readings["heavy"][1] > 5.0
-    assert readings["bimodal"][0] == pytest.approx(readings["heavy"][0], rel=1e-3)
 
 
 def test_the_readout_still_carries_gradient_to_the_message():
@@ -1283,7 +783,7 @@ def test_the_readout_still_carries_gradient_to_the_message():
         passing anything back. Normalising the readout must not be a way of
         doing that quietly.
     """
-    listener = _quiet_cross_comparer()
+    listener = _cross_comparer()
     referents, messages = _inputs(listener)
     messages = messages.clone().requires_grad_(True)
 
@@ -1469,11 +969,9 @@ def test_the_readout_scalars_are_elevated_and_the_weight_that_turns_is_not():
         the elevated rate to be able to calibrate inside one. `bilinear.weight`
         learns a direction and stays at the base rate.
 
-    `score_bias` is the one this arm never had. Its predecessor `mix_bias`
-        existed only on `AttentionDiscriminator` and had no config key at all,
-        so it sat at the base 1e-4: at birds' 194 steps an epoch that bounded
-        its entire thirty-epoch travel at 0.58, against a score whose opening
-        spread is 0.577.
+    `score_bias` is the one this arm never had. At the base 1e-4 and birds'
+        194 steps an epoch its entire thirty-epoch travel would be bounded at
+        0.58, against a score whose opening spread is 0.577.
 
     `mix_scale_lr` has no successor: one `ScoreVolume` per discriminator means
         one key. A leftover key would be worse than a leftover parameter here --
@@ -1518,45 +1016,32 @@ def test_the_readout_scalars_are_elevated_and_the_weight_that_turns_is_not():
     )
 
 
-def test_an_attention_rung_with_a_normalised_channel_asks_for_the_mix_weight_rate_and_nothing_else():
+def test_a_cross_attention_rung_with_a_normalised_channel_elevates_three_scalars_and_nothing_else():
     """
-    Which parameters are left in an elevated group, on the rung that has the
-        most of them. Four of the five keys cannot be told apart by their rate --
-        DEFAULT.toml opens the scaling scalars and `score_bias` together at
-        6e-3 -- so the assertion is on membership.
+    Which parameters are left in an elevated group, on the top rung. The keys
+        cannot be told apart by their rate -- DEFAULT.toml opens the scaling
+        scalars and `score_bias` together -- so the assertion is on membership.
 
-    `polarity_embedding` used to be a fifth key, and is not in an optimiser
+    `polarity_embedding` used to be a key here too, and is not in an optimiser
         group at all since 2026-09-28: the tag is frozen, so it is asserted
         below to be absent from every group.
 
-    This rung's `SenderTransformerLM` earns the speaker's two, its channel
-        scale being the second -- `log_logit_scale` takes `score_scale_lr`'s
-        rate, because it is the listener's volume's counterpart at the other end
-        of the channel. It exists only under
-        `normalise_logits`, which stopped being the default on 2026-09-05 and
-        which this rung's file does not set, so the flag is pinned on at the
-        call below: the subject here is which parameters land in an elevated
-        group, and dropping one of them silently would weaken the assertion
-        rather than fail it. The listener contributes three: its volume, its offset,
-        and the mixing *weight*. They are separate keys because they are
-        separate things -- `mix_logit` says what the score is made of,
-        `log_score_scale` how loudly it is stated, `score_bias` where it sits
-        against `train.py`'s fixed `lis_scores > 0` -- and only one of them was
-        ever accused of starving the speaker.
+    The speaker contributes its channel scale, `log_logit_scale`, which exists
+        only under `normalise_logits` -- pinned on at the call below, because
+        dropping it silently would weaken the assertion rather than fail it. The
+        listener contributes two: its volume and its offset. A third, the
+        attention discriminator's mixing weight, went with that class on
+        2026-10-01.
 
-    Exactly one `log_score_scale` and one `score_bias` on the whole listener,
-        and no `log_mix_scale` or `mix_bias`: `AttentionDiscriminator` composes
-        a bilinear path built with neither scalar, so the composed module
-        contributes neither a second volume nor a second offset, and the offset
-        it used to own itself now comes from `ScoreVolume` like the volume does.
+    Exactly one `log_score_scale` and one `score_bias` on the whole listener:
+        the cross-attention encoder owns neither.
     """
     config, pair, optimiser = _pair_and_optimiser(
-        "16_birds_attention_discriminator.toml",
+        "18_birds_receiver_cross_attention_lm.toml",
         receiver_discriminator=READOUT_ON,
         sender_language_model={"normalise_logits": True},
     )
-    wanted = config["optimiser"]["mix_logit_lr"]
-    assert wanted == config["optimiser"]["score_scale_lr"]
+    wanted = config["optimiser"]["score_scale_lr"]
     assert wanted != config["optimiser"]["lr"]
 
     volumes = [
@@ -1571,11 +1056,6 @@ def test_an_attention_rung_with_a_normalised_channel_asks_for_the_mix_weight_rat
     ]
     assert offsets == ["discriminator.score_bias"]
 
-    assert not any(
-        "log_mix_scale" in name or "mix_bias" in name
-        for name, _ in pair.receiver.named_parameters()
-    )
-
     named = {id(p): name for name, p in pair.named_parameters()}
     elevated = {
         named[id(p)]
@@ -1585,7 +1065,6 @@ def test_an_attention_rung_with_a_normalised_channel_asks_for_the_mix_weight_rat
 
     assert elevated == {
         "sender.language_model.log_logit_scale",
-        "receiver.discriminator.mix_logit",
         "receiver.discriminator.log_score_scale",
         "receiver.discriminator.score_bias",
     }
@@ -1597,6 +1076,7 @@ def test_an_attention_rung_with_a_normalised_channel_asks_for_the_mix_weight_rat
         for group in optimiser.param_groups
         for p in group["params"]
     )
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

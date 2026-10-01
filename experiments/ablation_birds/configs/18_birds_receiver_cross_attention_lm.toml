@@ -1,0 +1,130 @@
+# Rung 18: rung 16 with the cross-attention message encoder.
+#
+# `ReceiverCrossAttentionLM` reads the message with a decoder stack that
+# cross-attends into the candidate set, so its output is referent-conditioned
+# by construction. It replaces `ReceiverTransformerBidirectionalLM` and moves
+# nothing else. The discriminator is still `BilinearDiscriminator`, which reads
+# the stack's last position.
+#
+# **Last, because it can score without the message.** As rung 12, over the
+# causal speaker,
+# `lr_sweep_6_receiver_cross_attention_lm` measured
+# `train_shuffled_message_acc` climbing to ~0.65 (test ~0.58) against live
+# accuracy ~0.75 / ~0.63 on every birds arm.
+# That is the attention discriminator's shortcut, stronger -- that reached
+# ~0.55 / ~0.51 -- and this rung is last for the same reason the discriminator
+# was before it was removed: nothing above it inherits the confound.
+# Cross-attending the message into the candidate set gives the encoder a
+# summary of the set whatever the tokens say, and scoring against it is "pick
+# the cluster". Read `train_shuffled_message_acc` before accuracy here.
+#
+# **Moved and rebased on 2026-10-01.** This was rung 12, directly over the
+# receiver ViT; it now sits over the parallel speaker. The receiver block is
+# unchanged, so the stack is the one sweep 6 measured.
+#
+# **The encoders are parameter-matched and the listeners are not quite.** The
+# stack is 4,702,646 at the 6 blocks stated below, against the GRU's 4,687,872
+# (+0.3%) and rung 16's encoder's 4,673,344. `output_size` is 256 on both, so
+# the bilinear discriminator is 65,536 on both; `receiver.interfaces` grows from
+# 147,712 to 229,632 because this stack reads the candidates through an
+# interface of its own. The listener is 15,616,036 here against rung 16's
+# 15,504,814.
+
+name = "ablation_birds"
+
+[data]
+dataset = "../data/cub"
+
+[sender]
+feature_model = "BirdsViT"
+prototyper = "AttentionPrototyper"
+language_model = "SenderTransformerBidirectionalLM"
+
+[sender_language_model]
+# The two must equal *each other*, and neither has anything to do with the
+# vision model's width. `SenderTransformerLM` layer-norms the incoming
+# prototypes at its own `d_model` and separately rejects
+# `token_embedding_size != referent_embedding_size`, so these two are pinned
+# together -- but the referents arrive already at this `d_model`:
+# `builder.build_models` sets `sender_referent_width` from *this* table and the
+# speaker's adapter brings `final_feat_dim` to it, whatever the backbone emits.
+#
+# The comment this replaces said both keys "must equal
+# `sender_feature_model.d_model`". That was true of the speaker before the
+# adapter landed and has been false since; verified by building a ShapeWorld rung with a
+# 128-wide vision model under a 320-wide language model. It is worth naming
+# rather than deleting, because ShapeWorld's ViT2 is 128 wide now -- narrowed to
+# match `ResNet56` -- and under the old reading that narrowing would have
+# dragged this stack, and the whole capacity match against the GRU baseline,
+# down with it. Rung 3 still comes before this one, but for the ordering of the
+# ladder rather than for a width constraint.
+token_embedding_size = 320
+d_model = 320
+heads = 5    # head_dim 64, as everywhere
+
+# 7 blocks and `ff_inner_size = 512`, which together hold the speaker's language
+# model at 0.990x the GRU baseline's on this arm. The argument is at rung 8.
+layers = 7
+
+# The parallel arm, chosen by `language_model = "SenderTransformerBidirectionalLM"`
+# above rather than by `bidirectional`, which this class overrides. The blocks
+# run over the latent array unmasked and the message is its tail, read in one
+# shot. `layers` is rung 12's: the two arms are parameter-matched at equal
+# depth, so no depth change is needed to hold the match.
+
+[receiver]
+feature_model = "BirdsViT"
+language_model = "ReceiverCrossAttentionLM"
+
+[receiver_language_model]
+# 256 wide, 4 heads and a feedforward inner size of 320, unchanged since this
+# stack sat at rungs 11 and 12, so it is the one
+# `lr_sweep_6_receiver_cross_attention_lm` measured. The widths were set equal to
+# the since-removed attention discriminator's for want of a reason to favour
+# either. `layers` is argued for below.
+#
+# `token_embedding_size` *is* restated here: the listener's embedding table is
+# built from this key in `builder.py` and then adapted into `d_model`, so
+# matching the two keeps the adapter square.
+d_model = 256
+heads = 4
+ff_inner_size = 320
+token_embedding_size = 256
+# 6 blocks. This is where listener parameter parity with the GRU arm is paid
+# for: `DEFAULT.toml` restores `[receiver_language_model]` to
+# jayelm's 1 layer unidirectional at 1024 wide, which is 4,687,872 parameters,
+# and a block of this stack is 772,809, so 6 of them is 4,702,646 -- +0.3%. The
+# match got closer, not looser: this stack's `referent_adapter` is one of
+# `Receiver`'s interfaces now, and the GRU never had anything corresponding.
+# Parity is bought by deepening the arm under test rather than by inflating the
+# published baseline; see `layers` in `DEFAULT.toml`.
+#
+# DeepNorm's constants follow the `"deepnorm"` sentinel from this key, so the
+# depth change rescales `alpha` and `beta` on its own with nothing further to
+# set.
+#
+# Note this buys parameter parity and not interface parity: `output_size` is 256
+# here against the restored GRU's 1024, so the discriminator downstream is a
+# different size on the two arms.
+layers = 6
+
+# `true`, i.e. no causal mask, for the same reason the speaker's key is `false`:
+# neither is about masking for its own sake. The key is shared with
+# `ReceiverGRULM`, which passes it to `nn.GRU(bidirectional=)`;
+# `ReceiverCrossAttentionLM` turns it into `causal = not bidirectional` on the
+# stack that encodes the incoming message. Masking that stack left to right
+# models a listener that must commit to an interpretation of symbol 1 before
+# seeing symbol 5, which is not the listening task -- the message arrives whole.
+bidirectional = true
+
+[scheduler]
+epochs = 100
+
+[experiment]
+repeats = 1
+
+[slurm]
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

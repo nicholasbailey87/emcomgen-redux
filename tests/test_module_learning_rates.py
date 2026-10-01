@@ -53,8 +53,8 @@ BIRDS_FEATS = (3, 224, 224)
 
 RUNGS = all_rungs()
 
-# `(suffix, config key)` for every group `SPLIT_LEARNING_RATES` creates. Four
-#     keys against three scalar clip groups, and the mismatch is deliberate:
+# `(suffix, config key)` for every group `SPLIT_LEARNING_RATES` creates. Three
+#     keys against two scalar clip groups, and the mismatch is deliberate:
 #     `score_bias` takes a rate of its own but clips with the module whose
 #     output it modifies. See `SCALAR_GROUPS`. `polarity_embedding` was a fifth
 #     until 2026-09-28, when the speaker's tag was frozen.
@@ -66,7 +66,6 @@ SCALAR_OVERRIDES = (
     ("log_logit_scale", "logit_scale_lr"),
     ("log_score_scale", "score_scale_lr"),
     ("score_bias", "score_bias_lr"),
-    ("mix_logit", "mix_logit_lr"),
 )
 
 
@@ -187,7 +186,7 @@ def test_the_default_rates_are_flat_at_jayelms_own():
         two-tier version was: the magnitudes are chosen and the shape is the
         claim. A change that keeps the table flat is a retune; one that
         re-tiers it is a different position, and this is where a reader is told
-        which happened. It applies to all fourteen rungs at once either way.
+        which happened. It applies to every rung at once either way.
 
     One consequence worth knowing: `build_models` splits a scalar into its own optimiser group only `if lr != base_lr`,
         so every `*_lr` key that happens to equal the base is now inert. The
@@ -266,7 +265,15 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
             "BirdsViT": 5e-5,
             "ShapeWorldViT": 5e-5,
         },
-        "receiver_language_model": {"ReceiverCrossAttentionLM": 1e-5},
+        # The two Transformer encoder arms are unswept and at the base until
+        #     sweeps 6 and 7 report. The cross-attention encoder's 1e-5 is the
+        #     old sweep 6's, measured under the causal speaker, and stands until
+        #     sweep 9 re-measures it over the parallel one.
+        "receiver_language_model": {
+            "ReceiverTransformerAutoregressiveLM": 1e-4,
+            "ReceiverTransformerBidirectionalLM": 1e-4,
+            "ReceiverCrossAttentionLM": 1e-5,
+        },
         "sender_prototyper": {"AttentionPrototyper": 2e-5},
         # The causal arm at 2e-6 from sweep 4, on both datasets. The parallel
         #     arm is unswept and at the base until sweep 8 reports.
@@ -325,8 +332,8 @@ def test_the_implementation_rate_beats_the_group_rate_for_the_class_in_use():
 @pytest.mark.parametrize(
     "config_file,arm",
     [
-        ("11_shapeworld_receiver_cross_attention_lm.toml", "SenderTransformerAutoregressiveLM"),
-        ("13_shapeworld_sender_transformer_bidirectional_lm.toml", "SenderTransformerBidirectionalLM"),
+        ("13_shapeworld_receiver_transformer_bidirectional_lm.toml", "SenderTransformerAutoregressiveLM"),
+        ("15_shapeworld_sender_transformer_bidirectional_lm.toml", "SenderTransformerBidirectionalLM"),
     ],
 )
 def test_the_two_transformer_speaker_arms_take_separate_rates(config_file, arm):
@@ -357,6 +364,44 @@ def test_the_two_transformer_speaker_arms_take_separate_rates(config_file, arm):
         lr_of[id(p)]
         for name, p in built["pair"].sender.language_model.named_parameters()
         if p.requires_grad and not claimed(name, p)
+    }
+    assert seen == {rates[arm]}
+
+
+@pytest.mark.parametrize(
+    "config_file,arm",
+    [
+        ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "ReceiverTransformerAutoregressiveLM"),
+        ("14_birds_receiver_transformer_bidirectional_lm.toml", "ReceiverTransformerBidirectionalLM"),
+    ],
+)
+def test_the_two_transformer_listener_arms_take_separate_rates(config_file, arm):
+    """
+    The listener's counterpart of the test above: each arm of
+        `ReceiverTransformerLM` is keyed by its own class, so sweeps 6 and 7
+        tune them apart and the rate for the arm not in use reaches nothing.
+    """
+    flat = dict(parse_config.get_config()["optimiser"]["module_lr"])
+    rates = {
+        "ReceiverTransformerAutoregressiveLM": 3e-6,
+        "ReceiverTransformerBidirectionalLM": 7e-6,
+    }
+
+    config, built = _build(
+        config_file,
+        optimiser={
+            "module_lr": flat,
+            "implementation_lr": {"receiver_language_model": rates},
+        },
+    )
+
+    assert config["optimiser"]["resolved_module_lrs"]["receiver_language_model"] == rates[arm]
+
+    lr_of = _lr_by_id(built["optimiser"])
+    seen = {
+        lr_of[id(p)]
+        for p in built["pair"].receiver.language_model.parameters()
+        if p.requires_grad
     }
     assert seen == {rates[arm]}
 
@@ -474,7 +519,7 @@ def test_each_module_group_gets_the_rate_its_config_names(config_file):
     The scaling scalars are excluded on both sides. `claimed_separately` keeps
         them out of the module's optimiser group as well as out of its clip
         group, so a module at 3.2e-4 does not drag its scalars along with it and
-        `mix_logit_lr = lr` still means "no override".
+        `score_scale_lr = lr` still means "no override".
     """
     config, built = _build(config_file)
     pair = built["pair"]
@@ -533,7 +578,7 @@ def test_the_resolved_rates_are_written_back_for_save_args(config_file):
     "name,expected",
     [
         ("volume.log_score_scale", True),
-        ("mix_logit", True),
+        ("log_logit_scale", True),
         # The two that deliberately stay with their module.
         ("score_bias", False),
         ("polarity_embedding", False),

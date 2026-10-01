@@ -53,8 +53,8 @@ python diagnostics/comparer_probe.py --message scrambled --distractors varied
 ```
 
 `--config` takes any rung. It defaults to
-`experiments/ablation_birds/configs/16_birds_attention_discriminator.toml`, and works
-on the bilinear baseline too. `--lr` defaults to the config's own
+`experiments/ablation_shapeworld/configs/17_shapeworld_receiver_cross_attention_lm.toml`,
+and works on the bilinear baseline too. `--lr` defaults to the config's own
 `optimiser.lr`, so the timings below are the rate the real run learns at, not a
 convenience setting. About a minute on CPU for a thousand steps.
 
@@ -109,17 +109,12 @@ more general than the arbitrage that first motivated it. That arbitrage —
 outliers being cheap per unit of variance under a pinned variance budget — went
 with the pin.
 
-The bracketed `[module: …]` figures are the discriminator's own
-`decision_spread` and `decision_kurtosis`, the ones that reach `metrics.csv`.
-They are computed independently of the probe's, so a disagreement between the
-two would mean the logged column is wrong. `AttentionDiscriminator` adds a
-second bracket, `[mix a … agree …]`: how much of the score is the attention path
-and how far the two paths agree within a game. Read those two together — see
-docs/measurement.md.
-
-Note what `decision_spread` alone cannot do: it read 2.7–5.1 in the informative
-condition and 1.4–2.1 in the scrambled one — overlapping ranges, no verdict.
-That is why `decision_kurtosis` exists.
+The probe used to print two brackets of the attention discriminator's own
+columns beside these — its logged spread and kurtosis, and its mixing weight and
+path agreement. Both went with that class on 2026-10-01; the probe's own
+`score_sd` and `excess_kurt` remain. Note what the spread alone could not do: it
+read 2.7–5.1 in the informative condition and 1.4–2.1 in the scrambled one —
+overlapping ranges, no verdict. That is why the kurtosis reading exists.
 
 ### What this has established
 

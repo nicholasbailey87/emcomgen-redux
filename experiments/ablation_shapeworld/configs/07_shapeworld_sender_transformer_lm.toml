@@ -20,7 +20,7 @@
 #
 # The GRU baseline is autoregressive too, so this rung moves the language model's
 # architecture and not its generation regime. The parallel arm, which moves only
-# the regime, is the top rung: 15 on ShapeWorld, 16 on birds.
+# the regime, comes later: rung 15 on ShapeWorld, 16 on birds.
 #
 # It also no longer moves *how the concept arrives*, which it silently used to.
 # `SenderGRULM` builds its initial hidden state from the prototypes through
@@ -107,7 +107,7 @@ layers = 7
 # moves the language model's architecture and nothing else. The parallel arm,
 # `SenderTransformerBidirectionalLM`, would move the generation regime at the
 # same time, and whatever the combination measured could not be attributed to
-# either. It comes later instead -- rungs 13 and 14 -- where it
+# either. It comes later instead -- rungs 15 and 16 -- where it
 # moves the regime alone. The two arms are the same blocks at the same size and
 # differ by `token_embedding` alone, which only the causal arm needs because
 # only it reads a symbol back.

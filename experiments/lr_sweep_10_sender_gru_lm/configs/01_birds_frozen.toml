@@ -1,0 +1,84 @@
+# lr_sweep_10_sender_gru_lm: what learning rate the GRU speaker, `SenderGRULM`,
+# wants on the CUB baseline.
+#
+# **Sweep 9 until 2026-10-01**, `lr_sweep_9_sender_gru_lm`, renumbered when the
+# chain was re-cut; rung 1 records why. Still outside the chain: it copies
+# rung 2 and nothing in sweeps 1-9 waits on it. Its results on the cluster are
+# filed under the old name.
+#
+# Six arms on birds, smallest rate first, copying ablation rung 2.
+# `[optimiser.implementation_lr.sender_language_model] SenderGRULM` is frozen at
+# 1e-12 in `01`, a control, and moves over 2e-6, 1e-5, 5e-5, 1e-4 and 2e-4 in
+# `02`-`06`. Nothing else differs between the arms, and nothing else differs
+# from rung 2. 30 epochs, one repeat.
+#
+# **Why it exists.** Rung 8 compares `SenderTransformerAutoregressiveLM` at the
+# 2e-6 `lr_sweep_4` measured against this GRU at 1e-4, which is jayelm's rate
+# and was tuned on his setup -- `Conv4` on ShapeWorld and an ImageNet-pretrained
+# `ResNet18` on birds -- not on this one. One side of that step is tuned here
+# and the other is not, which is the confound every rung is built to avoid.
+#
+# **And a question sweep 4 raised.** A frozen Transformer speaker reached
+# `test_same_acc` 0.672 against 0.704 at its best rate, and higher rates stopped
+# its vocabulary from growing. If the GRU also does best near frozen, that is a
+# property of speaker language models in this game, not of the Transformer.
+# The frozen arm is here to answer that directly, and the grid runs a decade
+# below the inherited 1e-4 for the same reason, and one step above it so that
+# 1e-4 is not an edge.
+#
+# 1e-12 rather than 0, because `validate_config` requires a positive rate:
+# AdamW moves a parameter by at most ~`lr` a step, so over ~4,700 steps no
+# weight travels more than ~5e-9. It freezes the whole `sender_language_model`
+# group, `init_h` included, so the prototypes reach the GRU through a fixed
+# random projection. `log_logit_scale` is its own group at `logit_scale_lr`
+# 2e-3 on every arm and still learns.
+#
+# **Birds only**, as sweeps 4, 7 and 8 are: on ShapeWorld when an arm escapes the
+# colour-only minimum is a roll of the uniform mixture more than a function of
+# the rate. The class carries one rate on both datasets, and the GRU speaker is
+# 6,813,499 on ShapeWorld against 6,822,649 here.
+#
+# **Outside the serial chain.** Rung 2's other components are the ones sweep 1
+# already settled (`ResNet18` at 1e-4), plus the listener's GRU and bilinear
+# discriminator at the base, so nothing here waits on sweeps 5-8. The cost runs
+# the other way: sweeps 1-3 were all measured with this GRU at 1e-4, so if its
+# rate moves a long way, those rates were tuned against a speaker the ladder no
+# longer runs, and are owed a re-check.
+#
+# **What to read.** `test_acc` and `test_same_acc` over the last five epochs,
+# and `test_unique_message_count` beside them -- the column that separated sweep
+# 4's arms after epoch 10 when accuracy did not. Then `train_logit_prior_share`
+# and `train_realised_survival` for whether a high arm is collapsing onto a
+# prior, which is how sweep 4's first pass died.
+#
+# `epochs` and `repeats` are restated in every file: `scripts/job_utils.py` reads
+# both straight out of the file rather than out of the merged config. `[slurm]`
+# is read from the *first* config in the folder only, sorted by filename, so the
+# block below governs the whole array.
+#
+# ---
+#
+# **This arm: `SenderGRULM` at 1e-12 (frozen) on CUB**, copying ablation rung 02.
+
+name = "lr_sweep_10_sender_gru_lm"
+
+[data]
+dataset = "../data/cub"
+
+[optimiser.implementation_lr.sender_language_model]
+# The one key this sweep moves. Every other rate is DEFAULT.toml's.
+SenderGRULM = 1e-12
+
+[scheduler]
+epochs = 30
+
+[experiment]
+repeats = 1
+
+[slurm]
+# Rung 2's allowance, which is sized for a 100-epoch birds run; at 30 epochs on
+# the CNN trunks (`lr_sweep_1_cnn` measured ~3.4 min/epoch) the margin is wide.
+time = "24:00:00"
+cpus_per_task = 6
+gpus_per_task = 1
+mem_gb = 24

@@ -1,44 +1,33 @@
 """
-Tests for the attention listener's architecture, in code/models/receiver.py.
+Tests for the cross-attention listener's architecture, in
+code/models/receiver.py.
 
 Runnable without pytest:  python tests/test_cross_attention_comparer.py
 
-`ReceiverCrossAttentionLM` and `AttentionDiscriminator` are the two halves of
-what used to be `TransformerCrossAttentionComparer`, and this file follows the
+`ReceiverCrossAttentionLM` is the message half of what used to be
+`TransformerCrossAttentionComparer`; the scoring half became an attention
+discriminator, which was removed on 2026-10-01, and the encoder now feeds
+`BilinearDiscriminator` like every other language model. This file follows the
 whole path because the claims below are claims about the path. What is here is
 the *shape*: which stage can see what, and whether the residual stream stays
 where DeepNorm's constants assume it is. Everything about scale is in
 test_score_scale.py, and the two-slot contract itself is in
 test_receiver_slots.py.
 
-Four claims, each of which failed in some version this replaces and each of
-which cost something measurable on the ablation's rungs 11 and 12.
+The message reads the candidate set. That is the design -- the meaning it
+refines is discriminative rather than absolute -- and it is also the shortcut:
+a set summary lets the listener score "which cluster" whatever the tokens say,
+which `lr_sweep_6_receiver_cross_attention_lm` measured and which is why this
+encoder is the top rung. Both halves are pinned below.
 
-The message reads the candidate set. Without that the message stack sees the
-message alone and can only build an absolute meaning, when the task is
-discriminative.
-
-The message reaches the scored stream in every referent block, not once. The
-structure before this one crossed it in exactly once, so the only thing that
-could separate two candidates was the difference between their attention weights
-over the message -- a small perturbation about a near-flat softmax, and second
-order at initialisation where the bilinear comparison's message term is first
-order. Rungs 11 to 14 sat at 0.5000 accuracy for thirty epochs.
-
-Every stage joins its input back on. An earlier `cross_attention` had no
-residual, so a candidate reached the score only through near-uniform attention
-weights: between-object variance was 41.5% of the total going into that stage
-and 22.1% coming out. That is rung 11 taking four times as long as the baseline
-to become informative.
-
-And the residuals are post-normed rather than added bare. `MHAttention` already
+The residuals are post-normed rather than added bare. `MHAttention` already
 RMS-normalises its output, so `x + attn(x)` sums two tensors of norm `sqrt(d)`
 and the stream grows by `sqrt(2)` a stage.
 
 Nothing here reads the referent ordering, and `test_no_stage_can_read_the_
-referent_ordering` is the test that says so: the referent stack is built
-`causal=False`, and a causal mask over candidates would let a score be read off
-a position rather than off the message.
+referent_ordering` is the test that says so: the candidate set is
+cross-attention memory with no positional embedding, and anything able to index
+its sequence axis could score off a position rather than off the message.
 """
 
 import sys
@@ -55,18 +44,18 @@ from _bootstrap import build_listener, rung
 REFERENT_DIM = 320
 BATCH, N_OBJ = 32, 20
 
-CROSS_RUNG = "15_shapeworld_attention_discriminator.toml"
+CROSS_RUNG = "17_shapeworld_receiver_cross_attention_lm.toml"
 
 
 def _listener(language_model_overrides=None, discriminator_overrides=None):
     """
-    The attention arm end to end: `ReceiverCrossAttentionLM` feeding
-        `AttentionDiscriminator`, composed the way `Receiver` composes them and
-        built from rung 15, which is the config that states widths for both.
+    The cross-attention arm end to end: `ReceiverCrossAttentionLM` feeding
+        `BilinearDiscriminator`, composed the way `Receiver` composes them and
+        built from rung 17.
     """
     return build_listener(
         "ReceiverCrossAttentionLM",
-        "AttentionDiscriminator",
+        "BilinearDiscriminator",
         REFERENT_DIM,
         config_file=rung(CROSS_RUNG),
         language_model_overrides=language_model_overrides,
@@ -137,56 +126,26 @@ def _stages(listener, referents, messages):
     memory = record(
         "memory", listener.deliver(R.DISCRIMINATOR_MESSAGE, encoded)
     )
-    refined = record(
-        "refined referents",
-        discriminator.referent_decoder(scored_referents, memory),
+    # The bilinear form by hand, before the readout's two scalars: the last
+    #     slot, projected, dotted with each candidate and calibrated.
+    projected = discriminator.bilinear(memory[:, -1, :])
+    record(
+        "bilinear score",
+        torch.einsum("ijh,ih->ij", (scored_referents, projected))
+        / discriminator.referent_embedding_size ** 0.5,
     )
-    record("attention readout", discriminator.decision(refined).squeeze(-1))
-    # The same two tensors the stack reads, which is what one declared width
-    #     per input buys: this branch is no longer a second consumer of the
-    #     referents at a width of its own.
-    record("bilinear readout", discriminator.bilinear(scored_referents, memory))
     return seen
-
-
-def _object_share(scores_or_states):
-    """
-    How much of the variation is between the objects of a game rather than
-        between games. The quantity the missing residual was destroying.
-    """
-    within = (
-        scores_or_states - scores_or_states.mean(dim=1, keepdim=True)
-    ).std()
-    between = scores_or_states.mean(dim=1).std()
-    return (within / between).item()
 
 
 def test_the_staged_walkthrough_matches_the_forward_pass():
     """
-    The readout is `decision`, then the mix. `decision` alone used to be the
-        whole of it -- and before that `F.normalize(decision.weight)` against a
-        learnable `score_scale`, and then `decision_layer_norm -> decision`; see
-        test_score_scale.py for the first change and docs/architecture.md for
-        the second.
+    The path, rebuilt from its stages: encode the message against the
+        candidates, deliver it through the message interface, take the last
+        slot, score bilinearly, then the readout -- multiply by `score_scale`,
+        add `score_bias`. Nothing else.
 
-    What follows it now is the interpolation with the bilinear path and then the
-        readout, and this is the test that pins that arithmetic: mix the two at
-        `mix_weight`, multiply by `score_scale`, add a bias. Nothing else.
-
-    Note the order, because each step is somewhere it has to be. The branches
-        are *not* standardised individually -- that would make `mix_weight` mean
-        composition exactly and close the escape `mix_share` watches. `485b38e`
-        removed the `standardise` that used to sit on the mix, so what is left
-        is a volume and an offset, both from `ScoreVolume.readout`. The offset
-        is after the volume, so that it is an offset on the score rather than
-        one the volume rescales, and it is also why `decision` carries no bias
-        -- one constant across candidates per module. It was `mix_bias`, owned
-        by this module alone; it is `score_bias` now, on both discriminators.
-
-    There was briefly a `BatchNorm1d(1)` and a fixed gain in this position,
-        which had to be rebuilt on the same flattening `forward` used and left
-        this test sensitive to call order through the running estimates. Both
-        are gone. See test_score_scale.py for the whole sequence.
+    The offset is after the volume, so that it is an offset on the score rather
+        than one the volume rescales. See test_score_scale.py.
     """
     # Both readout scalars pinned on: they stopped being the default on
     #     2026-09-11 with `loss = "hinge"`, and the arithmetic this test walks
@@ -200,13 +159,9 @@ def test_the_staged_walkthrough_matches_the_forward_pass():
 
     with torch.no_grad():
         stages = _stages(listener, referents, messages)
-        weight = discriminator.mix_weight
-        mixed = (
-            (1.0 - weight) * stages["bilinear readout"]
-            + weight * stages["attention readout"]
-        )
         rebuilt = (
-            discriminator.score_scale * mixed + discriminator.score_bias
+            discriminator.score_scale * stages["bilinear score"]
+            + discriminator.score_bias
         )
         actual = listener(referents, messages)
 
@@ -222,7 +177,8 @@ def test_the_encoded_message_depends_on_the_candidate_set():
     The point of the message stack's cross-attention: the message's meaning is
         allowed to be discriminative rather than absolute. Nothing else in the
         suite would notice if that branch were removed, because the module would
-        still run and still score.
+        still run and still score. It is also the route of the clustering
+        shortcut, which is why this encoder is the top rung.
     """
     listener = _listener()
     referents, messages = _inputs(listener)
@@ -254,36 +210,14 @@ def test_the_score_still_depends_on_the_message():
     assert (after - before).abs().mean().item() > 0.01
 
 
-def test_referent_identity_survives_to_the_readout():
-    """
-    The residuals through the referent stack, measured as the thing they
-        protect. Without one on the cross-attention, that stage roughly halved
-        the between-object share of the variance -- 0.415 in, 0.221 out -- and
-        the score inherited the loss.
-
-    Measured on the attention path's own readout rather than on the returned
-        score, and that is not a softening. `standardise` sets the
-        between-object spread of every game to one by construction, so a
-        measurement taken after it would report the same number whatever the
-        stack did, and would pass a comparer that had destroyed the signal
-        entirely.
-    """
-    listener = _listener()
-    referents, messages = _inputs(listener)
-    with torch.no_grad():
-        stages = _stages(listener, referents, messages)
-
-    entering = _object_share(stages["scored referents"])
-    leaving = _object_share(stages["attention readout"].unsqueeze(-1))
-
-    assert leaving > 0.6 * entering
-
-
 def test_the_scores_are_not_a_function_of_one_referent_alone():
     """
-    The referent stack's self-attention is the only place a score may depend on
-        the rest of the set, and it is what a criterion like "the odd one out"
-        would need. Perturbing one candidate must move the others' scores.
+    The message stack's cross-attention is the only place a score may depend on
+        the rest of the set: every candidate is read by the encoded message, so
+        perturbing one moves what every other is scored against. That is what a
+        criterion like "the odd one out" would need, and also what "pick the
+        cluster" needs. `BilinearDiscriminator` alone scores each candidate
+        independently; this is the encoder's doing.
     """
     listener = _listener()
     referents, messages = _inputs(listener)
@@ -309,9 +243,7 @@ def test_no_stage_can_read_the_referent_ordering():
         sequence axis could score perfectly while ignoring the message.
 
     Permuting the candidates must therefore permute the scores and change
-        nothing else. Note this now covers the mix as well: `standardise` works
-        over the candidate axis, so a reduction there that was not permutation
-        equivariant would show up here.
+        nothing else.
     """
     listener = _listener()
     referents, messages = _inputs(listener)
@@ -332,7 +264,6 @@ def test_no_stage_can_read_the_referent_ordering():
     "stage",
     [
         "encoded message",
-        "refined referents",
     ],
 )
 def test_the_residual_stream_does_not_grow(stage):
@@ -360,29 +291,23 @@ def test_a_bare_add_would_have_grown_it():
     referents, messages = _inputs(listener)
     with torch.no_grad():
         stages = _stages(listener, referents, messages)
-        adapted = stages["scored referents"]
-        memory = stages["memory"]
-        attended = listener.discriminator.referent_decoder.blocks[
+        stream = stages["encoded message"]
+        candidates = stages["encoder referents"]
+        attended = listener.language_model.message_decoder.blocks[
             0
-        ].cross_attention(adapted, memory, memory)
-        bare = adapted + attended
+        ].cross_attention(stream, candidates, candidates)
+        bare = stream + attended
 
     assert bare.pow(2).mean(dim=-1).sqrt().mean().item() > 1.3
 
 
 def test_the_memory_reaches_the_scored_stack_normalised():
     """
-    A post-norm stack normalises its own stream and never its memory, so
-        whatever the language model hands over arrives at whatever magnitude it
-        happens to have. `message_decoder`'s last post-norm used to make that
-        safe by accident; a GRU state would not, and the slot is swappable now.
-        Hence the norm on the message interface, which makes it safe on
-        purpose. It was this module's own `memory_layer_norm` until the
-        interfaces were hoisted into `Receiver`; the same operation, one stage
-        upstream, and unconditional there rather than exempted from a
-        `normalise_score` by hand -- that key is gone, and what replaced it,
-        `scale_score` and `bias_score`, reaches nothing but the two readout
-        scalars.
+    Whatever the language model hands over arrives at whatever magnitude it
+        happens to have. `message_decoder`'s last post-norm makes that safe by
+        accident; a GRU state would not, and the slot is swappable. Hence the
+        norm on the message interface, which makes it safe on purpose and
+        unconditionally.
     """
     listener = _listener()
     referents, messages = _inputs(listener)
@@ -397,39 +322,27 @@ def test_the_memory_reaches_the_scored_stack_normalised():
 # Construction.
 # --------------------------------------------------------------------------
 
-def test_each_depth_key_sizes_its_own_stack_and_nothing_else():
+def test_the_depth_key_sizes_the_stack():
     """
-    One key was once a total, split inside a single module between two stacks,
-        so asking for one more block moved two. Now each stack's depth is the
-        `layers` key of its own config table, which is what stops that
-        recurring -- and is the same key `ReceiverGRULM` reads for its own
-        depth, on the same argument that these are different modules.
+    The stack's depth is `[receiver_language_model] layers`, the same key
+        `ReceiverGRULM` reads for its own depth.
     """
-    listener = _listener(
-        language_model_overrides=dict(layers=2),
-        discriminator_overrides=dict(layers=5),
-    )
+    listener = _listener(language_model_overrides=dict(layers=2))
 
     assert len(listener.language_model.message_decoder.blocks) == 2
-    assert len(listener.discriminator.referent_decoder.blocks) == 5
 
 
-def test_each_stack_gets_deepnorm_for_its_own_depth():
+@pytest.mark.parametrize("layers", [2, 5])
+def test_the_stack_gets_deepnorm_for_its_own_depth(layers):
     """
     `decoder=True`, because these blocks have three residual branches rather
-        than two, and at its own depth, because the stacks are sized
-        independently. Resolving both from one number would scale the shallower
-        stack's branches as if it were the deeper one.
+        than two -- self-attention, cross-attention into the candidates, and a
+        feedforward.
     """
-    listener = _listener(
-        language_model_overrides=dict(layers=2),
-        discriminator_overrides=dict(layers=5),
-    )
+    listener = _listener(language_model_overrides=dict(layers=layers))
 
-    assert listener.language_model.alpha == pytest.approx((3 * 2) ** 0.25)
-    assert listener.language_model.beta == pytest.approx((12 * 2) ** -0.25)
-    assert listener.discriminator.alpha == pytest.approx((3 * 5) ** 0.25)
-    assert listener.discriminator.beta == pytest.approx((12 * 5) ** -0.25)
+    assert listener.language_model.alpha == pytest.approx((3 * layers) ** 0.25)
+    assert listener.language_model.beta == pytest.approx((12 * layers) ** -0.25)
 
 
 def test_stochastic_depth_is_suppressed_only_at_a_single_layer():
@@ -437,8 +350,7 @@ def test_stochastic_depth_is_suppressed_only_at_a_single_layer():
     `depthwise_linear_stochastic_depth` spreads the rate linearly across
         layers, so a one-layer stack would get a single rate of 0.0 anyway. It
         used to be gated on `layers // 2 > 1`, which silenced it at three layers
-        -- a live depth for this module. Asked of each stack separately, so a
-        one-block stack beside a deep one still gets nothing.
+        -- a live depth for this module.
 
     The rate is passed in rather than inherited from the config, which it used
         to be. `DEFAULT.toml` set 0.1 everywhere when this was written and now
@@ -450,59 +362,28 @@ def test_stochastic_depth_is_suppressed_only_at_a_single_layer():
     """
     rate = dict(stochastic_depth=0.1)
 
-    single = _listener(
-        language_model_overrides=dict(layers=1, **rate),
-        discriminator_overrides=dict(layers=4, **rate),
-    )
+    single = _listener(language_model_overrides=dict(layers=1, **rate))
     assert single.language_model.stochastic_depth == 0.0
-    assert single.discriminator.stochastic_depth > 0.0
 
     for layers in (2, 3, 4):
-        deep = _listener(
-            language_model_overrides=dict(layers=layers, **rate),
-            discriminator_overrides=dict(layers=layers, **rate),
-        )
+        deep = _listener(language_model_overrides=dict(layers=layers, **rate))
         assert deep.language_model.stochastic_depth > 0.0
-        assert deep.discriminator.stochastic_depth > 0.0
 
 
-def test_the_referent_stack_is_not_causal_and_reads_the_message_first():
+def test_the_candidate_set_is_read_without_positions():
     """
-    Two settings that `DecoderBlock` defaults the other way, because its default
-        caller is a speaker generating a sequence.
-
-    `causal=False` is what `test_no_stage_can_read_the_referent_ordering` above
-        measures the consequence of; this is the same claim read off the
-        construction, so a regression names itself rather than showing up as a
-        permutation failure.
-
-    `cross_first` puts the message ahead of the candidates reading each other,
-        so what the self-attention compares is message-informed. That
-        self-attention is the route to the concept game's clustering shortcut,
-        which is reachable with the message scrambled entirely.
+    The construction half of the ordering guard. The message stream runs rotary
+        -- its axis is an order -- but the cross-attention into the candidates
+        carries no positional embedding, so no block can index the candidate
+        axis. `test_no_stage_can_read_the_referent_ordering` measures the
+        consequence; this names the setting.
     """
     listener = _listener()
-
-    for block in listener.discriminator.referent_decoder.blocks:
-        assert block.causal is False
-        assert block.self_attention.causal is False
-        assert block.cross_first is True
 
     for block in listener.language_model.message_decoder.blocks:
         assert block.cross_first is False
-
-
-def test_the_referent_stack_carries_no_positional_information():
-    """
-    The other half of the ordering guard. A rotary embedding on the candidate
-        axis would let a block index its own sequence even without a mask.
-    """
-    listener = _listener()
-    referent_decoder = listener.discriminator.referent_decoder
-
-    assert referent_decoder.absolute_position_embedding is None
-    for block in referent_decoder.blocks:
-        assert block.rotary_embedding is None
+        assert block.cross_attention.rotary_embedding is None
+        assert block.self_attention.rotary_embedding is not None
 
 
 def test_reset_parameters_leaves_nothing_trained():
