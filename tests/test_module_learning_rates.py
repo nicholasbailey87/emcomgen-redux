@@ -265,17 +265,15 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
             "BirdsViT": 5e-5,
             "ShapeWorldViT": 5e-5,
         },
-        # One rate per side since 2026-10-01: 5e-5 for every listener language
-        #     model and 2e-6 for every speaker one. See DEFAULT.toml.
         "receiver_language_model": {
-            "ReceiverGRULM": 5e-5,
+            "ReceiverGRULM": 1e-4,
             "ReceiverTransformerAutoregressiveLM": 5e-5,
             "ReceiverTransformerBidirectionalLM": 5e-5,
             "ReceiverCrossAttentionLM": 5e-5,
         },
         "sender_prototyper": {"AttentionPrototyper": 2e-5},
         "sender_language_model": {
-            "SenderGRULM": 2e-6,
+            "SenderGRULM": 5e-5,
             "SenderTransformerAutoregressiveLM": 2e-6,
             "SenderTransformerBidirectionalLM": 2e-6,
         },

@@ -104,15 +104,22 @@
 #     [data] flip / affine / mixup            off   -> on     ShapeWorld only
 #
 # `[birds.data]` pins the three augmentations back off, so the birds half takes
-# the rate, the warm-up and the channel only. The listener's five module rates
-# moved with the base, so the whole `[optimiser.module_lr]` table is flat at
-# 1e-4.
+# the rate, the warm-up and the channel only.
+#
+# Two of those have moved again since: `normalise_logits` is back to true, and
+# `silhouette_p_receiver` is 0.3 from 2026-09-12 (`silhouette_p_sender` 0.0); see
+# DEFAULT.toml for both. The module rates are no longer flat at the base
+# either: each backbone and language model takes its own rate from
+# `[optimiser.implementation_lr]` in DEFAULT.toml.
 #
 # **Read no ShapeWorld `train_acc` across that date.** With `mixup_alpha` on,
 # `per_game_accuracy` scores against `lis_y > 0.5` -- the dominant source of each
 # blend -- so it is a different quantity from the one every recorded ablation
 # trace holds, and from `test_acc` in the same row. `train_loss` and the eval
 # splits are unaffected; eval is never mixed and never silhouetted.
+#
+# **Historical, from 2026-09-05; the premise no longer holds.** Every ViT now runs
+# at 5e-5, half the rate this paragraph is about.
 #
 # **The rate carries a known risk and it is being taken deliberately.** On the
 # 2026-08-30 ladder rung 3 collapsed at epoch 10 -- `logit_prior_share` 0.891 ->
@@ -129,15 +136,7 @@
 # and 9, and if they go, that is the evidence for the threshold rather than
 # against the ladder.
 #
-# The silhouette rate is not settled either, and the `silhouette_titration`
-# experiment is what settles it: five copies of this rung at 0.1 through 0.5,
-# read on the `md_shape` / `md_color` breakdown. Until it reports, a ladder
-# result at 0.5 is a result at a provisional setting -- and 0.5 is the rate that
-# titration found leaves shape at chance in nine runs of ten, so a ladder that
-# ranks nothing may be ranking nothing for that reason and not for an
-# architectural one.
-#
-# **Seven configs here, one per ShapeWorld rung, and no variants.** Half-rate and
+# **Nine configs here, one per ShapeWorld rung, and no variants.** Half-rate and
 # silhouette-rate forks of rungs 3 and 8 lived here through August 2026; the
 # half-rate one is now DEFAULT.toml's `[optimiser] lr` and the silhouette ones
 # are the `silhouette_titration` experiment, so the ladder is back to one file
