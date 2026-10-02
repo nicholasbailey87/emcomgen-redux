@@ -2,7 +2,8 @@
 #
 # ResNet56 on both agents, AveragePrototyper, SenderGRULM,
 # ReceiverGRULM, BilinearDiscriminator. This is the reference point every other
-# rung is measured against, and it overrides nothing.
+# rung is measured against. It overrides nothing but the silhouetting in
+# `[data]`, which every rung carries.
 #
 # The ladder, in order. Each rung is the one below it plus exactly one change:
 #
@@ -108,7 +109,7 @@
 #
 # Two of those have moved again since: `normalise_logits` is back to true, and
 # `silhouette_p_receiver` is 0.3 from 2026-09-12 (`silhouette_p_sender` 0.0); see
-# DEFAULT.toml for both. The module rates are no longer flat at the base
+# DEFAULT.toml for both. This ladder overrides both to 0.0; see `[data]` below. The module rates are no longer flat at the base
 # either: each backbone and language model takes its own rate from
 # `[optimiser.implementation_lr]` in DEFAULT.toml.
 #
@@ -152,6 +153,13 @@
 # is governed by rung 2's block, not this one.
 
 name = "ablation_shapeworld"
+
+# Silhouetting off on every rung of this ladder, overriding DEFAULT.toml's
+# `silhouette_p_receiver = 0.3`. Set in all nine files, so each rung still
+# differs from the one below it by one architectural change.
+[data]
+silhouette_p_sender = 0.0
+silhouette_p_receiver = 0.0
 
 [scheduler]
 epochs = 100
