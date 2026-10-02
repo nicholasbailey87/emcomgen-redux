@@ -29,7 +29,7 @@ layers = 7
 SenderTransformerAutoregressiveLM = 1e-5
 
 [scheduler]
-epochs = 30
+epochs = 100
 
 [experiment]
 repeats = 1
