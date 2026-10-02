@@ -777,6 +777,43 @@ def test_a_vit_name_crossed_with_the_other_dataset_is_rejected(
         parse_config.validate_config(config)
 
 
+def test_weight_drift_measures_distance_from_the_snapshot():
+    """
+    `drift_*` is zero against its own snapshot, NaN without one, and reads the
+    relative distance moved -- including a pure rotation, which leaves the
+    `weight_*` column beside it exactly where it was.
+    """
+    pair = _pair_with_gradients()
+    initial = train.snapshot_weights(pair)
+
+    still = train.weight_drift(pair, initial)
+    assert tuple(still) == models.builder.GROUP_NAMES
+    # NaN where there is nothing to measure against: an empty group, or a
+    #     scalar like `log_score_scale` that starts at zero.
+    for name, params in models.builder.group_parameters(pair):
+        undefined = not any(p.detach().abs().sum() > 0 for p in params)
+        assert math.isnan(still[name]) is undefined, f"{name}: {still[name]}"
+        if not undefined:
+            assert still[name] == 0.0, f"{name}: {still[name]}"
+
+    assert all(math.isnan(d) for d in train.weight_drift(pair, None).values())
+
+    # Negate the listener's language model: its norm is unchanged and its
+    #     distance from init is exactly twice its size.
+    group = dict(models.builder.group_parameters(pair))["receiver_language_model"]
+    before = train.weight_norms(pair)["receiver_language_model"]
+    with torch.no_grad():
+        for p in group:
+            p.neg_()
+
+    assert math.isclose(
+        train.weight_norms(pair)["receiver_language_model"], before, rel_tol=1e-6
+    )
+    moved = train.weight_drift(pair, initial)
+    assert math.isclose(moved["receiver_language_model"], 2.0, rel_tol=1e-5)
+    assert moved["sender_vision"] == 0.0
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -823,6 +823,26 @@ one column cannot distinguish the two and the pair can.
 The columns are new on 2026-09-06, alongside `weight_decay = 0.1`, so no run
 before that date has one.
 
+### Weight drift, on the train pass only
+
+**`train_drift_<group>`** — how far one group has moved from its initial
+weights, relative to their size: `‖θ − θ₀‖ / ‖θ₀‖`, over the same partition and
+with the same norm as `train_weight_<group>`, recorded on the same step. `θ₀` is
+snapshotted before the first step of a fresh run and carried in
+`checkpoint_last.pt`, so a resume measures from the true init.
+
+**What they are for.** A `weight_*` column cannot say whether a group is
+learning. A group can rotate a long way while its norm sits still: negating
+every weight leaves `weight_*` unchanged and puts `drift_*` at 2. Whether a
+language model at a low rate is moving at all is a question for this column.
+
+NaN where the group is empty, where `‖θ₀‖` is zero, and on a run resumed from a
+checkpoint written before the column existed. `receiver_reset_interval` does not
+re-snapshot, so after a reset the listener's columns measure from the original
+init, not the reset one.
+
+The columns are new on 2026-10-02, so no run before that date has one.
+
 ### Per-epoch, all splits
 
 **`unique_message_fraction`** — how much the language compresses. A speaker that

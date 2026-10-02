@@ -444,6 +444,71 @@ def weight_norms(pair):
     return dict(zip(names, torch.stack(stacked).cpu().tolist()))
 
 
+def snapshot_weights(pair):
+    """
+    A detached copy of every group's parameters, for `weight_drift` to measure
+        against. Taken once, at the start of a fresh run, and carried in the
+        checkpoint so that a resumed run still measures from the true init.
+
+    Args:
+        pair: the sender/receiver `Pair`
+
+    Returns:
+        `{group name: [a clone of each parameter, in `group_parameters` order]}`
+    """
+    return {
+        name: [p.detach().clone() for p in params]
+        for name, params in models.builder.group_parameters(pair)
+    }
+
+
+def weight_drift(pair, initial):
+    """
+    Each group's distance from its initial weights, relative to their size:
+        `||theta - theta_0|| / ||theta_0||`, over the same partition and with the
+        same norm as `weight_norms`. See docs/measurement.md.
+
+    A `weight_*` column cannot say whether a group is learning: AdamW's update
+        is not orthogonal to `W`, but neither is it parallel, so a group can
+        rotate a long way while its norm sits still. This is the column that
+        can.
+
+    Args:
+        pair: the sender/receiver `Pair`
+        initial: `snapshot_weights(pair)` from the start of the run, or `None`
+            when there is none (a profiling pass, or a resume from a checkpoint
+            written before these columns existed)
+
+    Returns:
+        `{group name: relative distance}`, a key for every entry of
+            `builder.GROUP_NAMES`, `nan` where the group is empty, where there
+            is no snapshot, or where the snapshot's norm is zero.
+    """
+    names = []
+    stacked = []
+    device = next(pair.parameters()).device
+    nan = torch.tensor(float("nan"), device=device)
+
+    for name, params in models.builder.group_parameters(pair):
+        names.append(name)
+        start = initial.get(name) if initial is not None else None
+
+        if not params or start is None or len(start) != len(params):
+            stacked.append(nan)
+            continue
+
+        moved = torch.linalg.vector_norm(torch.stack([
+            torch.linalg.vector_norm((p.detach() - p0).float())
+            for p, p0 in zip(params, start)
+        ]))
+        size = torch.linalg.vector_norm(torch.stack([
+            torch.linalg.vector_norm(p0.float()) for p0 in start
+        ]))
+        stacked.append(torch.where(size > 0, moved / size, nan))
+
+    return dict(zip(names, torch.stack(stacked).cpu().tolist()))
+
+
 def prepare_batch(batch, dataloader, config):
     """
     One batch's four image/label tensors, scaled and on the device.
@@ -606,6 +671,7 @@ def run(
     config,
     random_state=None,
     compute_topsim=False,
+    initial_weights=None,
 ):
     """
     Run the model for a single epoch.
@@ -630,6 +696,9 @@ def run(
         If true, drive the sender through ``speak`` so that message, symbol
         embeddings and concepts all come from one forward pass, collect them,
         and compute the topsim report at the end. Set on the eval passes only.
+    initial_weights : ``dict`` or ``None``
+        ``snapshot_weights`` from the start of the run, which the train pass's
+        ``drift_*`` columns measure from. ``None`` reports them as NaN.
 
     Returns
     -------
@@ -695,6 +764,12 @@ def run(
         # `weight_*` column beside it; see `weight_norms`.
         stats.update(**{
             f"weight_{name}": norm for name, norm in weight_norms(pair).items()
+        })
+
+        # How far each group has travelled from its init, on the same step.
+        stats.update(**{
+            f"drift_{name}": drift for name, drift in
+            weight_drift(pair, initial_weights).items()
         })
 
         scaler.step(optimizer)
@@ -1362,6 +1437,9 @@ if __name__ == "__main__":
 
     metrics = {}
 
+    # Taken before any step, and overwritten from the checkpoint on a resume.
+    initial_weights = snapshot_weights(model_config['pair'])
+
     if config.get('resume', False) and os.path.exists(checkpoint_path):
         print(f"Resuming from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, weights_only=False)
@@ -1370,6 +1448,10 @@ if __name__ == "__main__":
         scheduler.load_state_dict(checkpoint["scheduler_state"])
 
         start_epoch = checkpoint["epoch"]
+
+        # A checkpoint from before the `drift_*` columns has no snapshot, and
+        # the freshly built weights would be the wrong origin: report NaN.
+        initial_weights = checkpoint.get("initial_weights")
 
         print(f"Resumed at epoch {start_epoch}")
 
@@ -1467,7 +1549,9 @@ if __name__ == "__main__":
         metrics["epoch"] = epoch
 
         # Train
-        train_metrics, lang = run("train", epoch, *run_args)
+        train_metrics, lang = run(
+            "train", epoch, *run_args, initial_weights=initial_weights
+        )
         util.update_with_prefix(metrics, train_metrics, "train")
 
         # Between the train pass and the eval passes, so that eval reads
@@ -1546,6 +1630,7 @@ if __name__ == "__main__":
             {
                 "epoch": epoch + 1,  # resume at the NEXT epoch
                 "scheduler_state": scheduler.state_dict(),
+                "initial_weights": initial_weights,
             },
             checkpoint_path,
         )
