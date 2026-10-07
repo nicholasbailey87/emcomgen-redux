@@ -55,10 +55,14 @@ vis = false
 # moved only 18.5 -> 18.2: the collapse is one scalar, and it is the loss asking
 # for it. In hinge's linear region the loss is `1 - mean(t * score)`, exactly 1
 # when scores and labels are uncorrelated *whatever their scale*, so going quiet
-# is flat rather than downhill and every candidate at zero still returns a
-# constant gradient. The speculative half is that anything already right by a
-# full margin contributes exactly nothing, so once the colour-solvable games are
-# solved the gradient concentrates on the ones colour cannot do.
+# is flat rather than downhill. What that buys the speaker is direction, not
+# size: under BCE a listener going quiet is not reading the message, so the
+# gradient it sends back is noise that Adam rescales to full size, whereas here
+# the loss falls only through `mean(t * score)`, i.e. through the message. See
+# docs/training.md, "The objective". The speculative half is that anything
+# already right by a full margin contributes exactly nothing, so once the
+# colour-solvable games are solved the gradient concentrates on the ones colour
+# cannot do.
 #
 # **What it costs.** `train_loss` no longer reads against `ln 2` = 0.6931 but
 # against `mean(w)`, which is 1.0 on hard labels -- so every `ln 2` reference in

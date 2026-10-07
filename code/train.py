@@ -85,6 +85,14 @@ def hinge_loss(scores, labels, margin=HINGE_MARGIN):
         clips at zero, so the loss settles around `|score| ~ margin` instead of
         collapsing to the origin.
 
+    **Why that matters to the speaker.** Under BCE the cost of the descent is
+        not the smaller gradient it sends back -- AdamW and clipping divide
+        that out -- but its direction: a listener lowering its loss by going
+        quiet is not reading the message, so what reaches the speaker is noise
+        that Adam rescales to full size. Here the only way down is through
+        `mean(t * scores)`, i.e. through the message, so the speaker's gradient
+        comes from a listener trying to read it from the first step.
+
     **Hard labels only**, which is why `validate_config` rejects this beside
         class-blending mixup. `t` is `+/-1` by construction there. A continuous
         label would come through as a `t` of intermediate magnitude, which reads

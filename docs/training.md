@@ -553,15 +553,29 @@ cannot solve* — and `scale_without_attenuating` was an earlier attempt on the
 same problem from the other end, stopping the volume's slide from multiplying
 down the gradients behind it.
 
+**What the descent costs the speaker is direction, not size.** The slide does
+shrink the gradient the listener sends back, but AdamW divides out a uniform
+factor and per-submodule clipping binds anyway, so the speaker's step size
+barely notices (see `models/builder.py`'s comment on `score_scale_lr`). What
+nothing downstream repairs is that a listener lowering its loss by going quiet is
+not trying to read the message, so the gradient it returns reflects only an
+incidental dependence of its scores on the message. Adam rescales that to full
+size and the speaker walks confidently in a direction that does not lead to a
+code. Only once the message-agnostic route is used up — scores near zero, loss
+near `ln 2` — does further progress have to come through the message; the
+listener starts depending on it and the speaker's gradient becomes informative.
+That wait is the flat start.
+
 A hinge removes the basin rather than compensating for it. Inside the margin the
 loss is `margin − mean(t · score)`, which is `margin` exactly whenever `t` and
 `score` are uncorrelated **and does not depend on their scale**, so going quiet is
 flat rather than downhill. Push the scores up while still uncorrelated and the
 wrong half grows linearly where the right half clips at zero, so the loss settles
-around `|score| ≈ margin` instead of collapsing to the origin. The gradient at
-zero is a constant per candidate rather than BCE's confidence-weighted
-`σ(s) − y`, so a speaker whose message carries nothing still gets a full-sized
-push.
+around `|score| ≈ margin` instead of collapsing to the origin. So there is no
+message-agnostic way down: the loss falls only as `mean(t · score)` rises, which
+needs scores that track which candidates are positive, and only the message
+says that. From the first step the gradient the speaker receives comes from a
+listener trying to read it.
 
 **The second property, and the one that turned out to matter.** A candidate
 already right by a full margin contributes exactly zero. So once the
