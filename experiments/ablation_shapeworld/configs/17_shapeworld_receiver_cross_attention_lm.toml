@@ -114,13 +114,6 @@ layers = 6
 # seeing symbol 5, which is not the listening task -- the message arrives whole.
 bidirectional = true
 
-# Silhouetting off on every rung of this ladder, overriding DEFAULT.toml's
-# `silhouette_p_receiver = 0.3`. Set in all nine files, so each rung still
-# differs from the one below it by one architectural change.
-[data]
-silhouette_p_sender = 0.0
-silhouette_p_receiver = 0.0
-
 [scheduler]
 epochs = 100
 

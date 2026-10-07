@@ -313,7 +313,7 @@ n_workers = 5
 # than going to 0.5 or changing the fill. `silhouette_fill` is left at the mean
 # object colour for that reason: it is the setting the rate would come back at.
 #
-# **The tell returned, and `silhouette_p_receiver` is 0.3 since 2026-09-12.**
+# **The tell returned, and `silhouette_p_receiver` was 0.3 from 2026-09-12.**
 # The hinge did not do the job on its own once the speaker's backbone became a
 # ViT. `lr_sweep_2_sender_vit` ran ten ShapeWorld arms at 0.0 across two passes
 # and two of them escaped the colour-only minimum; the other eight read shape
@@ -360,8 +360,32 @@ n_workers = 5
 # a small sample. `silhouette_p_sender` stays 0.0: it is the axis
 # `conv4_silhouette_asymmetric` moves, and the speaker learns only through the
 # listener in any case.
+#
+# **`silhouette_p_receiver` is 0.1 since 2026-10-07.** `silhouetting_sweep` ran
+# rung 1 of the ShapeWorld ablation (ResNet56 both sides, GRU language models)
+# at 0.0-0.4, three seeds an arm, 100 epochs. Final test accuracies at epoch 99:
+#
+#     rate    test_acc_md_shape        test_acc_md_color        test_acc mean
+#     0.0     0.514, 0.770, 0.758      0.702, 0.842, 0.863      0.680
+#     0.1     0.734, 0.727, 0.771      0.683, 0.685, 0.846      0.705
+#     0.2     0.772, 0.775, 0.764      0.748, 0.683, 0.847      0.706
+#     0.3     0.861, 0.624, 0.587      0.774, 0.503, 0.562      0.640
+#     0.4     0.650, 0.670, 0.770      0.497, 0.548, 0.676      0.626
+#
+# At 0.0 one seed never left chance on shape. Above 0.2 colour collapses
+# towards chance on most seeds -- the mirror-image failure -- and overall
+# accuracy falls with it. 0.1 and 0.2 are a tie: every seed learned shape and
+# overall accuracy is the same. 0.2 has slightly higher and tighter shape on
+# three seeds. The tie goes to the lower rate because it lets more of the
+# listener's input through, which helps the later rungs that are less exposed
+# to the colour/shape collapse. Colour lands at either ~0.84 or ~0.68 at every
+# rate, so the rate does not settle it.
+#
+# Note this supersedes the 0.3 above on a different architecture: that
+# titration had a ViT speaker and 30 epochs, this one the rung 1 CNNs and
+# 100 epochs. Every ShapeWorld rung inherits this key; none overrides it.
 silhouette_p_sender = 0.0
-silhouette_p_receiver = 0.3
+silhouette_p_receiver = 0.1
 
 # Geometric augmentation of the referents, train-only and drawn per image.
 #
