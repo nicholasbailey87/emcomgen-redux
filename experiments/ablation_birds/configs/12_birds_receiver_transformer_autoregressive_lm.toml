@@ -113,7 +113,7 @@ layers = 7
 epochs = 100
 
 [experiment]
-repeats = 1
+repeats = 3
 
 [slurm]
 time = "24:00:00"
