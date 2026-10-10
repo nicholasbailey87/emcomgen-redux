@@ -793,7 +793,9 @@ possible, and both are refused rather than appended to:
    column from that row on. Checked before every append, comparing the set of
    header columns to the row's keys. The row is then written in the header's
    order, so a row whose keys arrive in a different order still lands under the
-   right columns.
+   right columns. The check also runs against a header this same process
+   wrote in an earlier epoch, so a metric that drops out partway through a run
+   raises there rather than writing a NaN under its column.
 
 The failure is invisible until someone reads the CSV months later, so both raise
 with instructions to use `--no_resume` or move the run directory aside.

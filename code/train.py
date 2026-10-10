@@ -372,6 +372,43 @@ def log_epoch_summary(epoch, split, metrics):
     )
 
 
+def append_metrics_row(metrics_path, metrics):
+    """
+    Append one epoch's row to `metrics.csv`, writing the header if the file is
+    new.
+
+    Appending is what lets earlier rows survive a resume, so the columns are
+    checked against the header on disk first, and the row is written in the
+    header's order. The check runs on every append, so it covers a header this
+    same process wrote in an earlier epoch as well as one left by a run being
+    resumed. See docs/training.md.
+    """
+    columns = list(metrics)
+    if os.path.exists(metrics_path):
+        with open(metrics_path) as f:
+            existing_columns = f.readline().rstrip("\n").split(",")
+
+        if set(existing_columns) != set(metrics):
+            raise RuntimeError(
+                f"{metrics_path} has a header this run's rows do not match, "
+                f"so appending would misalign the columns. On disk but not "
+                f"measured now: {sorted(set(existing_columns) - set(metrics))}. "
+                f"Measured now but not on disk: "
+                f"{sorted(set(metrics) - set(existing_columns))}. If this is a "
+                f"resume, start again with --no_resume, or move the existing run "
+                f"directory aside. If this run wrote the header itself, a metric "
+                f"went missing or appeared between epochs."
+            )
+        columns = existing_columns
+
+    pd.DataFrame([metrics], columns=columns).to_csv(
+        metrics_path,
+        mode="a",
+        header=not os.path.exists(metrics_path),
+        index=False,
+    )
+
+
 def log_epoch_progress(epoch, batch_i, batch_size, dataloader, stats):
     meter_str = " ".join(f"{k}: {v.avg:.3f}" for k, v in stats.meters.items())
     data_i = batch_i * batch_size
@@ -1509,8 +1546,6 @@ if __name__ == "__main__":
     metrics_path = os.path.join(exp_dir, "metrics.csv")
     start_epoch = 0
 
-    metrics = {}
-
     # Taken before any step, and overwritten from the checkpoint on a resume.
     initial_weights = snapshot_weights(model_config['pair'])
 
@@ -1634,7 +1669,10 @@ if __name__ == "__main__":
             logging.info(f"Resetting receiver at epoch {epoch}")
             model_config['pair'].receiver.reset_parameters()
 
-        metrics["epoch"] = epoch
+        # Rebuilt every epoch, so a metric missing from this epoch's passes
+        #     fails the header check below instead of carrying the previous
+        #     epoch's value into this row.
+        metrics = {"epoch": epoch}
 
         # Train
         train_metrics, lang = run(
@@ -1686,31 +1724,7 @@ if __name__ == "__main__":
 
         metrics["timestamp"] = datetime.now().isoformat()
 
-        # Appending is what lets earlier rows survive a resume, so the columns
-        # are checked against the header on disk first, and the row is written
-        # in the header's order. See docs/training.md.
-        columns = list(metrics)
-        if os.path.exists(metrics_path):
-            with open(metrics_path) as f:
-                existing_columns = f.readline().rstrip("\n").split(",")
-
-            if set(existing_columns) != set(metrics):
-                raise RuntimeError(
-                    f"{metrics_path} has a header this run's rows do not match, "
-                    f"so appending would misalign the columns. On disk but not "
-                    f"measured now: {sorted(set(existing_columns) - set(metrics))}. "
-                    f"Measured now but not on disk: "
-                    f"{sorted(set(metrics) - set(existing_columns))}. Start again "
-                    f"with --no_resume, or move the existing run directory aside."
-                )
-            columns = existing_columns
-
-        pd.DataFrame([metrics], columns=columns).to_csv(
-            metrics_path,
-            mode="a",
-            header=not os.path.exists(metrics_path),
-            index=False,
-        )
+        append_metrics_row(metrics_path, metrics)
 
         # Checkpoint after the row is on disk so the model/optimiser state stays
         # in sync with metrics.csv on resume. A crash between the two writes can
