@@ -1,4 +1,3 @@
-import numpy as np
 from torch.utils.data import DataLoader
 import torch
 
@@ -14,11 +13,6 @@ def load(config):
     else:
         raise ValueError(f"Unknown dataset {config['data']['dataset']}")
     return lf(config)
-
-
-def worker_init(worker_id):
-    np.random.seed()
-    torch.seed()
 
 
 # The seed of the one fixed order every eval pass reads its split in. A
@@ -52,12 +46,14 @@ def load_dataloaders(config):
                 sampler=torch.randperm(len(dset), generator=generator).tolist()
             )
 
+        # No `worker_init_fn`: torch seeds each worker's torch, numpy and
+        #     `random` from the main process's torch RNG, so `--seed` fixes
+        #     the data stream too. A reseed from OS entropy here would not.
         return DataLoader(
             dset,
             batch_size=config['data']['batch_size'],
             num_workers=config['data']['n_workers'],
             pin_memory=True,
-            worker_init_fn=worker_init,
             **order,
         )
 

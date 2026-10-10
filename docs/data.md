@@ -79,7 +79,7 @@ in any environment, under any future version.
 
 **`holdout_image_names` touches no RNG at all**, global or local, and that is a
 requirement rather than a nicety. `train.py` seeds numpy from `--seed` and
-`loader.worker_init` re-seeds it per worker, so an `np.random.choice` here would
+torch's `DataLoader` seeds it per worker, so an `np.random.choice` here would
 hand every seed — and every resume, and every dataloader worker — a different
 partition, and an image held out under seed 0 would be trained on under seed 1.
 Since the sort key depends on the image *name* alone, the result is also

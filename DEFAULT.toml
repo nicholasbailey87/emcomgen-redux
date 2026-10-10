@@ -217,9 +217,9 @@ n_examples = 20 # number of examples seen by agents, including distractors
 # permutes, and every augmentation returns a new tensor. If a run dies on
 # memory, this is the first key to lower.
 #
-# `worker_init` reseeds numpy and torch per worker, so the augmentations' draws
-# stay independent across them; what it does not do is make them reproducible,
-# and they were not reproducible at 0 either.
+# Torch seeds each worker's torch, numpy and `random` from the main process's
+# torch RNG, so the augmentations' draws stay independent across workers and
+# are fixed by `--seed`.
 n_workers = 5
 
 # Probability of repainting an agent's whole view as flat single-colour

@@ -147,6 +147,25 @@ an antipodal pair of `randn(d_model)` draws, so the separation opens at
 what `measurement.md` documents. The docstring predates the antipodal init and
 describes the zero init it replaced.
 
+### `data.loader.worker_init`'s `torch.seed()` did have an effect
+
+This file listed `worker_init` as near-dead code: *"calls `torch.seed()` and
+discards the result; only the `np.random.seed()` call has an effect on the
+worker's stream."* `torch.seed()` reseeds torch's default generator from OS
+entropy as well as returning the seed, so torch draws in each worker were
+unseeded too. A 2-worker `DataLoader` read twice after `torch.manual_seed(0)`
+gave different numpy and torch draws with `worker_init`, and identical ones
+without it. `--seed` therefore fixed init, dropout and Gumbel noise but not the
+data stream: game sampling, silhouetting, flips, rotation, mixup and the CUB
+transforms.
+
+`worker_init` was removed on 2026-10-10. Torch's own worker setup (2.9,
+`torch/utils/data/_utils/worker.py`) seeds each worker's torch and python
+`random` with `base_seed + worker_id`, and numpy with a state derived from the
+same pair, where `base_seed` is drawn from the main process's torch RNG each
+time an iterator is made. Every run after that date reads a different data
+stream from every run before it at the same seed.
+
 ## Claims that depend on an external version
 
 These were true of some version of a dependency and have no guard in the code.
@@ -274,8 +293,6 @@ holds today — but the argument is still a silent no-op.
 - **`ResNet(flatten=False)`** sets `final_feat_dim = [indim, 7, 7]`, which
   hardcodes the 224px assumption the adaptive pool was introduced to remove. No
   caller uses `flatten=False`.
-- **`data.loader.worker_init`** calls `torch.seed()` and discards the result;
-  only the `np.random.seed()` call has an effect on the worker's stream.
 - **`shapeworld.get_metadata`** raises `ValueError(f"Unknown feature type
   {this_md}")` in a branch where `this_md` may be unbound.
 - **`SenderTransformerLM.__init__`** carried a docstring consisting of `...` and

@@ -13,7 +13,7 @@ partition slips -- between seeds, between resumes, between dataloader workers --
 concept" into "recall of images already trained on", and the number it reports
 goes *up*. That is why `holdout_image_names` uses a hash rather than an RNG, and
 why four of these tests do nothing but pin its determinism. `train.py` seeds
-numpy from `--seed` and `loader.worker_init` re-seeds it per worker, so any
+numpy from `--seed` and torch's `DataLoader` seeds it per worker, so any
 reliance on global RNG state would give each seed a different partition and every
 seed would train on some other seed's test set.
 
