@@ -661,8 +661,9 @@ class AttentionPrototyper(nn.Module):
             heads, ff_inner_size, activation: the block's shape, as
                 `[sender_feature_model]` sets them for the same dataset
             self_attention_dropout, ff_inner_dropout, ff_outer_dropout: the
-                block's internals, which never take the speaker's own
-                `dropout` -- that one regularises the prototypes going out
+                block's internals, which never take `[sender]
+                prototype_dropout` -- that one regularises the prototypes going
+                out
         """
         super().__init__()
         self.d_model = kwargs["d_model"]
@@ -1287,7 +1288,6 @@ class SenderGRULM(GumbelChannel, nn.Module):
         #     straight-through Jacobian is taken at. See `sample_symbols`.
         self.tau = kwargs["tau"]
         self.uniform_weight = kwargs["uniform_weight"]
-        self.dropout = kwargs["dropout"]
         self.layers = kwargs["layers"]
         self.bidirectional = kwargs["bidirectional"]
         self.directions = 2 if self.bidirectional else 1
@@ -1300,7 +1300,13 @@ class SenderGRULM(GumbelChannel, nn.Module):
             num_layers=self.layers,
             bias=True,
             batch_first=True,
-            dropout=self.dropout,
+            # Pinned at 0.0, as on the listener's GRU. `nn.GRU` applies this
+            #     *between* layers, and every config runs this speaker at
+            #     `layers = 1`, so the `[sender_language_model] dropout` that
+            #     used to be wired in here never took effect and was retired.
+            #     The speaker's regularisation is `[sender] prototype_dropout`
+            #     -- see docs/broccoli.md.
+            dropout=0.0,
             bidirectional=self.bidirectional
         )
 
@@ -1461,7 +1467,6 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
         #     straight-through Jacobian is taken at. See `sample_symbols`.
         self.tau = kwargs["tau"]
         self.uniform_weight = kwargs["uniform_weight"]
-        self.dropout = kwargs["dropout"]
         self.layers = kwargs["layers"]
         self.bidirectional = kwargs["bidirectional"]
         self.heads = kwargs["heads"]
@@ -1596,8 +1601,8 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
         self.cross_attention = broccoli.transformer.MHAttention(
             self.d_model,
             self.heads,
-            # Attention internals get their own setting, never the speaker's
-            #     `dropout`, which regularises the prototypes going in.
+            # Attention internals get their own setting, never `[sender]
+            #     prototype_dropout`, which regularises the prototypes going in.
             dropout=self.cross_attention_dropout,
             causal=False, # Whole image informs whole latent array
             seq_len=self.latent_length,

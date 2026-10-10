@@ -1406,6 +1406,29 @@ def test_config_rejects_the_retired_estimator_key():
     assert "estimator" not in get_config()["sender_language_model"]
 
 
+def test_config_rejects_the_retired_language_model_dropout_key():
+    """
+    `[sender_language_model] dropout` was retired on 2026-10-10 because it
+    never reached anything: a one-layer `nn.GRU` ignores it and
+    `SenderTransformerLM` never read it. A config setting it would look like a
+    regularisation treatment while running the default, so it raises, and the
+    message points at the key that is the speaker's dropout.
+    """
+    import parse_config
+
+    for value in (0.0, 0.1, 0.5):
+        config = get_config()
+        config["sender_language_model"]["dropout"] = value
+        with pytest.raises(
+            parse_config.InvalidConfig, match="prototype_dropout"
+        ):
+            parse_config.validate_config(config)
+
+    assert "dropout" not in get_config()["sender_language_model"]
+    # Not to be confused with the listener's, which is live and stays.
+    assert "dropout" in get_config()["receiver"]
+
+
 if __name__ == "__main__":
     import itertools
 

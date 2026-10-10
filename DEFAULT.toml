@@ -2073,7 +2073,6 @@ tau = 1.0                     # Gumbel-softmax tau. Gradient shaping only:
                               # shapes is the soft sample the straight-through
                               # Jacobian is taken at, so it moves the backward
                               # pass and nothing the speaker says.
-dropout = 0.1
 layers = 1
 
 # Read by `SenderGRULM` alone. `false` is the causal, left-to-right speaker:

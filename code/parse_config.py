@@ -250,6 +250,16 @@ def validate_config(config: dict) -> bool:
             "See `sender.sample_symbols`",
         ),
         (
+            'sender_language_model',
+            'dropout',
+            "it never had an effect: `SenderGRULM` passed it to a one-layer "
+            "`nn.GRU`, which only applies dropout between layers, and "
+            "`SenderTransformerLM` stored it and read it nowhere. Removing it "
+            "changes no run. The speaker's dropout is `[sender] "
+            "prototype_dropout`, on the pooled concept vectors before the "
+            "language model",
+        ),
+        (
             'sender',
             'contrast',
             "the contrast stage was folded into `AttentionPrototyper` on "

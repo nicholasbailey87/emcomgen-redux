@@ -87,6 +87,16 @@ Fixed at 0.0 to match jayelm, whose listener GRU takes no dropout argument at al
 the moment anyone raised `layers`. Zero also silences PyTorch's warning about
 that combination.
 
+### GRU `dropout=0.0` on the speaker
+
+Pinned the same way on `SenderGRULM`. It used to read
+`[sender_language_model] dropout`, but every config in `experiments/` runs this
+speaker at `layers = 1`, so it never took effect. That was the key's last reader
+once the speaker's cross-attention moved to its own key (below) —
+`SenderTransformerLM` stored it and used it nowhere — and it was retired on
+2026-10-10; `parse_config` rejects a config that still sets it. The mask on what
+the speaker's language model reads is `[sender] prototype_dropout`.
+
 ### `ViT2`-specific pins
 
 **`cnn=False` and the whole `cnn_*` group.** Inert while `cnn` is False: broccoli
@@ -173,8 +183,9 @@ docs/anecdotes.md.
 ### Attention dropout is its own key
 
 Attention internals take `cross_attention_dropout` / `self_attention_dropout`,
-never the agent's `dropout`, which regularises the inputs to the comparison. The
-speaker's cross-attention used to read `self.dropout` while the listener's
+never an agent's input dropout — `[sender] prototype_dropout` or
+`[receiver] dropout`. The speaker's cross-attention used to read `self.dropout`
+(`[sender_language_model] dropout`) while the listener's
 matching cross-attention took a separate constant, so raising the speaker's input
 regularisation silently rewired its attention and the two agents were regularised
 on different terms. The speaker now has exactly one cross-attention — the
