@@ -7,6 +7,7 @@ See docs/training.md.
 from torch.amp import GradScaler, autocast
 
 import os
+import random
 from pathlib import Path
 
 from collections import defaultdict
@@ -300,6 +301,52 @@ def restore_scheduler(scheduler, state):
     """
     scheduler.load_state_dict(state)
     scheduler.update_learning_rates()
+
+
+def rng_state():
+    """
+    The torch, CUDA, numpy and `random` generator states, for the checkpoint.
+
+    With no `worker_init_fn`, each DataLoader pass seeds its workers from the
+    main torch RNG, so restoring these restores the data stream as well. CUDA is
+    left out when it is unavailable.
+    """
+    state = {
+        "torch": torch.get_rng_state(),
+        "numpy": np.random.get_state(),
+        "python": random.getstate(),
+    }
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def restore_rng_state(state):
+    """
+    Put back what `rng_state` saved. Restores only the keys present, so a
+    checkpoint written before these were saved restores nothing.
+
+    CUDA states are restored device by device for the devices that exist now; a
+    different device count than at save time restores the overlap and warns,
+    since the run will then not follow the uninterrupted one.
+    """
+    if "torch" in state:
+        torch.set_rng_state(state["torch"])
+    if "numpy" in state:
+        np.random.set_state(state["numpy"])
+    if "python" in state:
+        random.setstate(state["python"])
+    if "cuda" in state:
+        saved = state["cuda"]
+        available = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if len(saved) != available:
+            logging.warning(
+                f"Checkpoint has CUDA RNG states for {len(saved)} device(s) "
+                f"but {available} are available; restoring the first "
+                f"{min(len(saved), available)}."
+            )
+        for device, device_state in enumerate(saved[:available]):
+            torch.cuda.set_rng_state(device_state, device)
 
 
 def compute_metrics_by_md(all_lang, md_vocab=None):
@@ -1363,7 +1410,6 @@ def profile_train_epoch(run_args, active_steps, trace_path):
 
 if __name__ == "__main__":
     import argparse
-    import random
 
     import paths
 
@@ -1468,6 +1514,10 @@ if __name__ == "__main__":
     # Taken before any step, and overwritten from the checkpoint on a resume.
     initial_weights = snapshot_weights(model_config['pair'])
 
+    # Filled from the checkpoint on a resume, and restored just before the
+    #     epoch loop rather than here. See below.
+    resumed_rng_state = {}
+
     if config.get('resume', False) and os.path.exists(checkpoint_path):
         print(f"Resuming from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, weights_only=False)
@@ -1480,6 +1530,10 @@ if __name__ == "__main__":
         # A checkpoint from before the `drift_*` columns has no snapshot, and
         # the freshly built weights would be the wrong origin: report NaN.
         initial_weights = checkpoint.get("initial_weights")
+
+        # Absent from a checkpoint written before RNG state was saved, which
+        # then resumes on whatever state the build left.
+        resumed_rng_state = checkpoint.get("rng_state", {})
 
         print(f"Resumed at epoch {start_epoch}")
 
@@ -1553,6 +1607,12 @@ if __name__ == "__main__":
         scaler,
         config
     )
+
+    # The checkpoint is the last thing an epoch does, so the state it saved is
+    #     the one the next epoch would have started on. Restored here, after
+    #     the build and the compile call and before anything draws, so that the
+    #     resumed loop starts on it too.
+    restore_rng_state(resumed_rng_state)
 
     print("Starting to train")
 
@@ -1660,6 +1720,7 @@ if __name__ == "__main__":
                 "epoch": epoch + 1,  # resume at the NEXT epoch
                 "scheduler_state": scheduler.state_dict(),
                 "initial_weights": initial_weights,
+                "rng_state": rng_state(),
             },
             checkpoint_path,
         )

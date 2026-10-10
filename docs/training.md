@@ -807,6 +807,16 @@ The checkpoint holds the epoch to resume *at* (`epoch + 1`) and
 `scheduler.state_dict()` — gradboard's `PASS` restores model, optimiser, scaler
 and step count together.
 
+It also holds the torch, CUDA, numpy and `random` generator states
+(`rng_state`), since a resumed run would otherwise draw differently from an
+uninterrupted one. The DataLoader seeds its workers from the main torch RNG on
+every pass, so this covers the data stream too. The checkpoint is the last thing
+an epoch does, so the saved state is the one the next epoch would start on; the
+resume restores it just before the epoch loop, after the build. A checkpoint
+written before this has no `rng_state` and resumes on whatever state the build
+left. CUDA states are restored for the devices present, with a warning if the
+count differs from the one at save time.
+
 It is written **after** the metrics row is on disk, so the model state stays in
 sync with `metrics.csv` on resume. As in vit, a crash between these two writes
 can re-emit one row, which is benign.
