@@ -281,6 +281,27 @@ def build_lr_schedule(config, training_examples, batch_size):
     return gradboard.cycles.CycleSequence(lr_stages)
 
 
+def restore_scheduler(scheduler, state):
+    """
+    Load a `PASS` state dict and put the optimiser back on the schedule's rate
+    for the restored step.
+
+    `PASS.load_state_dict` calls `update_learning_rates` while `step_count` is
+    still 0 and only then restores `step_count`, so on its own it leaves every
+    parameter group at the schedule's step-0 rate: zero under a warm-up, the
+    full base rate on a schedule without one. The next `scheduler.step()` would
+    correct it, but only after the optimiser had taken one step at that rate.
+    Recomputing here, once `step_count` and `original_param_groups` are both
+    restored, closes that.
+
+    Args:
+        scheduler: a freshly built `gradboard.scheduler.PASS`
+        state: what `scheduler.state_dict()` returned before the interruption
+    """
+    scheduler.load_state_dict(state)
+    scheduler.update_learning_rates()
+
+
 def compute_metrics_by_md(all_lang, md_vocab=None):
     metrics_by_md = {}
     per_md_acc = all_lang[["md", "acc"]].groupby("md").mean()
@@ -1452,7 +1473,7 @@ if __name__ == "__main__":
         checkpoint = torch.load(checkpoint_path, weights_only=False)
 
         # gradboard's PASS restores model + optimiser + scaler + step_count.
-        scheduler.load_state_dict(checkpoint["scheduler_state"])
+        restore_scheduler(scheduler, checkpoint["scheduler_state"])
 
         start_epoch = checkpoint["epoch"]
 

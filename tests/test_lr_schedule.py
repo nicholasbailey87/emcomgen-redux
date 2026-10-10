@@ -260,6 +260,55 @@ def test_cosine_is_the_falling_half_and_does_not_come_back_up():
 
 
 # --------------------------------------------------------------------------
+# Resuming
+# --------------------------------------------------------------------------
+
+
+def _scheduler(config):
+    """A fresh model, optimiser and `PASS`, built as `train.py` builds them."""
+    model = torch.nn.Linear(2, 2)
+    optimiser = torch.optim.AdamW(model.parameters(), lr=BASE_LR)
+    scheduler = PASS(
+        train.build_lr_schedule(config, TRAINING_EXAMPLES, BATCH_SIZE),
+        model,
+        optimiser,
+        range_test=False,
+        cool_point_multiplier=0.0,
+    )
+    return optimiser, scheduler
+
+
+@pytest.mark.parametrize("warm_up_epochs,steps", [(10, 50), (10, 4000), (0, 4000)])
+def test_a_resume_restores_the_rate_the_run_was_at(warm_up_epochs, steps):
+    """
+    `PASS.load_state_dict` recomputes rates before it restores `step_count`, so
+        loading alone leaves the optimiser at the step-0 rate until the next
+        `scheduler.step()`. `train.restore_scheduler` is what `train.py` resumes
+        through. With a warm-up the step-0 rate is zero, whether the resume
+        lands inside the ramp (50 steps) or on the cosine after it (4000);
+        without one it is the full base rate.
+    """
+    config = _config(100, warm_up_epochs, "cosine", FLOOR)
+
+    optimiser, scheduler = _scheduler(config)
+    for _ in range(steps):
+        scheduler.step()
+    before = [group["lr"] for group in optimiser.param_groups]
+    state = scheduler.state_dict()
+
+    # The live rate must be off both step-0 values, or the test proves nothing.
+    assert 0.0 < before[0] < BASE_LR * 0.999
+
+    optimiser, scheduler = _scheduler(config)
+    train.restore_scheduler(scheduler, state)
+
+    assert scheduler.step_count == steps
+    assert [group["lr"] for group in optimiser.param_groups] == pytest.approx(
+        before, rel=1e-12
+    )
+
+
+# --------------------------------------------------------------------------
 # What the config is allowed to say
 # --------------------------------------------------------------------------
 
