@@ -772,7 +772,11 @@ it; that cost is paid deliberately (see [measurement.md](measurement.md)).
 including at epoch 0. Every `reset_parameters` in the codebase is written to
 reproduce construction *exactly*, including buffers: BatchNorm running statistics
 are reset, because leaving them would carry the pre-reset feature distribution
-across the reset, which is not what the interval is asking for.
+across the reset, which is not what the interval is asking for. broccoli's
+modules are the exception that has to be patched from outside: its resets walk
+past `swish_beta` and the ViT's `encoder.norm`, and
+`model_util.reset_constant_initialised` restores both at the end of each agent's
+reset. See [anecdotes.md](anecdotes.md).
 
 ## `metrics.csv` discipline
 

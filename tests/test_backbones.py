@@ -350,8 +350,9 @@ def test_reset_parameters_restores_every_backbone():
         # downstream reads them as learned state.
         stale = [n for n in stale if "rotary_embedding" not in n]
         if name in ("ShapeWorldViT", "BirdsViT"):
-            # broccoli does not restore these two, which is an upstream gap
-            # rather than one this repository can fix from here.
+            # broccoli's own reset does not restore these two. The agents'
+            # resets do, through `model_util.reset_constant_initialised`;
+            # `test_agent_reset_leaves_no_sentinel` covers that.
             stale = [
                 n for n in stale if not (n.endswith("swish_beta") or "norm." in n)
             ]
@@ -433,6 +434,63 @@ def test_agent_reset_parameters_covers_every_parameter():
         pair.receiver.reset_parameters()
         stale = _still_perturbed(pair)
         assert not stale, f"{name}: {len(stale)} tensors not reset: {stale[:5]}"
+
+
+# No initialiser in the codebase produces it: the random ones would hit it with
+#     probability zero, and the constant ones are 0 and 1.
+SENTINEL = 7.77
+
+
+@pytest.mark.parametrize(
+    "config_file",
+    [
+        "01_shapeworld_baseline.toml",
+        "13_shapeworld_receiver_transformer_bidirectional_lm.toml",
+        "18_birds_receiver_cross_attention_lm.toml",
+    ],
+)
+def test_agent_reset_leaves_no_sentinel(config_file):
+    """
+    Every parameter of both agents, on the rungs built from broccoli's
+        transformers as well as the baseline. broccoli's resets walk past
+        `Swish.swish_beta` in every SwiGLU and `ViTEncoder.norm`, and both
+        survived a reset until `model_util.reset_constant_initialised`.
+
+    Any element rather than the whole tensor, so a reset that covered only
+        part of a parameter would fail too.
+    """
+    from _bootstrap import rung
+
+    config = parse_config.get_config(rung(config_file))
+    config["cuda"] = False
+
+    class _Dataset:
+        # Rungs are numbered odd for ShapeWorld and even for birds.
+        n_feats = BIRDS_FEATS if int(config_file[:2]) % 2 == 0 else SHAPEWORLD_FEATS
+
+    class _Loader:
+        dataset = _Dataset()
+
+    pair = models.builder.build_models({"train": _Loader()}, config)["pair"]
+    with torch.no_grad():
+        for parameter in pair.parameters():
+            parameter.fill_(SENTINEL)
+
+    pair.sender.reset_parameters()
+    pair.receiver.reset_parameters()
+
+    stale = [
+        name
+        for name, parameter in pair.named_parameters()
+        if (parameter == SENTINEL).any()
+        # broccoli's RoPE frequency tables: a deterministic function of
+        #     position, frozen, and never recomputed on reset. Nothing trains
+        #     them, so there is nothing for a reset to undo.
+        and not (
+            name.endswith("rotary_embedding.freqs") and not parameter.requires_grad
+        )
+    ]
+    assert not stale, f"{config_file}: {len(stale)} kept the sentinel: {stale[:5]}"
 
 
 def test_reset_parameters_clears_the_measured_survival_and_keeps_the_channel_scale():

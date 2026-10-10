@@ -4,7 +4,7 @@ Model building utils
 
 import torch.nn as nn
 
-from broccoli.activation import ReLU, GELU, SquaredReLU, SwiGLU
+from broccoli.activation import ReLU, GELU, SquaredReLU, SwiGLU, Swish
 
 
 # Name -> broccoli activation, so `activation` can be set from a TOML config.
@@ -93,6 +93,40 @@ def resolve_residual_scaling(alpha, beta, layers, decoder=False):
 #     are this constant, re-exported under the names they have always had. See
 #     docs/channel.md.
 LAYER_NORM_EPS = 1e-12
+
+
+# Modules whose construction-time init is a constant -- `Swish.swish_beta` is
+#     1.0, and every norm here is PyTorch's default of unit gain, zero bias and
+#     zeroed running statistics -- so re-applying it is idempotent.
+_NORMS = (nn.RMSNorm, nn.LayerNorm, nn.modules.batchnorm._BatchNorm)
+
+
+def reset_constant_initialised(module):
+    """
+    Re-apply every constant initialiser under `module`, as the last step of an
+        agent's `reset_parameters`.
+
+    broccoli's resets walk named children and skip two things that hold
+        trained state:
+
+    - `Swish.swish_beta`, in every SwiGLU. `FeedforwardBlock.reset_parameters`
+        walks its `process` sequence calling `reset_parameters` where it
+        exists; the activation there is an `XGLU`, which has none and does not
+        reach the `Swish` inside it, and `Swish` has none either.
+    - `ViTEncoder.norm`, the `RMSNorm` built beside `initial_ff`.
+        `ViTEncoder.reset_parameters` resets `preprocess`, `initial_ff` and
+        `transformer`, and `norm` is in none of them.
+
+    A walk over `module.modules()` rather than those two paths, so a constant
+        a later broccoli layout leaves out is caught too. Only constants:
+        re-running a random initialiser would re-draw a module its parent had
+        already re-initialised its own way. See docs/anecdotes.md.
+    """
+    for submodule in module.modules():
+        if isinstance(submodule, Swish):
+            nn.init.ones_(submodule.swish_beta)
+        elif isinstance(submodule, _NORMS):
+            submodule.reset_parameters()
 
 
 class LinearInterface(nn.Module):
@@ -247,7 +281,9 @@ class LinearInterface(nn.Module):
             to return the whole stage to its opening state, and
             `receiver_reset_interval` resets an agent mid-run. There is no
             `Swish` here any more, and nothing left for that fix-up to
-            re-initialise.
+            re-initialise. The same gap is still open in every other SwiGLU
+            stack, and `reset_constant_initialised` closes it for the whole
+            agent.
         """
         self.adapter.reset_parameters()
         self.norm.reset_parameters()

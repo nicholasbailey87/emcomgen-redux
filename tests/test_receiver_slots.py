@@ -981,13 +981,13 @@ def test_reset_parameters_leaves_nothing_trained(language_model, discriminator):
     #     is exactly the bug docs/anecdotes.md records.
     listener.reset_parameters()
 
-    # broccoli owns these and does not re-draw them, which is correct for both:
+    # broccoli owns this and does not re-draw it, which is correct:
     #     `rotary_embedding.freqs` is a deterministic function of position, so
-    #     there is nothing to draw, and `swish_beta` is the activation's own
-    #     parameter rather than the block's. Excluded by name rather than by
-    #     loosening the assertion, so that a *new* untouched parameter still
-    #     fails.
-    BROCCOLI_INERT = ("rotary_embedding.freqs", "swish_beta")
+    #     there is nothing to draw. Excluded by name rather than by loosening
+    #     the assertion, so that a *new* untouched parameter still fails.
+    #     `swish_beta` used to be excluded here too; the reset now covers it
+    #     through `model_util.reset_constant_initialised`.
+    BROCCOLI_INERT = ("rotary_embedding.freqs",)
     unchanged = [
         name
         for name, parameter in listener.named_parameters()

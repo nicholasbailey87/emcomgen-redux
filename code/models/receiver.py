@@ -1098,3 +1098,7 @@ class Receiver(nn.Module):
         #     survived a `receiver_reset_interval` reset. See docs/anecdotes.md.
         for interface in self.interfaces.values():
             interface.reset_parameters()
+
+        # Last, after everything above: the constants broccoli's own resets
+        #     walk past. See `model_util.reset_constant_initialised`.
+        model_util.reset_constant_initialised(self)

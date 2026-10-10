@@ -688,6 +688,23 @@ Parameter-free norms are listed in every `reset_parameters` anyway, for the
 mirror reason: turning `elementwise_affine` back on must not leave a reset
 listener holding trained gains.
 
+**broccoli's own resets.** Two kinds of trained parameter survived both agents'
+resets on every transformer rung. Every SwiGLU's `swish_beta`:
+`FeedforwardBlock.reset_parameters` calls `reset_parameters` on whatever in its
+`process` sequence has one, and the activation there is an `XGLU`, which has none
+and does not forward to the `Swish` inside it (which has none either). And the
+ViT's `encoder.norm`: `ViTEncoder.reset_parameters` resets `preprocess`,
+`initial_ff` and `transformer`, and that `RMSNorm` is an attribute outside all
+three. Both are constants at construction — `swish_beta` is 1.0, the norm's gain
+is 1 — so `model_util.reset_constant_initialised` re-applies every such constant
+under the agent as the last step of `Sender.reset_parameters` and
+`Receiver.reset_parameters`. It walks `modules()` rather than naming the two
+paths, and re-runs only constant initialisers, which are idempotent; re-running a
+random one would re-draw a module its parent had already initialised its own way.
+`test_agent_reset_leaves_no_sentinel` fills every parameter with a value no
+initialiser produces and checks none keeps it. The one exception is broccoli's
+RoPE `freqs`, which is frozen and never trained.
+
 ## The polarity tag: a speaker that could not read its own input order
 
 `SenderTransformerLM`'s encoder cross-attention carries no positional or rotary

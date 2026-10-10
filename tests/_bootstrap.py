@@ -102,6 +102,7 @@ def config_section(section, config_file=None, **overrides):
 import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 
+from models import model_util  # noqa: E402
 from models import receiver as _receiver  # noqa: E402
 
 
@@ -160,6 +161,8 @@ class Listener(nn.Module):
 
         for interface in self.interfaces.values():
             interface.reset_parameters()
+
+        model_util.reset_constant_initialised(self)
 
     def forward(self, referents, messages):
         message_repr = self.language_model(
