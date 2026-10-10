@@ -319,7 +319,7 @@ Every other column is `<split>_<metric>`.
 | `train_` | The training pass. |
 | `test_` | Held-out **novel** concepts — the generalisation split. |
 | `test_same_` | Held-out instances of concepts **seen in training**. For ShapeWorld these are freshly generated worlds; for CUB, photographs held out of the training species (see the birds-splits section of the top-level README). Optional in principle: absent for a dataset that ships no `test_same` split, in which case these columns are missing entirely. |
-| `test_avg_` | The unweighted mean of `test_` and `test_same_` for the same metric. Applied to every eval metric, topsim included (so it is a mean of two Spearman rhos, not a rho over the pooled data). With no `test_same` split it equals `test_` — which is what birds runs recorded before `cub.py` grew one look like, so do not pool them with newer birds runs. |
+| `test_avg_` | The unweighted mean of `test_` and `test_same_` for the same metric. Applied to every eval metric, topsim included (so it is a mean of two Spearman rhos, not a rho over the pooled data), except the topsim `_low`, `_high` and `_degenerate` columns, which it leaves out. With no `test_same` split it equals `test_` — which is what birds runs recorded before `cub.py` grew one look like, so do not pool them with newer birds runs. |
 
 There is no `val` split and no best-epoch selection — training runs to a fixed
 endpoint and the trajectory *is* the deliverable — so there are no `best_*`
@@ -364,11 +364,36 @@ Topsim is a property of the language, so it is computed on the eval passes only:
 there are no `train_topsim_*` columns.
 
 Every topsim column is a Spearman correlation between pairwise **meaning**
-distances and pairwise **signal** (message) distances, measured over concept
-*prototypes* — one point per concept, whose message is the modal token sequence
-its instances emitted, whose symbol embeddings are the mean over the instances
-that emitted that sequence, and whose concept vector is the mean over its
-instances. Concepts are capped at `[analysis] max_concepts`.
+distances and pairwise **signal** (message) distances, measured per *game* — one
+point per eval game — over a seeded random sample of `[analysis] topsim_pairs`
+game pairs.
+
+On `test` and `test_same`, every topsim column `key` comes with three more:
+
+- `key_low` and `key_high`, the bounds of a 95% percentile bootstrap interval
+  that resamples the games;
+- `key_degenerate`, the fraction of bootstrap replicates on which Spearman was
+  undefined (the meaning or the signal distance constant on every pair the
+  replicate weighted). Those are left out of the bounds, so a high fraction
+  means the interval describes only the resampled corpora where Spearman was
+  defined. It is about 0.37 when one game's message differs from all the
+  others. Where `key` is NaN it is 1 and the bounds are NaN.
+
+`test_avg` carries the values only: the mean of two splits' bounds is not an
+interval. That makes 72 topsim columns per eval split on ShapeWorld and 36 on
+birds, and 18 and 9 on `test_avg`.
+
+Reading the intervals: non-overlap is evidence of a difference, and overlap is
+not evidence of none. Two epochs of one ShapeWorld run are scored on the same
+games and pairs, so their errors are correlated; a difference between them needs
+a paired comparison, not two intervals side by side. On birds the eval games are
+redrawn every pass. See `docs/measurement.md`.
+
+**Older files.** CSVs written before 2026-10-10 hold topsim per concept prototype
+(the modal message among a concept's games) with no `_low`/`_high`/`_degenerate`
+columns. Those
+values are not comparable with the per-game ones, and a run started before the
+change cannot resume across it: the `metrics.csv` header no longer matches.
 
 A value is `NaN` where Spearman is undefined: fewer than two finite pairs, or
 either side constant across all pairs. That is the correct reading, not an error.

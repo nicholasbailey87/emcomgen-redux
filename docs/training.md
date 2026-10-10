@@ -790,8 +790,10 @@ possible, and both are refused rather than appended to:
    once at startup.
 2. **Different metrics.** Any new column does the same damage for the same
    reason: `pool_effective_examples` arriving mid-flight silently misaligns every
-   column from that row on. Checked before every append, comparing the full
-   header to the row's key order.
+   column from that row on. Checked before every append, comparing the set of
+   header columns to the row's keys. The row is then written in the header's
+   order, so a row whose keys arrive in a different order still lands under the
+   right columns.
 
 The failure is invisible until someone reads the CSV months later, so both raise
 with instructions to use `--no_resume` or move the run directory aside.

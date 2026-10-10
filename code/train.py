@@ -9,7 +9,7 @@ from torch.amp import GradScaler, autocast
 import os
 from pathlib import Path
 
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import datetime
 
 import numpy as np
@@ -121,20 +121,14 @@ def get_true_lang(batch, dataset, join=True):
 
 def concept_keys_from_true_lang(true_lang_text, dataset_name):
     """
-    Map each item's ground-truth language to the key identifying its concept: a
+    Map each game's ground-truth language to the key identifying its concept: a
     CUB concept is its (integer) class id; a shapeworld concept is the logical-
-    form string with SOS/EOS stripped. Items sharing a key are instances of the
-    same concept and are pooled into one prototype for the topsim suite.
+    form string with SOS/EOS stripped, which is the formula the ``topsim_gt_``
+    family reads.
     """
     if dataset_name == "cub":
         return [int(t[1]) for t in true_lang_text]
     return [" ".join(t[1:-1]) for t in true_lang_text]
-
-
-def representative_message(messages):
-    """The most common token sequence among messages for one concept."""
-    counts = Counter(tuple(m) for m in messages)
-    return list(counts.most_common(1)[0][0])
 
 
 def compute_language_metrics(
@@ -142,59 +136,62 @@ def compute_language_metrics(
     symbol_embeddings,
     concepts,
     concept_keys,
-    max_concepts,
+    n_pairs,
+    replicates,
+    seed,
     ground_truth_meaning,
 ):
     """
-    The topsim report over concept prototypes (``emergence.topsim_report``).
+    The topsim report over this pass's games (``emergence.topsim_report``).
 
-    Measurement is per *concept prototype*, not per image; a prototype is the
-    modal token sequence its instances emitted, the mean of the contextual
-    symbol embeddings of every instance that emitted it, and the mean of the
-    instances' concept vectors. See docs/measurement.md.
+    Measurement is per *game*: one point per game, its message, its contextual
+    symbol embeddings and its concept vector. Spearman is taken over ``n_pairs``
+    game pairs drawn at random, and each value carries a 95% bootstrap interval
+    over ``replicates`` resamplings of the games, and the fraction of them that
+    were degenerate. The pairs and the resamplings are both drawn from
+    ``seed``, so every epoch scores the same pair indices. The pairs index
+    games by their position in the pass: on ShapeWorld, whose eval splits are
+    read in one fixed order, that makes them the same game pairs every epoch;
+    birds redraws its eval games every pass, so there they are not. See
+    docs/measurement.md.
 
     ``ground_truth_meaning`` says whether the concept keys are logical forms, in
     which case the ``topsim_gt_`` family is reported against them too.
     """
-    concepts = np.asarray(concepts, dtype=np.float64)
-
-    groups = defaultdict(list)
-    for i, key in enumerate(concept_keys):
-        groups[key].append(i)
-
-    keys = list(groups)
-    if len(keys) > max_concepts:
-        chosen = np.random.choice(len(keys), size=max_concepts, replace=False)
-        keys = [keys[i] for i in sorted(chosen)]
-
-    # Spearman needs at least two pairs, i.e. at least three prototypes.
-    if len(keys) < 3:
+    # Spearman needs at least two pairs, i.e. at least three games.
+    if len(messages) < 3:
         return {}
 
-    proto_messages = []
-    proto_embeddings = []
-    proto_concepts = []
-    for key in keys:
-        idx = groups[key]
-        message = representative_message([messages[i] for i in idx])
-        # Every source emitted `message`, so these all stack cleanly. Slice in
-        # case an EOS trimmed this message short.
-        sources = [i for i in idx if list(messages[i]) == message]
-        proto_messages.append(message)
-        proto_embeddings.append(
-            np.stack([
-                np.asarray(symbol_embeddings[i])[: len(message)]
-                for i in sources
-            ]).mean(0)
-        )
-        proto_concepts.append(concepts[idx].mean(0))
-
+    rng = np.random.default_rng(seed)
+    pairs = emergence.sample_pairs(len(messages), n_pairs, rng)
     return emergence.topsim_report(
-        proto_messages,
-        proto_embeddings,
-        np.stack(proto_concepts),
-        formulas=keys if ground_truth_meaning else None,
+        messages,
+        symbol_embeddings,
+        np.asarray(concepts, dtype=np.float64),
+        formulas=concept_keys if ground_truth_meaning else None,
+        pairs=pairs,
+        replicates=replicates,
+        rng=rng,
     )
+
+
+def average_splits(split_metrics):
+    """
+    The mean over the eval splits of each metric, for the ``test_avg`` columns.
+
+    A topsim value's bootstrap columns (``emergence.BOOTSTRAP_SUFFIXES``) are
+    left out: the mean of two splits' bounds is not an interval for the mean of
+    their values. ``test_avg_topsim_*`` is the plain average of the values; the
+    spread is read off ``test`` and ``test_same``.
+    """
+    return {
+        metric: np.mean(values)
+        for metric, values in split_metrics.items()
+        if not (
+            metric.startswith("topsim")
+            and metric.endswith(emergence.BOOTSTRAP_SUFFIXES)
+        )
+    }
 
 
 def build_lr_schedule(config, training_examples, batch_size):
@@ -1157,7 +1154,9 @@ def run(
             all_symbol_embs,
             all_concepts,
             concept_keys,
-            max_concepts=config['analysis']['max_concepts'],
+            n_pairs=config['analysis']['topsim_pairs'],
+            replicates=config['analysis']['topsim_bootstrap_replicates'],
+            seed=config['analysis']['topsim_seed'],
             ground_truth_meaning=dataloader.dataset.name != "cub",
         )
         metrics.update(lang_metrics)
@@ -1601,20 +1600,20 @@ if __name__ == "__main__":
 
         # Average across seen and novel
         util.update_with_prefix(
-            metrics,
-            {k: np.mean(v) for k, v in split_metrics.items()},
-            "test_avg",
+            metrics, average_splits(split_metrics), "test_avg"
         )
 
         metrics["timestamp"] = datetime.now().isoformat()
 
         # Appending is what lets earlier rows survive a resume, so the columns
-        # are checked against the header on disk first. See docs/training.md.
+        # are checked against the header on disk first, and the row is written
+        # in the header's order. See docs/training.md.
+        columns = list(metrics)
         if os.path.exists(metrics_path):
             with open(metrics_path) as f:
                 existing_columns = f.readline().rstrip("\n").split(",")
 
-            if existing_columns != list(metrics):
+            if set(existing_columns) != set(metrics):
                 raise RuntimeError(
                     f"{metrics_path} has a header this run's rows do not match, "
                     f"so appending would misalign the columns. On disk but not "
@@ -1623,8 +1622,9 @@ if __name__ == "__main__":
                     f"{sorted(set(metrics) - set(existing_columns))}. Start again "
                     f"with --no_resume, or move the existing run directory aside."
                 )
+            columns = existing_columns
 
-        pd.DataFrame([metrics]).to_csv(
+        pd.DataFrame([metrics], columns=columns).to_csv(
             metrics_path,
             mode="a",
             header=not os.path.exists(metrics_path),

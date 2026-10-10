@@ -362,9 +362,10 @@ def test_test_same_games_never_show_a_training_image():
 def test_eval_length_is_sized_per_species():
     """
     Equal games per species across both eval splits, which is what makes their
-    topsim readable against each other: topsim builds one prototype per concept,
-    so it is coverage per *species* that has to match, not total games. Pins
-    DEFAULT.toml's birds values against a silent edit.
+    topsim readable against each other: each species then weighs the same in
+    either split's game pairs, so it is coverage per *species* that has to
+    match, not total games. Pins DEFAULT.toml's birds values against a silent
+    edit.
     """
     config = _cub_config()
 

@@ -155,9 +155,8 @@ number of games per epoch.
 
 Eval is sized per species (`eval_games_per_species`, 16), so `test` draws 800
 games and `test_same` 2,400. Equal coverage per species rather than equal totals,
-because topsim builds one prototype per concept from the modal message over that
-concept's instances, so it is games-per-species that has to match for the two
-splits to be read against each other.
+so that each species weighs the same in either split's topsim and accuracy, and
+the two splits can be read against each other.
 
 ## Running experiments
 
@@ -425,16 +424,14 @@ forward pass — calling the accessors separately would resample the vision
 dropout mask and (for the GRU sender) the message itself, so the three would not
 correspond.
 
-Measurement is **per concept prototype**, not per image: one point per concept,
-whose message is the modal token sequence its instances emitted, whose symbol
-embeddings are the mean over *every* instance that emitted that sequence
-(averaging rather than picking one arbitrary instance is what keeps a single
-epoch's reading stable), and whose concept vector is the mean over its
-instances. Pairing individual images would put many pairs at meaning distance
-zero (same concept, different image) against a non-zero signal distance, which
-only depresses the correlation. Concepts are
-capped at `[analysis] max_concepts` (default 500), which bounds measurement at
-roughly 30–55 s per eval pass.
+Measurement is **per game**: one point per eval game, with its message, its
+contextual symbol embeddings and its concept vector. Spearman is taken over a
+seeded random sample of `[analysis] topsim_pairs` (20,000) game pairs, and every
+column comes with `_low` and `_high`, a 95% percentile bootstrap interval over
+`topsim_bootstrap_replicates` (1,000) resamplings of the games, and
+`_degenerate`, the fraction of those resamplings left out of the interval
+because Spearman was undefined on them. Measurement costs about 15 s per eval
+pass on a laptop CPU. See `docs/measurement.md`.
 
 **Two meaning spaces.** The same six signal distances are read against two
 meaning distances, and both families are reported:
@@ -493,6 +490,12 @@ resume. Each is prefixed with its split — `train`, `test` (novel concepts),
     against the ground-truth logical forms. ShapeWorld only.
 - `{test,test_same,test_avg}_topsim{,_gt}_s1_static` … `_s3_static` — the three
     soft variants under the decontextualised embeddings. Soft variants only.
+- `{test,test_same}_<topsim column>_low`, `_high` and `_degenerate` — each topsim
+    value's 95% bootstrap interval over games, and the fraction of bootstrap
+    replicates left out of it. Not on `test_avg`, which averages the values
+    only. That is 72 topsim columns per eval split on ShapeWorld (18 values, each
+    with three companions) and 36 on birds, plus the 18 or 9 values on
+    `test_avg`.
 - `{train,test,...}_loss` — the training objective. `_combined_loss` is a
     duplicate of it, kept only so older analysis scripts keep working.
 - `train_realised_survival` — the mean winning-token probability, i.e. the

@@ -180,33 +180,108 @@ fires early and every message is exactly `message_length − 2` content symbols.
 Insertions and deletions therefore never arise, length normalisation is a no-op,
 and a 5-symbol message has only 4 two-grams.
 
-## Concept prototypes (`train.compute_language_metrics`)
+## Game pairs and bootstrap intervals (`train.compute_language_metrics`)
 
-Measurement is per **concept prototype**, not per image. One point per concept is
-what the signal sets are about — a language is compositional to the extent that
-the form of the utterance for a concept tracks that concept's meaning. Pairing
-individual images would put many pairs at meaning distance zero (same concept,
-different image) against a non-zero signal distance, which only depresses the
-correlation; and the soft signal distances are O(n²) in a Python loop, so 2000
-images is ~2M pairs.
+Measurement is per **game**. Each eval game is one point: its message, the
+contextual embeddings of the symbols it emitted, and its speaker prototypes (the
+concept vector `Sender.speak` returns). All three come from the same forward
+pass, so they correspond.
 
-A concept's prototype is:
+This replaced a per-concept prototype, whose message was the modal token sequence
+among the concept's games and whose embeddings were averaged over the games that
+emitted it. With a 20-symbol vocabulary and messages up to 10 symbols, a
+concept's 16 or so messages were usually all different. `most_common(1)` then
+returned the first game's message, so the soft distances rested on one game while
+the meaning side averaged all of them. Writing measurement per game removes the
+mismatch and every grouping step with it.
 
-- the **modal token sequence** its instances emitted;
-- the **mean of the contextual symbol embeddings** of *every* instance that
-  emitted that sequence (the soft distances need embeddings paired with real
-  symbols, and averaging over the instances that emitted them rather than taking
-  one arbitrary instance is what keeps a single epoch's reading stable);
-- the **mean of its instances' concept vectors**.
+**Pairs.** Spearman is taken over a fixed random sample of `topsim_pairs`
+(20,000) distinct unordered game pairs, drawn uniformly from `topsim_seed`.
+Every pair is used when there are fewer. The six signal distances and both
+meaning distances are computed only on those pairs (the `*_pairs` functions in
+`code/emergence.py`; each `*_condensed` is the same function over every pair).
 
-Concepts are capped at `max_concepts`; capping images instead would starve each
-concept of the instances the modal message is drawn from.
+On ShapeWorld, two games of one concept share a formula, so under `topsim_gt_`
+they sit at meaning distance zero against a non-zero signal distance, which is
+the objection the prototype was built to avoid. They are left in rather than
+special-cased. Their share of the sample depends on how many concepts each
+ShapeWorld eval split holds, which has not been counted here. The `topsim_`
+family, the only one birds reports, has no such tie: every game has its own
+concept vector, so two games of one concept are not in general zero apart.
 
-Spearman needs at least two pairs, i.e. at least three prototypes; below that the
+**Intervals.** Every column `key` comes with `key_low` and `key_high`, the 2.5th
+and 97.5th percentiles of `topsim_bootstrap_replicates` (1,000) bootstrap
+replicates that resample the **games**. A replicate draws game multiplicities
+`w ~ Multinomial(n, 1/n)`, which leaves the sampled pairs in place and gives pair
+`(i, j)` weight `w_i · w_j` — exactly what resampling the games with replacement
+does to them. The replicate's rho is the weighted Pearson correlation of the
+pairs' mid-ranks, so the interval covers both game-sampling and pair-sampling
+noise. One set of multiplicities is shared by every column of one report.
+
+Two approximations, both deliberate:
+
+- The ranks are those of the original sample, not recomputed per replicate. That
+  makes each replicate a matrix product. `tests/test_emergence.py` bounds the
+  error against exact `np.repeat` + `spearmanr` resampling at about 0.01.
+- A game drawn twice does not add a pair between its two copies. Such a pair
+  would sit at distance zero on both sides and inflate the replicate.
+
+Non-finite pairs are masked once per column, as `spearman_topsim` does.
+
+**Degenerate replicates.** A replicate on which Spearman is undefined — every
+weighted pair at one value on either side — gives no rho and is left out of the
+percentiles. Every column `key` also comes with `key_degenerate`, the fraction
+of replicates left out, so the bounds are percentiles over the other
+`1 − key_degenerate` of them, and describe only the resampled corpora on which
+Spearman was defined. The fraction is what says how far to trust them. In a
+near-collapsed language, where one game's message differs from every other,
+the replicates that do not draw that game are degenerate: about `(1 − 1/n)^n` of
+them for `n` games, close to `1/e ≈ 0.37` once `n` is in the hundreds.
+`tests/test_emergence.py` checks that case.
+
+Where the point value is NaN, both bounds are NaN and `key_degenerate` is 1. A
+replicate only reweights the sample's finite pairs, so it is undefined whenever
+the sample is, and every replicate would be degenerate; they are not computed. So
+`key_degenerate = 1` exactly when the bounds are NaN, whether or not the point
+value is.
+
+**Calibration.** Simulated over 200 repetitions at 20,000 pairs and 400
+replicates (the 2026-10-10 review), coverage of the nominal 95% ran 0.965 at
+800 games and rho 0.45, 0.970 at 2,400 games and rho 0.90, and 0.940 at 60
+games. Two departures:
+
+- **Slightly conservative when pair noise dominates.** Weighting pairs by
+  `w_i · w_j` counts the pair-sampling variance about three times over: a
+  linearisation gives `4ζ₁/n + 3ζ₂/P` for the replicate variance against a true
+  `4ζ₁/n + ζ₂/P`, with `n` games and `P` pairs. At 2,400 games and rho 0.90 the
+  mean width was 0.0128 against a true 0.0103.
+- **Slight under-coverage near ±1.** 0.935 at rho 0.988 and 0.925 at 0.9995. At
+  rho exactly 1 every replicate is 1 and the interval collapses to [1, 1].
+
+**The seed is fixed**, so every epoch scores the same pair indices, and the
+indices pick games by their position in the eval pass. On ShapeWorld the eval
+splits are stored files read in one fixed order (`EVAL_ORDER_SEED` in
+`code/data/loader.py`), so those are the same game pairs every epoch, and in
+every run at the same `topsim_seed`. On birds the eval games are redrawn on every
+pass, so the same indices land on different games and no game or pair is shared
+between epochs.
+
+That matters for comparisons. Two ShapeWorld epochs of one run are scored on the
+same games and pairs, so their errors are correlated, and the difference between
+them carries less noise than the two intervals side by side suggest; it needs a
+paired comparison. Between intervals, non-overlap is evidence of a difference,
+and overlap is not evidence of none.
+
+Spearman needs at least two pairs, i.e. at least three games; below that the
 report is empty.
 
-Concept keys come from the ground-truth language: a CUB concept is its integer
-class id, a ShapeWorld concept is the logical-form string with SOS/EOS stripped.
+For ShapeWorld each game's formula — the `topsim_gt_` meaning — is its
+logical-form string with SOS/EOS stripped (`concept_keys_from_true_lang`). CUB has
+no logical forms, so it reports only the `topsim_` family: 9 values a split
+against ShapeWorld's 18, each with `_low`, `_high` and `_degenerate`.
+
+The `_static` control's per-token mean embeddings are still taken over every game
+in the pass, not only the sampled ones.
 
 Topsim is computed on the eval passes only. It is a property of the language, so
 there is no point computing it mid-training-pass, and the extra tensor is wasted
@@ -265,11 +340,16 @@ and the *tightest* gap in that set belongs to a run that never left `ln 2`.
 ### Read more than one column
 
 There are 6 signal sets × 2 meaning spaces + 3 `_static` per meaning space = 18
-per split, over `test` / `test_same` / `test_avg` — 54 columns on ShapeWorld, 27
-on CUB. Reading `test_topsim_s1` alone is reading one of them.
+values per split on ShapeWorld, and 9 on CUB, which has one meaning space. On
+`test` and `test_same` each value comes with `_low`, `_high` and `_degenerate`,
+so 72 columns a split on ShapeWorld and 36 on CUB; `test_avg` carries the values
+alone, 18 or 9. That is 162 topsim columns in all on ShapeWorld and 81 on CUB.
+Reading `test_topsim_s1` alone is reading one of them.
 
 **`test_avg` is `np.mean` of the `test` and `test_same` values**, not a third
-eval pass, which is why it always sits between them.
+eval pass, which is why it always sits between them. It has no interval: the
+mean of two splits' bounds is not one for the mean of their values. Read the
+spread off `test` and `test_same`.
 
 **S4–S6 touch no embeddings at all.** Only S1–S3 read the sender's contextual
 symbol embeddings, which is why only they get a `_static` control. "The topsim is
@@ -886,7 +966,8 @@ pass is where the compute is. Reported as a single scalar, not broken down by
 the concept: `shape`, `color`, `and_color_shape`, and so on.
 
 **`test_avg_*`** — the mean of the `test` and `test_same` readings of every eval
-metric.
+metric, except the topsim bootstrap columns (`_low`, `_high`, `_degenerate`),
+which it leaves out.
 
 **`timestamp`** — wall-clock time the epoch finished, matching vit's `timestamp`
 column, so a run's pace can be read off `metrics.csv` after the fact.

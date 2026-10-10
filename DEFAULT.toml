@@ -183,12 +183,31 @@ receiver_reset_interval = 0.0
 # adjustment against a pre-training baseline pass, which read ~0 for every
 # variant and so bounded nothing: the leakage it existed to catch is created by
 # training. See `emergence.topsim_report`.
-max_concepts = 500     # cap on concept prototypes entering one topsim computation.
-                       # Measurement is per concept prototype, not per image, and
-                       # the soft signal distances are O(n^2) in a Python loop, so
-                       # this bounds the measurement cost. The `_static` control
-                       # roughly doubles it; dropping the pre-training baseline
-                       # pass gives most of that back.
+#
+# Measurement is per game: one point per eval game -- its message, its contextual
+# symbol embeddings and its speaker prototypes. It replaces a per-concept
+# prototype whose message was the modal sequence among the concept's games; with
+# a 20-symbol vocabulary those were mostly all different, so the "mode" was the
+# first game's message and the soft distances rested on one game while the
+# meaning side averaged them all. Spearman is taken over a seeded random sample
+# of game pairs, and every column gains `_low` and `_high`: a 95% percentile
+# bootstrap interval that resamples the games, so it covers game-sampling noise
+# as well as pair-sampling noise. And `_degenerate`: the fraction of bootstrap
+# replicates on which Spearman was undefined, which the interval leaves out.
+# Those three are on `test` and `test_same` only; `test_avg` averages the values.
+# See docs/measurement.md.
+#
+# The seed is fixed, so every epoch scores the same pair indices. On ShapeWorld
+# those are the same game pairs every epoch, and in every run at the same
+# `topsim_seed`: the eval splits are stored files, read in one fixed order
+# (`data.loader.EVAL_ORDER_SEED`). On birds the
+# eval games are redrawn on every pass, so the same indices land on different
+# games, and no game or pair is shared between epochs.
+topsim_pairs = 20000   # game pairs entering each Spearman. All pairs are used
+                       # when there are fewer. The soft Levenshtein (S3, and its
+                       # `_static`) is a Python DP per pair and dominates the cost.
+topsim_bootstrap_replicates = 1000  # resamplings of the games behind each interval
+topsim_seed = 0        # draws the pairs and the bootstrap's game multiplicities
 
 [data]
 # 40 images per stored game rather than 80-100. `split_spk_lis` only ever reads
@@ -2662,10 +2681,10 @@ games_per_epoch = 5000
 # stored files.
 #
 # Per species rather than flat because the two eval splits hold different numbers
-# of species, and topsim measures one prototype per concept -- the modal message
-# over that concept's instances -- so it is coverage *per species* that has to
-# match for the two splits to be read against each other. jayelm's flat 200 gave
-# `test` four games a species and would have given `test_same` 1.3.
+# of species, and it is coverage *per species* that has to match for the two
+# splits to be read against each other: it sets how much each species weighs in a
+# split's topsim game pairs. jayelm's flat 200 gave `test` four games a species
+# and would have given `test_same` 1.3.
 #
 # 16 rather than jayelm's effective 4 because 200 games was too few to see
 # through, `test_same` or not. Across the three recorded birds runs `test_acc`

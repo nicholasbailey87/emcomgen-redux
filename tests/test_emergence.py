@@ -587,9 +587,234 @@ def test_report_omits_ground_truth_keys_without_formulas():
     seqs, embs, concepts = _toy_language(rng)
     report = E.topsim_report(seqs, embs, concepts)
     assert not any(key.startswith("topsim_gt_") for key in report)
-    assert set(report) == set(E.TOPSIM_KEYS) | {
-        f"topsim_{s}_static" for s in E.SOFT_SIGNAL_SETS
+    base = set(E.TOPSIM_KEYS) | {f"topsim_{s}_static" for s in E.SOFT_SIGNAL_SETS}
+    assert set(report) == {
+        key + suffix for key in base for suffix in ("",) + E.BOOTSTRAP_SUFFIXES
     }
+
+
+def test_report_keys_carry_an_interval_for_every_value():
+    """
+    Every base key has a `_low`, a `_high` and a `_degenerate`, with and
+    without formulas.
+    """
+    base = [
+        key for key in E.REPORT_KEYS if not key.endswith(E.BOOTSTRAP_SUFFIXES)
+    ]
+    assert len(base) == 18 and len(E.REPORT_KEYS) == 72
+    for key in base:
+        for suffix in E.BOOTSTRAP_SUFFIXES:
+            assert f"{key}{suffix}" in E.REPORT_KEYS
+
+    rng = np.random.RandomState(15)
+    seqs, embs, concepts = _toy_language(rng)
+    formulas = [" ".join(map(str, seq)) for seq in seqs]
+    with_gt = E.topsim_report(seqs, embs, concepts, formulas, replicates=50)
+    without_gt = E.topsim_report(seqs, embs, concepts, replicates=50)
+    assert set(with_gt) == set(E.REPORT_KEYS)
+    assert len(without_gt) == 36
+    for key in without_gt:
+        assert key in with_gt
+
+
+
+# --------------------------------------------------------------------------- #
+# Sampled pairs                                                                #
+# --------------------------------------------------------------------------- #
+def test_sample_pairs_are_distinct_and_ordered():
+    rng = np.random.default_rng(0)
+    i, j = E.sample_pairs(500, 5000, rng)
+    assert len(i) == 5000
+    assert (i < j).all() and (i >= 0).all() and (j < 500).all()
+    assert len(set(zip(i.tolist(), j.tolist()))) == 5000
+
+
+def test_sample_pairs_is_reproducible_from_the_seed():
+    first = E.sample_pairs(300, 2000, np.random.default_rng(7))
+    second = E.sample_pairs(300, 2000, np.random.default_rng(7))
+    other = E.sample_pairs(300, 2000, np.random.default_rng(8))
+    assert all(np.array_equal(a, b) for a, b in zip(first, second))
+    assert not np.array_equal(first[0], other[0]) or not np.array_equal(
+        first[1], other[1]
+    )
+
+
+def test_sample_pairs_returns_every_pair_when_the_budget_covers_them():
+    """All pairs, in `pdist` order, so a small corpus is measured exactly."""
+    for n in (2, 3, 10, 57):
+        i, j = E.sample_pairs(n, 10 ** 6, np.random.default_rng(0))
+        ref_i, ref_j = np.triu_indices(n, k=1)
+        assert np.array_equal(i, ref_i) and np.array_equal(j, ref_j)
+
+
+def test_condensed_index_mapping_is_exact_at_scale():
+    """The closed-form row lookup holds at eval-pass sizes, row edges included."""
+    n = 2400
+    ref_i, ref_j = np.triu_indices(n, k=1)
+    i, j = E.all_pairs(n)
+    assert np.array_equal(i, ref_i) and np.array_equal(j, ref_j)
+
+
+def test_pairwise_distances_match_condensed():
+    """
+    Each `*_pairs` distance is the `*_condensed` one at the sampled indices --
+    so the identity, smoothness and toy-language tests above, which run through
+    the condensed wrappers, cover the code the report runs on.
+    """
+    from scipy.spatial.distance import pdist
+
+    rng = np.random.RandomState(16)
+    n = 40
+    vocab = list(range(FIRST_SYMBOL, FIRST_SYMBOL + 8))
+    seqs = [list(rng.choice(vocab, size=LENGTH)) for _ in range(n)]
+    embs = [rng.randn(LENGTH, 12) for _ in seqs]
+    concepts = rng.randn(n, 20)
+    words = ["and", "or", "red", "blue", "square", "circle"]
+    formulas = [" ".join(rng.choice(words, size=3)) for _ in range(n)]
+
+    pairs = E.sample_pairs(n, 300, np.random.default_rng(1))
+    i, j = pairs
+    k = n * i - i * (i + 1) // 2 + (j - i - 1)
+
+    sampled = E.signal_distances(seqs, embs, pairs)
+    condensed = E.signal_distances(seqs, embs)
+    for name in SETS:
+        assert np.allclose(sampled[name], condensed[name][k]), name
+
+    assert np.allclose(
+        E.concept_distance_pairs(concepts, pairs),
+        pdist(concepts, metric="cosine")[k],
+    )
+    assert np.allclose(
+        E.formula_distance_pairs(formulas, pairs),
+        E.formula_distance_condensed(formulas)[k],
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Bootstrap intervals over games                                               #
+# --------------------------------------------------------------------------- #
+def _noisy_corpus(rng, n_items, noise=1.0):
+    """Meaning and signal coordinates per game, correlated through ``noise``."""
+    meaning = rng.standard_normal((n_items, 3))
+    signal = meaning + noise * rng.standard_normal((n_items, 3))
+    return meaning, signal
+
+
+def _pair_distances_of(points, pairs):
+    i, j = pairs
+    return np.linalg.norm(points[i] - points[j], axis=1)
+
+
+def _interval(n_items, n_pairs, seed, replicates=400):
+    rng = np.random.default_rng(seed)
+    meaning, signal = _noisy_corpus(rng, n_items)
+    pairs = E.sample_pairs(n_items, n_pairs, rng)
+    weights = E.game_weights(n_items, replicates, rng)
+    m = _pair_distances_of(meaning, pairs)
+    s = _pair_distances_of(signal, pairs)
+    return m, s, pairs, weights, E.game_bootstrap(m, {"x": s}, pairs, weights)["x"]
+
+
+def test_bootstrap_interval_contains_the_point_estimate():
+    for seed in range(5):
+        *_, (rho, low, high, _) = _interval(150, 3000, seed)
+        assert low <= rho <= high, (low, rho, high)
+        assert high - low > 0
+
+
+def test_bootstrap_interval_narrows_with_more_games():
+    """
+    Every pair at both sizes, four times the games: the interval should about
+    halve. At a fixed pair budget it would tighten less, because what is left
+    is pair-sampling noise, which more games do not remove.
+    """
+    *_, (_, low_few, high_few, _) = _interval(60, 10 ** 6, seed=0)
+    *_, (_, low_many, high_many, _) = _interval(240, 10 ** 6, seed=0)
+    assert high_many - low_many < 0.7 * (high_few - low_few), (
+        high_few - low_few, high_many - low_many
+    )
+
+
+def test_fixed_rank_bootstrap_matches_exact_resampling():
+    """
+    Holding the original ranks fixed is an approximation to re-ranking every
+    replicate. Exact resampling repeats each sampled pair ``w_i * w_j`` times
+    and takes Spearman afresh; the two intervals must agree to ~0.01.
+    """
+    from scipy.stats import spearmanr
+
+    m, s, (i, j), weights, (_, low, high, _) = _interval(120, 2000, seed=3)
+
+    exact = []
+    for row in weights:
+        repeats = (row[i] * row[j]).astype(np.int64)
+        exact.append(
+            spearmanr(np.repeat(m, repeats), np.repeat(s, repeats)).correlation
+        )
+    exact_low, exact_high = np.percentile(exact, [2.5, 97.5])
+    assert abs(low - exact_low) < 0.01, (low, exact_low)
+    assert abs(high - exact_high) < 0.01, (high, exact_high)
+
+
+def test_degenerate_corpus_gives_nan_point_and_interval():
+    """
+    One message for every game: the hard variants are undefined, so are their
+    bounds, and every replicate counts as degenerate.
+    """
+    rng = np.random.RandomState(17)
+    seqs = [[4, 5, 6, 7, 8] for _ in range(10)]
+    embs = [rng.randn(LENGTH, 16) for _ in seqs]
+    report = E.topsim_report(seqs, embs, rng.randn(10, 24), replicates=50)
+    for s in ("s4", "s5", "s6"):
+        for suffix in ("", "_low", "_high"):
+            assert np.isnan(report[f"topsim_{s}{suffix}"]), f"topsim_{s}{suffix}"
+        assert report[f"topsim_{s}_degenerate"] == 1.0, s
+
+
+def test_near_collapsed_corpus_reports_its_degenerate_fraction():
+    """
+    One game's message differs from the rest. A replicate that does not draw
+    that game has a constant signal side and is left out of the interval; the
+    fraction left out is P(game not drawn) = (1 - 1/n)^n.
+    """
+    n_items, replicates = 60, 4000
+    rng = np.random.default_rng(18)
+    pairs = E.all_pairs(n_items)
+    meaning = _pair_distances_of(rng.standard_normal((n_items, 3)), pairs)
+    i, j = pairs
+    # Game 0 is at signal distance 1 from every other game; the rest are at 0.
+    signal = ((i == 0) | (j == 0)).astype(np.float64)
+    weights = E.game_weights(n_items, replicates, rng)
+
+    rho, low, high, degenerate = E.game_bootstrap(
+        meaning, {"x": signal}, pairs, weights
+    )["x"]
+    expected = (1 - 1 / n_items) ** n_items
+    # Binomial sd at 4000 replicates is about 0.0076.
+    assert abs(degenerate - expected) < 0.03, (degenerate, expected)
+    # The weights fix the fraction exactly: the replicates without game 0.
+    assert degenerate == (weights[:, 0] == 0).mean()
+    assert np.isfinite(rho) and low <= high
+
+
+def test_nan_column_keeps_its_place_in_the_report():
+    """
+    The report follows the order of `signals` whatever is NaN, so a resumed
+    run whose NaN pattern differs from epoch 0's writes the same header.
+    """
+    rng = np.random.default_rng(19)
+    n_items = 30
+    pairs = E.all_pairs(n_items)
+    meaning, signal = _noisy_corpus(rng, n_items)
+    m = _pair_distances_of(meaning, pairs)
+    s = _pair_distances_of(signal, pairs)
+    signals = {"s1": s, "s2": np.ones_like(s), "s3": s[::-1].copy()}
+    weights = E.game_weights(n_items, 50, rng)
+
+    report = E.game_bootstrap(m, signals, pairs, weights)
+    assert list(report) == ["s1", "s2", "s3"]
+    assert np.isnan(report["s2"][0]) and np.isfinite(report["s1"][0])
 
 
 if __name__ == "__main__":

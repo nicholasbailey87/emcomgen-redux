@@ -233,6 +233,14 @@ def validate_config(config: dict) -> bool:
     # aid, not a permanent record. That is what docs/ is for.
     for table, key, guidance in (
         (
+            'analysis',
+            'max_concepts',
+            "topsim is measured per game since 2026-10-10, not per concept "
+            "prototype, so there are no concepts to cap. The cost is bounded by "
+            "`topsim_pairs` (game pairs per Spearman) and "
+            "`topsim_bootstrap_replicates`, and `topsim_seed` fixes both draws",
+        ),
+        (
             'receiver_discriminator',
             'normalise_score',
             "it gated the operand norms, the `1/sqrt(d)` calibration and both "

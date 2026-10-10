@@ -110,10 +110,9 @@ game.
   sets it; the default is no longer jayelm's 1,000.
 - **Eval** — sized *per species* rather than flat. The two eval splits hold 50
   and 150 species, so one shared game count would give them very different
-  per-concept coverage — and topsim measures one prototype per concept, built
-  from the modal message over that concept's instances, so coverage per species
-  is the quantity that has to be held equal for the two splits to be read against
-  each other. jayelm's flat 200 gave `test` four games a species and would have
+  per-concept coverage — and coverage per species sets how much each species
+  weighs in a split's topsim game pairs and accuracy, so it is the quantity that
+  has to be held equal for the two splits to be read against each other. jayelm's flat 200 gave `test` four games a species and would have
   given `test_same` 1.3.
 
 The eval size follows the species actually present on disk (`len(subset)`), not
