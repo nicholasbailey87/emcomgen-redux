@@ -164,6 +164,10 @@ train_listener_probe = true
 # Default 0, i.e. off, so that no recorded run changes behaviour and every
 # existing config still reproduces from itself. What to set it to is what
 # `diagnostics/bn_calibration_probe.py` measures.
+#
+# ShapeWorld only. CUB has the same train-only augmentation mismatch, but
+# `cub.load` builds no `train_clean` loader, so `parse_config.validate_config`
+# rejects a non-zero value on `cub` rather than let the pass be skipped.
 bn_calibration_batches = 0
 receiver_reset_interval = 0.0
 

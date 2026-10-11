@@ -388,6 +388,23 @@ def validate_config(config: dict) -> bool:
                     "name at the other's size."
                 )
 
+    # BatchNorm calibration on CUB, rejected because it would do nothing:
+    #     only `shapeworld.load` builds the `train_clean` loader that
+    #     `train.calibrate_batch_norm` reads, and `train.py` skips the pass
+    #     when that loader is absent. A birds config setting the key would
+    #     believe it was calibrating.
+    n_calibration = config.get('bn_calibration_batches')
+    if dataset_name == 'cub' and n_calibration and n_calibration > 0:
+        raise InvalidConfig(
+            f"`bn_calibration_batches = {n_calibration}` on CUB would be "
+            "silently skipped: `cub.load` builds no `train_clean` loader, so "
+            "there is nothing clean to calibrate BatchNorm on. CUB has the "
+            "same train-only augmentation mismatch (RandomResizedCrop, "
+            "brightness/contrast/colour jitter, horizontal flip), but "
+            "calibration is only implemented for ShapeWorld. Set "
+            "it to 0, or build `train_clean` in `cub.load` first."
+        )
+
     # `[optimiser.module_lr]`, one rate per module clip group. Checked here
     # rather than in `build_models` because the whole point of the check is that
     # a key naming no group must *raise*: an unknown key would otherwise sit in

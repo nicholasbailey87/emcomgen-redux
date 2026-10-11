@@ -403,6 +403,36 @@ def test_the_eval_splits_get_no_clean_twin():
         assert set(datasets) == {"train", "test", "train_clean"}
 
 
+def _config_for(dataset, extra=""):
+    """`get_config` for one dataset, so the `[birds.*]` overlay is applied."""
+    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+        f.write(f'name = "test"\n{extra}\n[data]\ndataset = "{dataset}"\n')
+        path = f.name
+    try:
+        return parse_config.get_config(path)
+    finally:
+        os.unlink(path)
+
+
+def test_calibration_on_cub_is_rejected():
+    """
+    `cub.load` builds no `train_clean`, and `train.py` skips the pass when that
+    loader is absent -- so a birds config asking for calibration would run
+    without it and say nothing. It raises at config time instead. ShapeWorld
+    takes the same value, and CUB still takes the default of 0.
+    """
+    try:
+        _config_for("../data/cub", "bn_calibration_batches = 8")
+    except parse_config.InvalidConfig as e:
+        assert "train_clean" in str(e)
+    else:
+        raise AssertionError("bn_calibration_batches > 0 on cub validated")
+
+    assert _config_for("../data/cub")["bn_calibration_batches"] == 0
+    config = _config_for("../data/shapeworld", "bn_calibration_batches = 8")
+    assert config["bn_calibration_batches"] == 8
+
+
 if __name__ == "__main__":
     for name, test in sorted(list(globals().items())):
         if name.startswith("test_") and callable(test):

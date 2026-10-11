@@ -30,8 +30,10 @@ it. Nothing is ever scored on it. `train.calibrate_batch_norm` reads it to
 re-estimate BatchNorm's running statistics on clean images, and because it gets
 no columns in `metrics.csv` it is exempt from the header check that raises when a
 split has none. See "The silhouette intervention" below, and
-`bn_calibration_batches` in `DEFAULT.toml`. CUB has no equivalent; the
-calibration is a no-op where the key is absent.
+`bn_calibration_batches` in `DEFAULT.toml`. CUB has no equivalent, so
+`parse_config.validate_config` rejects a non-zero `bn_calibration_batches` on
+`cub`: its train-only augmentations shift BatchNorm in the same way, but the
+calibration is not implemented there.
 
 ### ShapeWorld
 
