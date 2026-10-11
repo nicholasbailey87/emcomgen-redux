@@ -57,7 +57,9 @@ import parse_config
 READOUT_ON = {"scale_score": True, "bias_score": True}
 
 REFERENT_DIM = 320
-BATCH, N_OBJ, SEQ = 6, 10, 7
+# SEQ is DEFAULT.toml's ShapeWorld `message_length`, which these listeners are
+#     built from: 12 since 2026-10-11, 7 before.
+BATCH, N_OBJ, SEQ = 6, 10, 12
 
 # Deliberately unlike every other width in these tests, so
 #     `test_no_discriminator_reads_the_token_embedding` cannot pass by

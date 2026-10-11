@@ -1002,16 +1002,17 @@ def test_realised_survival_reports_the_channel_in_use(build):
     speaker.decode(prototypes)
     assert speaker.realised_survival > baseline + 0.1
 
-    # A freshly initialised speaker starts genuinely uncertain, with room to
-    # earn confidence rather than beginning at its own ceiling. At the opening
-    # scale of 1.0 that is an argmax it holds a bit over a quarter of the time,
-    # mixed down to about 0.26 by `uniform_weight` -- see
-    # `test_the_documented_operating_point_still_holds` for where the unmixed
-    # number comes from. The range is wide because these are tiny test speakers
-    # over a handful of slots, not the 100k-row reference the other test uses.
+    # A freshly initialised speaker starts below its own ceiling, with room to
+    # earn confidence. At the opening scale of 1.0 and DEFAULT.toml's V = 4 that
+    # is an argmax it holds about 59% of the time, mixed down to about 0.55 by
+    # `uniform_weight` -- see `test_the_documented_operating_point_still_holds`
+    # for where the unmixed number comes from. At the V = 14 used until
+    # 2026-10-11 it was about 0.26, and this range was 0.18 to 0.36. The range
+    # is wide because these are tiny test speakers over a handful of slots, not
+    # the 100k-row reference the other test uses.
     fresh = build().train()
     fresh.decode(_prototypes(fresh))
-    assert 0.18 < fresh.realised_survival < 0.36, fresh.realised_survival
+    assert 0.45 < fresh.realised_survival < 0.65, fresh.realised_survival
 
 
 @pytest.mark.parametrize(
@@ -1279,7 +1280,8 @@ def test_saturation_costs_gradient_and_the_ceiling_bounds_it(build):
     saturating speaker really does lose gradient -- this is the failure that
     killed the 2026-08-30 gumbel runs and the reason the `"identity"` branch was
     written. What makes it survivable is that `p` is bounded: at
-    `MAX_LOGIT_SCALE` the sharpest legal shape reaches 0.9945 and no further,
+    `MAX_LOGIT_SCALE` the sharpest legal shape reaches 0.9713 at V = 4 (0.9945
+    at the V = 14 these runs used) and no further,
     and every arm of `lr_sweep_1_cnn` ended pinned there with speaker norms
     between 0.03 and 10 rather than at the ~2e-7 of the unbounded runs.
 
@@ -1320,9 +1322,11 @@ def test_saturation_costs_gradient_and_the_ceiling_bounds_it(build):
     # Confirm the far end really is saturated, so the comparison is about what
     # it claims to be: the sharpest legal shape at the highest legal scale.
     sharpest = _masked(S.layer_norm_logits(spike, vocabulary).detach())
+    # 0.9713 at DEFAULT.toml's V = 4; it was 0.9945 at the V = 14 used until
+    # 2026-10-11. The narrower vocabulary has a smaller shape budget.
     assert S.mean_winning_probability(
         sharpest, S.MAX_LOGIT_SCALE, 0.0
-    ).item() == pytest.approx(0.9945, abs=1e-4)
+    ).item() == pytest.approx(0.9713, abs=1e-4)
 
     ratio = gradient_norm(saturated) / gradient_norm(flat)
 
