@@ -140,6 +140,17 @@ def validate_config(config: dict) -> bool:
             "would sit there unread."
         )
 
+    # `vis.report` reads the listener's prediction per candidate, `(batch,
+    # n_objects)`, and the cross-entropy branch hands it one argmax per game
+    # over a subset of the candidates, `(batch,)`. It raises `IndexError` at
+    # the end of the first pass.
+    if config['vis'] and config['reference_game_xent']:
+        raise InvalidConfig(
+            "`vis = true` and `reference_game_xent = true` cannot both be set: "
+            "`vis.report` draws one prediction per candidate, and the "
+            "cross-entropy branch produces a single argmax per game."
+        )
+
     if (
         loss == "hinge"
         and config['data']['mixup_alpha']

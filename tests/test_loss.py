@@ -233,6 +233,22 @@ def test_a_hinge_beside_the_cross_entropy_branch_is_rejected():
         parse_config.validate_config(config)
 
 
+def test_vis_beside_the_cross_entropy_branch_is_rejected():
+    """
+    `vis.report` indexes the listener's prediction per candidate; the xent
+        branch's is one argmax per game, `(batch,)`, and raises `IndexError`.
+    """
+    config = parse_config.get_config(rung(RUNGS[0]))
+    config["loss"] = "bce"
+    config["reference_game"] = True
+    config["reference_game_xent"] = True
+    parse_config.validate_config(config)
+
+    config["vis"] = True
+    with pytest.raises(parse_config.InvalidConfig, match="vis"):
+        parse_config.validate_config(config)
+
+
 @pytest.mark.parametrize("blends", ["false", 0, None])
 def test_a_non_boolean_blend_flag_is_rejected(blends):
     with pytest.raises(parse_config.InvalidConfig):
