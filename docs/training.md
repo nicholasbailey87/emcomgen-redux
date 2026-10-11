@@ -737,8 +737,10 @@ actually do at init, and three mechanisms are behind that. See
    ramp across the blocks — `step_size = stochastic_depth / (n_layers - 1)` —
    so the *mean* drop rate is about half the configured value whatever the block
    count. At `stochastic_depth = 0.1` that is ~0.05 at three blocks and ~0.05 at
-   six. And a dropped block reverts to a clean identity rather than a rescaled
-   one, since the mask is applied as `alphas = (alpha - 1) * mask + 1`.
+   six. A dropped block is not a clean identity, though: the mask sets
+   `alphas = (alpha - 1) * mask + 1` and zeroes the branch, but the post-norm
+   `RMSNorm` is still applied. Nor are kept branches rescaled by
+   `1 / keep_prob`, so training and eval differ at any nonzero rate.
 
 So adding blocks costs compute and parameters, and very little else. When a
 bootstrap is marginal, the thing not to spend budget on is anything that changes
@@ -761,6 +763,11 @@ once per symbol, so the speaker's concept-to-symbol map jitters within a single
 message. At a ramped mean rate of ~0.05 it is a small effect and may well be
 irrelevant; it is off so that it is not a variable, not because it has been
 shown to matter.
+
+Since 2026-10-11 it cannot be turned back on: `parse_config.validate_config`
+rejects `stochastic_depth > 0` in every table, because of the missing
+`1 / keep_prob` rescale and the post-norm dropped block in item 3 above, as
+well as the per-symbol redraw. See docs/architecture.md.
 
 `torch.compile` is applied to the pair when `config['compile']` is set. Note that
 the `.item()` calls in the diagnostic paths cost a sync and a graph break under

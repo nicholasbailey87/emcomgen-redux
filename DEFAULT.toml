@@ -1836,7 +1836,9 @@ ff_inner_size = 256 # Only applies to Transformer vision models
 # Off, as in all four stacks below; the argument is at
 # [sender_language_model]. Not the stack that argument is about -- this one is
 # not inside the sampling loop -- but a bootstrap failure is not diagnosed with
-# regularisers running.
+# regularisers running. Must be 0: `validate_config` rejects any other value,
+# because broccoli does not rescale kept blocks by `1 / keep_prob` (see
+# [sender_language_model]).
 stochastic_depth = 0.0 # Only applies to Transformer vision models
 depthwise_linear_stochastic_depth = true # ramp the rate linearly over depth
 # GELU rather than the SwiGLU the birds stack runs, and this is a parameter
@@ -2235,9 +2237,16 @@ ff_inner_size = 512 # Only applies to Transformer language models
 #
 # 0.1 is small and this may well not be the cause. It is off because a
 # regulariser is a poor thing to leave running while diagnosing a bootstrap
-# failure, not because it has been shown to matter. Restore to 0.1 in all five
-# places if runs come back overfitting.
-stochastic_depth = 0.0 # Only applies to Transformer language models
+# failure, not because it has been shown to matter.
+#
+# It cannot be restored as things stand: `parse_config.validate_config` rejects
+# any `stochastic_depth > 0`, in this table and the three others that carry the
+# key. Beyond the per-symbol redraw above, broccoli's `EncoderBlock` and our
+# `DecoderBlock` drop a branch with a 0/1 mask and never rescale the kept ones
+# by `1 / keep_prob`, so training and eval run different networks; and under
+# post-norm a dropped block still applies its `RMSNorm`s rather than being the
+# identity. See docs/architecture.md.
+stochastic_depth = 0.0 # Must be 0; see above
 depthwise_linear_stochastic_depth = true
 activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
 relative_position_embedding = true
@@ -2345,7 +2354,7 @@ heads = 4 # head_dim 32. Only applies to Transformer vision models
 utility_tokens = 4 # Registers; see [sender_feature_model]. Transformer vision models only
 # See [sender_feature_model] for what these are and why they are here.
 ff_inner_size = 256 # Only applies to Transformer vision models
-# Off; see [sender_language_model].
+# Off, and must be 0; see [sender_language_model].
 stochastic_depth = 0.0 # Only applies to Transformer vision models
 depthwise_linear_stochastic_depth = true
 activation = "GELU" # one of ReLU, GELU, SquaredReLU, SwiGLU
@@ -2431,9 +2440,9 @@ message_length = 7 # Only applies to Transformer language models. Should be the 
 heads = 5 # Only applies to Transformer language models
 utility_tokens = 0 # Only applies to Transformer language models
 ff_inner_size = 576 # Only applies to Transformer language models
-# Off; see [sender_language_model]. Was already inert at a single block, where
-# a linear depth ramp gives one rate of 0.0 anyway -- stated as 0.0 so the
-# five keys read the same.
+# Off, and must be 0; see [sender_language_model]. Was already inert at a
+# single block, where a linear depth ramp gives one rate of 0.0 anyway -- stated
+# as 0.0 so the keys read the same.
 stochastic_depth = 0.0 # Only applies to Transformer language models
 # Attention dropout. Named per attention type, and kept strictly separate from
 # `[receiver] dropout`, which regularises the referent embeddings rather than

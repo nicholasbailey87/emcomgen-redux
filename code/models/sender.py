@@ -1781,7 +1781,13 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
             ordering there. What differs is that this threads the symbols
             themselves rather than a hidden state, re-reading the whole array
             through the stack at every step -- see docs/architecture.md for why
-            re-reading is exact.
+            re-reading is exact. It is exact only while the stack is
+            deterministic: `self_attention_dropout`, `ff_inner_dropout`,
+            `ff_outer_dropout` and `stochastic_depth` all act inside the loop,
+            so any of them above 0 redraws its masks on every pass and each
+            symbol reads a differently-perturbed prefix. All four are 0 in
+            DEFAULT.toml, and `stochastic_depth > 0` is rejected by
+            `parse_config.validate_config`.
 
         The point of the overwrite. Slot `first_message_slot + i` holds a
             *concept-derived* vector when it is read, because `encode` put one
