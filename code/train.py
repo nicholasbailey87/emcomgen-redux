@@ -521,6 +521,42 @@ def clip_gradients(pair, max_norm):
     return norms
 
 
+def complete_partial_accumulation(pair, microbatches, accumulator_steps):
+    """
+    Rescale the gradient of a trailing partial accumulation so that it is the
+        mean over the microbatches it holds.
+
+    Each microbatch's loss is divided by `accumulator_steps` before
+        `backward`, which makes a full accumulation the mean over its
+        microbatches. An epoch whose batch count is not a multiple of
+        `accumulator_steps` ends on `microbatches` < `accumulator_steps` of
+        them, and without this its gradient would be `microbatches /
+        accumulator_steps` of that mean.
+
+    Called before `scaler.unscale_`, so that clipping and the `clip_*` columns
+        see the corrected gradient. A `.grad` scaled here is still `scale`
+        times the true gradient, and `unscale_` divides by `scale` alone, so
+        the order is safe under `GradScaler`; an inf or NaN stays one, so its
+        check is unaffected.
+
+    Each microbatch is weighted equally, so a short final batch still counts
+        as much as a full one.
+
+    Args:
+        pair: the sender/receiver `Pair`, gradients accumulated and not yet
+            unscaled
+        microbatches: how many microbatches this accumulation holds
+        accumulator_steps: `[optimiser] accumulator_steps`
+    """
+    if microbatches == accumulator_steps:
+        return
+
+    factor = accumulator_steps / microbatches
+    for param in pair.parameters():
+        if param.grad is not None:
+            param.grad.mul_(factor)
+
+
 def weight_norms(pair):
     """
     Each group's parameter norm, partitioned exactly as `clip_gradients`
@@ -873,13 +909,16 @@ def run(
 
     collect = compute_topsim and speaking
 
-    def optimiser_step(loss):
+    def optimiser_step(loss, microbatches):
         """
         Called from inside the loop and once more after it, for a trailing
-        partial accumulation. Both paths have to agree, which is why they are
-        one function. Unscale then clip, per
+        partial accumulation of `microbatches` microbatches. Both paths have to
+        agree, which is why they are one function. Unscale then clip, per
         https://docs.pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping
         """
+        complete_partial_accumulation(
+            pair, microbatches, config['optimiser']['accumulator_steps']
+        )
         scaler.unscale_(optimizer)
 
         # Recorded per optimiser step rather than per example -- a gradient
@@ -918,9 +957,9 @@ def run(
         scheduler.step(loss.item())
         optimizer.zero_grad()
 
-    # Bound before the loop so the flush below reads a defined name on an
-    # empty split.
-    backpropped = True
+    # Microbatches backpropagated since the last optimiser step. Bound before
+    # the loop so the flush below reads a defined name on an empty split.
+    accumulated = 0
 
     if training:
         optimizer.zero_grad()
@@ -1090,11 +1129,10 @@ def run(
             if training:
                 scaler.scale(this_loss / config['optimiser']['accumulator_steps']).backward()
 
-                backpropped = (
-                    (batch_i + 1) % config['optimiser']['accumulator_steps'] == 0
-                )
-                if backpropped:
-                    optimiser_step(this_loss)
+                accumulated += 1
+                if accumulated == config['optimiser']['accumulator_steps']:
+                    optimiser_step(this_loss, accumulated)
+                    accumulated = 0
 
             stats.update(
                 loss=this_loss.item(), acc=this_acc, batch_size=batch_size,
@@ -1235,8 +1273,8 @@ def run(
             if batch_i + 1 >= _PROFILE_UNTIL:
                 break
 
-    if training and not backpropped:
-        optimiser_step(this_loss)
+    if training and accumulated:
+        optimiser_step(this_loss, accumulated)
 
     # Compute metrics + collect generation language
     metrics = stats.averages()

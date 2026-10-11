@@ -440,7 +440,10 @@ goes as `1/‖W‖`, which makes a `clip_*` column uninterpretable alone; see
 The forward pass runs under `autocast` in bfloat16 where supported and float16
 otherwise. Gradients are scaled, accumulated over `accumulator_steps` batches,
 then **unscaled, clipped, stepped** — that order per the PyTorch AMP gradient
-clipping recipe. A trailing partial accumulation is flushed after the loop.
+clipping recipe. A trailing partial accumulation is flushed after the loop,
+its gradient first rescaled to the mean over the microbatches it holds (see
+`train.complete_partial_accumulation`); a short final batch still weighs as
+much as a full one.
 
 The scheduler is `gradboard.scheduler.PASS`, driven by
 `gradboard.cycles.CycleSequence` over up to two stages: an `ascent` warm-up of
