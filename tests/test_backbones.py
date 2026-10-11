@@ -493,6 +493,68 @@ def test_agent_reset_leaves_no_sentinel(config_file):
     assert not stale, f"{config_file}: {len(stale)} kept the sentinel: {stale[:5]}"
 
 
+def test_reset_receiver_drops_only_the_listeners_optimiser_state():
+    """
+    `train.reset_receiver` used to be `reset_parameters()` alone, which left
+    AdamW's moments and step count in place: a fresh listener was stepped with
+    the old one's. After a reset no listener parameter may hold state, the
+    speaker's must be untouched, and the next step must re-create the listener's
+    from zero rather than fail on the missing entries.
+
+    The gradients are random rather than backpropped: what is under test is the
+    optimiser's bookkeeping, not what the pair computes.
+    """
+    torch.manual_seed(0)
+    config = _config_for("../data/shapeworld_40")
+    config["cuda"] = False
+
+    class _Dataset:
+        n_feats = SHAPEWORLD_FEATS
+        name = "shapeworld"
+
+    class _Loader:
+        dataset = _Dataset()
+
+    built = models.builder.build_models({"train": _Loader()}, config)
+    pair, optimiser = built["pair"], built["optimiser"]
+
+    # The speaker's state is kept on the strength of this.
+    speaker = {id(p) for p in pair.sender.parameters()}
+    assert not speaker & {id(p) for p in pair.receiver.parameters()}
+
+    def step():
+        for parameter in pair.parameters():
+            if parameter.requires_grad:
+                parameter.grad = torch.randn_like(parameter)
+        optimiser.step()
+        optimiser.zero_grad()
+
+    for _ in range(3):
+        step()
+
+    trained = [p for p in pair.parameters() if p.requires_grad]
+    assert all(p in optimiser.state for p in trained)
+    kept = {
+        p: {k: v.clone() for k, v in optimiser.state[p].items()}
+        for p in pair.sender.parameters() if p.requires_grad
+    }
+
+    train.reset_receiver(pair.receiver, optimiser)
+
+    assert not [p for p in pair.receiver.parameters() if p in optimiser.state]
+    for p, state in kept.items():
+        for key, value in state.items():
+            assert torch.equal(optimiser.state[p][key], value)
+
+    step()
+
+    for p in pair.receiver.parameters():
+        if p.requires_grad:
+            assert int(optimiser.state[p]["step"]) == 1
+    for p in kept:
+        assert int(optimiser.state[p]["step"]) == 4
+
+
 def test_reset_parameters_clears_the_measured_survival_and_keeps_the_channel_scale():
     """
     `realised_survival` is measured off the logits a particular set of weights

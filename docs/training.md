@@ -778,6 +778,12 @@ past `swish_beta` and the ViT's `encoder.norm`, and
 `model_util.reset_constant_initialised` restores both at the end of each agent's
 reset. See [anecdotes.md](anecdotes.md).
 
+`train.reset_receiver` also drops AdamW's state for every receiver parameter.
+Without that, `exp_avg`, `exp_avg_sq` and `step` survived the reset, and the
+fresh listener was stepped with the old one's moments. AdamW re-creates a missing
+entry from zero on the next step. The speaker's state is kept; on every rung the
+two agents share no parameter.
+
 ## `metrics.csv` discipline
 
 Rows are **appended** per epoch rather than rewritten from an in-memory list,

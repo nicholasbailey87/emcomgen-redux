@@ -303,6 +303,29 @@ def restore_scheduler(scheduler, state):
     scheduler.update_learning_rates()
 
 
+def reset_receiver(receiver, optimizer):
+    """
+    Re-initialise the listener and drop the optimiser's state for its
+    parameters, so the fresh listener starts from AdamW's state as well as its
+    weights.
+
+    `reset_parameters` alone kept each parameter's `exp_avg`, `exp_avg_sq` and
+    `step`, so the first steps of a fresh listener were driven by the old
+    listener's moments, and bias-corrected as if far into training. AdamW
+    re-creates a parameter's state on its next step when the entry is missing
+    (`len(state) == 0` in `_init_group`, shared by the for-loop, foreach and
+    fused paths), so popping is the whole reset. The speaker's state is kept:
+    the two agents share no parameter.
+
+    Args:
+        receiver: the `Receiver` to reset
+        optimizer: the optimiser holding both agents' parameters
+    """
+    receiver.reset_parameters()
+    for parameter in receiver.parameters():
+        optimizer.state.pop(parameter, None)
+
+
 def rng_state():
     """
     The torch, CUDA, numpy and `random` generator states, for the checkpoint.
@@ -1662,12 +1685,15 @@ if __name__ == "__main__":
         raise SystemExit(0)
 
     for epoch in range(start_epoch, config['scheduler']['epochs']):
-        if (# No reset on epoch 0, but reset after epoch 2, epoch 4, etc
+        # At the start of epochs 0, N, 2N, ... for an interval of N. Epoch 0
+        #     included, as docs/training.md says: there it re-draws a listener
+        #     that has not yet trained.
+        if (
             config['receiver_reset_interval'] > 0
             and (epoch % config['receiver_reset_interval']) == 0
         ):
             logging.info(f"Resetting receiver at epoch {epoch}")
-            model_config['pair'].receiver.reset_parameters()
+            reset_receiver(model_config['pair'].receiver, model_config['optimiser'])
 
         # Rebuilt every epoch, so a metric missing from this epoch's passes
         #     fails the header check below instead of carrying the previous
