@@ -399,6 +399,29 @@ def hard_levenshtein_condensed(token_seqs):
     return hard_levenshtein_pairs(token_seqs, all_pairs(len(token_seqs)))
 
 
+def saturated_share(token_seqs, pairs):
+    """
+    The fraction of ``pairs`` whose S6 distance is as large as it can be.
+
+    Levenshtein distance is at most the longer message's length, so a pair at
+    that bound shares nothing an alignment could use. A capped distance cannot
+    grade meaning past it: every pair beyond it ties, whatever their meanings.
+    A finer partition of the meaning space pulls the cap in even when
+    neighbouring regions get similar messages, so a rising share is one way
+    ``topsim_s6`` can fall without the language getting less systematic. Pairs
+    of two empty messages are left out of both counts. NaN when none remain.
+    See docs/measurement.md.
+    """
+    distances = hard_levenshtein_pairs(token_seqs, pairs)
+    lengths = np.array([len(seq) for seq in token_seqs])
+    i, j = pairs
+    bound = np.maximum(lengths[i], lengths[j])
+    counted = bound > 0
+    if not counted.any():
+        return float("nan")
+    return float(np.mean(distances[counted] == bound[counted]))
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration                                                                #
 # --------------------------------------------------------------------------- #
@@ -499,11 +522,18 @@ def topsim_suite(token_seqs, symbol_embeddings, concepts):
 
 def decontextualised_embeddings(token_seqs, symbol_embeddings):
     """
-    Each symbol's contextual embedding replaced by the corpus mean for its id.
+    Each symbol's contextual embedding replaced by the corpus mean for its id
+    *in that position*.
 
     This strips the embeddings of their sensitivity to the concept being
     described while leaving synonymy detection intact, and is what the
-    ``_static`` columns are computed on. See docs/measurement.md.
+    ``_static`` columns are computed on. The mean is taken per (position,
+    symbol) rather than per symbol because emergent languages reuse a symbol to
+    mean different things in different slots (Chaabouni et al. 2020): pooling
+    across positions would blur those meanings together and penalise the
+    language for its own positional code. A slot carries nothing about the game,
+    so the control still removes leakage. Before 2026-10-11 the mean was per
+    symbol. See docs/measurement.md.
     """
     totals, counts = {}, Counter()
     dim = None
@@ -511,16 +541,18 @@ def decontextualised_embeddings(token_seqs, symbol_embeddings):
         embedding = np.asarray(embedding, dtype=np.float64)
         dim = embedding.shape[-1]
         for position, token in enumerate(seq):
-            token = int(token)
-            if token in totals:
-                totals[token] += embedding[position]
+            cell = (position, int(token))
+            if cell in totals:
+                totals[cell] += embedding[position]
             else:
-                totals[token] = embedding[position].copy()
-            counts[token] += 1
+                totals[cell] = embedding[position].copy()
+            counts[cell] += 1
 
-    table = {token: totals[token] / counts[token] for token in totals}
+    table = {cell: totals[cell] / counts[cell] for cell in totals}
     return [
-        np.stack([table[int(token)] for token in seq])
+        np.stack([
+            table[(position, int(token))] for position, token in enumerate(seq)
+        ])
         if len(seq) else np.zeros((0, dim), dtype=np.float64)
         for seq in token_seqs
     ]

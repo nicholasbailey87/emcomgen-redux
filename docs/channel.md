@@ -385,10 +385,19 @@ opening from there. Unmixed survival, at the two ends of the scale's range:
 
 | | scale 1.0 | scale 2.0 |
 | --- | --- | --- |
-| ShapeWorld, V = 14 — fresh speaker | 0.280 | 0.511 |
-| ShapeWorld, V = 14 — sharpest legal shape | 0.789 | 0.995 |
-| birds, V = 20 — fresh speaker | 0.226 | 0.455 |
-| birds, V = 20 — sharpest legal shape | 0.838 | 0.998 |
+| ShapeWorld, V = 4 — fresh speaker | 0.587 | 0.773 |
+| ShapeWorld, V = 4 — sharpest legal shape | 0.770 | 0.971 |
+| birds, V = 5 — fresh speaker | 0.515 | 0.718 |
+| birds, V = 5 — sharpest legal shape | 0.753 | 0.974 |
+| ShapeWorld, V = 14 (until 2026-10-11) — fresh speaker | 0.280 | 0.511 |
+| ShapeWorld, V = 14 (until 2026-10-11) — sharpest legal shape | 0.789 | 0.995 |
+| birds, V = 20 (until 2026-10-11) — fresh speaker | 0.226 | 0.455 |
+| birds, V = 20 (until 2026-10-11) — sharpest legal shape | 0.838 | 0.998 |
+
+The vocabularies moved from 14 and 20 to 4 and 5 on 2026-10-11, with messages
+lengthened to keep capacity. The opening that the next paragraph argues should
+stay modest is now roughly twice as confident per symbol. No run has yet tested
+whether that matters.
 
 **Bootstrapping is why the opening wants to stay modest.** A fresh speaker's
 argmax is very nearly input-independent: it has learned nothing, so its preferred
@@ -602,7 +611,23 @@ a ceiling has to answer is what fraction of *that* it lets a speaker reach:
 99% of the mixture's own ceiling needs 1.84 on ShapeWorld and 1.64 on birds, so
 2.0 is the round number just above the tighter of the two. Past it the scale has
 stopped mattering — 2.5 buys another 0.46% on ShapeWorld and 0.18% on birds — and
-below it real fidelity is given away, 3.7% on ShapeWorld at 1.5. **2.0 is the
+below it real fidelity is given away, 3.7% on ShapeWorld at 1.5.
+
+**This was argued at V = 14 and V = 20.** At the V = 4 and V = 5 in use since
+2026-10-11, the mixture's ceiling is 0.925 and 0.920, and the smaller shape budget
+leaves the scale more to do:
+
+| cap | ShapeWorld (V = 4) | birds (V = 5) |
+|---|---|---|
+| 1.00 | 77.7% | 75.8% |
+| 1.50 | 91.6% | 91.6% |
+| **2.00** | **97.2%** | **97.4%** |
+| 2.50 | 99.1% | 99.3% |
+| 3.00 | 99.7% | 99.8% |
+
+99% needs 2.46 and 2.39, so at 2.0 the scale binds again, by about 2.8%. The
+ceiling has been left where it was until a run says otherwise. What follows is
+the original argument. **2.0 is the
 point where the scale stops being the binding constraint and the uniform mixture
 becomes it.**
 

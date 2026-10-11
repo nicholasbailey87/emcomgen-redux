@@ -81,6 +81,22 @@ LAYER_NORM_EPS = model_util.LAYER_NORM_EPS
 #         2.00        99.5%                  99.8%
 #         2.50        99.9%                 100.0%
 #
+#     **That argument was made at V = 14 and V = 20, and does not survive the
+#     move to V = 4 and V = 5 on 2026-10-11.** The ceilings there are 0.925 and
+#     0.920, and a narrower vocabulary has a smaller shape budget
+#     (`V / sqrt(V - 1)` = 2.309 and 2.500), so the scale has more to do:
+#
+#         cap    ShapeWorld (V = 4)     birds (V = 5)
+#         1.00        77.7%                  75.8%
+#         1.50        91.6%                  91.6%
+#         2.00        97.2%                  97.4%
+#         2.50        99.1%                  99.3%
+#         3.00        99.7%                  99.8%
+#
+#     99% now needs 2.46 and 2.39, so at 2.0 the scale is the binding constraint
+#     again, by about 2.8%. The ceiling has been left at 2.0 pending a run; the
+#     argument below is the V = 14 one.
+#
 #     99% of the mixture's ceiling needs 1.84 on ShapeWorld and 1.64 on birds,
 #     so 2.0 is the round number above the tighter of the two. Past it the scale
 #     has stopped mattering -- 2.5 buys another 0.46% on ShapeWorld and 0.18% on

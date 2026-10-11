@@ -439,7 +439,7 @@ ShapeWorld but **not** for CUB, whose concept keys are bare class ids.
 
 `<split>_topsim_s1_static`, `_s2_static`, `_s3_static` and their `topsim_gt_`
 counterparts repeat the three soft variants with each symbol's contextual
-embedding replaced by the corpus mean for that token id. This keeps synonymy
+embedding replaced by the corpus mean for that token id in that position. This keeps synonymy
 tolerance but removes the channel by which the concept can reach the signal
 distance without passing through the symbols actually emitted (the GRU sender
 initialises its hidden state from the concept vector, so the embedding behind the
@@ -447,6 +447,9 @@ first content symbol is a function of the concept alone).
 
 `raw − static` is the contextuality inflation. The hard variants (`s4`–`s6`) see
 nothing but token identities, so they need no control and have no `_static` form.
+
+Files written before 2026-10-11 average each token id over every position, not
+per position, so their `_static` columns are not comparable with later ones.
 
 ## Older files: `_adj` instead of `_static`
 

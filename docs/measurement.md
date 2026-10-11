@@ -64,7 +64,7 @@ drawing a conclusion from either.
 ### The `_static` control
 
 The three soft variants are additionally reported as `_static`: recomputed on
-per-token mean embeddings.
+mean embeddings per symbol *per position*.
 
 The soft signal distances are parameterised by the sender's *contextual* symbol
 embeddings, which differ from a fixed lookup table in two ways at once. They
@@ -86,13 +86,24 @@ parallel arm is the extreme case: *no* position depends on a sampled token, sinc
 they are all emitted at once, so there every symbol's embedding is a function of
 the concept alone.
 
-Averaging every occurrence of a token id into one vector removes exactly that
-second sensitivity and keeps the first. What survives is a non-contextual
-embedding table learned from the sender's own usage: two tokens used for similar
-meanings still sit close together, so synonymy is still detected, but no single
-symbol carries the concept it was emitted for. **`raw − static` is the
-contextuality inflation** — the thing a soft-versus-hard gap cannot by itself
-rule out.
+Averaging every occurrence of a token id in a given slot into one vector removes
+exactly that second sensitivity and keeps the first. What survives is a
+non-contextual embedding table learned from the sender's own usage, with one row
+per (position, symbol): two tokens used for similar meanings still sit close
+together, so synonymy is still detected, but no single symbol carries the
+concept it was emitted for. **`raw − static` is the contextuality inflation** —
+the thing a soft-versus-hard gap cannot by itself rule out.
+
+**Why per position.** Emergent languages often reuse a symbol to mean different
+things in different slots (Chaabouni et al. 2020's positional disentanglement is
+built on exactly that). A table with one row per symbol averages those meanings
+together, so a positional code reads as noise and the control penalises the
+language rather than the leak. A slot carries nothing about the game, since every
+message fills every slot (see "Message geometry" below), so keying on position as
+well removes no less leakage. It matters more at small vocabularies: at four or
+five symbols a per-symbol table has only four or five rows. **Before 2026-10-11
+the table was per symbol**, so `_static` columns from earlier files are not
+comparable with later ones.
 
 The hard variants need no such control; they see nothing but token identities, so
 there is no leakage for them to suffer.
@@ -178,7 +189,11 @@ undefined at zero variance).
 Both senders mask the reserved tokens out of the content logits, so EOS never
 fires early and every message is exactly `message_length − 2` content symbols.
 Insertions and deletions therefore never arise, length normalisation is a no-op,
-and a 5-symbol message has only 4 two-grams.
+and a message has one fewer two-gram than it has symbols. Since 2026-10-11 that is
+10 symbols over a vocabulary of 4 on ShapeWorld and 15 over 5 on birds. Before
+then it was 5 over 14 and 8 over 20. At a vocabulary of 4 or 5, S4's histogram
+has only 4 or 5 bins and says little; S5 has 16 or 25 bigram types, and S6
+grades from 0 to 10 or 15 instead of 0 to 5 or 8.
 
 ## Game pairs and bootstrap intervals (`train.compute_language_metrics`)
 
@@ -280,8 +295,8 @@ logical-form string with SOS/EOS stripped (`concept_keys_from_true_lang`). CUB h
 no logical forms, so it reports only the `topsim_` family: 9 values a split
 against ShapeWorld's 18, each with `_low`, `_high` and `_degenerate`.
 
-The `_static` control's per-token mean embeddings are still taken over every game
-in the pass, not only the sampled ones.
+The `_static` control's per-(position, symbol) mean embeddings are still taken over
+every game in the pass, not only the sampled ones.
 
 Topsim is computed on the eval passes only. It is a property of the language, so
 there is no point computing it mid-training-pass, and the extra tensor is wasted
@@ -454,9 +469,10 @@ Expect the two to open close together and separate as the run sharpens. Watch
 saturation signature in [training.md](training.md) is live. It is bounded rather
 than unbounded, which is the whole of what the ceilings buy: `MAX_LOGIT_SCALE`
 and `sharpest_logit_margin` cap the two factors that saturate it, so this column
-cannot exceed **0.9945** at V = 14. A run pinned *at* that is at the sharpest
-the channel allows; a run pinned at `realised_survival`'s 0.90714 might be
-anywhere.
+cannot exceed **0.971** at ShapeWorld's V = 4 (0.974 at birds' V = 5; it was
+0.9945 at the V = 14 used until 2026-10-11). A run pinned *at* that is at the
+sharpest the channel allows; a run pinned at `realised_survival`'s 0.925 might
+be anywhere.
 
 **`logit_margin`** — the winning token's lead over the runner-up, in units of the
 logits' own standard deviation, averaged over slots. Taken after
@@ -510,17 +526,18 @@ way it moves, not its distance from zero. Read it against that bias.
 **Why the shape columns exist at all.** `layer_norm_logits` fixes the second
 moment, so the speaker has a bounded shape budget and the only question is what
 it spends it on. The most concentrated distribution the normaliser permits is one
-token at `sqrt(V-1)` and the other thirteen at `-1/sqrt(V-1)` — a margin of
-**3.883** sd at V = 14, or `V/√(V−1)` in general. The 2026-08-29 run had used 86%
-of that budget. **Fidelity does not have to come from the scale** — at a scale
-of one this shape alone reaches 0.789 at V = 14 — which is why a run can traverse
+token at `sqrt(V-1)` and the rest at `-1/sqrt(V-1)` — a margin of
+**2.309** sd at V = 4, or `V/√(V−1)` in general (3.883 at the V = 14 used until
+2026-10-11). The 2026-08-29 run, at V = 14, had used 86% of that budget.
+**Fidelity does not have to come from the scale** — at a scale of one this shape
+alone reaches 0.770 at V = 4 — which is why a run can traverse
 the whole channel with `logit_scale` flat, and why a bound on the scale is not by
 itself a bound on saturation.
 
 **None of the four columns above survive `normalise_logits = false` as
 comparable quantities.** They are all measured on post-norm logits — "in units
 of the logits' own standard deviation" — and `sharpest_logit_margin`'s bound of
-3.883 at V = 14 is a property of `layer_norm_logits` that does not exist without
+2.309 at V = 4 is a property of `layer_norm_logits` that does not exist without
 it. They stay computable, read against a raw spread instead, and must not be
 pooled across the key. `logit_spread` is taken *before* the norm and is
 unaffected. See [channel.md](channel.md).
@@ -944,6 +961,32 @@ over 20,000 games is 1,102 distinct messages, and a single underlying message at
 `realised_survival` 0.9067 over 5 content slots predicts 1,108 — 61% clean, all
 65 single substitutions seen, about 908 of the 1,690 doubles, 134 triples. Read
 the eval column for the policy and the train column only against that prediction.
+
+**`message_entropy`** — the entropy, in bits, of the split's distribution over
+distinct messages, and `2 ** message_entropy` is the effective number of messages.
+The count gives a message used once the same weight as one used in half the
+games, so a long tail of rare messages can keep it high while most games share
+a few. The entropy weights each message by its use. It is the plug-in estimate,
+which runs low when many messages are seen only once or twice, as on a 1,000
+game eval split with a few hundred messages. The train column carries the same
+Gumbel-noise caveat as the count. New on 2026-10-11.
+
+**`effective_message_count`** — `2 ** message_entropy`, written out so it can be
+read directly against `unique_message_count`. It equals the count only when every
+message is used equally often. The further it falls below the count, the more of
+the count is long tail. New on 2026-10-11.
+
+**`s6_saturated`** (eval splits, where topsim is measured) — the share of the
+sampled game pairs whose S6 distance is at its cap, the longer message's length,
+so the two messages share nothing an alignment can use. A capped distance cannot
+grade meaning beyond it: every pair past the cap ties. So if the speaker splits
+its meaning space more finely while still giving neighbouring regions similar
+messages, the cap moves in, more pairs tie at the maximum, and `topsim_s6` falls
+without the language getting less systematic. Read it beside `topsim_s6` and
+`message_entropy`. When this share rises while `topsim_s6` falls, the saturation
+explanation holds. When it stays flat while `topsim_s6` falls, the language has
+become less systematic. Pairs of two empty messages are left out. New on
+2026-10-11.
 
 **`shuffled_message_acc`** (eval splits only) — the listener's accuracy on the
 same candidates when the message is another game's, so the message is in

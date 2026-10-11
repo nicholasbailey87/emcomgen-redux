@@ -494,8 +494,8 @@ def test_static_control_leaves_a_real_language_alone():
         assert report[f"topsim_{s}_static"] > 0.9
 
 
-def test_decontextualised_embeddings_are_constant_per_token():
-    seqs = [[4, 5, 6, 4, 5], [5, 4, 7, 7, 6], [6, 6, 4, 5, 7]]
+def test_decontextualised_embeddings_are_constant_per_token_and_position():
+    seqs = [[4, 5, 6, 4, 5], [5, 4, 7, 7, 6], [4, 6, 4, 5, 7]]
     rng = np.random.RandomState(12)
     embs = [rng.randn(LENGTH, 8) for _ in seqs]
     static = E.decontextualised_embeddings(seqs, embs)
@@ -503,20 +503,32 @@ def test_decontextualised_embeddings_are_constant_per_token():
     seen = {}
     for seq, table in zip(seqs, static):
         for position, token in enumerate(seq):
-            if token in seen:
-                assert np.allclose(seen[token], table[position]), (
-                    f"token {token} has two different static embeddings"
+            cell = (position, token)
+            if cell in seen:
+                assert np.allclose(seen[cell], table[position]), (
+                    f"token {token} at position {position} has two different "
+                    f"static embeddings"
                 )
-            seen[token] = table[position]
+            seen[cell] = table[position]
 
-    # And the value is the mean over every occurrence.
+    # And the value is the mean over every occurrence in that slot.
     occurrences = [
-        emb[position]
-        for seq, emb in zip(seqs, embs)
-        for position, token in enumerate(seq)
-        if token == 4
+        emb[0] for seq, emb in zip(seqs, embs) if seq[0] == 4
     ]
-    assert np.allclose(seen[4], np.mean(occurrences, axis=0))
+    assert np.allclose(seen[(0, 4)], np.mean(occurrences, axis=0))
+
+
+def test_decontextualised_embeddings_keep_positions_apart():
+    """
+    A symbol used in two slots with two meanings keeps two static vectors, so
+    the control does not blur a positional code.
+    """
+    seqs = [[4, 5], [5, 4], [4, 5], [5, 4]]
+    first, second = np.ones(3), -np.ones(3)
+    embs = [np.stack([first, second]) for _ in seqs]
+    static = E.decontextualised_embeddings(seqs, embs)
+    assert np.allclose(static[0][0], first)
+    assert np.allclose(static[1][1], second)
 
 
 def test_ground_truth_meaning_space_sees_a_collapsed_sender():
@@ -823,3 +835,22 @@ if __name__ == "__main__":
         fn()
         print(f"ok  {fn.__name__}")
     print(f"\n{len(fns)} tests passed")
+
+
+def test_saturated_share_counts_pairs_at_the_longer_length():
+    # Distances to [1, 2, 3]: [4, 5, 6] is 3 of 3, [1, 5, 6] is 2 of 3, and
+    # [7] against a length-3 message is 3 of 3.
+    seqs = [[1, 2, 3], [4, 5, 6], [1, 5, 6], [7]]
+    pairs = (np.array([0, 0, 0]), np.array([1, 2, 3]))
+    assert E.saturated_share(seqs, pairs) == 2 / 3
+
+
+def test_saturated_share_leaves_out_pairs_of_empty_messages():
+    seqs = [[], [], [1, 2]]
+    assert np.isnan(E.saturated_share(seqs, (np.array([0]), np.array([1]))))
+    assert E.saturated_share(seqs, (np.array([0, 0]), np.array([1, 2]))) == 1.0
+
+
+def test_saturated_share_is_zero_for_identical_messages():
+    seqs = [[1, 2, 3]] * 4
+    assert E.saturated_share(seqs, E.all_pairs(4)) == 0.0

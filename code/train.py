@@ -159,6 +159,9 @@ def compute_language_metrics(
 
     ``ground_truth_meaning`` says whether the concept keys are logical forms, in
     which case the ``topsim_gt_`` family is reported against them too.
+
+    ``s6_saturated`` rides along over the same pairs: the share at the S6
+    distance's cap (``emergence.saturated_share``).
     """
     # Spearman needs at least two pairs, i.e. at least three games.
     if len(messages) < 3:
@@ -166,7 +169,7 @@ def compute_language_metrics(
 
     rng = np.random.default_rng(seed)
     pairs = emergence.sample_pairs(len(messages), n_pairs, rng)
-    return emergence.topsim_report(
+    report = emergence.topsim_report(
         messages,
         symbol_embeddings,
         np.asarray(concepts, dtype=np.float64),
@@ -175,6 +178,8 @@ def compute_language_metrics(
         replicates=replicates,
         rng=rng,
     )
+    report["s6_saturated"] = emergence.saturated_share(messages, pairs)
+    return report
 
 
 def average_splits(split_metrics):
@@ -1330,6 +1335,16 @@ def run(
             all_lang["lang"].nunique() / len(all_lang)
         )
         metrics["unique_message_count"] = float(all_lang["lang"].nunique())
+
+        # The count treats a message used once like one used in half the
+        # games, so a long tail can hold it up while most games share a few
+        # messages. The entropy weights by use: two to its power is the
+        # effective number of messages.
+        frequencies = all_lang["lang"].value_counts(normalize=True).to_numpy()
+        metrics["message_entropy"] = float(
+            -(frequencies * np.log2(frequencies)).sum()
+        )
+        metrics["effective_message_count"] = 2.0 ** metrics["message_entropy"]
 
     # The column has to exist on every eval pass whether or not any batch was
     # large enough to roll, or a split that produced none would shift every

@@ -60,7 +60,8 @@ def _metrics(ground_truth_meaning=True, seed=0, n_games=200):
 
 def test_every_column_with_an_interval_that_brackets_it():
     metrics = _metrics()
-    assert set(metrics) == set(E.REPORT_KEYS)
+    assert set(metrics) == set(E.REPORT_KEYS) | {"s6_saturated"}
+    assert 0.0 <= metrics["s6_saturated"] <= 1.0
     for key in E.REPORT_KEYS:
         if key.endswith(E.BOOTSTRAP_SUFFIXES):
             continue
@@ -74,7 +75,7 @@ def test_every_column_with_an_interval_that_brackets_it():
 
 def test_cub_has_no_ground_truth_columns():
     metrics = _metrics(ground_truth_meaning=False)
-    assert len(metrics) == 36
+    assert len(metrics) == 36 + 1
     assert not any(key.startswith("topsim_gt_") for key in metrics)
 
 
@@ -107,8 +108,8 @@ def test_split_average_keeps_values_and_drops_bootstrap_columns():
     values = [
         key for key in E.REPORT_KEYS if not key.endswith(E.BOOTSTRAP_SUFFIXES)
     ]
-    assert set(average) == set(values) | {"acc"}
-    assert len(average) == 18 + 1
+    assert set(average) == set(values) | {"s6_saturated", "acc"}
+    assert len(average) == 18 + 2
     assert np.isclose(average["acc"], 0.6)
     for key in values:
         assert np.isclose(average[key], (test[key] + test_same[key]) / 2), key

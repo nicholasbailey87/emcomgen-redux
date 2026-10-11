@@ -1906,21 +1906,33 @@ beta = "deepnorm"
 [sender_language_model]
 token_embedding_size = 500
 d_model = 1024
-vocabulary = 14
-message_length = 7 # max message length. note this includes sos/eos token, i.e. the true length is this - 2
+# Four symbols over ten slots: 20 bits, against the 19.0 of the 14 symbols over
+# five slots that ran until 2026-10-11. Same capacity, spent on length rather
+# than on vocabulary, so the hard signal distances have room to grade: S6
+# Levenshtein is capped at the content length, and at five slots most pairs of
+# distinct messages sat at or near the cap (`s6_saturated` reports the share).
+# It also gives the `_static` control a positional code to respect -- see
+# `emergence.decontextualised_embeddings`. Nothing run before that date is
+# comparable with anything run after it.
+#
+# **Untested opening.** At V = 4 a fresh speaker holds its argmax 59% of the
+# time at a scale of one, against 28% at V = 14; see the table below for why
+# that was argued to matter. No run has yet shown whether it does.
+vocabulary = 4
+message_length = 12 # max message length. note this includes sos/eos token, i.e. the true length is this - 2
 # There are exactly two exploration controls, and they do different jobs.
 #
 # `uniform_weight` (w) is the *ceiling* on fidelity, and so the floor under
 # exploration. Mixing caps a slot's winner at `1 - w + w/V` however sharp the
 # logits are, so at least `w * (1 - 1/V)` of symbols are flipped no matter what
-# -- 0.093 at w = 0.1, V = 14. That is a permanent per-symbol corruption rate
+# -- 0.075 at w = 0.1, V = 4 (0.093 at the V = 14 used until 2026-10-11). That is a permanent per-symbol corruption rate
 # training cannot reduce, which is the point: it keeps late training from
 # committing the channel entirely. This is jayelm's `--uniform_weight`, and its
 # role here is the one it has there.
 #
 # V is `vocabulary` above, the emittable tokens only: the four reserved slots
 # (PAD/SOS/EOS/UNK) are masked to -inf before the mixture, which is spread over
-# the finite entries, so these divide by 14 rather than by 18.
+# the finite entries, so these divide by 4 rather than by 8.
 uniform_weight = 0.1
 
 # There is no key for the channel's scale. `GumbelChannel.log_logit_scale` is a
@@ -1930,9 +1942,15 @@ uniform_weight = 0.1
 # channel, since these are the numbers `realised_survival` and
 # `unmixed_survival` are read against.
 #
-# The two ends of the scale's range, as unmixed survival, at V = 14 and V = 20:
+# The two ends of the scale's range, as unmixed survival, at ShapeWorld's V = 4
+# and birds' V = 5, with the V = 14 and V = 20 used until 2026-10-11 for
+# comparison:
 #
 #                            scale 1.0   scale 2.0
+#     fresh speaker            0.587       0.773      (V = 4)
+#     sharpest legal shape     0.770       0.971
+#     fresh speaker            0.515       0.718      (V = 5)
+#     sharpest legal shape     0.753       0.974
 #     fresh speaker            0.280       0.511      (V = 14)
 #     sharpest legal shape     0.789       0.995
 #     fresh speaker            0.226       0.455      (V = 20)
@@ -1940,7 +1958,9 @@ uniform_weight = 0.1
 #
 # The first row of each pair is the opening: a freshly initialised speaker's
 # normalised logits are i.i.d. standard normal, so it holds its argmax about
-# 28% of the time on ShapeWorld. That is deliberately modest -- a fresh
+# 59% of the time on ShapeWorld, where it was 28% at V = 14. The argument
+# below was made for the modest opening, and the small vocabulary gives that
+# up per symbol, though less so per bit. It is untested -- a fresh
 # speaker's argmax barely varies with its input, so a confident opening means it
 # emits near enough one message for everything from the first batch and the
 # listener co-adapts to that before the speaker's embeddings are worth grounding
@@ -1950,7 +1970,7 @@ uniform_weight = 0.1
 # at sqrt(V-1) and the rest at -1/sqrt(V-1), a margin of V/sqrt(V-1). It is
 # reached at a scale of one, which is the point -- fidelity has never had to come
 # from the scale, and `logit_margin` is the column that says which route a run
-# took. Multiply the two bounds and 0.995 is the most confident a ShapeWorld
+# took. Multiply the two bounds and 0.971 is the most confident a ShapeWorld
 # speaker can ever be before `uniform_weight` mixes anything in.
 #
 # `realised_survival`, `unmixed_survival`, `logit_margin` and `logit_scale`
@@ -2034,8 +2054,8 @@ uniform_weight = 0.1
 #
 # **What normalising costs, stated as expressiveness.** Softmax is invariant to
 # a constant shift, so subtracting the mean is free and the operation that bites
-# is the division by each example's own standard deviation. Raw logits carry 13
-# effective degrees of freedom at V = 14: twelve of direction, which name the
+# is the division by each example's own standard deviation. Raw logits carry 3
+# effective degrees of freedom at V = 4: two of direction, which name the
 # token, and one of magnitude, which says how sure the speaker is. The
 # normaliser keeps the direction, deletes the per-example magnitude, and hands
 # back one global scalar in its place -- capped at 2.0. Every game is then
@@ -2069,7 +2089,7 @@ uniform_weight = 0.1
 # `logit_margin`, `logit_prior_share`, `unmixed_survival` and
 # `realised_survival` are all measured on post-norm logits, "in units of the
 # logits' own standard deviation", and `sharpest_logit_margin`'s fixed budget of
-# 3.883 at V = 14 is a property of the normaliser and does not exist without it.
+# 2.309 at V = 4 is a property of the normaliser and does not exist without it.
 # They are read against a raw spread here instead, so do not compare them across
 # this key. `logit_spread` is taken *before* normalisation and is unaffected;
 # `train_logit_scale` and `train_clip_log_logit_scale` read NaN.
@@ -2085,7 +2105,7 @@ uniform_weight = 0.1
 # written around. `logit_scale` is a scalar in front of a unit-variance
 # quantity, which is the only reading under which `MAX_LOGIT_SCALE = 2.0` is a
 # statement about survival probability; `sharpest_logit_margin`'s budget of
-# 3.883 at V = 14 is a property of the normaliser; and `logit_margin`,
+# 2.309 at V = 4 is a property of the normaliser; and `logit_margin`,
 # `logit_prior_share`, `unmixed_survival` and `realised_survival` are all
 # measured in units the normaliser defines. Off, the speaker runs but four
 # columns change meaning and one parameter disappears.
@@ -2165,17 +2185,18 @@ heads = 4 # Heads per layer - only applies to Transformer language models
 # referents is one softmax weight per head: the referents reach the language
 # model through `heads * latent_length` scalars and nothing else. Under the
 # previous ShapeWorld configuration that was 4 heads x 5 positions = 20 numbers.
-# At 2.0 and the new 5 heads it is 50 for ShapeWorld and 80 for birds.
+# At 2.0 and the new 5 heads it is 100 for ShapeWorld and 150 for birds, at
+# the ten- and fifteen-symbol messages of 2026-10-11.
 #
-# Rounded, not floored. 2.0 is exact at both message lengths (5 content symbols
-# -> 10 latents, 8 -> 16), so the rounding only matters if this is swept.
+# Rounded, not floored. 2.0 is exact at both message lengths (10 content symbols
+# -> 20 latents, 15 -> 30), so the rounding only matters if this is swept.
 #
 # 1.0 is now the floor, and it is enforced. The message is the *tail* of the
 # latent array on both arms, so what this knob buys is free slots ahead of the
 # message rather than a separately-sized array behind it; an array shorter than
 # the message has nowhere to put the message and `SenderTransformerLM` raises.
-# At 2.0 that is 5 free slots plus 5 message slots on ShapeWorld, 8 plus 8 on
-# birds.
+# At 2.0 that is 10 free slots plus 10 message slots on ShapeWorld, 15 plus 15
+# on birds.
 #
 # Those free slots are load-bearing and not merely spare capacity. Nothing ever
 # overwrites them, so under the causal mask every message slot reads all of them
@@ -2438,7 +2459,7 @@ layers = 1
 # right would model a listener committing to symbol 1 before it has seen symbol
 # 5, and the message arrives whole.
 bidirectional = false
-message_length = 7 # Only applies to Transformer language models. Should be the same as sender_language_model.message_length
+message_length = 12 # Only applies to Transformer language models. Should be the same as sender_language_model.message_length
 # Transformer language model only, whose depth is `layers` above, shared with the
 # GRU. 4 heads at 256 wide is what rungs 11 to 18 set, for the head dimension of 64
 # that every attention module in the repo has; 5 is here so the key exists.
@@ -2827,8 +2848,8 @@ activation = "SwiGLU"
 # architecture happened to produce -- 0.24 for the ViT sender, ~1.0 for a Conv4
 # one -- so the two datasets differed in their channel rather than in their task.
 # Inheriting w gives birds the same irreducible `w * (1 - 1/V)` corruption
-# ShapeWorld gets. At the 0.1 that 119b2de made the default, that is 0.095 here
-# against ShapeWorld's 0.093 -- the vocabularies differ (20 against 14) but the
+# ShapeWorld gets. At the 0.1 that 119b2de made the default, that is 0.080 here
+# against ShapeWorld's 0.075 -- the vocabularies differ (5 against 4) but the
 # floor barely moves, which is the point of sharing the knob rather than the
 # rate.
 #
@@ -2841,17 +2862,21 @@ activation = "SwiGLU"
 # `MAX_LOGIT_SCALE` on both datasets, so the two speakers start and end their
 # channel at the same multiplier and the vocabulary difference shows up where it
 # belongs -- in what that multiplier buys. At a scale of one the sharpest shape
-# `layer_norm_logits` permits reaches 0.789 unmixed survival at ShapeWorld's
-# V = 14 and 0.838 at the 20 here, so the wider vocabulary is slightly the
-# louder channel at equal scale rather than being handed a different bound.
+# `layer_norm_logits` permits reaches 0.770 unmixed survival at ShapeWorld's
+# V = 4 and 0.753 at the 5 here, so the wider vocabulary is slightly the
+# quieter channel at equal scale rather than being handed a different bound.
+# (It was the louder one at the V = 14 and V = 20 used until 2026-10-11.)
 #
 # Note the two datasets are still not identical at the message level, and cannot
-# be: 8 content tokens here versus 5 on ShapeWorld makes a whole message here
+# be: 15 content tokens here versus 10 on ShapeWorld makes a whole message here
 # harder to pin down. `message_length` is the knob that governs that, not these. The opening also differs -- a fresh speaker holds
-# its argmax at 0.294 here against 0.386 on ShapeWorld -- because the same cap at
-# a larger vocabulary needs a smaller multiplier to reach it.
-vocabulary = 20
-message_length = 10 # max message length. note this includes sos/eos token, i.e. the true length is this - 2
+# its argmax at 0.515 here against 0.587 on ShapeWorld, at a scale of one --
+# because i.i.d. normal logits spread over more tokens put less on the winner.
+# Five symbols over fifteen slots: 34.8 bits, against the 34.6 of the 20
+# symbols over eight slots used until 2026-10-11. See
+# `[sender_language_model]` for why.
+vocabulary = 5
+message_length = 17 # max message length. note this includes sos/eos token, i.e. the true length is this - 2
 
 [birds.receiver]
 feature_model = "ResNet18"
@@ -2865,4 +2890,4 @@ ff_inner_size = 576
 activation = "SwiGLU"
 
 [birds.receiver_language_model]
-message_length = 10 # Only applies to Transformer language models. Should be the same as sender_language_model.message_length
+message_length = 17 # Only applies to Transformer language models. Should be the same as sender_language_model.message_length
