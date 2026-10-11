@@ -607,6 +607,58 @@ def test_nothing_that_should_be_undecayed_is_decayed(config_file):
 
 
 @pytest.mark.parametrize(
+    "config_file",
+    ["09_shapeworld_receiver_vit.toml", "10_birds_receiver_vit.toml"],
+)
+def test_the_vit_stem_is_weight_decayed(config_file):
+    """
+    broccoli 30.2.0 to 30.5.0 named `ViT2`'s patch-embedding matrices
+    `initial_ff.linear_in_embedding` and `linear_out_embedding`, which matched
+    gradboard's "embedding" exclusion and trained at weight decay 0.0. 30.6.0
+    names them `linear_in` and `linear_out` and they are decayed. See
+    docs/broccoli.md.
+
+    Built on the rungs where both agents run `ViT2`, at the rung's own
+    `weight_decay`. Also pins the whole set of undecayed matrices in each
+    backbone -- the bos tokens and `SequencePool`'s `nondecay_linear` -- so a
+    broccoli bump that moves anything else in or out of the exclusion fails
+    here rather than changing training silently. A venv moved back to an older
+    broccoli fails too, on the names.
+    """
+    config, built = _build(config_file)
+    pair, optimiser = built["pair"], built["optimiser"]
+    weight_decay = config["optimiser"]["weight_decay"]
+    assert weight_decay > 0.0
+
+    decay = {
+        id(p): group["weight_decay"]
+        for group in optimiser.param_groups
+        for p in group["params"]
+    }
+
+    for backbone in (pair.sender.feat_model, pair.receiver.feature_model):
+        named = dict(backbone.backbone.named_parameters())
+        stem = [
+            "encoder.initial_ff.linear_in.weight",
+            "encoder.initial_ff.linear_out.weight",
+        ]
+        assert all(name in named for name in stem), sorted(
+            n for n in named if "initial_ff" in n
+        )
+        assert [decay[id(named[name])] for name in stem] == [weight_decay] * 2
+
+        undecayed_matrices = {
+            name
+            for name, p in named.items()
+            if p.dim() >= 2 and decay[id(p)] == 0.0
+        }
+        assert undecayed_matrices == {
+            "encoder.transformer._bos_token_embedding",
+            "pool.summarize.nondecay_linear.weight",
+        }
+
+
+@pytest.mark.parametrize(
     "baseline,transformer,tolerance",
     [
         # Measured at 0.992x on ShapeWorld and 0.991x on CUB, at seven blocks

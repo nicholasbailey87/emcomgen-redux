@@ -5,9 +5,12 @@
 #
 # Where the two disagree, this file wins. It used to disagree in exactly one
 # place -- vit asks for broccoli-ml and gradboard at the `neovit` *branch*, and
-# this file pinned them by SHA -- and as of 2026-09-18 it no longer does: both
-# are tracked at `neovit` here too, so the venv the two projects share installs
-# one version of each and vit's file and this one cannot drift apart.
+# this file pinned them by SHA -- and from 2026-09-18 both were tracked at
+# `neovit` here too, so the venv the two projects share installed one version of
+# each. As of 2026-10-11 they disagree again, for broccoli only: this file pins
+# the PyPI release `broccoli-ml==30.6.0`, because `neovit` sits at 30.5.0
+# (3b6ff1b), one commit short of the change described below. Installing vit's
+# file after this one would move the shared venv back to 30.5.0.
 #
 # A branch ref is not a pin, and that has cost this project before. `neovit` was
 # fast-forwarded onto main and took broccoli from 27.1.1 to 30.1.0 under a
@@ -16,21 +19,27 @@
 # `pre_norm`/`post_norm` defaults, so the cluster and the local venv ran
 # different architectures off this same file, and checkpoints could not be
 # resumed across the boundary (the new `out_norm` entries are missing keys under
-# a strict load). Tracking the branch accepts that risk knowingly, in exchange
-# for the two projects staying in step. Three things make it survivable:
+# a strict load). Tracking the branch, as gradboard still is here, accepts that
+# risk knowingly, in exchange for the two projects staying in step. Three things
+# make it survivable:
 #
-#   - `code/util.py` records the installed version and commit of both packages
-#     in each run's `config.toml`, so a result always says what built it.
-#   - The SHAs `neovit` points at today, and the ones to roll back to, are
+#   - `code/util.py` records the installed version of both packages, and the
+#     commit of anything installed from git, in each run's `config.toml`, so a
+#     result always says what built it. A PyPI release records no commit; its
+#     version string names one build.
+#   - The SHAs each package is at today, and the ones to roll back to, are
 #     written below.
 #   - Rebuild the venv between experiments, not during one. `pip install -r`
 #     may skip a reinstall when the installed version string still matches, so
 #     pass `--force-reinstall` for these two lines when you mean to move.
 #
-# As of 2026-09-24 `neovit` is identical to `main` in both repositories:
+# As of 2026-10-11 broccoli's `main` is 30.6.0 and `neovit` is 30.5.0;
+# gradboard's `neovit` is identical to its `main`:
 #
-#   broccoli-ml 30.4.0 = 669263d19acecf1018070e8dda980a6efc6ec2a0
-#       (rollback: 30.3.0 = 00b93c8794e3846401cdfb9c8cc9e3048abae3f7,
+#   broccoli-ml 30.6.0 = 052aaa3e9a26f17101731c9366a8c677b95004d3 (PyPI release)
+#       (rollback: 30.5.0 = 3b6ff1b4987771c10acab983cf8578bc23f4e0c5,
+#                  30.4.0 = 669263d19acecf1018070e8dda980a6efc6ec2a0,
+#                  30.3.0 = 00b93c8794e3846401cdfb9c8cc9e3048abae3f7,
 #                  30.1.0 = 33d6f21642f754f841a5adbc27ff331b191a4e90,
 #                  27.1.1 = d50d2e8689659947cade11c06000c1bc70bc019b)
 #   gradboard   18.0.0 = 806a0bf2d56092dc279a2f465df478de80bdd2f4
@@ -47,6 +56,20 @@
 # runs either side of the boundary are not strictly comparable. broccoli 30.4.0
 # (669263d) only adds opt-in `NormedSwiGLU`/`NormedGELU`; defaults and state
 # dict keys are unchanged.
+#
+# 2026-10-11: broccoli 30.4.0 -> 30.6.0. Not inert, for every run with a `ViT2`
+# backbone. 30.6.0 (052aaa3) builds `ViTEncoder.initial_ff` -- the patch-
+# embedding stem -- without `embedding=True`, so its two matrices are named
+# `linear_in`/`linear_out` again instead of `linear_in_embedding`/
+# `linear_out_embedding`, no longer match gradboard's "embedding" exclusion, and
+# are weight-decayed like every other matrix. Seeded init and forward outputs
+# of both datasets' `ViT2` are bit-identical across the bump; only that decay
+# changes. The rename also changes the state dict, so a ViT checkpoint written
+# under 30.4.0 or 30.5.0 will not resume strictly against 30.6.0. Finish a run
+# under one or the other. 30.5.0 (3b6ff1b) adds an opt-in `images_in_stream`
+# (default False) and refactors `ViTEncoder.forward` into `embed`, which
+# changes nothing at `images_in_stream=False`; it also routes
+# `attention_logits` through `embed`, which nothing here calls.
 #
 # The notes below describe the 2026-09-18 move:
 #
@@ -69,7 +92,7 @@
 #     tensors stop being weight-decayed. Both also change the state dict, so a
 #     checkpoint written under 30.1.0 will not load strictly against 30.3.0.
 #     Finish a run under one or the other.
-broccoli-ml @ git+https://github.com/nicholasbailey87/broccoli.git@neovit
+broccoli-ml==30.6.0
 gradboard @ git+https://github.com/nicholasbailey87/gradboard.git@neovit
 
 # torch and torchvision were previously absent from this file entirely. These

@@ -743,6 +743,12 @@ def build_models(dataloaders, config):
     #     and which would matter: gamma sits *after* the normalisation and is
     #     not scale-invariant, so decaying it genuinely shrinks the layer's
     #     output rather than being absorbed.
+    #
+    # The `ViT2` patch-embedding stem is decayed. broccoli 30.2.0 to 30.5.0
+    #     named its two matrices `initial_ff.linear_in_embedding` and
+    #     `linear_out_embedding`, which matched "embedding" and took 0.0; 30.6.0
+    #     names them `linear_in` and `linear_out`, so they take `weight_decay`
+    #     like every other matrix. See docs/broccoli.md.
     optimiser = get_optimiser(
         pair,
         lr=config['optimiser']['lr'],

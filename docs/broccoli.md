@@ -129,6 +129,21 @@ the older assumption that it did. The resizer has no parameters, so this costs
 nothing but the interpolation, and it only raises below `d_model = 3`
 (`in_channels`), which no config approaches.
 
+**The stem is weight-decayed, from broccoli 30.6.0.** `ViTEncoder.initial_ff`
+is the patch embedding here, since `cnn` is False. broccoli 30.2.0 (faccb78)
+built it with `FeedforwardBlock(embedding=True)`, which registers its two
+matrices as `linear_in_embedding` and `linear_out_embedding`; those match
+gradboard's `"embedding"` exclusion, so every run on 30.2.0 to 30.5.0 trained
+them at weight decay 0.0. 30.6.0 (052aaa3) drops the flag, the matrices are
+`initial_ff.linear_in.weight` and `initial_ff.linear_out.weight` again, and
+they take `[optimiser] weight_decay` like every other matrix. Nothing else
+moves: across 30.4.0 and 30.6.0 every rung's set of undecayed parameters is
+identical apart from those two per `ViT2`, and seeded init and forward outputs
+of both datasets' `ViT2` are bit-identical. The rename does change the state
+dict, so a `ViT2` checkpoint from 30.5.0 or earlier will not resume against
+30.6.0. `test_the_vit_stem_is_weight_decayed` pins the new state, and fails if
+the venv is moved back to an older broccoli.
+
 **`transformer_initial_ff_*_dropout=None`.** `None` means "fall back to the
 corresponding `transformer_ff_*` value", which is 0.0 in each case — not "no
 dropout argument".
