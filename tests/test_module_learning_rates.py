@@ -750,7 +750,7 @@ def test_pass_builds_over_the_groups_and_still_reports_base(config_file):
     config, built = _build(config_file)
 
     scheduler = PASS(
-        train.build_lr_schedule(config, 1_000, 32),
+        train.build_lr_schedule(config, 32),
         built["pair"],
         built["optimiser"],
         scaler=None,

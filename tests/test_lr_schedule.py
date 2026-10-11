@@ -54,8 +54,8 @@ from _bootstrap import all_rungs, rung
 RUNGS = all_rungs()
 
 BASE_LR = 1e-4
-TRAINING_EXAMPLES = 5000
-BATCH_SIZE = 32
+# 5,000 examples at a batch of 32 and no accumulation.
+STEPS_PER_EPOCH = 157
 
 # Comfortably below 1.0 and not a round fraction of it, so a rate that landed on
 #     the floor by some other route would not look like a pass.
@@ -85,7 +85,7 @@ def _rates(config, at_epochs):
     cycles: the multiplier moved correctly throughout and was multiplied by
     zero.
     """
-    schedule = train.build_lr_schedule(config, TRAINING_EXAMPLES, BATCH_SIZE)
+    schedule = train.build_lr_schedule(config, STEPS_PER_EPOCH)
     optimiser = torch.optim.AdamW(
         [{"params": [torch.zeros(1, requires_grad=True)], "lr": BASE_LR}]
     )
@@ -221,9 +221,7 @@ def test_a_shape_that_takes_no_floor_is_pinned_flat_whatever_its_curve():
         if takes_floor:
             continue
 
-        schedule = train.build_lr_schedule(
-            _config(100, 0, name), TRAINING_EXAMPLES, BATCH_SIZE
-        )
+        schedule = train.build_lr_schedule(_config(100, 0, name), STEPS_PER_EPOCH)
         cycle, = schedule.cycles
         assert cycle.low == cycle.high == 1.0, name
 
@@ -260,6 +258,95 @@ def test_cosine_is_the_falling_half_and_does_not_come_back_up():
 
 
 # --------------------------------------------------------------------------
+# The schedule's length against the loop's
+# --------------------------------------------------------------------------
+
+
+def _default_config(dataset, tmp_path):
+    """`DEFAULT.toml` as one dataset's run resolves it, with no rung on top."""
+    if dataset == "shapeworld":
+        return parse_config.get_config()
+    path = tmp_path / "birds.toml"
+    path.write_text('[data]\ndataset = "../data/cub"\n')
+    return parse_config.get_config(str(path))
+
+
+def _loop_steps(training_examples, batch_size, accumulator_steps):
+    """
+    The optimiser steps `train.run` takes over one training epoch, counted the
+        way it counts them: over a loader built as `data.loader` builds the
+        training one, a step on every `accumulator_steps`-th microbatch and one
+        more for whatever is left at the end.
+    """
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(torch.arange(training_examples)),
+        batch_size=batch_size,
+        shuffle=True,
+    )
+    steps = accumulated = 0
+    for _ in loader:
+        accumulated += 1
+        if accumulated == accumulator_steps:
+            steps += 1
+            accumulated = 0
+    if accumulated:
+        steps += 1
+    return steps
+
+
+def _training_examples(config):
+    """
+    The default epoch's size, then sizes either side of a multiple of the
+        effective batch. On birds that is `games_per_epoch`; ShapeWorld's is the
+        stored train split, 20,000 games by a profiling log rather than the
+        loader, which is why the multiples are tested independently of it.
+    """
+    effective = config["data"]["batch_size"] * config["optimiser"]["accumulator_steps"]
+    default = config["data"]["games_per_epoch"] if "cub" in (
+        config["data"]["dataset"]
+    ) else 20_000
+    return [
+        default,
+        effective * 156,
+        effective * 156 - 1,
+        effective * 156 + 1,
+        config["data"]["batch_size"],
+        1,
+    ]
+
+
+@pytest.mark.parametrize("dataset", ["shapeworld", "birds"])
+def test_the_schedule_is_as_long_as_the_steps_the_loop_takes(dataset, tmp_path):
+    """
+    gradboard's `Cycle` counts `floor(N / (b * A)) + 1` steps an epoch, which is
+        one more than the loop takes whenever `b * A` divides `N`. Over a
+        100-epoch run the loop then stops 100 steps before the schedule does,
+        and every epoch boundary lands a step further from where the schedule
+        put it. Both datasets' defaults are checked, since they differ in
+        `accumulator_steps`. Built straight on `Cycle`, so a gradboard that
+        changed its count would fail here rather than shift every run.
+    """
+    config = _default_config(dataset, tmp_path)
+    batch_size = config["data"]["batch_size"]
+    accumulator_steps = config["optimiser"]["accumulator_steps"]
+    epochs = config["scheduler"]["epochs"]
+
+    for training_examples in _training_examples(config):
+        loop = _loop_steps(training_examples, batch_size, accumulator_steps)
+        microbatches = -(-training_examples // batch_size)
+        schedule = train.build_lr_schedule(
+            config, train.optimiser_steps_per_epoch(microbatches, accumulator_steps)
+        )
+        assert len(schedule) == epochs * loop, training_examples
+
+
+def test_a_schedule_of_no_steps_is_refused():
+    """`Cycle._windows` loops forever on a cycle of zero steps."""
+    with pytest.raises(ValueError):
+        train.build_lr_schedule(_config(10, 2), 0)
+
+
+# --------------------------------------------------------------------------
 # Resuming
 # --------------------------------------------------------------------------
 
@@ -269,7 +356,7 @@ def _scheduler(config):
     model = torch.nn.Linear(2, 2)
     optimiser = torch.optim.AdamW(model.parameters(), lr=BASE_LR)
     scheduler = PASS(
-        train.build_lr_schedule(config, TRAINING_EXAMPLES, BATCH_SIZE),
+        train.build_lr_schedule(config, STEPS_PER_EPOCH),
         model,
         optimiser,
         range_test=False,

@@ -6,6 +6,7 @@ See docs/training.md.
 """
 from torch.amp import GradScaler, autocast
 
+import math
 import os
 import random
 from pathlib import Path
@@ -195,7 +196,25 @@ def average_splits(split_metrics):
     }
 
 
-def build_lr_schedule(config, training_examples, batch_size):
+def optimiser_steps_per_epoch(microbatches, accumulator_steps):
+    """
+    How many optimiser steps `run` takes over a training epoch of
+    `microbatches` microbatches: one per full accumulation of
+    `accumulator_steps`, and one more for a trailing partial accumulation.
+
+    `microbatches` is `len(dataloader)`, which is `ceil(N / batch_size)`, since
+    `data.loader` builds the training loader without `drop_last`. So this is
+    `ceil(ceil(N / b) / A)`.
+
+    gradboard's `Cycle` counts `floor(N / (b * A)) + 1` steps an epoch from
+    the example count and the effective batch. That agrees with this unless
+    `b * A` divides `N`, where it counts one step an epoch the loop never
+    takes. `build_lr_schedule` takes this count instead.
+    """
+    return math.ceil(microbatches / accumulator_steps)
+
+
+def build_lr_schedule(config, steps_per_epoch):
     """
     The learning-rate schedule: `[scheduler] warm_up_epochs` ascending from zero
     to the base rate, then `[scheduler] lr_schedule_shape` over the rest.
@@ -233,15 +252,24 @@ def build_lr_schedule(config, training_examples, batch_size):
     from a checkpoint written before this change restores the old floor and goes
     flat again. Start such a run fresh rather than resuming it.
 
+    Each cycle is `steps_per_epoch` steps an epoch, which `Cycle` cannot be
+    told directly: it computes `epochs * (floor(training_examples /
+    batch_size) + 1)`. Passing `steps_per_epoch - 1` examples at a batch of 1
+    makes that `epochs * steps_per_epoch`. Neither value is read anywhere else
+    in a `Cycle` built without `t_0`.
+
     Args:
         config: the parsed config, for `[scheduler]`
-        training_examples: `len(dataset)` for the training split
-        batch_size: the *effective* batch, `[data] batch_size` times
-            `[optimiser] accumulator_steps`
+        steps_per_epoch: optimiser steps per training epoch, from
+            `optimiser_steps_per_epoch`
 
     Returns:
         A `gradboard.cycles.CycleSequence` over one or two stages.
     """
+    # At zero `Cycle._windows` never terminates.
+    if steps_per_epoch < 1:
+        raise ValueError(f"steps_per_epoch must be >= 1, got {steps_per_epoch}")
+
     epochs = config['scheduler']['epochs']
     warmup_epochs = min(config['scheduler']['warm_up_epochs'], epochs)
 
@@ -259,9 +287,9 @@ def build_lr_schedule(config, training_examples, batch_size):
         lr_stages.append(
             gradboard.cycles.Cycle(
                 gradboard.cycles.ascent,
-                training_examples,
+                steps_per_epoch - 1,
                 warmup_epochs,
-                batch_size,
+                1,
                 low=0.0,
                 high=1.0
             )
@@ -271,9 +299,9 @@ def build_lr_schedule(config, training_examples, batch_size):
         lr_stages.append(
             gradboard.cycles.Cycle(
                 shape,
-                training_examples,
+                steps_per_epoch - 1,
                 epochs - warmup_epochs,
-                batch_size,
+                1,
                 low=floor,
                 high=1.0
             )
@@ -954,6 +982,12 @@ def run(
         pair.sender.language_model.project_channel()
 
         scaler.update()
+        # Advances whether or not `scaler.step` skipped the optimiser step.
+        # Under bf16, which has float32's exponent range, loss scaling does
+        # not overflow, so a skip means a genuinely inf or NaN gradient and
+        # the schedule moving on one step is the least of that step's
+        # problems. Under the fp16 fallback an overflow skip, as the scaler
+        # backs off its initial scale, costs one scheduled step as well.
         scheduler.step(loss.item())
         optimizer.zero_grad()
 
@@ -1585,11 +1619,12 @@ if __name__ == "__main__":
     util.save_args(config, exp_dir)
     scaler = GradScaler()
 
-    training_examples = len(dataloaders['train'].dataset)
-    batch_size = config['data']['batch_size'] * config['optimiser']['accumulator_steps']
+    steps_per_epoch = optimiser_steps_per_epoch(
+        len(dataloaders['train']), config['optimiser']['accumulator_steps']
+    )
 
     scheduler = PASS(
-        build_lr_schedule(config, training_examples, batch_size),
+        build_lr_schedule(config, steps_per_epoch),
         model_config['pair'],
         model_config['optimiser'],
         scaler=scaler,
