@@ -426,14 +426,21 @@ Design details, each load-bearing:
   discarded. Inside a single LayerNorm the tag and the content compete for one
   unit budget, so growing the tag enough to be read reliably suppresses the
   prototype it is tagging. After the norm the two scales are independent.
-- **An antipodal draw**, one `randn_like` vector for row 0 and its negation for
-  row 1. Only `e_pos - e_neg` reaches the attention, so an antipodal pair buys
-  twice the readable separation per unit of tag magnitude that two independent
-  draws would; near-orthogonality, which is what independent draws in `d_model`
-  dimensions actually give you, is a property nothing here wants. The pair is a
-  starting point and not a constraint: `dL/de_i` is the gradient at row `i` of
-  the sequence and the rows differ in content, so nothing holds `e_neg` at
-  `-e_pos` once training starts.
+- **Two independent draws, now; an antipodal one before.** The tag is two
+  independent `randn` rows, frozen. It used to be one `randn_like` vector for
+  row 0 and its negation for row 1, on the argument that only `e_pos - e_neg`
+  reaches the attention, so an antipodal pair buys twice the readable separation
+  per unit of tag magnitude. That argument was wrong: broccoli's `MHAttention`
+  RMS-normalises each key per head (`k_norm`) after projecting it, so a vector
+  added to both rows changes both keys' directions and the gap between their
+  attention logits; softmax cancels only a shift shared by both logits. Only on
+  the unnormalised value side does the shared part come back as the same offset
+  for every query. An independent pair is an antipodal one along
+  `(t_pos - t_neg) / 2` plus a random common mode `(t_pos + t_neg) / 2`, so the
+  switch both shrank the separation and gave the keys a shared random component
+  the antipodal pair did not have. Nothing here argues that component harmless,
+  and nothing logs it; `polarity_separation` reads the difference only. See
+  `SenderTransformerLM.reset_parameters`.
 
   This replaces a zero init, which opened the rung at the untagged speaker's
   behaviour exactly, in the spirit of `AttentionPrototyper`'s scoring weights.
@@ -450,19 +457,21 @@ Design details, each load-bearing:
   around epoch 15. Seven epochs of a thirty-epoch run were spent climbing.
 
   Read the opening against that 13.19 and not against zero. At rung 8's 320-wide
-  speaker the antipodal draw opens at `2 * sqrt(320)` = 35.8, so it starts a
-  factor of 2.7 above where a learning run settled — an overshoot, but a mild
-  one. The 0.16 to 0.79 that rungs 11 and 12 reached is not the comparison: those
+  speaker the antipodal draw opened at `2 * sqrt(320)` = 35.8, a factor of 2.7
+  above where a learning run settled — an overshoot, but a mild one. The two
+  independent draws open at `sqrt(2 * 320)` = 25.3, a factor of 1.9. The 0.16 to 0.79 that rungs 11 and 12 reached is not the comparison: those
   runs never learned, so it is where a dead run leaves the tag rather than where
   the loss puts it.
 - **Scaled by what it is added to, not pinned to a number.** `randn_like` is at
   per-element unit variance, which is exactly what `referent_layer_norm` emits
   when it is reset, so the tag opens at the scale of the prototype it marks with
-  no constant to choose and none to keep in step with `d_model`. That puts the
-  opening separation at `2 * sqrt(d_model)` — about 64 at the configured 1024,
-  roughly twice a normed prototype's norm. Loud, but along a *single* random
-  direction out of `d_model` rather than broadband, so the cross-attention can
-  attenuate that one direction if the loss wants the content back.
+  no constant to choose and none to keep in step with `d_model`. Two
+  independent draws put the separation at about `sqrt(2 * d_model)` — about 45
+  at the configured 1024, roughly 1.4 times a normed prototype's norm, where the
+  antipodal draw gave `2 * sqrt(d_model)`, about 64. The difference is loud,
+  but along a *single* random direction out of `d_model` rather than broadband,
+  so the cross-attention can attenuate that one direction if the loss wants the
+  content back.
 - **The name matters.** `gradboard`'s `EXCLUDE_FROM_WEIGHT_DECAY` matches
   `"embedding"` as a substring, so this lands at `weight_decay = 0.0`. A 2-D
   parameter would otherwise be decayed — and decayed *up*, by

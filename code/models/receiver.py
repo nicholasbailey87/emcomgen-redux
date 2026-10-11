@@ -624,8 +624,11 @@ class ReceiverCrossAttentionLM(nn.Module):
         )
 
         # `causal` follows `bidirectional` exactly as the encoder it replaces
-        #     did: the message arrives whole, so nothing here masks it left to
-        #     right.
+        #     did, so this stack masks the message left to right whenever
+        #     `bidirectional` is false -- which is DEFAULT.toml's value, set for
+        #     jayelm's GRU. The message arrives whole, so a rung building this
+        #     class wants `bidirectional = true`; see `[receiver_language_model]
+        #     bidirectional`.
         self.message_decoder = transformer_decoder.TransformerDecoder(
             self.message_length,
             # `memory_len` is recorded for the caller and sizes nothing; the

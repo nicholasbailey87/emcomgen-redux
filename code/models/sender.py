@@ -929,9 +929,10 @@ class AttentionPrototyper(nn.Module):
             #     referents arrive at: `Sender`'s referent interface ends in a
             #     parameter-free `LayerNorm`, so the tag opens at the scale of
             #     what it is added to, with no constant to choose and none to
-            #     keep in step with `d_model`. `SenderTransformerLM`'s
-            #     `polarity_embedding` is initialised the same way and
-            #     docs/architecture.md carries the argument.
+            #     keep in step with `d_model`. docs/architecture.md carries the
+            #     argument. `SenderTransformerLM`'s `polarity_embedding` was
+            #     initialised the same way and is now two independent draws;
+            #     see its `reset_parameters`.
             positive_tag = torch.randn(self.d_model)
             self.label_embedding.copy_(
                 torch.stack([positive_tag, -positive_tag])
@@ -1758,9 +1759,13 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
 
     def record_polarity_separation(self):
         """
-        `norm(e_pos - e_neg)`, the only part of `polarity_embedding` the
-            cross-attention can act on, opening at exactly zero. A parameter
-            norm rather than a per-batch quantity. See docs/measurement.md.
+        `norm(e_pos - e_neg)`, the distance between the two rows of
+            `polarity_embedding`. Not everything of the tag the cross-attention
+            acts on: its keys are RMS-normalised per head, so the rows' common
+            mode reaches the attention logits too (see `reset_parameters`). The
+            tag is two independent `randn` draws and frozen, so this opens near
+            `sqrt(2 * d_model)` and stays there. A parameter norm rather than a
+            per-batch quantity. See docs/measurement.md.
         """
         with torch.no_grad():
             self.polarity_separation = (
@@ -1926,19 +1931,25 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
         self.query_layer_norm.reset_parameters()
         self.referent_layer_norm.reset_parameters()
         self.latent_layer_norm.reset_parameters()
-        # Two independent draws rather than an antipodal pair. Only
-        #     `e_pos - e_neg` reaches the cross-attention -- the two prototypes
-        #     are its whole key/value sequence, so softmax annihilates whatever
-        #     the rows share and the value path returns it as a constant -- and
-        #     an independent pair is exactly an antipodal one along
-        #     `(t_pos - t_neg) / 2` plus that constant. So this is a magnitude
-        #     change and not a geometry one: the opening separation goes from
-        #     `2 * sqrt(d_model)` = 35.8 to `sqrt(2 * d_model)` = 25.3, against
-        #     the 13.19 the one learning rung 10 settled at from a zero init.
-        #     docs/architecture.md called the antipodal opening a 2.7x
-        #     overshoot; this halves the overshoot. `polarity_separation` still
-        #     reads the difference correctly, but the common mode it now has is
-        #     not logged anywhere.
+        # Two independent draws rather than an antipodal pair. An independent
+        #     pair is an antipodal one along `(t_pos - t_neg) / 2` plus a common
+        #     mode `(t_pos + t_neg) / 2`, and the common mode is not inert.
+        #     broccoli's `MHAttention` RMS-normalises each key per head
+        #     (`k_norm`) after projecting it, so a vector added to both rows
+        #     changes both keys' directions and with them the difference between
+        #     the two attention logits; softmax cancels only a shift shared by
+        #     both logits, which this is not. Only on the value side, which is
+        #     not normalised, does the common mode come back as the same offset
+        #     for every query, ahead of `out_norm`.
+        #
+        # So the switch is two changes, not one. The difference opens at
+        #     `sqrt(2 * d_model)` = 25.3 instead of `2 * sqrt(d_model)` = 35.8,
+        #     against the 13.19 the one learning rung 10 settled at from a zero
+        #     init -- 1.9x where docs/architecture.md called the antipodal
+        #     opening a 2.7x overshoot. And the keys the cross-attention reads
+        #     now carry a random shared component the antipodal pair did not,
+        #     which nothing here argues is harmless. `polarity_separation` reads
+        #     the difference only; the common mode is not logged anywhere.
         with torch.no_grad():
             self.polarity_embedding.normal_(mean=0.0, std=1.0)
         self.cross_attention.reset_parameters()

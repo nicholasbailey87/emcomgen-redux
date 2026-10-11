@@ -625,19 +625,22 @@ branch that was 99.98% a shared vector plus a per-polarity offset. Adding a
 common vector lowers this ratio by construction — that is what it is for.
 
 **`polarity_separation`** — `norm(e_pos − e_neg)` for the Transformer speaker's
-`polarity_embedding`. A constant added to both rows shifts every key and value
-alike and cannot separate them, so the distance between the rows is the only part
-of the tag the cross-attention can act on. Opens at `2 * sqrt(d_model)`: the tag
-is an antipodal draw at the scale of the layer-normed prototype it is added to,
-which on a 320-wide speaker is 35.8, where under the old zero init the column
-opened at 0 and the question was whether the tag was ever used at all.
+`polarity_embedding`. Not the whole of what the cross-attention reads from the
+tag: broccoli's `MHAttention` RMS-normalises each key per head (`k_norm`), so a
+vector the two rows share changes the keys' directions and the attention logits
+too, and that common mode is logged nowhere. The tag is two independent `randn`
+draws at the scale of the layer-normed prototype it is added to, frozen, so the
+column opens near `sqrt(2 * d_model)` — 25.3 on a 320-wide speaker — and stays
+there. It opened at `2 * sqrt(d_model)`, 35.8, under the antipodal init before
+that, and at 0 under the zero init before that, when the question was whether
+the tag was ever used at all.
 
 The trace to read it against is rung 10's, the one rung that both builds this
 speaker and learns: 0.098 at epoch 0, crossing 1.0 at epoch 4, 6.1 by epoch 7
 and 13.19 by epoch 29, with `train_acc` leaving chance in the same epoch the tag
 crosses 1.0 and plateauing when it does. So a learning run wants a tag of order
-10, and the antipodal init opens a factor of 2.7 above that rather than the
-order of magnitude the dead rungs suggest. Do **not** use rungs 11 and 12's 0.16
+10, and the independent draws open a factor of 1.9 above that (the antipodal
+init opened at 2.7) rather than the order of magnitude the dead rungs suggest. Do **not** use rungs 11 and 12's 0.16
 to 0.79 as the reference: those runs never learned, so that is where a dead run
 leaves the tag. NaN for `SenderGRULM`, which is
 handed the distinction by `init_h` and has nothing to learn.

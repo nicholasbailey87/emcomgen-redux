@@ -2113,9 +2113,9 @@ layers = 1
 #                               symbol sampled at a time conditioned on the
 #                               symbols before it -- rungs 7 to 14
 #   SenderTransformerBidirectionalLM   Perceiver IO: `layers` blocks of
-#                               self-attention over the *latent* array, and a
-#                               learned query that reads it back out as every
-#                               symbol at once -- rungs 15 to 18
+#                               self-attention over the *latent* array, whose
+#                               tail slots are read out as every symbol at
+#                               once -- rungs 15 to 18
 #
 # The arm is a class rather than this flag so that each can hold its own rate
 # under `[optimiser.implementation_lr.sender_language_model]`, which keys on
@@ -2127,9 +2127,12 @@ layers = 1
 # nothing. The latent array is not a sequence in time: it is read back out in
 # one shot, so latent index 0 is no earlier than latent index 9 in any sense the
 # task can see, and masking it left to right only hid most of the image from the
-# low-index latents. No Transformer in this repository now runs a causal mask
-# except the decoder arm's self-attention, over the message, where it means what
-# it says.
+# low-index latents. A causal mask is now run only where something is read in
+# order: the decoder arm's stack, over the latent array whose tail slots are the
+# message, generated one symbol at a time; and
+# `ReceiverTransformerAutoregressiveLM`, over the incoming message.
+# (`ReceiverCrossAttentionLM` reads `causal = not bidirectional` as well; see
+# `[receiver_language_model] bidirectional`.)
 #
 # The two arms are parameter-matched at equal `layers`. At the rungs' 7 layers
 # the parallel arm is 6,752,594 on ShapeWorld and 6,756,440 on birds, the
@@ -2257,14 +2260,12 @@ ff_inner_dropout = 0.0
 ff_outer_dropout = 0.0
 # See [receiver_language_model] for what these two are.
 #
-# `cross_attention_dropout` covers every cross-attention in the speaker, on both
-# arms: the one that reads the prototypes into the latent array, the parallel
-# arm's readout back down to message length, and the decoder arm's per-block
-# reads of the latent memory -- `layers` of them rather than one, so this knob
-# reaches considerably further on that arm than on the other.
-# `self_attention_dropout` covers the stack, which is the self-attention over the
-# latent array on the parallel arm and over the emerging message on the decoder
-# arm.
+# `cross_attention_dropout` covers the speaker's one cross-attention, the one
+# that reads the prototypes into the latent array, identically on both arms. (It
+# used to cover a parallel-arm readout and a decoder arm that cross-attended in
+# every block as well; both are gone.) `self_attention_dropout` covers the stack,
+# which is the self-attention over the latent array on both arms, masked on the
+# decoder arm.
 self_attention_dropout = 0.0
 cross_attention_dropout = 0.0
 alpha = "deepnorm" # see [sender_feature_model]
@@ -2670,11 +2671,16 @@ n_examples = 10 # number of examples seen by agents, including distractors
 # `N ln N / 20` = 3,123. 3,100 was set against coverage alone and gave up step
 # parity, at 194 steps an epoch against ShapeWorld's 156.
 #
-# **5,000 as of 2026-08-31, and both constraints are satisfied again.** With
-# `[birds.optimiser] accumulator_steps` now 2, 5,000 / (16 x 2) = 156.25 steps
-# an epoch, and ShapeWorld's 20,000 / (32 x 4) = 156.25 -- the same number and
-# the same remainder, so the odd trailing batch is left unstepped on both. That
-# matters because the learning-rate schedule is keyed to the epoch counter and
+# **5,000 as of 2026-08-31, and both constraints are satisfied again.** At an
+# effective batch of 32 (`[birds.data] batch_size` 32, `[birds.optimiser]
+# accumulator_steps` 1; it was 16 x 2 when this was set), 5,000 / 32 = 156.25,
+# and ShapeWorld's 20,000 / (32 x 4) = 156.25 -- so 157 optimiser steps an epoch
+# on both, the training loader keeping its short final batch and `train.run`
+# stepping a trailing partial accumulation after the loop. The remainders are
+# not the same, though: birds' last step is one 8-game batch, ShapeWorld's is a
+# single full 32-game microbatch, rescaled by `complete_partial_accumulation` to
+# stand as the mean of an accumulation. The matching count is what matters:
+# the learning-rate schedule is keyed to the epoch counter and
 # every `lr * steps` traverse in `[optimiser]` above is quoted per epoch: one
 # steps-per-epoch figure now describes both datasets, and the arithmetic in
 # those blocks is written against it.
@@ -2729,9 +2735,9 @@ eval_games_per_species = 16
 # of the batch while the step count falls as the batch, so accumulation is a net
 # loss for a lone Adam scalar even where it is a net gain for the modules above
 # it. `[birds.data] games_per_epoch` moves with it for exactly that reason:
-# 5,000 games at an effective batch of 32 restores the 156 steps an epoch that
-# 3,100 at 16 was producing, so no travel budget is given up and the epoch stays
-# a comparable clock across the two datasets.
+# 5,000 games at an effective batch of 32 restores the 156.25 steps an epoch that
+# 2,500 at 16 was producing (3,100 at 16 had given 193.75), so no travel budget
+# is given up and the epoch stays a comparable clock across the two datasets.
 #
 # **1 since 2026-09-06, with `[birds.data] batch_size` doubled to 32 in the same
 # breath.** Everything above still describes the effective batch, which is

@@ -140,7 +140,14 @@ different run (`13_shapeworld_sender_transformer_lm_latent`), not from the loade
 
 ### `record_polarity_separation`'s docstring says the tag opens at zero
 
-The docstring reads *"the only part of `polarity_embedding` the cross-attention
+**Resolved on 2026-10-11, by rewriting the docstring.** The tag has since moved
+again, to two independent `randn(d_model)` draws, frozen, so the separation now
+opens near `sqrt(2·d_model)` ≈ 25.3 on a 320-wide speaker; the docstring says
+so, and no longer calls the difference the only part of the tag the
+cross-attention acts on (broccoli's `k_norm` lets the rows' common mode through
+to the attention logits). What follows is the entry as written.
+
+The docstring read *"the only part of `polarity_embedding` the cross-attention
 can act on, opening at exactly zero"*. `reset_parameters` initialises the tag as
 an antipodal pair of `randn(d_model)` draws, so the separation opens at
 `2·sqrt(d_model)` ≈ 35.8 on a 320-wide speaker, which is what the runs show and
