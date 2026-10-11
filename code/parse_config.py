@@ -399,13 +399,27 @@ def validate_config(config: dict) -> bool:
                     "name at the other's size."
                 )
 
+    # A batch count, compared against a batch index in
+    #     `train.calibrate_batch_norm`. `get_config` merges DEFAULT.toml first,
+    #     so the key is always present there; what this catches is a value that
+    #     is not a count.
+    n_calibration = config.get('bn_calibration_batches')
+    if (
+        not isinstance(n_calibration, int)
+        or isinstance(n_calibration, bool)
+        or n_calibration < 0
+    ):
+        raise InvalidConfig(
+            "`bn_calibration_batches` must be a non-negative integer, got "
+            f"{n_calibration!r}."
+        )
+
     # BatchNorm calibration on CUB, rejected because it would do nothing:
     #     only `shapeworld.load` builds the `train_clean` loader that
     #     `train.calibrate_batch_norm` reads, and `train.py` skips the pass
     #     when that loader is absent. A birds config setting the key would
     #     believe it was calibrating.
-    n_calibration = config.get('bn_calibration_batches')
-    if dataset_name == 'cub' and n_calibration and n_calibration > 0:
+    if dataset_name == 'cub' and n_calibration > 0:
         raise InvalidConfig(
             f"`bn_calibration_batches = {n_calibration}` on CUB would be "
             "silently skipped: `cub.load` builds no `train_clean` loader, so "
@@ -414,6 +428,23 @@ def validate_config(config: dict) -> bool:
             "brightness/contrast/colour jitter, horizontal flip), but "
             "calibration is only implemented for ShapeWorld. Set "
             "it to 0, or build `train_clean` in `cub.load` first."
+        )
+
+    # `train.py` resets the listener at every epoch where `epoch % interval ==
+    #     0`, epochs being integers. A fractional interval would still run, but
+    #     at the epochs that happen to be whole multiples of it -- 1.5 resets
+    #     every third epoch -- so only whole numbers are accepted. DEFAULT.toml
+    #     writes the off value as `0.0`, so a whole-valued float is accepted
+    #     alongside an int.
+    interval = config.get('receiver_reset_interval')
+    if (
+        not isinstance(interval, (int, float))
+        or isinstance(interval, bool)
+        or not (interval >= 0 and float(interval).is_integer())
+    ):
+        raise InvalidConfig(
+            "`receiver_reset_interval` must be a non-negative whole number of "
+            f"epochs (0 for no resets), got {interval!r}."
         )
 
     # `[optimiser.module_lr]`, one rate per module clip group. Checked here
@@ -510,6 +541,22 @@ def validate_config(config: dict) -> bool:
                     f"must be a positive number, got {rate}."
                 )
 
+    # `train.py` divides each micro-batch loss by this, steps on `(batch_i + 1)
+    #     % accumulator_steps == 0`, and multiplies `batch_size` by it for the
+    #     schedule's step count, so it must be a positive integer: 0 divides by
+    #     zero and a float makes the step count fractional.
+    accumulator_steps = config['optimiser'].get('accumulator_steps')
+
+    if (
+        not isinstance(accumulator_steps, int)
+        or isinstance(accumulator_steps, bool)
+        or accumulator_steps < 1
+    ):
+        raise InvalidConfig(
+            "`optimiser.accumulator_steps` must be a positive integer, got "
+            f"{accumulator_steps!r}."
+        )
+
     # `[scheduler]`. The shape is a sentinel rather than a `FN_LIBRARY` name --
     # see `LR_SCHEDULE_SHAPES` for why the surface is this narrow -- and the
     # floor is required by exactly the shapes that descend.
@@ -568,6 +615,19 @@ def validate_config(config: dict) -> bool:
         p = config['data'][key]
         if not 0.0 <= p <= 1.0:
             raise InvalidConfig(f"`{key}` must be in [0, 1], got {p}.")
+
+    # A probability `data.util.split_spk_lis` compares against: at 0.0 the
+    #     listener sees the speaker's own images, at 1.0 images of its own (the
+    #     concept game). TOML reads `1` as an int, so ints are accepted.
+    percent_novel = config['data'].get('percent_novel')
+    if (
+        not isinstance(percent_novel, (int, float))
+        or isinstance(percent_novel, bool)
+        or not 0.0 <= percent_novel <= 1.0
+    ):
+        raise InvalidConfig(
+            f"`percent_novel` must be a number in [0, 1], got {percent_novel!r}."
+        )
 
     # Four keys and two checks: the geometry is set per agent, so each check
     #     runs over both. Both sides are on by default -- see DEFAULT.toml for
