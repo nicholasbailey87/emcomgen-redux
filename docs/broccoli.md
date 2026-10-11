@@ -97,6 +97,23 @@ once the speaker's cross-attention moved to its own key (below) —
 2026-10-10; `parse_config` rejects a config that still sets it. The mask on what
 the speaker's language model reads is `[sender] prototype_dropout`.
 
+### `return_bos_tokens=False` on the speaker's stack
+
+Pinned in `SenderTransformerLM` and retired from `[sender_language_model]` on
+2026-10-11; `parse_config` rejects a config that still sets it. broccoli's
+`TransformerEncoder.forward` strips the `bos_tokens` (here `utility_tokens`)
+from its output only when this flag is False. Both arms index that output by
+latent slot — the parallel arm takes the tail from `first_message_slot`, the
+causal arm reads row `slot` — so returning them shifts every row by
+`utility_tokens`. Built with it True at the default 4 tokens, the parallel arm
+emitted 9 content symbols instead of 5, and the causal arm's row for the slot it
+was sampling no longer moved when that slot's input changed: it was row
+`slot - 4`, which the mask hides the slot from.
+
+The listener's language models and both vision models still take the key from
+their own tables; their outputs are pooled or indexed differently and this entry
+does not cover them.
+
 ### `ViT2`-specific pins
 
 **`cnn=False` and the whole `cnn_*` group.** Inert while `cnn` is False: broccoli

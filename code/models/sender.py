@@ -1478,7 +1478,6 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
         self.relative_position_embedding = kwargs["relative_position_embedding"]
         self.pre_norm = kwargs["pre_norm"]
         self.post_norm = kwargs["post_norm"]
-        self.return_bos_tokens = kwargs["return_bos_tokens"]
         self.knocking_heads = kwargs["knocking_heads"]
         self.depthwise_linear_stochastic_depth = kwargs[
             "depthwise_linear_stochastic_depth"
@@ -1673,7 +1672,13 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
             linear_module=nn.Linear,
             bos_tokens=self.utility_tokens,
             knocking_heads=self.knocking_heads,
-            return_bos_tokens=self.return_bos_tokens,
+            # Pinned, and no longer a config option: both arms index this
+            #     stack's output by latent slot, so it must come back without
+            #     the utility tokens prepended. Returning them would shift every
+            #     row by `utility_tokens` -- the parallel arm's tail would grow
+            #     by that many symbols, and the causal arm would read a row
+            #     that cannot see the slot it is sampling. See docs/broccoli.md.
+            return_bos_tokens=False,
             pre_norm=self.pre_norm,
             post_norm=self.post_norm,
             msa_scaling="d",

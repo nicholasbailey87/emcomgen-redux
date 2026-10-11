@@ -268,6 +268,17 @@ def validate_config(config: dict) -> bool:
             "language model",
         ),
         (
+            'sender_language_model',
+            'return_bos_tokens',
+            "it is pinned False in `SenderTransformerLM` since 2026-10-11. "
+            "Both arms index the stack's output by latent slot, and returning "
+            "the `utility_tokens` would shift every row by that many: the "
+            "parallel arm would emit `utility_tokens` extra symbols and the "
+            "causal arm would read a row that cannot see the slot it samples. "
+            "`false` was the only value that worked, and the default. The "
+            "listener's and the vision models' tables still carry the key",
+        ),
+        (
             'sender',
             'contrast',
             "the contrast stage was folded into `AttentionPrototyper` on "

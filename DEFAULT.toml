@@ -2182,7 +2182,9 @@ latent_message_multiplier = 2.0
 # Learned prefix tokens on the stack that runs over the latent array. One stack
 # on both arms now, so they sit ahead of the whole array -- ahead of the free
 # slots, which sit ahead of the message -- and every message slot attends back to
-# them through the causal mask.
+# them through the causal mask. Never returned from the stack: both arms index
+# its output by latent slot, so `return_bos_tokens` is pinned false in
+# `SenderTransformerLM` and is not a key in this table. See docs/broccoli.md.
 utility_tokens = 4 # Only applies to Transformer language models
 # See [sender_feature_model] for what these are and why they are here. Note the
 # vocabulary logits are always layer-normalised before sampling and there is no
@@ -2241,7 +2243,6 @@ activation = "SwiGLU" # one of ReLU, GELU, SquaredReLU, SwiGLU
 relative_position_embedding = true
 pre_norm = false
 post_norm = true
-return_bos_tokens = false
 knocking_heads = false
 ff_inner_dropout = 0.0
 ff_outer_dropout = 0.0

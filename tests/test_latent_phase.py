@@ -513,3 +513,62 @@ def test_the_causal_arm_reports_its_diagnostics_over_every_position():
     assert speaker.logit_spread == speaker.logit_spread
     assert 0.0 < speaker.realised_survival <= 1.0
     assert speaker.logit_spread > 0.0
+
+
+# ------------------------------------------------ the utility tokens stay out --
+
+@pytest.mark.parametrize("build", [_speaker, _latent_speaker])
+def test_the_stack_returns_the_array_without_its_utility_tokens(build):
+    """
+    Both arms index the stack's output by latent slot, which holds only if
+    broccoli strips the `utility_tokens` it prepends. It does that only while
+    `return_bos_tokens` is False, so the speaker pins it rather than reading a
+    key. Built with the flag True, the parallel arm emitted
+    `content_length + utility_tokens` symbols and the causal arm read row
+    `slot - utility_tokens`, which the mask hides the slot itself from.
+    """
+    speaker = build().eval()
+    assert speaker.utility_tokens > 0  # else there is nothing to strip
+
+    with torch.no_grad():
+        rows = list(
+            speaker.latent_layer_norm(speaker.encode(_prototypes())).unbind(1)
+        )
+        out = speaker.transformer(torch.stack(rows, dim=1))
+
+        assert out.shape[1] == speaker.latent_length
+
+        # The row read for a slot must see that slot. Under the causal mask a
+        #     row `utility_tokens` earlier would not.
+        slot = speaker.first_message_slot
+        rows[slot] = torch.randn_like(rows[slot])
+        moved = speaker.transformer(torch.stack(rows, dim=1))
+
+    assert not torch.allclose(out[:, slot, :], moved[:, slot, :], atol=1e-5)
+
+
+def test_config_rejects_the_retired_return_bos_tokens_key():
+    """
+    `[sender_language_model] return_bos_tokens` was retired on 2026-10-11, when
+    the speaker pinned it False. `true` mis-indexed both arms and `false` is now
+    unconditional, so a config naming either value raises rather than being
+    read past.
+    """
+    import parse_config
+
+    for value in (False, True):
+        config = get_config()
+        config["sender_language_model"]["return_bos_tokens"] = value
+        with pytest.raises(
+            parse_config.InvalidConfig, match="return_bos_tokens"
+        ):
+            parse_config.validate_config(config)
+
+    assert "return_bos_tokens" not in get_config()["sender_language_model"]
+    # The listener's and the vision models' keys are live and stay.
+    for table in (
+        "sender_feature_model",
+        "receiver_feature_model",
+        "receiver_language_model",
+    ):
+        assert "return_bos_tokens" in get_config()[table]
