@@ -652,17 +652,22 @@ def validate_config(config: dict) -> bool:
         if not 0.0 <= p <= 1.0:
             raise InvalidConfig(f"`{key}` must be in [0, 1], got {p}.")
 
-    # A probability `data.util.split_spk_lis` compares against: at 0.0 the
-    #     listener sees the speaker's own images, at 1.0 images of its own (the
-    #     concept game). TOML reads `1` as an int, so ints are accepted.
+    # A switch in `data.util.split_spk_lis`: at 0 the listener sees the
+    #     speaker's own images, at 1 images of its own (the concept game).
+    #     Values in between take a third branch whose novelty mask is sized
+    #     for the positives only and is applied to every candidate, so it
+    #     raises a shape mismatch at the first batch. TOML reads `1` as an
+    #     int, so ints are accepted.
     percent_novel = config['data'].get('percent_novel')
     if (
         not isinstance(percent_novel, (int, float))
         or isinstance(percent_novel, bool)
-        or not 0.0 <= percent_novel <= 1.0
+        or percent_novel not in (0, 1)
     ):
         raise InvalidConfig(
-            f"`percent_novel` must be a number in [0, 1], got {percent_novel!r}."
+            f"`percent_novel` must be 0 or 1, got {percent_novel!r}. Fractional "
+            "values are not supported: the novelty mask in "
+            "`data.util.split_spk_lis` is sized for the positives only."
         )
 
     # Four keys and two checks: the geometry is set per agent, so each check

@@ -222,6 +222,10 @@ dataset = "../data/shapeworld_40"
 # ~32 GB of disk reads per epoch.
 load_shapeworld_into_memory = true
 batch_size = 32
+# 1 is the concept game (the listener's candidates are images the speaker never
+# saw), 0 the setref and reference games (the same images). Only 0 and 1 are
+# accepted: `data.util.split_spk_lis` has a branch for fractions, but its novelty
+# mask is sized for the positives only and it crashes at the first batch.
 percent_novel = 1.0
 n_examples = 20 # number of examples seen by agents, including distractors
 

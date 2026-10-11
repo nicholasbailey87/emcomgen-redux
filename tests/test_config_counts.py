@@ -8,7 +8,8 @@ Runnable without pytest:  python tests/test_config_counts.py
       each micro-batch loss by it, so 0 was a `ZeroDivisionError` mid-epoch.
     * `bn_calibration_batches` -- a non-negative integer, compared against a
       batch index in `train.calibrate_batch_norm`.
-    * `[data] percent_novel` -- a number in [0, 1].
+    * `[data] percent_novel` -- 0 or 1. A fraction would pass a range check
+      but crash `data.util.split_spk_lis` at the first batch.
     * `receiver_reset_interval` -- a non-negative whole number of epochs. It is
       used as `epoch % interval`, so a fractional value would run but reset at
       only the epochs that are whole multiples of it.
@@ -18,8 +19,9 @@ DEFAULT.toml first, which sets all four, and a TOML file cannot delete a key.
 So the checks are about type and range, and a `None` is rejected as "not a
 number" for the case where `validate_config` is handed a dict built elsewhere.
 
-TOML reads `1` as an int and `1.0` as a float, so the two fractional keys accept
-either; `bool` is an `int` subclass in Python and is rejected everywhere.
+TOML reads `1` as an int and `1.0` as a float, so `percent_novel` and
+`receiver_reset_interval` accept either; `bool` is an `int` subclass in Python
+and is rejected everywhere.
 """
 
 import _bootstrap  # noqa: F401
@@ -61,8 +63,9 @@ CASES = [
     ("bn_calibration_batches", [0, 1, 8], [-1, 2.5] + BAD_COUNT),
     (
         "data.percent_novel",
-        [0, 1, 0.0, 0.5, 1.0],
-        [-0.1, 1.1, math.nan, math.inf, None, "1.0", True, False],
+        [0, 1, 0.0, 1.0],
+        [0.5, 0.01, 0.99, -0.1, 1.1, math.nan, math.inf]
+        + [None, "1.0", True, False],
     ),
     (
         "receiver_reset_interval",

@@ -36,6 +36,9 @@ def split_spk_lis(inp, y, n_examples, percent_novel=1.0):
         lis_inp = spk_inp
         lis_label = spk_label
     elif percent_novel < 1.0:  # Sample some negatives
+        # Unreachable from a config: `parse_config.validate_config` accepts
+        #     only 0 and 1. The mask has `n_pos_ex` entries but is applied to
+        #     all `n_examples` rows, so any fraction raises a shape mismatch.
         is_novel = torch.rand(n_pos_ex) < percent_novel
         if spk_inp.ndim == 4:  # Image
             is_novel_exp = is_novel.unsqueeze(1).unsqueeze(1).unsqueeze(1)

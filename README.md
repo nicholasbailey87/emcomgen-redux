@@ -220,7 +220,9 @@ derived from the config path: `<output_root>/<experiment>/<config_stem>_seed<see
 Game type and the other hyperparameters are set **in the TOML config**, not via
 CLI flags (the config inherits from the repo-root `DEFAULT.toml`):
 
-- `[data] percent_novel = 1.0`: concept game (fraction of images novel to the student)
+- `[data] percent_novel = 1.0`: concept game (the listener's images differ from the
+    speaker's). Only 0 and 1 are accepted; fractions are rejected at config
+    validation, since `split_spk_lis` crashes on them
 - `[data] percent_novel = 0.0`: setref game
 - `[data] percent_novel = 0.0` + `reference_game = true`: reference game. **For
     ShapeWorld, use the 30-concept reference dataset `shapeworld_ref`, not the
