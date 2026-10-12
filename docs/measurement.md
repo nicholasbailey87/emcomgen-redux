@@ -100,8 +100,7 @@ built on exactly that). A table with one row per symbol averages those meanings
 together, so a positional code reads as noise and the control penalises the
 language rather than the leak. A slot carries nothing about the game, since every
 message fills every slot (see "Message geometry" below), so keying on position as
-well removes no less leakage. It matters more at small vocabularies: at four or
-five symbols a per-symbol table has only four or five rows. **Before 2026-10-11
+well removes no less leakage. **Before 2026-10-11
 the table was per symbol**, so `_static` columns from earlier files are not
 comparable with later ones.
 
@@ -189,11 +188,7 @@ undefined at zero variance).
 Both senders mask the reserved tokens out of the content logits, so EOS never
 fires early and every message is exactly `message_length − 2` content symbols.
 Insertions and deletions therefore never arise, length normalisation is a no-op,
-and a message has one fewer two-gram than it has symbols. Since 2026-10-11 that is
-10 symbols over a vocabulary of 4 on ShapeWorld and 15 over 5 on birds. Before
-then it was 5 over 14 and 8 over 20. At a vocabulary of 4 or 5, S4's histogram
-has only 4 or 5 bins and says little; S5 has 16 or 25 bigram types, and S6
-grades from 0 to 10 or 15 instead of 0 to 5 or 8.
+and a 5-symbol message has only 4 two-grams.
 
 ## Game pairs and bootstrap intervals (`train.compute_language_metrics`)
 
@@ -469,10 +464,9 @@ Expect the two to open close together and separate as the run sharpens. Watch
 saturation signature in [training.md](training.md) is live. It is bounded rather
 than unbounded, which is the whole of what the ceilings buy: `MAX_LOGIT_SCALE`
 and `sharpest_logit_margin` cap the two factors that saturate it, so this column
-cannot exceed **0.971** at ShapeWorld's V = 4 (0.974 at birds' V = 5; it was
-0.9945 at the V = 14 used until 2026-10-11). A run pinned *at* that is at the
-sharpest the channel allows; a run pinned at `realised_survival`'s 0.925 might
-be anywhere.
+cannot exceed **0.9945** at V = 14. A run pinned *at* that is at the sharpest
+the channel allows; a run pinned at `realised_survival`'s 0.90714 might be
+anywhere.
 
 **`logit_margin`** — the winning token's lead over the runner-up, in units of the
 logits' own standard deviation, averaged over slots. Taken after
@@ -526,18 +520,17 @@ way it moves, not its distance from zero. Read it against that bias.
 **Why the shape columns exist at all.** `layer_norm_logits` fixes the second
 moment, so the speaker has a bounded shape budget and the only question is what
 it spends it on. The most concentrated distribution the normaliser permits is one
-token at `sqrt(V-1)` and the rest at `-1/sqrt(V-1)` — a margin of
-**2.309** sd at V = 4, or `V/√(V−1)` in general (3.883 at the V = 14 used until
-2026-10-11). The 2026-08-29 run, at V = 14, had used 86% of that budget.
-**Fidelity does not have to come from the scale** — at a scale of one this shape
-alone reaches 0.770 at V = 4 — which is why a run can traverse
+token at `sqrt(V-1)` and the other thirteen at `-1/sqrt(V-1)` — a margin of
+**3.883** sd at V = 14, or `V/√(V−1)` in general. The 2026-08-29 run had used 86%
+of that budget. **Fidelity does not have to come from the scale** — at a scale
+of one this shape alone reaches 0.789 at V = 14 — which is why a run can traverse
 the whole channel with `logit_scale` flat, and why a bound on the scale is not by
 itself a bound on saturation.
 
 **None of the four columns above survive `normalise_logits = false` as
 comparable quantities.** They are all measured on post-norm logits — "in units
 of the logits' own standard deviation" — and `sharpest_logit_margin`'s bound of
-2.309 at V = 4 is a property of `layer_norm_logits` that does not exist without
+3.883 at V = 14 is a property of `layer_norm_logits` that does not exist without
 it. They stay computable, read against a raw spread instead, and must not be
 pooled across the key. `logit_spread` is taken *before* the norm and is
 unaffected. See [channel.md](channel.md).

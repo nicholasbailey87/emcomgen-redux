@@ -298,12 +298,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # `test_the_shapeworld_backbones_are_matched`.
         ("01_shapeworld_baseline.toml", "sender.feat_model", 852_368),
         ("01_shapeworld_baseline.toml", "receiver.feature_model", 852_368),
-        # The speakers' language models shrank on 2026-10-11 with the move to
-        # V = 4 over 10 slots (ShapeWorld) and V = 5 over 15 (birds): the token
-        # embedding and the vocabulary projection both lose rows. The GRU went
-        # 6,813,499 -> 6,798,249 and 6,822,649 -> 6,799,774; the transformer
-        # arms below moved by less, as their tables are narrower.
-        ("01_shapeworld_baseline.toml", "sender.language_model", 6_798_249),
+        ("01_shapeworld_baseline.toml", "sender.language_model", 6_813_499),
         # The listener is two modules: `receiver.language_model` encodes the
         # message and `receiver.discriminator` scores the candidates from it.
         #
@@ -362,7 +357,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # rung 7's `layers` for why seven, and for the two depths before it.
         ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "sender.feat_model", 874_417),
         ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "receiver.feature_model", 874_417),
-        ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "sender.language_model", 6_755_144),
+        ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "sender.language_model", 6_758_354),
         # The speaker LM's depth and feedforward at the listener's width:
         # encoder, message adapter and `SequencePool`, 0.997x the GRU's
         # 4,687,872.
@@ -396,11 +391,11 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # CUB, which only the causal arm has because only it reads a symbol
         # back. That gap is the whole of what these pin against rungs 13 and
         # 14, and rungs 17 and 18 keep it.
-        ("15_shapeworld_sender_transformer_bidirectional_lm.toml", "sender.language_model", 6_752_584),
-        ("17_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 6_752_584),
+        ("15_shapeworld_sender_transformer_bidirectional_lm.toml", "sender.language_model", 6_752_594),
+        ("17_shapeworld_receiver_cross_attention_lm.toml", "sender.language_model", 6_752_594),
         # CUB: the CNN/GRU baseline.
         ("02_birds_baseline.toml", "sender.feat_model", 11_176_512),
-        ("02_birds_baseline.toml", "sender.language_model", 6_799_774),
+        ("02_birds_baseline.toml", "sender.language_model", 6_822_649),
         ("02_birds_baseline.toml", "receiver.language_model", 4_687_872),
         ("02_birds_baseline.toml", "receiver.discriminator", 1_048_576),
         # CUB: the Transformer encoders at 12 and 14, the parallel speaker
@@ -433,15 +428,15 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # for -2,176. CUB loses 1,152 + 320 = 1,472 in each of eleven, SwiGLU's
         # `linear_in` being double width, and gains 4 * 320, for -14,912.
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "sender.feat_model", 10_612_078),
-        ("12_birds_receiver_transformer_autoregressive_lm.toml", "sender.language_model", 6_758_985),
+        ("12_birds_receiver_transformer_autoregressive_lm.toml", "sender.language_model", 6_764_120),
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "receiver.language_model", 4_673_344),
         ("14_birds_receiver_transformer_bidirectional_lm.toml", "receiver.language_model", 4_673_344),
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "receiver.discriminator", 65_536),
         # 320 * 256 for the referents at the birds ViT's width, plus the same
         # 65,792 message interface as ShapeWorld.
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "receiver.interfaces", 147_712),
-        ("16_birds_sender_transformer_bidirectional_lm.toml", "sender.language_model", 6_756_105),
-        ("18_birds_receiver_cross_attention_lm.toml", "sender.language_model", 6_756_105),
+        ("16_birds_sender_transformer_bidirectional_lm.toml", "sender.language_model", 6_756_440),
+        ("18_birds_receiver_cross_attention_lm.toml", "sender.language_model", 6_756_440),
         ("18_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
         ("18_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 65_536),
         ("18_birds_receiver_cross_attention_lm.toml", "receiver.interfaces", 229_632),
