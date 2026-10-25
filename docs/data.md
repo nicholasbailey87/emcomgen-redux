@@ -201,14 +201,16 @@ docs/dubious-claims.md, which is where the one-object assumption lives.
 defaulting to the palette's own mean object colour (149, 149, 106).** Which
 colour it is is a claim about the receiver's input BatchNorm; *that it is
 chromatic* is a claim about the palette, below. The value did not change when
-the edge treatment did. `ViT2` passes
-`initial_batch_norm=True`, so broccoli puts an `nn.BatchNorm2d(3)` over raw RGB
+the edge treatment did. When this was written `ViT2` passed
+`initial_batch_norm=True`, so broccoli put an `nn.BatchNorm2d(3)` over raw RGB
 at `preprocess[0]`, and ShapeWorld gets no other input normalisation — whatever
-this function emits lands directly on that layer's statistics. Since eval is
-never silhouetted (below), those running statistics are gathered on a mixture
+this function emits landed directly on that layer's statistics. Since eval is
+never silhouetted (below), those running statistics were gathered on a mixture
 and then applied to clean images, and any gap between the two is a fixed offset
 of `(μ_clean − μ_running) / σ` on every eval activation. The learned affine
-cannot absorb it, because at train the offset is zero.
+cannot absorb it, because at train the offset is zero. That input layer came off
+ShapeWorld on 2026-09-10 and off birds on 2026-10-25; the argument still holds
+for every deeper BatchNorm, as the next paragraph says.
 
 That argument is about the input layer because that is where it is easiest to
 state, but nothing in it is specific to the input layer: every deeper BatchNorm

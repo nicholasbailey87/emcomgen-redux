@@ -129,7 +129,7 @@ def silhouette(imgs, fill=DEFAULT_SILHOUETTE_FILL):
     statistics -- and eval is never silhouetted, so the running stats were
     gathered on a mixture and then used on clean images. That is history on
     ShapeWorld since 2026-09-10, when `ShapeWorldViT` stopped building the layer
-    (`BirdsViT` still does); the fill's other argument, about *batch* rather than
+    (`BirdsViT` followed on 2026-10-25); the fill's other argument, about *batch* rather than
     running statistics, needs no BatchNorm on raw RGB and is unaffected. See
     DEFAULT.toml and `vision.ShapeWorldViT`. The palette is blue-deficient (blue appears in two of six
     colours where red and green appear in three), so its mean is (148.83, 148.83,

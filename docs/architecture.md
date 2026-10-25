@@ -1202,13 +1202,15 @@ two are the same code at different sizes — 128/6/4/256 GELU against `ResNet56`
 because each dataset's ViT is matched to that dataset's own baseline CNN rather
 than to the other dataset.
 
-**And since 2026-09-10 they are not pure aliases.** `ShapeWorldViT` passes
-`initial_batch_norm=False` and `BirdsViT` passes `True`, which is the one thing
-either factory does beyond naming the class — so unlike `ResNet56` and
-`ResNet18` over `ResNet`, choosing the name now chooses an architecture. The
-layer is a `BatchNorm2d(3)` over the raw image and the only BatchNorm in the
-stack, so ShapeWorld's count is 876,593 where birds keeps its own unchanged, and
-`test_the_arms_are_the_sizes_they_claim` is what asserts the layer is gone.
+**From 2026-09-10 to 2026-10-25 they were not pure aliases.** `ShapeWorldViT`
+passed `initial_batch_norm=False` and `BirdsViT` passed `True` — the one thing
+either factory did beyond naming the class. The layer is a `BatchNorm2d(3)` over
+the raw image. Since 2026-10-25 `ViT2` builds it on neither dataset, so the two
+factories are pure aliases again, as `ResNet56` and `ResNet18` are over
+`ResNet`; the architecture each runs is chosen by its dataset's config table,
+and the name chooses only the learning rate.
+`test_the_arms_are_the_sizes_they_claim` is what asserts the layer is gone, by
+six parameters on each dataset.
 
 Why it comes off ShapeWorld. `prepare_batch` divides the uint8 store by 255, so
 a ShapeWorld image reaches the model as [0, 1] with its black background at
@@ -1224,10 +1226,13 @@ area, which the CNN it is size-matched against does not have — and shape has n
 equivalent, since no per-channel batch statistic encodes an outline. On a
 dataset whose standing failure is a colour-only minimum, that is worth removing.
 
-Why it stays on birds. `image_util.TransformLoader`'s pipeline ends in a
-torchvision normalise, so a CUB tensor is already centred on arrival and there is
-no black background for the layer to lift off zero. The argument above does not
-reach it.
+Why it came off birds too, on 2026-10-25. The argument above does not reach CUB,
+which has no black background, but nothing argued for the layer either.
+`image_util.TransformLoader`'s pipeline ends in a torchvision ImageNet
+normalise, so a CUB tensor is already centred on arrival. All the layer added was
+CUB's batch statistics in place of ImageNet's and a per-channel affine, at the
+cost of another train/eval gap between batch and running statistics. Birds'
+CNN stem keeps its own BatchNorm (`cnn_batch_norm`).
 
 One consequence: on a ShapeWorld ViT rung the speaker's backbone now contains no
 BatchNorm at all, so `calibrate_batch_norm` has nothing to re-estimate on that
@@ -1301,8 +1306,8 @@ DEFAULT.toml and docs/broccoli.md.
 **The two datasets no longer run the same ViT.** `[sender_feature_model]` is
 ShapeWorld's — 128 wide, 6 layers, 4 heads, `ff_inner_size` 170 behind a
 256-wide stem, 851,763 parameters — and `[birds.sender_feature_model]` pins
-CUB's, 320 / 10 / 5 at `ff_inner_size` 704 behind a CNN stem, at 11,168,097
-since 2026-10-25. Each is matched to
+CUB's, 320 / 10 / 5 at `ff_inner_size` 704 behind a CNN stem, at 11,168,091
+since 2026-10-25 (11,168,097 until its input BatchNorm came off the same day). Each is matched to
 its own baseline backbone rather than to the other dataset's: `ResNet56` at
 852,368 on ShapeWorld and `ResNet18` at 11,176,512 on CUB. See
 [the CIFAR ResNet](#resnet56-the-cifar-resnet) below for why the ShapeWorld

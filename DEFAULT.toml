@@ -700,9 +700,9 @@ mixup_blends_classes = false
 #
 # **Why chromatic and not simply another integer grey.** This argument was
 # written when `ViT2` opened with `nn.BatchNorm2d(3)` over raw RGB on both
-# datasets. Since 2026-09-10 it does not on ShapeWorld -- `ShapeWorldViT`
-# passes `initial_batch_norm=False` -- so read the next two paragraphs as
-# birds' and as ShapeWorld's history. What replaces them for ShapeWorld is the
+# datasets. Since 2026-09-10 it does not on ShapeWorld, and since 2026-10-25
+# not on birds either -- `ViT2` builds no input BatchNorm at all -- so read the
+# next two paragraphs as history. What replaces them for ShapeWorld is the
 # batch-statistics argument further down, which needs no BatchNorm on raw RGB
 # and survives the change; the eval-time running-statistics half does not, and
 # on a ShapeWorld ViT rung there is now no BatchNorm in the speaker's backbone
@@ -711,7 +711,7 @@ mixup_blends_classes = false
 # outlived the layer is the half that was doing the work. See
 # `vision.ShapeWorldViT`.
 #
-# The receiver's `ViT2` opens with `nn.BatchNorm2d(3)` over raw RGB
+# The receiver's `ViT2` opened with `nn.BatchNorm2d(3)` over raw RGB
 # (`initial_batch_norm=True`, and broccoli's `vit.py` puts it at
 # `preprocess[0]`), and ShapeWorld gets no other
 # input normalisation, so whatever `silhouette` emits lands directly on that
@@ -774,8 +774,8 @@ mixup_blends_classes = false
 # arm, the demonstrated fill wins over the reasoned one. Note the BatchNorm
 # half of the argument only ever bit on `ViT2`, which opened with
 # `nn.BatchNorm2d(3)` over raw RGB where `Conv4` and `ResNet18SmallInput` do
-# not -- and since 2026-09-10 it does not on ShapeWorld either, so on this
-# dataset that half is now history on every backbone.
+# not -- and since 2026-09-10 it does not on ShapeWorld either (nor, since
+# 2026-10-25, on birds), so that half is now history on every backbone.
 #
 # **Back to the mean colour on 2026-09-09, and this time on a run.** With this
 # fill, `silhouette_p_receiver = 0.2` and `warm_up_epochs = 10`, on top of
@@ -2846,6 +2846,11 @@ feature_model = "ResNet18"
 # back; 688 would be 0.986x and 720 1.013x. Beta is 1/sqrt(21), 0.218, with
 # the stem counted as a branch. `stem_ff_inner_size` and `stem_activation` are
 # inert here.
+#
+# **11,168,091 later on 2026-10-25**: `BirdsViT` no longer builds the
+# `BatchNorm2d(3)` over raw RGB, six parameters. CUB is ImageNet-normalised on
+# arrival, so the layer had little to do; see `vision.BirdsViT`. The CNN
+# stem's own BatchNorm stays.
 #
 # Without this block the ShapeWorld narrowing would have dragged the birds ViT
 # rungs down to 128 wide as well, matching them to a backbone the birds arm does

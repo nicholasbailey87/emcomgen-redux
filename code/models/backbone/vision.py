@@ -50,7 +50,6 @@ class ViT2(nn.Module):
     def __init__(
             self,
             n_feats=(3, 64, 64),
-            initial_batch_norm=True,
             **kwargs
         ):
         super().__init__()
@@ -135,12 +134,12 @@ class ViT2(nn.Module):
             input_size=n_feats[1:],
             image_classes=self.d_model, # Just return an overall embedding
             in_channels=n_feats[0],
-            # A `BatchNorm2d(3)` over the raw image. Not the only possible
-            #     BatchNorm: the CNN stem below brings its own
-            #     (`cnn_batch_norm`). Set by the factory rather than by
-            #     config: False for `ShapeWorldViT` and True for `BirdsViT`,
-            #     for the reasons in those two docstrings.
-            initial_batch_norm=initial_batch_norm,
+            # No `BatchNorm2d(3)` over the raw image, on either dataset.
+            #     ShapeWorld lost it on 2026-09-10 and birds on 2026-10-25;
+            #     see `ShapeWorldViT` and `BirdsViT` for why. Not the only
+            #     possible BatchNorm: the CNN stem below brings its own
+            #     (`cnn_batch_norm`), which birds still runs.
+            initial_batch_norm=False,
             # The CNN stem is a linear patch embedding: one convolution at the
             #     patch grid's kernel and stride, `d_model` channels, no
             #     activation, after `9-bigger.json`. broccoli gives the
@@ -277,20 +276,21 @@ class ViT2(nn.Module):
 
 def ShapeWorldViT(*args, **kwargs):
     """
-    `ViT2` under ShapeWorld's name, with no initial BatchNorm: 128 wide, 6
+    `ViT2` under ShapeWorld's name: 128 wide, 6
         layers, 4 heads, `NormedSwiGLU` at inner 170 behind a `NormedGELU`
         stem at inner 256 -- 851,763 parameters against `ResNet56`'s 852,368,
         since 2026-10-22 (874,417 before, at inner 256 with GELU).
 
     The size is not here. It is in `[sender_feature_model]` and
         `[receiver_feature_model]`, which is where every backbone's
-        hyperparameters live. What *is* here is `initial_batch_norm=False`,
-        which is the one thing this factory does beyond naming the class --
-        so it is not a pure alias the way `ResNet56` and `ResNet18` are over
-        `ResNet`, and the 6 parameters between 876,593 and 876,599 were that
-        layer's weight and bias.
+        hyperparameters live. Since 2026-10-25 this factory, like `BirdsViT`,
+        does nothing beyond naming the class: a pure alias, the way `ResNet56`
+        and `ResNet18` are over `ResNet`. From 2026-09-10 to then it passed
+        `initial_batch_norm=False` where `BirdsViT` passed `True`, and the 6
+        parameters between 876,593 and 876,599 were that layer's weight and
+        bias. `ViT2` now builds no input BatchNorm on either dataset.
 
-    **Why it is off here and on for birds.** `ViT2` opened with an
+    **Why it came off here first.** `ViT2` opened with an
         `nn.BatchNorm2d(3)` over the raw image on both datasets until
         2026-09-10. ShapeWorld runs the feedforward stem, so on ShapeWorld it
         was the only BatchNorm in the stack (birds' CNN stem adds a second,
@@ -312,11 +312,8 @@ def ShapeWorldViT(*args, **kwargs):
         encodes an outline. On ShapeWorld, where the standing failure is a
         colour-only minimum, that is worth removing.
 
-    CUB keeps it, and the asymmetry is the point rather than an oversight.
-        `image_util.TransformLoader`'s pipeline ends in a torchvision
-        normalise, so a birds tensor is already centred when it arrives and
-        `BatchNorm2d(3)` is close to inert on it -- there is nothing to remove
-        and no black background for it to lift. See `BirdsViT`.
+    CUB kept it until 2026-10-25, because none of that reaches birds: there
+        is no black background to lift. See `BirdsViT` for why it went anyway.
 
     What the name buys is a key. `[optimiser.implementation_lr]` is keyed by
         the class named in the config, and both datasets run the same `ViT2`
@@ -328,18 +325,20 @@ def ShapeWorldViT(*args, **kwargs):
         `type(module).__name__`.
 
     `parse_config.validate_config` refuses a `ShapeWorldViT` on a `cub`
-        dataset. That check guarded a label when the two names were aliases;
-        it guards an architecture now.
+        dataset. With the two names aliases again, that check guards a label
+        -- but the label is what selects the learning rate, so a wrong one is
+        a run at the wrong rate under a name saying otherwise.
     """
-    return ViT2(*args, initial_batch_norm=False, **kwargs)
+    return ViT2(*args, **kwargs)
 
 
 def BirdsViT(*args, **kwargs):
     """
     `ViT2` under CUB's name: 320 wide, 10 layers, 5 heads at head_dim 64,
         `NormedSwiGLU` at inner 704 behind a CNN stem with the raw patches in
-        the stream -- 11,168,097 parameters against `ResNet18`'s 11,176,512,
-        since 2026-10-25 (10,612,078 before 2026-10-22, at inner 576 with
+        the stream -- 11,168,091 parameters against `ResNet18`'s 11,176,512,
+        since the input BatchNorm came off on 2026-10-25 (11,168,097 with it
+        earlier that day; 10,612,078 before 2026-10-22, at inner 576 with
         SwiGLU and a feedforward stem).
 
     Sized by `[birds.sender_feature_model]` and
@@ -350,14 +349,18 @@ def BirdsViT(*args, **kwargs):
         `experiments/lr_sweep_2_sender_vit/`, listener from
         `experiments/lr_sweep_5_receiver_vit/`).
 
-    `initial_batch_norm=True`, stated rather than defaulted, because since
-        2026-09-10 it is the thing the two names differ in. CUB's images reach
-        the model already normalised by `image_util.TransformLoader`, so the
-        layer has little left to do and no black background to lift off zero;
-        the argument that took it off ShapeWorld does not reach here. See
+    **No `BatchNorm2d(3)` over the raw image since 2026-10-25.** It was kept
+        here when it came off ShapeWorld because the argument against it there
+        -- a black background lifted off zero, colour-selectively -- does not
+        reach CUB. But nothing argued *for* it either. `image_util.TransformLoader`
+        already ends in a torchvision ImageNet normalise, so the layer had
+        little left to do beyond swapping ImageNet's channel statistics for
+        CUB's batch ones and adding a per-channel affine, at the price of
+        another train/eval gap between batch and running statistics. The CNN
+        stem's own BatchNorm (`cnn_batch_norm`) is unaffected. See
         `ShapeWorldViT`.
     """
-    return ViT2(*args, initial_batch_norm=True, **kwargs)
+    return ViT2(*args, **kwargs)
 
 
 # Basic ResNet model

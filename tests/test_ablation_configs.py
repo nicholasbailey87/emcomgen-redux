@@ -430,8 +430,8 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # **876,593 since 2026-09-10.** `ShapeWorldViT` passes
         # `initial_batch_norm=False`, and the six parameters that went are that
         # layer's weight and bias -- it is the only BatchNorm in the stack, so
-        # this count is also the assertion that it is gone. `BirdsViT` keeps it
-        # and is unchanged. See `vision.ShapeWorldViT` for why.
+        # this count is also the assertion that it is gone. `BirdsViT` kept it
+        # until 2026-10-25, below. See `vision.ShapeWorldViT` for why.
         #
         # **874,417 and 10,612,078 since 2026-09-27**, on both datasets at
         # once: every ViT feedforward went bias-free (`vision.BIAS_FREE_LINEAR`)
@@ -451,7 +451,11 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # **11,168,097 for CUB since 2026-10-25**, 0.999x: a CNN stem after
         # `9-bigger.json` replaced the feedforward one there, and
         # `ff_inner_size` rose to 704 to make up the difference.
-        ("12_birds_receiver_transformer_autoregressive_lm.toml", "sender.feat_model", 11_168_097),
+        #
+        # **11,168,091 later the same day**: `BirdsViT` stopped building the
+        # input `BatchNorm2d(3)` too, and the six parameters that went are its
+        # weight and bias -- the same six ShapeWorld lost on 2026-09-10.
+        ("12_birds_receiver_transformer_autoregressive_lm.toml", "sender.feat_model", 11_168_091),
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "sender.language_model", 6_764_120),
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "receiver.language_model", 4_673_344),
         ("14_birds_receiver_transformer_bidirectional_lm.toml", "receiver.language_model", 4_673_344),
@@ -474,7 +478,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # The two intermediate vision swaps, so a rung that stopped inheriting
         # the shared ViT specification shows up here rather than in a run.
         ("03_shapeworld_sender_vit.toml", "sender.feat_model", 851_763),
-        ("04_birds_sender_vit.toml", "sender.feat_model", 11_168_097),
+        ("04_birds_sender_vit.toml", "sender.feat_model", 11_168_091),
         # And the prototyper, where rung 3's is nothing at all. One transformer
         # block, two `SequencePool`s and the label tag, at the width this
         # module now declares for itself -- the sender ViT's, per dataset. The
