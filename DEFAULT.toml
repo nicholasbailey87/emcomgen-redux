@@ -2122,6 +2122,22 @@ uniform_weight = 0.1
 # so that can be tested deliberately, one setting at a time, rather than
 # inherited from a default that moved alongside three other things.
 normalise_logits = true
+# An affine-free BatchNorm over the emittable logits, ahead of the layer norm
+# above. It centres each token's logit across the batch's games, so a preference
+# for some symbols that every game shares is removed instead of spending the
+# layer norm's fixed margin (`logit_prior_share` measures that share), and it
+# pushes against every game getting the same message. It worked in another
+# emergent-language experiment for that reason.
+#
+# Off by default. This repository has removed a BatchNorm over the logits
+# before (`layer_norm_logits` replaced it): running statistics at eval mean
+# the greedy `test_` messages are normalised by numbers training never used,
+# and in training each game's message depends on the other games in its batch,
+# and so on `accumulator_steps`. Both hold here, with eval on the running
+# statistics. One mean and variance per token, shared across positions.
+# `train.calibrate_batch_norm` leaves it alone. See
+# `sender.GumbelChannel.batch_norm_logits`.
+batch_norm_logits = false
 
 tau = 1.0                     # Gumbel-softmax tau. Gradient shaping only:
                               # the emitted symbol is an argmax and so is

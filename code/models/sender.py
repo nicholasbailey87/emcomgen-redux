@@ -964,7 +964,7 @@ class GumbelChannel:
     The channel is that one parameter and the per-batch diagnostics.
     """
 
-    def _init_channel(self, normalise_logits=True):
+    def _init_channel(self, normalise_logits=True, batch_norm_logits=False):
         """
         Call from `__init__` where the parameter should be created: creation
             order fixes which RNG draw every later parameter gets. `torch.zeros`
@@ -1008,11 +1008,26 @@ class GumbelChannel:
             Turning it off goes back past that point, to a channel no successful
             run has used, which is why it is a separate flag from the
             listener's.
+
+        `batch_norm_logits=True` adds an affine-free `BatchNorm1d` over the
+            emittable logits ahead of the layer norm, from
+            `[sender_language_model] batch_norm_logits`. It centres each
+            token's logit across the batch's games, so a preference for some
+            symbols shared by every game is removed rather than spending the
+            layer norm's fixed margin; see `batch_norm_logits`. Running
+            statistics at eval, as for any BatchNorm. No parameters, and
+            building it draws nothing from the generator.
         """
         self.normalises_logits = normalise_logits
+        self.batch_norms_logits = batch_norm_logits
 
         if self.normalises_logits:
             self.log_logit_scale = nn.Parameter(torch.zeros(()))
+
+        if self.batch_norms_logits:
+            self.logit_batch_norm = nn.BatchNorm1d(
+                self.vocabulary, affine=False
+            )
 
         self.reset_channel_diagnostics()
 
@@ -1074,6 +1089,36 @@ class GumbelChannel:
 
         with torch.no_grad():
             self.log_logit_scale.zero_()
+
+    def reset_logit_batch_norm(self):
+        """
+        Clear the logit BatchNorm's running statistics. A no-op when it is off,
+            so a `reset_parameters` need not branch.
+        """
+        if self.batch_norms_logits:
+            self.logit_batch_norm.reset_parameters()
+
+    def batch_norm_logits(self, logits):
+        """
+        Batch-normalise the emittable logits, each token over every example and
+            position in the call, leaving the four reserved columns untouched
+            as `layer_norm_logits` does. A no-op when the BatchNorm is off.
+
+        Shared across positions: one mean and variance per token, whether the
+            call is one autoregressive step `(batch, vocabulary + 4)` or a whole
+            parallel message `(batch, length, vocabulary + 4)`. The
+            autoregressive arms therefore update the running statistics once
+            per step.
+        """
+        if not self.batch_norms_logits:
+            return logits
+
+        emittable = logits[..., 4:]
+        normalised = self.logit_batch_norm(
+            emittable.reshape(-1, self.vocabulary)
+        ).reshape(emittable.shape)
+
+        return torch.cat([logits[..., :4], normalised], dim=-1)
 
     def reset_channel_diagnostics(self):
         """
@@ -1204,6 +1249,7 @@ class GumbelChannel:
         #     variance first. The four channel columns measured off it stay
         #     computable and stop being comparable across the flag; see
         #     DEFAULT.toml beside the key.
+        logits = self.batch_norm_logits(logits)
         normalised = (
             layer_norm_logits(logits, self.vocabulary)
             if self.normalises_logits else logits
@@ -1293,7 +1339,10 @@ class SenderGRULM(GumbelChannel, nn.Module):
         self.bidirectional = kwargs["bidirectional"]
         self.directions = 2 if self.bidirectional else 1
 
-        self._init_channel(kwargs.get("normalise_logits", True))
+        self._init_channel(
+            kwargs.get("normalise_logits", True),
+            kwargs.get("batch_norm_logits", False),
+        )
 
         self.gru = nn.GRU(
             self.token_embedding_size,
@@ -1437,6 +1486,7 @@ class SenderGRULM(GumbelChannel, nn.Module):
         self.outputs2vocab.reset_parameters()
         self.token_embedding.reset_parameters()
         self.reset_channel_scale()
+        self.reset_logit_batch_norm()
         self.reset_channel_diagnostics()
 
 
@@ -1502,7 +1552,10 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
             decoder=False,
         )
 
-        self._init_channel(kwargs.get("normalise_logits", True))
+        self._init_channel(
+            kwargs.get("normalise_logits", True),
+            kwargs.get("batch_norm_logits", False),
+        )
 
         if self.referent_embedding_size != self.token_embedding_size:
             raise NotImplementedError(
@@ -1962,6 +2015,7 @@ class SenderTransformerLM(GumbelChannel, nn.Module):
 
         self.outputs2vocab.reset_parameters()
         self.reset_channel_scale()
+        self.reset_logit_batch_norm()
         self.reset_channel_diagnostics()
 
 

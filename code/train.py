@@ -784,12 +784,13 @@ def calibrate_batch_norm(pair, dataloader, config, n_batches):
         change the training trajectory it is measuring.
 
     The two feature models directly, rather than `pair.sender(...)` and
-        `pair.receiver(...)`. Every `_BatchNorm` in the pair lives inside them
-        (`models/backbone/vision.py`, plus broccoli's `ViT` output
-        `BatchNorm1d`), so this reaches all of them, and it keeps the language
-        model out of the pass entirely: no Gumbel draws and no autoregressive
-        decode, neither of which would move a running statistic and both of
-        which cost. `Receiver.forward` could not have been called here anyway --
+        `pair.receiver(...)`, and only their BatchNorms. That keeps the
+        language model out of the pass entirely: no Gumbel draws and no
+        autoregressive decode, both of which cost. It also leaves the speaker's
+        optional logit BatchNorm (`[sender_language_model] batch_norm_logits`)
+        alone -- it sees no clean-image shift, and resetting it here without
+        forwarding the language model would leave it at zero mean and unit
+        variance. `Receiver.forward` could not have been called here anyway --
         it needs a message to embed.
 
     Args:
@@ -804,7 +805,9 @@ def calibrate_batch_norm(pair, dataloader, config, n_batches):
         None. The statistics are updated in place.
     """
     batch_norms = [
-        module for module in pair.modules()
+        module
+        for feature_model in (pair.sender.feat_model, pair.receiver.feature_model)
+        for module in feature_model.modules()
         if isinstance(module, torch.nn.modules.batchnorm._BatchNorm)
     ]
 
