@@ -135,10 +135,11 @@ class ViT2(nn.Module):
             input_size=n_feats[1:],
             image_classes=self.d_model, # Just return an overall embedding
             in_channels=n_feats[0],
-            # A `BatchNorm2d(3)` over the raw image, and the only BatchNorm in
-            #     this stack. Set by the factory rather than by config: False
-            #     for `ShapeWorldViT` and True for `BirdsViT`, for the reasons
-            #     in those two docstrings.
+            # A `BatchNorm2d(3)` over the raw image. Not the only possible
+            #     BatchNorm: the CNN stem below brings its own
+            #     (`cnn_batch_norm`). Set by the factory rather than by
+            #     config: False for `ShapeWorldViT` and True for `BirdsViT`,
+            #     for the reasons in those two docstrings.
             initial_batch_norm=initial_batch_norm,
             # The CNN stem is a linear patch embedding: one convolution at the
             #     patch grid's kernel and stride, `d_model` channels, no
@@ -291,9 +292,11 @@ def ShapeWorldViT(*args, **kwargs):
 
     **Why it is off here and on for birds.** `ViT2` opened with an
         `nn.BatchNorm2d(3)` over the raw image on both datasets until
-        2026-09-10, and it is the only BatchNorm in this stack. ShapeWorld's
-        images arrive as [0, 1] with a black background at exactly 0.0
-        (`train.prepare_batch` divides the uint8 store by 255), so that layer
+        2026-09-10. ShapeWorld runs the feedforward stem, so on ShapeWorld it
+        was the only BatchNorm in the stack (birds' CNN stem adds a second,
+        `cnn_batch_norm`). ShapeWorld's images arrive as [0, 1] with a black
+        background at exactly 0.0 (`train.prepare_batch` divides the uint8
+        store by 255), so that layer
         was doing two things at once: standing in for the input normalisation
         ShapeWorld has none of, and making the background nonzero.
 
@@ -342,8 +345,10 @@ def BirdsViT(*args, **kwargs):
     Sized by `[birds.sender_feature_model]` and
         `[birds.receiver_feature_model]`, which the dataset name selects. See
         `ShapeWorldViT` for why the two stacks have two names when they are one
-        class: the learning-rate table is keyed by name, and the birds arm of
-        `experiments/lr_sweep_2_sender_vit/` chose 2e-5 for this one alone.
+        class: the learning-rate table is keyed by name, so the two can take
+        different rates. DEFAULT.toml currently gives both 5e-5 (speaker from
+        `experiments/lr_sweep_2_sender_vit/`, listener from
+        `experiments/lr_sweep_5_receiver_vit/`).
 
     `initial_batch_norm=True`, stated rather than defaulted, because since
         2026-09-10 it is the thing the two names differ in. CUB's images reach
@@ -357,7 +362,7 @@ def BirdsViT(*args, **kwargs):
 
 # Basic ResNet model
 def init_layer(L):
-    # Initialization using fan-in
+    # He initialisation using fan-out (kernel area * out_channels)
     if isinstance(L, nn.Conv2d):
         n = L.kernel_size[0] * L.kernel_size[1] * L.out_channels
         L.weight.data.normal_(0, math.sqrt(2.0 / float(n)))

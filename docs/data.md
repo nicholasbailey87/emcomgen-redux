@@ -45,8 +45,9 @@ skips the corresponding eval pass.
 ### CUB
 
 CUB classes are 1-indexed. Classes 1–150 are the training species; 151–200 are
-held out wholesale and are the novel-concept `test` split — the same 50 species
-as jayelm's, so the generalisation number keeps its old footing.
+held out wholesale and are the novel-concept `test` split. That is not quite
+jayelm's: his code takes `range(150, 200)` over the same 1-indexed class numbers,
+so his test species are 150–199 and the two splits share 49 of their 50.
 
 Classes 101–150 were a val split. There is no val split any more, so rather than
 sit unused they are folded into training. That is what pays for the image-level
@@ -524,8 +525,7 @@ forward pass. `ShapeWorldDataset.get_reference_game` copies for the same reason.
 
 ## Shape descriptors and world files
 
-`extract_shapes` returns per-*image* descriptors, which disagree with a
-subsampled (40-image) store. They are consumed solely by
+`extract_shapes` returns per-*image* descriptors. They are consumed solely by
 `get_reference_game`/`shapes_to_idx`, which concept games never call, and they
 are the only consumer of the world JSON files — so concept games skip parsing
 them altogether (`need_shapes=config['reference_game']`). Reference games use the

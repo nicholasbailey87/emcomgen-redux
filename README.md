@@ -33,28 +33,18 @@ See [`diagnostics/`](diagnostics/README.md). A pair stuck at 0.5 accuracy and a 
 
 Code used for generating the ShapeWorld data is located [here](https://github.com/jayelm/minishapeworld/tree/neurips2021).
 
-#### Shrink ShapeWorld to 40 images per game (required)
+#### `shapeworld_40`
 
-ShapeWorld experiments train on `shapeworld_40`, a 40-image-per-game copy of
-`shapeworld`. Build it once after downloading:
+ShapeWorld experiments train on `shapeworld_40`, which is jayelm's `shapeworld`
+release above, unmodified. It already ships 40 images per game -- 20 positives
+and 20 negatives -- which is exactly what the concept game reads: at
+`n_examples = 20`, `split_spk_lis` gives each agent 10 of each polarity, and the
+speaker and listener halves are disjoint. Nothing is subsampled.
+`data/shrink_shapeworld.py` is not used to produce it.
 
-```bash
-python data/shrink_shapeworld.py --src ../data/shapeworld --dst ../data/shapeworld_40
-```
-
-The stored games hold 80-100 images but `split_spk_lis` only ever reads 20 (10
-per agent per polarity), so 40 is the smallest row that preserves the concept
-game's speaker/listener disjointness. That takes the train store from ~20-25 GB
-to ~9.8 GB, which fits in RAM — hence `load_shapeworld_into_memory = true` and
-~32 GB less disk I/O per epoch. The script draws its 20 keepers per half
-*proportionally within descriptor strata* rather than slicing the first 20,
-which would drop an entire stratum of the paper's 1/3-1/3-1/3 hard-target
-sampling; run it with `--audit` to see the ordering in your own copy of the
-data. Originals are left untouched.
-
-The unmodified `shapeworld` and `shapeworld_ref` datasets are only needed for
-reference-game runs and downstream analysis (`acre.py`); concept-game training
-does not read them.
+A copy of the same release under its download name, `shapeworld`, and the
+separate `shapeworld_ref` are only needed for reference-game runs and downstream
+analysis (`acre.py`); concept-game training does not read them.
 
 #### Silhouette augmentation (ShapeWorld only)
 

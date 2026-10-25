@@ -291,12 +291,10 @@ class ConceptDataset:
 
         `flip` and `degrees` are the calling agent's settings and arrive as
         arguments rather than off `self`, because the two agents no longer
-        share them: since 2026-09-09 the defaults augment the receiver and
-        leave the sender's view alone. The argument is in `DEFAULT.toml` beside
-        the keys; the short form is that the augmentation exists to stop
-        *memorisation*, and only the listener can memorise profitably -- it can
-        pick the positives from pixels and ignore the message, where everything
-        the speaker knows has to cross the channel to matter.
+        share them: the keys are split per agent since 2026-09-09. The
+        defaults augmented the receiver alone from 2026-09-09 and are
+        symmetric again since 2026-09-10 -- both views flipped and rotated
+        10 degrees. The argument is in `DEFAULT.toml` beside the keys.
 
         Per *image* and not per game, and called once per agent rather than
         once on the whole row. Both matter. A single draw applied to the whole

@@ -627,12 +627,15 @@ class AttentionPrototyper(nn.Module):
         language model's width with another, which is that class's rule applied
         rather than an exception to it: every swappable module declares the
         widths it wants and the agent delivers each input at that width in a
-        stated distribution. The number comes from the sender's *vision*
-        transformer, per dataset -- 128/4/256 GELU on ShapeWorld and 320/5/576
-        SwiGLU on birds -- so the choice is per-dataset capacity matching and
-        not a claim that 128 is enough. On ShapeWorld it really is a bottleneck:
-        the referent path narrows from the language model's 1024 to 128 before
-        pooling and widens again afterwards. That is the intended reading of
+        stated distribution. The width and head count come from the sender's
+        *vision* transformer, per dataset -- 128 wide with 4 heads on
+        ShapeWorld and 320 with 5 on birds. The feedforward does not: this
+        block runs 256 GELU on ShapeWorld and 576 SwiGLU on birds, while the
+        ViTs now run `NormedSwiGLU` at 170 and 704. So the choice is
+        per-dataset width matching and not a claim that 128 is enough. On
+        ShapeWorld it really is a bottleneck: the referent path narrows from
+        the language model's 1024 to 128 before pooling and widens again
+        afterwards. That is the intended reading of
         "sized from the sender transformer, per dataset", and it is worth
         knowing before a ShapeWorld result is read as being about attention.
 
@@ -1050,8 +1053,10 @@ class GumbelChannel:
             `receiver.py` states about the mix floor holds here: `clamp`'s
             gradient is zero *past* the bound and is not directional, so a
             parameter that overshoots gets no gradient in either direction and
-            welds there permanently. `weight_decay` is 0.0, so nothing else
-            would pull it back. `2 * sigmoid(x)` avoids the weld but its
+            welds there permanently. Nothing else would pull it back:
+            `[optimiser] weight_decay` is 0.1, but `get_optimiser` gives every
+            parameter with fewer than two axes a coefficient of 0.0, and this
+            one is a 0-d scalar. `2 * sigmoid(x)` avoids the weld but its
             derivative `scale(1 - scale/2)` saturates at *both* ends, making
             recovery from a low scale about 5x slower than the descent that got
             there; under `exp` the rate is proportional, which is the right

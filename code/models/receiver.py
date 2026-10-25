@@ -157,12 +157,12 @@ class ScoreVolume:
         **Two gates rather than one**, because the volume and the offset answer
             two questions and the config asks them separately:
             `[receiver_discriminator] scale_score` builds `log_score_scale` and
-            `bias_score` builds `score_bias`. Both default true, which is the
-            arithmetic every recorded run has. A listener can now have a
-            threshold without a loudness, or the reverse; under the single flag
-            these keys replace it could only have both or neither, which was
-            never a decision anybody made -- it was one boolean standing in for
-            two.
+            `bias_score` builds `score_bias`. DEFAULT.toml sets both false;
+            the code falls back to true only when a key is missing. A listener
+            can now have a threshold without a loudness, or the reverse; under
+            the single flag these keys replace it could only have both or
+            neither, which was never a decision anybody made -- it was one
+            boolean standing in for two.
 
         There is no third question here. The `1/sqrt(d)` calibration these
             gates used to travel with is unconditional and lives in
@@ -767,10 +767,11 @@ class BilinearDiscriminator(ScoreVolume, nn.Module):
             stage later.
 
         `scale_score` and `bias_score` arrive in `kwargs` from
-            `[receiver_discriminator]` and both default true, which is today's
-            arithmetic exactly. Each builds one scalar of the `ScoreVolume`
-            readout and nothing else. **Neither reaches the `1/sqrt(d)`
-            calibration**, which is unconditional -- see `forward`.
+            `[receiver_discriminator]`. DEFAULT.toml sets both false; `kwargs`
+            falls back to true only when a key is missing. Each builds one
+            scalar of the `ScoreVolume` readout and nothing else. **Neither
+            reaches the `1/sqrt(d)` calibration**, which is unconditional --
+            see `forward`.
 
             They replace a single `normalise_score`, which gated the calibration
             and both scalars together and, before the interface hoist, this

@@ -214,9 +214,9 @@ topsim_bootstrap_replicates = 1000  # resamplings of the games behind each inter
 topsim_seed = 0        # draws the pairs and the bootstrap's game multiplicities
 
 [data]
-# 40 images per stored game rather than 80-100. `split_spk_lis` only ever reads
-# 20 (10 per agent per polarity), so 40 is the smallest row that keeps the
-# concept game's speaker/listener disjointness. See data/shrink_shapeworld.py.
+# jayelm's ShapeWorld release, unmodified: it ships 40 images per stored game,
+# 20 positives and 20 negatives. At `n_examples = 20` `split_spk_lis` gives each
+# agent 10 of each polarity, so the concept game reads every image in the row.
 dataset = "../data/shapeworld_40"
 # ~9.8 GB train + ~1 GB test fits the 24 GB SLURM allocation, which removes
 # ~32 GB of disk reads per epoch.
@@ -489,11 +489,11 @@ silhouette_p_receiver = 0.1
 # been seen. The arm that separates them is still the same one: all four keys
 # on against `_sender` off, at one rate, with everything else held.
 #
-# Note the original ShapeWorld store had 40-50 positives per game and
-# `split_spk_lis` read 20 of them, so a fresh subset arrived every epoch;
-# `data/shrink_shapeworld.py` kept 20 and that variation went with it. Its
-# docstring's defence -- "C(20,10) = 184,756 speaker/listener divisions" --
-# counts partitions of a fixed set, not distinct images.
+# Note the store is jayelm's release as shipped, 40 images per game, and was
+# never subsampled: there is no larger pool for a fresh subset to come from, so
+# the 20 positives a game presents are the same 20 every epoch. "C(20,10) =
+# 184,756 speaker/listener divisions" counts partitions of that fixed set, not
+# distinct images.
 #
 # Both were off by default until 2026-09-05 so that every run recorded
 # before the keys existed was reproducible from its own config. They are on
@@ -890,10 +890,12 @@ lr = 1e-4
 # At 0.0 AdamW and Adam were the same optimiser and `class` above needed no
 # override; that is no longer true, and this is now genuinely decoupled AdamW.
 # Note the decay reaches only what `get_optimiser` gives a non-zero coefficient:
-# every parameter with two or more axes, scaled by `sqrt(fan_in / d_model)`.
-# Biases, norms, embeddings and every 0-d scalar are excluded, and so are the
-# BatchNorm gains -- see `builder.build_models`, which says why by name as well
-# as by shape.
+# every parameter with two or more axes, at this flat coefficient with no
+# per-parameter scaling. Anything with fewer than two axes -- every bias, every
+# 1-d gain and every 0-d scalar -- takes 0.0, and so does any parameter whose
+# name contains `nondecay`, `bias`, `norm`, `embedding`, `beta` or `bn` (gradboard's
+# `EXCLUDE_FROM_WEIGHT_DECAY` plus the `"bn"` that `builder.build_models` adds,
+# and says why).
 #
 # The 0.01 this replaced in an earlier revision was never justified against a run
 # that fitted its training set; 0.1 is justified against the mechanism above and
@@ -978,8 +980,9 @@ eps = 1e-12
 # = 2.0 by a projection `train.py` applies after each optimiser step rather than
 # by a `clamp` in the forward pass. `clamp`'s gradient is zero past the bound and
 # is not directional, so a parameter that overshot would get no gradient in
-# either direction and weld there, and `weight_decay` is 0.0 so nothing else
-# would pull it back. Projection keeps the gradient live right at the ceiling.
+# either direction and weld there, and nothing else would pull it back:
+# `[optimiser] weight_decay` is 0.1, but `get_optimiser` decays only parameters
+# with two or more axes and this is a 0-d scalar. Projection keeps the gradient live right at the ceiling.
 #
 # Expect the ceiling to bind, though no longer inside the first epoch. At this
 # rate a sign-consistent gradient reaches it in a little over two, which under
@@ -1725,9 +1728,10 @@ language_model = "SenderGRULM"
 #
 # **Sized from the sender's vision transformer, per dataset**, which is what
 # makes this the first per-dataset table this module has had: 128 / 4 / 256 with
-# GELU here and 320 / 5 / 576 with SwiGLU under `[birds.sender_prototyper]`,
-# exactly the two stacks `[sender_feature_model]` and
-# `[birds.sender_feature_model]` hold. Each dataset's speaker therefore mixes
+# GELU here and 320 / 5 / 576 with SwiGLU under `[birds.sender_prototyper]`.
+# Only `d_model` and `heads` still match `[sender_feature_model]` and
+# `[birds.sender_feature_model]`: since 2026-10-22 those ViTs run `NormedSwiGLU`
+# at inner 170 and 704, and this block kept its feedforward. Each dataset's speaker therefore mixes
 # its referents at the width it sees them at, and the two datasets are matched
 # to their own baselines rather than to each other -- the same rule, and the
 # same reason, as the ViT blocks above.

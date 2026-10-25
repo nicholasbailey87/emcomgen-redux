@@ -2,27 +2,30 @@
 """
 Write a 40-image-per-game copy of a ShapeWorld dataset.
 
-Each stored game holds 80-100 images, but ``data/util.py:split_spk_lis`` only
-ever reads ``n_examples`` (20) of them: images ``[0, 10)`` and ``[midp, midp+10)``
-go to the speaker, ``[10, 20)`` and ``[midp+10, midp+20)`` to the listener. With
-``midp = 20`` that consumes the full stored row, so 40 images is the smallest row
-that leaves the concept game (``percent_novel = 1.0``, speaker and listener on
-fully disjoint targets *and* distractors) intact. Shrinking to 40 takes the
-train store from ~20-25 GB to ~9.8 GB, which fits in memory and removes ~32 GB
-of disk reads per epoch.
+**Not used to produce the data the experiments run on.** ``shapeworld_40``, the
+store ``DEFAULT.toml`` points at, is jayelm's ShapeWorld release unmodified,
+and that release already ships 40 images per game. This script was written on
+the premise of a larger stored row that the data in use does not have, and is
+kept only as a tool for a store that does. Nothing below describes
+``shapeworld_40``.
 
-Augmentation is unaffected in practice: ``ConceptDataset.__getitem__`` permutes
-positives and negatives independently, so ``midp = 20`` still yields
-``C(20,10) = 184,756`` speaker/listener divisions on each side.
+``data/util.py:split_spk_lis`` at ``n_examples = 20`` reads images ``[0, 10)``
+and ``[midp, midp+10)`` for the speaker and ``[10, 20)`` and
+``[midp+10, midp+20)`` for the listener. With ``midp = 20`` that consumes a
+full 40-image row, so 40 is the smallest row that leaves the concept game
+(``percent_novel = 1.0``, speaker and listener on fully disjoint targets *and*
+distractors) intact.
 
 Which 20 to keep
 ----------------
 *Not* the first 20. Appendix ``app:hard`` of the paper states that for
 disjunctive concepts the generator samples 1/3 of targets satisfying only the
 left disjunct, 1/3 only the right, and 1/3 both (and correspondingly for
-conjunctive distractors). If that stratification is stored in order, slicing the
-first 20 of 40 would silently drop a whole stratum and change what the task
-tests.
+conjunctive distractors). ``diagnostics/concept_strata.py`` finds halves in
+jayelm's released data -- left-only and right-only, never both -- so treat the
+thirds as the paper's claim rather than the data's. If any such stratification
+is stored in order, slicing the first 20 would silently drop a stratum and
+change what the task tests.
 
 Two strategies are available:
 
@@ -32,7 +35,7 @@ Two strategies are available:
     within each group (largest-remainder allocation, ties broken at random).
     Each ``(color, shape)`` pair satisfies exactly one of {left-only,
     right-only, both} for a given concept, so preserving the descriptor
-    proportions preserves the paper's 1/3-1/3-1/3 mixture exactly, whatever
+    proportions preserves the source's stratum mixture exactly, whatever
     order the generator wrote them in. Negatives are handled the same way.
 
 ``uniform``
@@ -48,17 +51,18 @@ Usage
     # inspect the source without writing anything
     python data/shrink_shapeworld.py --audit --src ../data/shapeworld
 
-    # write the shrunk copy (originals are left untouched)
+    # write the shrunk copy (originals are left untouched). Note the default
+    # --dst is ../data/shapeworld_40, the name of the store the experiments
+    # use; pass a different --dst rather than write over it.
     python data/shrink_shapeworld.py \
-        --src ../data/shapeworld --dst ../data/shapeworld_40
+        --src ../data/shapeworld --dst ../data/shapeworld_shrunk
 
 ``*_worlds.json(.gz)`` files are copied across unmodified, for fidelity to the
-source dataset rather than because training needs them. Their only remaining
-consumer is the per-*image* ``shapeworld.extract_shapes``, which would disagree
-with the shrunk rows -- so ``shapeworld.load_split`` calls it only when
+source dataset rather than because training needs them. Their only consumer is
+the per-*image* ``shapeworld.extract_shapes``, which would disagree with rows
+this script had shrunk; ``shapeworld.load_split`` calls it only when
 ``reference_game`` is true, and reference games use the separate
-``shapeworld_ref`` dataset, which this script is not intended for. Concept games
-therefore never parse the world files at all.
+``shapeworld_ref`` dataset. Concept games never parse the world files at all.
 """
 
 import argparse

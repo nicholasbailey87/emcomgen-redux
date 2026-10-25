@@ -342,15 +342,15 @@ def validate_config(config: dict) -> bool:
             'augment_flip',
             "the geometry is set per agent since 2026-09-09. Use "
             "`augment_flip_sender` and `augment_flip_receiver`; the defaults "
-            "are `false` and `true`, which is the regime that key used to "
-            "apply to both views at once",
+            "are `true` and `true`, the regime this key used to apply to "
+            "both views at once",
         ),
         (
             'data',
             'augment_affine_degrees',
             "the geometry is set per agent since 2026-09-09. Use "
             "`augment_affine_degrees_sender` and "
-            "`augment_affine_degrees_receiver`; the defaults are `0.0` and "
+            "`augment_affine_degrees_receiver`; the defaults are `10.0` and "
             "`10.0`, where this key used to give both views the same rotation",
         ),
     ):
@@ -577,10 +577,12 @@ def validate_config(config: dict) -> bool:
                     f"must be a positive number, got {rate}."
                 )
 
-    # `train.py` divides each micro-batch loss by this, steps on `(batch_i + 1)
-    #     % accumulator_steps == 0`, and multiplies `batch_size` by it for the
-    #     schedule's step count, so it must be a positive integer: 0 divides by
-    #     zero and a float makes the step count fractional.
+    # `train.py` divides each micro-batch loss by this, steps whenever its
+    #     `accumulated` counter reaches it (plus one trailing partial step at
+    #     the end of an epoch), and takes the schedule's step count from
+    #     `optimiser_steps_per_epoch`, `ceil(ceil(N / b) / A)`. It is a count
+    #     of micro-batches, so it must be a positive integer; 0 divides by
+    #     zero.
     accumulator_steps = config['optimiser'].get('accumulator_steps')
 
     if (

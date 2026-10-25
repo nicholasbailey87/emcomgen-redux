@@ -38,9 +38,8 @@ echo "=============================================="
 
 mkdir -p "$DEST_ROOT"
 
-# shapeworld_40 is the 40-image-per-game dataset the ShapeWorld experiments
-# actually train on; build it once from `shapeworld` with
-# `python data/shrink_shapeworld.py`, then stage it here.
+# shapeworld_40 is the dataset the ShapeWorld experiments actually train on:
+# jayelm's ShapeWorld release unmodified, which ships 40 images per game.
 DATASETS=("cub" "shapeworld_40" "shapeworld" "shapeworld_ref")
 
 for name in "${DATASETS[@]}"; do

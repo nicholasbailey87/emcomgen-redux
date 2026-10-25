@@ -95,8 +95,8 @@ def load(config, fast=False):
             split,
             fast=fast,
             into_memory=config['data']['load_shapeworld_into_memory'],
-            # `extract_shapes` returns per-*image* descriptors, which disagree
-            # with a subsampled store. See docs/data.md.
+            # `extract_shapes` is needed only by reference games. See
+            # docs/data.md.
             need_shapes=config['reference_game'],
         )
 

@@ -11,26 +11,24 @@ This script measures that rather than taking it on trust.
 
 Two levels, because there are two places it could go wrong:
 
-  generator   The full games in `{split}_worlds.json(.gz)`. Note that the copy
-              in `shapeworld_40` was carried over from the source unmodified by
-              `data/shrink_shapeworld.py`, so it describes the generator's
-              original 80-100-image rows, not the 40 kept. That is exactly what
-              the paper's claim is about.
+  generator   The full games in `{split}_worlds.json(.gz)`. `shapeworld_40`
+              is jayelm's release unmodified, so these are the generator's own
+              rows, 40 images per game -- the same rows training reads.
 
   per agent   What one agent sees in one game: 10 targets and 10 distractors.
-              Simulated, because the shrink did not record which images it kept
-              and the training loop reshuffles every epoch anyway: a
-              `stratified_choice` of 20 per half (the shrink's own draw, fresh
-              RNG), then a random 10/10 speaker/listener split of each half, as
-              `ConceptDataset.__getitem__` + `split_spk_lis` do. 10 does not
-              divide by 3, so exact thirds are impossible here by construction;
-              the question is how far off, and how often a stratum is empty.
+              Simulated, because the training loop reshuffles every epoch: a
+              `stratified_choice` of 20 per half (fresh RNG; on a 40-image row
+              that is the whole half), then a random 10/10 speaker/listener
+              split of each half, as `ConceptDataset.__getitem__` +
+              `split_spk_lis` do. 10 does not divide by 3, so exact thirds are
+              impossible here by construction; the question is how far off,
+              and how often a stratum is empty.
 
 It also checks every image's label against the concept evaluated on its
 `(color, shape)`, since a stratum count means nothing if the labels are wrong.
 
-Memory. The train worlds file is 20,000 games of 80-100 objects, which
-`json.load` would turn into a few GB of Python dicts. It is streamed instead,
+Memory. The train worlds file is 20,000 games of 40 images each, which
+`json.load` would turn into a large tree of Python dicts. It is streamed instead,
 one game at a time, and the statistics are running totals, so peak memory is
 one game plus the langs (20,000 short strings).
 
