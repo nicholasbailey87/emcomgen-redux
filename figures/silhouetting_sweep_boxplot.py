@@ -30,6 +30,7 @@ SERIES = [
     ("test_acc", "Overall", "#111111"),
 ]
 BOX_WIDTH = 0.22
+FONT_SIZE = 16
 
 
 def final_rows() -> pd.DataFrame:
@@ -42,6 +43,7 @@ def final_rows() -> pd.DataFrame:
 
 
 def main():
+    plt.rcParams["font.size"] = FONT_SIZE
     finals = final_rows()
     rates = sorted(finals.rate.unique())
 
@@ -70,7 +72,7 @@ def main():
     ax.set_ylabel("Final test accuracy")
     ax.axhline(0.5, color="grey", ls=":", lw=1)
     ax.grid(axis="y", alpha=0.3)
-    ax.legend(frameon=False)
+    ax.legend(frameon=False, loc="upper right")
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
 
