@@ -4,6 +4,10 @@
 # file differs from that one in the objective and in the two scalars that
 # objective makes degenerate, and in nothing else.
 #
+# The pins against later defaults below are the same in both files; see the
+# header of `01_shapeworld_bce.toml` for what they are and what no config can
+# restore.
+#
 # ---
 #
 # **This arm: `loss = "hinge"`**, `mean(relu(1 - t * score))` at `t = 2y - 1`
@@ -58,10 +62,27 @@ bias_score = false
 # Sweep 2's choice, unchanged. This experiment moves the objective, not a rate.
 ShapeWorldViT = 2e-5
 
+[optimiser.implementation_lr.receiver_vision]
+# The listener's `ResNet56` at the 2e-5 DEFAULT.toml held at `96eb556`. It moved
+# to 5e-5 in `a5b2f72` (lr_sweep_1_cnn's second pass), after these runs.
+ResNet56 = 2e-5
+
+[optimiser.implementation_lr.sender_language_model]
+# `SenderGRULM` at 1e-4. At `96eb556` this group had no `implementation_lr`
+# entry, so the speaker LM took `[optimiser.module_lr] sender_language_model`
+# = 1e-4. DEFAULT.toml first keyed it in `f6d5543` (2e-6) and has held 5e-5
+# since `622dceb` (lr_sweep_10).
+# `ReceiverGRULM` resolved to 1e-4 then and still does, so it is not restated.
+SenderGRULM = 1e-4
+
 [scheduler]
 epochs = 100
+# The ten-epoch linear warm-up both arms ran under: DEFAULT.toml's value at
+# `96eb556` (real since `91db728`), taken to 0 in `8848c4b` the morning after on
+# the strength of this experiment.
+warm_up_epochs = 10
 
 [experiment]
-# Two seeds. `scripts/job_utils.py` reads this key and `[scheduler] epochs` from
+# Three seeds. `scripts/job_utils.py` reads this key and `[scheduler] epochs` from
 # the raw file rather than from the merged config, so both must be restated here.
-repeats = 2
+repeats = 3

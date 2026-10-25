@@ -48,6 +48,18 @@
 # n = 1 per arm and the arms differ in three keys, so this ranks the objectives
 # rather than settling them.
 #
+# **What these files pin, and what they cannot.** The runs were made at
+# `96eb556` (2026-09-10). Every key whose DEFAULT.toml value has moved since and
+# that these runs read is restated below at the value DEFAULT.toml held at that
+# commit: the listener's readout scalars, `silhouette_p_receiver`,
+# `warm_up_epochs`, and the listener-backbone and speaker-LM rates. What no
+# config can restore is code: the `ShapeWorldViT` speaker was re-specified in
+# `f626a07` (bias-free feedforwards, four registers) and again in `a539cd4`
+# (broccoli 31.x, new stem), the speaker's polarity tag is frozen since
+# `54ca650`, and `scale_without_attenuating` went in `d32ed58`. A re-run at a
+# later commit therefore compares the two objectives on a different speaker; to
+# reproduce the reported numbers themselves, check out `96eb556`.
+#
 # ---
 #
 # **This arm: `BCEWithLogitsLoss`**, the objective every run in this repo's
@@ -68,14 +80,39 @@ silhouette_p_receiver = 0.2
 [sender]
 feature_model = "ShapeWorldViT"
 
+[receiver_discriminator]
+# Both on, as every run before 2026-09-11 had them: DEFAULT.toml carried
+# `scale_score = true` and `bias_score = true` at `96eb556`, and `dd318fc` turned
+# them off by default beside the hinge. This arm's `train_score_scale` sliding
+# 0.997 -> 0.122 is the reported result, so it needs the volume to exist.
+scale_score = true
+bias_score = true
+
 [optimiser.implementation_lr.sender_vision]
 # Sweep 2's choice, unchanged. This experiment moves the objective, not a rate.
 ShapeWorldViT = 2e-5
 
+[optimiser.implementation_lr.receiver_vision]
+# The listener's `ResNet56` at the 2e-5 DEFAULT.toml held at `96eb556`. It moved
+# to 5e-5 in `a5b2f72` (lr_sweep_1_cnn's second pass), after these runs.
+ResNet56 = 2e-5
+
+[optimiser.implementation_lr.sender_language_model]
+# `SenderGRULM` at 1e-4. At `96eb556` this group had no `implementation_lr`
+# entry, so the speaker LM took `[optimiser.module_lr] sender_language_model`
+# = 1e-4. DEFAULT.toml first keyed it in `f6d5543` (2e-6) and has held 5e-5
+# since `622dceb` (lr_sweep_10).
+# `ReceiverGRULM` resolved to 1e-4 then and still does, so it is not restated.
+SenderGRULM = 1e-4
+
 [scheduler]
 epochs = 100
+# The ten-epoch linear warm-up both arms ran under: DEFAULT.toml's value at
+# `96eb556` (real since `91db728`), taken to 0 in `8848c4b` the morning after on
+# the strength of this experiment.
+warm_up_epochs = 10
 
 [experiment]
-# Two seeds. `scripts/job_utils.py` reads this key and `[scheduler] epochs` from
+# Three seeds. `scripts/job_utils.py` reads this key and `[scheduler] epochs` from
 # the raw file rather than from the merged config, so both must be restated here.
-repeats = 2
+repeats = 3
