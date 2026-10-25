@@ -10,9 +10,7 @@ import torch.nn.functional as F
 from broccoli.transformer import FeedforwardBlock
 from broccoli.vit import ViT, SequencePoolClassificationHead
 
-from ..model_util import (
-    get_activation, reset_constant_initialised, resolve_residual_scaling,
-)
+from ..model_util import get_activation, resolve_residual_scaling
 
 # The ViT's patch grid is this many patches on a side, whatever the image size,
 #     so every dataset runs the same sequence length. See `ViT2.__init__` for
@@ -270,13 +268,10 @@ class ViT2(nn.Module):
 
     def reset_parameters(self):
         """
-        Delegate to broccoli's `ViT`, which resets its own encoder and head,
-            then re-apply the constant initialisers it misses. The CNN stem's
-            BatchNorm is one: broccoli keeps it inside a `Sequential` its reset
-            walks past. See `model_util.reset_constant_initialised`.
+        Delegate to broccoli's `ViT`, which resets its own encoder and head --
+            the CNN stem's BatchNorm included since broccoli 8da3992.
         """
         self.backbone.reset_parameters()
-        reset_constant_initialised(self)
 
 
 def ShapeWorldViT(*args, **kwargs):

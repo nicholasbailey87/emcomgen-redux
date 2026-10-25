@@ -32,11 +32,12 @@
 #     may skip a reinstall when the installed version string still matches, so
 #     pass `--force-reinstall` for these two lines when you mean to move.
 #
-# As of 2026-10-22 broccoli's `main` and `neovit` are both 31.0.2; gradboard's
+# As of 2026-10-26 broccoli's `main` and `neovit` are both 31.1.1; gradboard's
 # `neovit` is identical to its `main`:
 #
-#   broccoli-ml 31.0.2 = 3627c6c8c413357bcd03971d7f6bbc9e38f866da
-#       (rollback: 30.6.0 = 052aaa3e9a26f17101731c9366a8c677b95004d3 (PyPI),
+#   broccoli-ml 31.1.1 = 8da39921147a14797d1b3350575de8ec63b66dd1
+#       (rollback: 31.0.2 = 3627c6c8c413357bcd03971d7f6bbc9e38f866da,
+#                  30.6.0 = 052aaa3e9a26f17101731c9366a8c677b95004d3 (PyPI),
 #                  30.5.0 = 3b6ff1b4987771c10acab983cf8578bc23f4e0c5,
 #                  30.4.0 = 669263d19acecf1018070e8dda980a6efc6ec2a0,
 #                  30.3.0 = 00b93c8794e3846401cdfb9c8cc9e3048abae3f7,
@@ -56,6 +57,12 @@
 # runs either side of the boundary are not strictly comparable. broccoli 30.4.0
 # (669263d) only adds opt-in `NormedSwiGLU`/`NormedGELU`; defaults and state
 # dict keys are unchanged.
+#
+# 2026-10-26: broccoli 31.0.2 -> 31.1.1 (8da3992). Two changes, both reaching
+# only CUB's ViT, whose CNN stem puts raw patches in the stream: `ResizePatches`
+# now antialiases its bilinear downscale (a9699c9), so the 14x14 -> 10x10 patch
+# reads every pixel; and `ViTEncoder.reset_parameters` resets the CNN stem's
+# BatchNorm, which it used to skip. Parameter counts are unchanged.
 #
 # 2026-10-22: broccoli 30.6.0 -> 31.0.2 (`neovit`, 3627c6c). Not inert, and
 # not only for the ViTs:
