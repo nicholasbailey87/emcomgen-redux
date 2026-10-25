@@ -1293,10 +1293,16 @@ reason is ShapeWorld's all-black background — with biases, each zero patch
 embeds to one shared learned constant, and ~240 copies of it outbid the image in
 every head. See `vision.BIAS_FREE_LINEAR`.
 
+**Both moved again on 2026-10-22**, to 851,763 and 11,114,321, with broccoli
+31: `NormedSwiGLU` in the body, a bias-free `NormedGELU` stem with no residual
+path, and `ff_inner_size` re-solved for parity. See `[sender_feature_model]` in
+DEFAULT.toml and docs/broccoli.md.
+
 **The two datasets no longer run the same ViT.** `[sender_feature_model]` is
-ShapeWorld's — 128 wide, 6 layers, 4 heads, `ff_inner_size` 256, GELU, 874,417
-parameters — and `[birds.sender_feature_model]` pins CUB's, which is the 320 /
-10 / 5 / 576 SwiGLU stack both used to share, at 10,612,078. Each is matched to
+ShapeWorld's — 128 wide, 6 layers, 4 heads, `ff_inner_size` 170 behind a
+256-wide stem, 851,763 parameters — and `[birds.sender_feature_model]` pins
+CUB's, 320 / 10 / 5 at `ff_inner_size` 704 behind a CNN stem, at 11,168,097
+since 2026-10-25. Each is matched to
 its own baseline backbone rather than to the other dataset's: `ResNet56` at
 852,368 on ShapeWorld and `ResNet18` at 11,176,512 on CUB. See
 [the CIFAR ResNet](#resnet56-the-cifar-resnet) below for why the ShapeWorld

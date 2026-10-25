@@ -116,18 +116,45 @@ does not cover them.
 
 ### `ViT2`-specific pins
 
-**`cnn=False` and the whole `cnn_*` group.** Inert while `cnn` is False: broccoli
-swaps in an Identity and the image goes straight to pooling. Pinned so that
-flipping `cnn` on is a deliberate act with visible settings, rather than silently
-adopting defaults.
+**`cnn` follows `stem`.** `"feedforward"` (ShapeWorld) builds no CNN; broccoli
+swaps in an Identity and the image goes straight to concat pooling.
+`"cnn"` (CUB, since 2026-10-25) is vit-representation-learning's
+`9-bigger.json` stem: one convolution at the patch grid's kernel, stride and
+padding into `d_model` channels, `nn.Identity` activation, no pooling, and
+`images_in_stream=True`.
 
-**`transformer_initial_ff_residual_path=True`.** On, because broccoli 30.1.0
-carries the residual with `ResizeAndPadPatches`: it bilinearly downscales each
-patch to the largest volume that fits `d_model` and zero-pads the rest, so the
-skip connection no longer ties `d_model` to the patch size. It was off here on
-the older assumption that it did. The resizer has no parameters, so this costs
-nothing but the interpolation, and it only raises below `d_model = 3`
-(`in_channels`), which no config approaches.
+**No stem residual path, from broccoli 31.** 30.x had a
+`transformer_initial_ff_residual_path`, on here, which added the patch itself
+(resized and padded to `d_model` by `ResizeAndPadPatches`) beside the
+patch-embedding feedforward. 31.0 removed the argument, the path and the
+resizer, stopped zero-padding the patch up to `d_model` before the stem, and put
+a `stem_output_norm` RMSNorm between the stem and the transformer. The stem now
+reads the patch at its own width: 4×4×3 = 48 on ShapeWorld, 14×14×3 = 588 on
+CUB. What replaced the path is `images_in_stream`: off with the feedforward
+stem, as in vit-representation-learning's
+`ablation_final/configs/5b-ff-stem-normed-gelu.json`, and on with the CNN
+stem, as in `9-bigger.json`. With it on, 31.x adds the raw patch (resized to
+fit `d_model` if larger, then zero-padded) to the stem's output scaled by
+`beta`; CUB's 588-value patch is resized to 10×10×3 = 300.
+
+**The stem is rebuilt at its own width.** broccoli's `ViT` gives the stem the
+body's `transformer_ff_inner_size` and has no argument to separate them, so
+`ViT2` replaces `encoder.initial_ff` after construction with a
+`FeedforwardBlock` at `stem_ff_inner_size`, passing everything else as broccoli
+did. Parameter names are unchanged (`initial_ff.linear_in`/`linear_out`), and
+`ViTEncoder.reset_parameters` reaches the replacement through the attribute.
+ShapeWorld's stem is 256 wide over a 170-wide body;
+`test_the_shapeworld_vit_stem_has_its_own_width` pins it. CUB's CNN stem
+leaves `stem_ff_inner_size` and `stem_activation` inert.
+
+**Why ShapeWorld does not run the CNN stem.** broccoli's CNN branch hard-codes
+`bias=True` on its convolution and always follows it with a BatchNorm over the
+output channels. Either one turns ShapeWorld's all-black background back into a
+nonzero, colour-selective constant, which is what `BIAS_FREE_LINEAR` and
+`initial_batch_norm=False` exist to prevent. The feedforward stem is bias-free
+throughout: bias-free linears, `NormedGELU` (an RMS norm with no gain), and
+RMSNorms. CUB has no black background and is normalised on arrival, so the
+argument does not reach it.
 
 **The stem is weight-decayed, from broccoli 30.6.0.** `ViTEncoder.initial_ff`
 is the patch embedding here, since `cnn` is False. broccoli 30.2.0 (faccb78)
@@ -232,13 +259,29 @@ broccoli gates attention dropout on `self.training` (the `dropout_p` argument in
 
 Name → broccoli activation, so that `activation` can be set from a TOML config.
 This mirrors the map broccoli's own `ViT.__init__` applies to string arguments,
-and deliberately offers the same four options: `ReLU`, `GELU`, `SquaredReLU`,
-`SwiGLU`. `TransformerEncoder` has no such map and takes the class (or, for the
+and deliberately offers the same six options: `ReLU`, `GELU`, `NormedGELU`,
+`SquaredReLU`, `SwiGLU`, `NormedSwiGLU`. The normed two RMS-normalise the
+activation's input (both halves, for the GLU) with no learned gain. `TransformerEncoder` has no such map and takes the class (or, for the
 GLU variants, the factory) directly, so the lookup has to happen on this side.
 
 `get_activation` raises `ValueError` naming the valid options, rather than
 letting a config typo surface as a bare `KeyError` from deep inside model
 construction.
+
+## Branch-count residual scaling
+
+The ViTs' default since 2026-10-22, adopted from vit-representation-learning
+(`src/training_utils.py`, `resolve_config`) along with its configuration:
+
+```
+alpha = 1    beta = 1 / sqrt(branches),  branches = 2N (3N with cross-attention)
+```
+
+The sentinel is `"branches"`, resolved by `model_util.branch_count_constants`.
+That repository adds one branch for the stem when `images_in_stream` is on,
+because broccoli 31 then scales the stem by `beta`; here that is `stem = "cnn"`,
+so CUB's ten layers count 21 branches and ShapeWorld's six count 12. The speaker's prototyper and language models
+keep DeepNorm.
 
 ## DeepNorm residual scaling
 
@@ -303,10 +346,8 @@ three hand-written residuals resolved at depth 1, on the argument that bare
 attention sublayers with no feedforward are one layer's worth of residual path;
 those residuals are gone, and with them the special case.
 
-`ViT2` derives from `layers` alone, which counts the transformer blocks; the
-initial feedforward residual path it also scales with `alpha` and `beta` is one
-branch outside that count, and a quarter root is forgiving enough that it is not
-worth a second constant.
+`ViT2` no longer uses these; see [branch-count scaling](#branch-count-residual-scaling)
+below.
 
 ### The constants set an opening, not a ceiling
 

@@ -177,10 +177,6 @@ stream from every run before it at the same seed.
 
 These were true of some version of a dependency and have no guard in the code.
 
-- **`transformer_initial_ff_residual_path=True` is safe because "broccoli 30.1.0
-  carries the residual with `ResizeAndPadPatches`".** Version-specific by its own
-  wording. The claim that it "only raises below `d_model = 3`" is likewise a
-  reading of that version.
 - **`gradboard`'s `EXCLUDE_FROM_WEIGHT_DECAY` matches `"embedding"` as a
   substring**, which is what keeps `polarity_embedding` out of weight decay. The
   code's own comment says renaming the parameter would reintroduce decay

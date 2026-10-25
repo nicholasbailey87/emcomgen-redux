@@ -453,8 +453,9 @@ def test_agent_reset_leaves_no_sentinel(config_file):
     """
     Every parameter of both agents, on the rungs built from broccoli's
         transformers as well as the baseline. broccoli's resets walk past
-        `Swish.swish_beta` in every SwiGLU and `ViTEncoder.norm`, and both
-        survived a reset until `model_util.reset_constant_initialised`.
+        `Swish.swish_beta` in every SwiGLU, and before broccoli 31 past
+        `ViTEncoder.norm`; both survived a reset until
+        `model_util.reset_constant_initialised`.
 
     Any element rather than the whole tensor, so a reset that covered only
         part of a parameter would fail too.

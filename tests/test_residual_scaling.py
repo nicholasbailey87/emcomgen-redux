@@ -26,6 +26,7 @@ uses it to build the sequence its encoder reads, and so does the listener's
 `test_the_listener_asks_for_the_decoder_form`.
 """
 
+import math
 
 import pytest
 import torch
@@ -96,9 +97,27 @@ def test_vit_resolves_from_its_own_depth(layers):
         n_feats=(3, 64, 64),
         **config_section("sender_feature_model", d_model=64, heads=2, layers=layers),
     )
-    alpha, beta = model_util.deepnorm_constants(layers)
+    alpha, beta = model_util.branch_count_constants(layers)
 
     assert (backbone.alpha, backbone.beta) == (alpha, beta)
+
+
+@pytest.mark.parametrize("layers", [1, 6, 10])
+def test_branch_count_constants_are_vit_representation_learnings(layers):
+    """
+    `alpha = 1` and `beta = 1 / sqrt(2N)`, as vit-representation-learning's
+    `training_utils.resolve_config` resolves them, plus one branch for a stem
+    that `images_in_stream` puts in the residual sum.
+    """
+    assert model_util.branch_count_constants(layers) == (
+        1.0, 1.0 / math.sqrt(2 * layers)
+    )
+    assert model_util.branch_count_constants(layers, decoder=True) == (
+        1.0, 1.0 / math.sqrt(3 * layers)
+    )
+    assert model_util.branch_count_constants(layers, stem_branch=True) == (
+        1.0, 1.0 / math.sqrt(2 * layers + 1)
+    )
 
 
 @pytest.mark.parametrize("layers", [1, 4])

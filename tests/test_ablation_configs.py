@@ -20,6 +20,7 @@ architectural change is too wide to catch the thing this file exists to catch.
 """
 
 import glob
+import math
 import os
 
 import pytest
@@ -355,8 +356,8 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # unmasked arm at 13 -- the same blocks, so the same counts. The
         # speaker's language model is the causal arm at seven blocks -- see
         # rung 7's `layers` for why seven, and for the two depths before it.
-        ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "sender.feat_model", 874_417),
-        ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "receiver.feature_model", 874_417),
+        ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "sender.feat_model", 851_763),
+        ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "receiver.feature_model", 851_763),
         ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "sender.language_model", 6_758_354),
         # The speaker LM's depth and feedforward at the listener's width:
         # encoder, message adapter and `SequencePool`, 0.997x the GRU's
@@ -427,7 +428,18 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # -- the patch embedding and six blocks -- and gains 4 * 128 registers,
         # for -2,176. CUB loses 1,152 + 320 = 1,472 in each of eleven, SwiGLU's
         # `linear_in` being double width, and gains 4 * 320, for -14,912.
-        ("12_birds_receiver_transformer_autoregressive_lm.toml", "sender.feat_model", 10_612_078),
+        #
+        # **851,763 and 11,114,321 since 2026-10-22**: broccoli 31 and the
+        # configuration after vit-representation-learning's
+        # `5b-ff-stem-normed-gelu.json` -- `NormedSwiGLU` in the body, a
+        # `NormedGELU` stem with no residual path, and `ff_inner_size`
+        # re-solved for parity (170 with a 256-wide stem on ShapeWorld, 656
+        # throughout on CUB). 0.999x `ResNet56` and 0.994x `ResNet18`.
+        #
+        # **11,168,097 for CUB since 2026-10-25**, 0.999x: a CNN stem after
+        # `9-bigger.json` replaced the feedforward one there, and
+        # `ff_inner_size` rose to 704 to make up the difference.
+        ("12_birds_receiver_transformer_autoregressive_lm.toml", "sender.feat_model", 11_168_097),
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "sender.language_model", 6_764_120),
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "receiver.language_model", 4_673_344),
         ("14_birds_receiver_transformer_bidirectional_lm.toml", "receiver.language_model", 4_673_344),
@@ -449,8 +461,8 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # removed on 2026-10-01.
         # The two intermediate vision swaps, so a rung that stopped inheriting
         # the shared ViT specification shows up here rather than in a run.
-        ("03_shapeworld_sender_vit.toml", "sender.feat_model", 874_417),
-        ("04_birds_sender_vit.toml", "sender.feat_model", 10_612_078),
+        ("03_shapeworld_sender_vit.toml", "sender.feat_model", 851_763),
+        ("04_birds_sender_vit.toml", "sender.feat_model", 11_168_097),
         # And the prototyper, where rung 3's is nothing at all. One transformer
         # block, two `SequencePool`s and the label tag, at the width this
         # module now declares for itself -- the sender ViT's, per dataset. The
@@ -487,13 +499,11 @@ def test_the_shapeworld_backbones_are_matched():
     Both numbers are stated in DEFAULT.toml as the reason for the sizes chosen
     there, so both are pinned here: 852,368 for the CNN, which is `6n + 2` at
     n = 9 and is within 1% of the 0.85M the architecture is known by, and
-    874,417 for the ViT, which is what 128 / 6 / 4 / 256 with GELU comes to less
-    the six parameters of the initial BatchNorm `ShapeWorldViT` no longer builds,
-    less its feedforward biases and plus four register tokens (2026-09-27; see
-    the table above).
-    The ratio is the point -- a ViT rung against a CNN rung measures architecture
-    only if the two are the same size -- and 3% is the band the feedforward
-    width can be tuned to at this depth.
+    851,763 for the ViT, which is 128 wide, 6 layers, 4 heads, `NormedSwiGLU` at
+    inner 170 and a `NormedGELU` stem at inner 256 (2026-10-22; see the table
+    above). The ratio is the point -- a ViT rung against a CNN rung measures
+    architecture only if the two are the same size. The band is 3%, which was
+    what the feedforward width could be tuned to under GELU; it is 0.1% now.
 
     The `Conv4` and `ResNet18` numbers are here as the contrast: this pair used
     to be 0.11M against 10.3M.
@@ -506,7 +516,7 @@ def test_the_shapeworld_backbones_are_matched():
 
     assert cnn == 852_368
     assert abs(cnn - 850_000) / 850_000 < 0.01, f"{cnn:,} is not 0.85M"
-    assert vit == 874_417
+    assert vit == 851_763
 
     assert abs(vit / cnn - 1.0) < 0.03, f"{vit / cnn:.3f}x"
 
@@ -515,6 +525,46 @@ def test_the_shapeworld_backbones_are_matched():
     assert _count(baseline.receiver.feature_model) == cnn
     _, receiver_vit = _pair("09_shapeworld_receiver_vit.toml")
     assert _count(receiver_vit.receiver.feature_model) == vit
+
+
+def test_the_shapeworld_vit_stem_has_its_own_width():
+    """
+    `stem_ff_inner_size` reaches the patch-embedding feedforward, which
+    `ViT2` rebuilds because broccoli gives it the body's width. The count tests
+    above would catch a stem left at the body's width only as a number that
+    moved; this names it. Bias-free, so an all-black patch stays zero, and with
+    no CNN, whose bias and BatchNorm would undo that.
+    """
+    _, pair = _pair("03_shapeworld_sender_vit.toml")
+    encoder = pair.sender.feat_model.backbone.encoder
+    ff = encoder.initial_ff
+
+    assert (ff.linear_in.in_features, ff.inner_size, ff.linear_out.out_features) == (48, 256, 128)
+    assert ff.linear_in.bias is None and ff.linear_out.bias is None
+    assert ff.activation.rmsnorm
+    assert isinstance(encoder.cnn, torch.nn.Identity)
+    assert encoder.image_patches is None
+    assert {block.ff.inner_size for block in encoder.transformer.blocks} == {170}
+
+
+def test_the_birds_vit_runs_the_cnn_stem():
+    """
+    CUB's stem is one convolution at the patch grid's kernel and stride into
+    `d_model`, with the raw patches in the stream and no feedforward stem.
+    Beta counts the stem as a branch: 1/sqrt(2 * 10 + 1).
+    """
+    _, pair = _pair("04_birds_sender_vit.toml")
+    vit = pair.sender.feat_model
+    encoder = vit.backbone.encoder
+
+    assert encoder.initial_ff is None
+    assert isinstance(encoder.cnn, torch.nn.Conv2d)
+    assert (encoder.cnn.in_channels, encoder.cnn.out_channels) == (3, 320)
+    assert encoder.cnn.kernel_size == encoder.cnn.stride == (14, 14)
+    assert encoder.sequence_length == 256
+    assert encoder.image_patches is not None
+    assert {block.ff.inner_size for block in encoder.transformer.blocks} == {704}
+    assert (vit.alpha, vit.beta) == (1.0, 1.0 / math.sqrt(21))
 
 
 @pytest.mark.parametrize(
@@ -638,14 +688,19 @@ def test_the_vit_stem_is_weight_decayed(config_file):
 
     for backbone in (pair.sender.feat_model, pair.receiver.feature_model):
         named = dict(backbone.backbone.named_parameters())
-        stem = [
-            "encoder.initial_ff.linear_in.weight",
-            "encoder.initial_ff.linear_out.weight",
-        ]
+        # CUB's CNN stem since 2026-10-25: the convolution's kernel is decayed
+        #     like any matrix, and its bias and BatchNorm are 1-D, so not.
+        stem = {
+            "feedforward": [
+                "encoder.initial_ff.linear_in.weight",
+                "encoder.initial_ff.linear_out.weight",
+            ],
+            "cnn": ["encoder.cnn.weight"],
+        }[backbone.stem]
         assert all(name in named for name in stem), sorted(
-            n for n in named if "initial_ff" in n
+            n for n in named if n.startswith(("encoder.initial_ff", "encoder.cnn"))
         )
-        assert [decay[id(named[name])] for name in stem] == [weight_decay] * 2
+        assert [decay[id(named[name])] for name in stem] == [weight_decay] * len(stem)
 
         undecayed_matrices = {
             name

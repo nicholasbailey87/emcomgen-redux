@@ -7,15 +7,20 @@ import math
 import numpy as np
 import torch.nn.functional as F
 
-from broccoli.activation import ReLU
+from broccoli.transformer import FeedforwardBlock
 from broccoli.vit import ViT, SequencePoolClassificationHead
 
-from ..model_util import get_activation, resolve_residual_scaling
+from ..model_util import (
+    get_activation, reset_constant_initialised, resolve_residual_scaling,
+)
 
 # The ViT's patch grid is this many patches on a side, whatever the image size,
 #     so every dataset runs the same sequence length. See `ViT2.__init__` for
 #     why the grid is the fixed quantity and the patch size the derived one.
 PATCH_GRID = 16
+
+# The patch-embedding stems `ViT2` can build; `[sender_feature_model] stem`.
+STEMS = ("feedforward", "cnn")
 
 # The ViT's feedforward linears, bias-free since 2026-09-27. Attention was
 #     already bias-free inside broccoli; these were the last biases in the
@@ -54,9 +59,22 @@ class ViT2(nn.Module):
         
         self.d_model = kwargs["d_model"]
 
+        # The patch-embedding stem: "feedforward" (ShapeWorld) or "cnn"
+        #     (CUB). See `[sender_feature_model] stem` for why they differ.
+        self.stem = kwargs["stem"]
+        if self.stem not in STEMS:
+            raise ValueError(
+                f"Unknown stem {self.stem!r}. Valid options: "
+                f"{', '.join(STEMS)}."
+            )
+        cnn_stem = self.stem == "cnn"
 
+        # The CNN stem runs with the raw patches in the stream, as
+        #     vit-representation-learning's `9-bigger.json` does, and broccoli
+        #     then scales the stem by `beta` as one more residual branch.
         self.alpha, self.beta = resolve_residual_scaling(
-            kwargs["alpha"], kwargs["beta"], kwargs["layers"]
+            kwargs["alpha"], kwargs["beta"], kwargs["layers"],
+            stem_branch=cnn_stem,
         )
 
         self.image_max_side = max(n_feats[1:])
@@ -99,11 +117,10 @@ class ViT2(nn.Module):
         #     sweep.py` puts 16x16 at 2.95 GMAC/img against 1.30 at 11x11, and
         #     it is the harness for timing rather than counting them.
         #
-        # Stride and kernel appear in no weight shape at 64px, so ShapeWorld's
-        #     876,599 parameters are untouched and the ablation's
-        #     size-matching claim against `ResNet56` still holds. CUB's moves,
-        #     because `ResizeAndPadPatches` carries a patch of 14*14*3 = 588
-        #     values where it carried 20*20*3 = 1,200.
+        # The patch size is the patch-embedding feedforward's input width:
+        #     4*4*3 = 48 at 64px and 14*14*3 = 588 at 224px. Since broccoli 31
+        #     the stem reads that width as it is; 30.x zero-padded it up to
+        #     `d_model` first when it was narrower.
         #
         # `pooling_padding` is whatever makes the tiling cover the image, split
         #     symmetrically. It is 0 at both live sizes, which divide by 16
@@ -125,29 +142,44 @@ class ViT2(nn.Module):
             #     for `ShapeWorldViT` and True for `BirdsViT`, for the reasons
             #     in those two docstrings.
             initial_batch_norm=initial_batch_norm,
-            # The whole `cnn_*` group is inert while `cnn` is False, and pinned
-            #     so that flipping `cnn` on is a deliberate act.
-            cnn=False,
-            cnn_out_channels=16,
-            cnn_kernel_size=3,
-            cnn_kernel_stride=1,
-            cnn_padding="same",
+            # The CNN stem is a linear patch embedding: one convolution at the
+            #     patch grid's kernel and stride, `d_model` channels, no
+            #     activation, after `9-bigger.json`. broccoli gives the
+            #     convolution a bias and follows it with a BatchNorm, neither
+            #     of which can be turned off -- which is why ShapeWorld does
+            #     not run it. Inert under the feedforward stem.
+            cnn=cnn_stem,
+            cnn_out_channels=self.d_model,
+            cnn_kernel_size=self.pooling_kernel_size,
+            cnn_kernel_stride=self.pooling_kernel_stride,
+            cnn_padding=self.pooling_padding,
             cnn_kernel_dilation=1,
             cnn_kernel_groups=1,
-            cnn_activation=ReLU,
+            cnn_activation=nn.Identity,
             cnn_activation_kwargs=None,
             cnn_dropout=0.,
-            pooling_type=kwargs["pooling_type"],
+            # No pooling after the CNN stem, which already sets the grid.
+            pooling_type=None if cnn_stem else kwargs["pooling_type"],
             # Derived from the image size, not configured: these size the patch
             #     grid, and so the transformer's source_size, from the data.
             pooling_kernel_size=self.pooling_kernel_size,
             pooling_kernel_stride=self.pooling_kernel_stride,
             pooling_padding=self.pooling_padding,
-            transformer_feedforward_first=True,
-            # On: broccoli 30.1.0 carries the residual with
-            #     `ResizeAndPadPatches`, so `d_model` is no longer tied to the
-            #     patch size. See docs/broccoli.md.
-            transformer_initial_ff_residual_path=True,
+            # With the CNN stem, the raw patch (resized to fit `d_model` if
+            #     larger, then zero-padded) is added to the stream beside the
+            #     stem, as in `9-bigger.json`. Off with the feedforward stem,
+            #     as in `5b-ff-stem-normed-gelu.json`. broccoli 31 removed the
+            #     stem's residual path; this is what replaced it. See
+            #     docs/broccoli.md.
+            images_in_stream=cnn_stem,
+            # The feedforward stem broccoli builds here is replaced below, to
+            #     give it its own inner size; these arguments still set what it
+            #     would be.
+            transformer_feedforward_first=not cnn_stem,
+            transformer_initial_ff_activation=get_activation(
+                kwargs["stem_activation"]
+            ),
+            transformer_initial_ff_activation_kwargs=None,
             transformer_initial_ff_linear_module_up=None,
             transformer_initial_ff_linear_module_down=None,
             # None means "fall back to the corresponding `transformer_ff_*`
@@ -205,27 +237,54 @@ class ViT2(nn.Module):
             linear_module=nn.Linear,
             head=SequencePoolClassificationHead,
             # Residual branch scaling, resolved against this stack's depth when
-            #     the config asks for `"deepnorm"`. See docs/broccoli.md.
+            #     the config asks for `"deepnorm"` or `"branches"`. See
+            #     docs/broccoli.md.
             alpha=self.alpha,
             beta=self.beta,
         )
+
+        # The patch-embedding stem, rebuilt at `stem_ff_inner_size`. broccoli's
+        #     `ViT` gives the stem `transformer_ff_inner_size`, the body's, and
+        #     has no argument to separate them; ShapeWorld's stem is wider
+        #     than its body (see `[sender_feature_model]`). Every other
+        #     argument is the one broccoli passed, so only the width differs.
+        if not cnn_stem:
+            stem = self.backbone.encoder.initial_ff
+            self.backbone.encoder.initial_ff = FeedforwardBlock(
+                stem.linear_in.in_features,
+                self.d_model,
+                ratio=None,
+                inner_size=kwargs["stem_ff_inner_size"],
+                activation=get_activation(kwargs["stem_activation"]),
+                activation_kwargs=None,
+                dropout=0.,
+                inner_dropout=kwargs["ff_inner_dropout"],
+                outer_dropout=kwargs["ff_outer_dropout"],
+                linear_module_up=BIAS_FREE_LINEAR,
+                linear_module_down=BIAS_FREE_LINEAR,
+            )
         self.final_feat_dim = self.d_model
 
     def forward(self, x):
         return self.backbone(x)
 
     def reset_parameters(self):
-        """Delegate to broccoli's `ViT`, which resets its own encoder and head."""
+        """
+        Delegate to broccoli's `ViT`, which resets its own encoder and head,
+            then re-apply the constant initialisers it misses. The CNN stem's
+            BatchNorm is one: broccoli keeps it inside a `Sequential` its reset
+            walks past. See `model_util.reset_constant_initialised`.
+        """
         self.backbone.reset_parameters()
+        reset_constant_initialised(self)
 
 
 def ShapeWorldViT(*args, **kwargs):
     """
     `ViT2` under ShapeWorld's name, with no initial BatchNorm: 128 wide, 6
-        layers, 4 heads, feedforward inner 256, GELU -- 874,417 parameters
-        against `ResNet56`'s 852,368, since the feedforwards went bias-free and
-        four registers came in on 2026-09-27 (876,593 before; see
-        `BIAS_FREE_LINEAR`).
+        layers, 4 heads, `NormedSwiGLU` at inner 170 behind a `NormedGELU`
+        stem at inner 256 -- 851,763 parameters against `ResNet56`'s 852,368,
+        since 2026-10-22 (874,417 before, at inner 256 with GELU).
 
     The size is not here. It is in `[sender_feature_model]` and
         `[receiver_feature_model]`, which is where every backbone's
@@ -280,9 +339,10 @@ def ShapeWorldViT(*args, **kwargs):
 def BirdsViT(*args, **kwargs):
     """
     `ViT2` under CUB's name: 320 wide, 10 layers, 5 heads at head_dim 64,
-        feedforward inner 576, SwiGLU -- 10,612,078 parameters (10,626,990 before
-        2026-09-27's bias-free feedforwards and registers) against
-        `ResNet18`'s 11,176,512.
+        `NormedSwiGLU` at inner 704 behind a CNN stem with the raw patches in
+        the stream -- 11,168,097 parameters against `ResNet18`'s 11,176,512,
+        since 2026-10-25 (10,612,078 before 2026-10-22, at inner 576 with
+        SwiGLU and a feedforward stem).
 
     Sized by `[birds.sender_feature_model]` and
         `[birds.receiver_feature_model]`, which the dataset name selects. See

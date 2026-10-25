@@ -1792,8 +1792,10 @@ ff_outer_dropout = 0.0
 # is about the transformer body and is unmoved by it. See
 # `vision.ShapeWorldViT`. **874,417 since 2026-09-27**, 1.03x still: the
 # feedforwards went bias-free (-2,688) and four registers came in (+512); see
-# `vision.BIAS_FREE_LINEAR` and `utility_tokens` below. That is the whole point of
-# the number: a ViT rung against a CNN rung is a comparison of architectures
+# `vision.BIAS_FREE_LINEAR` and `utility_tokens` below. **851,763 since
+# 2026-10-22**, 0.999x: broccoli 31, `NormedSwiGLU` in the body at inner 170
+# and a `NormedGELU` stem at inner 256; see `ff_inner_size` and
+# `stem_ff_inner_size` below. That is the whole point of the number: a ViT rung against a CNN rung is a comparison of architectures
 # only if the two are the same size, and until this change the ShapeWorld pair
 # was 0.11M of `Conv4` against 10.3M of ViT2, then 11.2M of
 # `ResNet18SmallInput` against 10.3M. The first was a 91x mismatch the ladder
@@ -1828,15 +1830,39 @@ utility_tokens = 4 # Only applies to Transformer vision models
 # geometry -- are derived rather than configured. The `cnn_*` group is inert
 # while `cnn` is False and stays in Python too.
 
-# 256, which is `2 * d_model` and lands the stack 3% above `ResNet56`.
+# 170 since 2026-10-22, solved for parity with `ResNet56` once the stem's
+# width was fixed at 256 (`stem_ff_inner_size` below): 851,763 against 852,368.
+# It was 256, `2 * d_model`, under GELU. `NormedSwiGLU`'s `linear_in` is double
+# width, so a block's feedforward costs `3 * d * f` where GELU's cost
+# `2 * d * f`, and the width falls to pay for it.
 #
-# The alignment argument that chose 576 for the birds stack still holds and is
-# satisfied for free here: bf16 is two bytes, the tensor-core kernels want
-# 16-byte aligned rows, and NVIDIA asks for multiples of 64 or 128 for good
-# tile efficiency. 256 is a multiple of both, and so is the 128 above it, so
-# every matmul in this stack is aligned without the number having to be chosen
-# for it. See `scripts/vit_throughput.py`.
-ff_inner_size = 256 # Only applies to Transformer vision models
+# 170 is not a multiple of 8, so the body's feedforward matmuls give up the
+# tensor-core alignment 256 had for free. Parity was the constraint chosen
+# over alignment: 168 and 176 are the aligned neighbours, at 847,143 and
+# 865,623. See `scripts/vit_throughput.py` to measure what that costs.
+ff_inner_size = 170 # Only applies to Transformer vision models
+# The patch-embedding stem: "feedforward" or "cnn". ShapeWorld runs the
+# feedforward stem, after vit-representation-learning's
+# `5b-ff-stem-normed-gelu.json`, because it is bias-free end to end and an
+# all-black patch stays exactly zero. broccoli's CNN stem gives its convolution
+# a bias and follows it with a BatchNorm, neither of which can be switched off,
+# and either turns the black background back into a colour-selective constant.
+# CUB has no black background and is normalised on arrival, so
+# `[birds.sender_feature_model]` runs the CNN stem instead. `"cnn"` also puts
+# the raw patches in the stream and counts the stem as one more branch for
+# `"branches"`. See `vision.ViT2`.
+stem = "feedforward" # Only applies to Transformer vision models
+# The patch-embedding feedforward's own inner width: the stem runs
+# 48 -> 256 -> 128, a 4x4x3 patch into `d_model`. Separate from the body's
+# `ff_inner_size` since 2026-10-22, which broccoli's `ViT` cannot express, so
+# `vision.ViT2` rebuilds the stem at this width after construction.
+stem_ff_inner_size = 256 # Only applies to Transformer vision models
+# The stem's activation, a normed GELU after vit-representation-learning's
+# `ablation_final/configs/5b-ff-stem-normed-gelu.json`. Its RMS norm has no
+# learned gain, and nothing in the stem has a bias, so an all-black ShapeWorld
+# patch still reaches the first block as exactly zero. See
+# `vision.BIAS_FREE_LINEAR`.
+stem_activation = "NormedGELU" # Only applies to Transformer vision models
 # Off, as in all four stacks below; the argument is at
 # [sender_language_model]. Not the stack that argument is about -- this one is
 # not inside the sampling loop -- but a bootstrap failure is not diagnosed with
@@ -1845,20 +1871,13 @@ ff_inner_size = 256 # Only applies to Transformer vision models
 # [sender_language_model]).
 stochastic_depth = 0.0 # Only applies to Transformer vision models
 depthwise_linear_stochastic_depth = true # ramp the rate linearly over depth
-# GELU rather than the SwiGLU the birds stack runs, and this is a parameter
-# decision as much as an activation one. SwiGLU's `linear_in` is double width
-# because it produces the gate alongside the value, so a block's feedforward
-# costs `3 * d * f` where GELU's costs `2 * d * f`. Measured at this shape:
-# 876,599 with GELU against 1,107,774 with SwiGLU, and the second is 1.30x
-# `ResNet56` where the first is 1.03x. There is no width at which SwiGLU both
-# matches the CNN and keeps `d_model` a sensible multiple of `heads`, so the
-# activation is what gives.
-#
-# It is a real difference between the two datasets' ViT rungs and not only an
-# accounting one. Nothing here claims GELU and SwiGLU are equivalent; what is
-# claimed is that within each dataset the ViT and the CNN are the same size,
-# which is the comparison each rung is making.
-activation = "GELU" # one of ReLU, GELU, SquaredReLU, SwiGLU
+# `NormedSwiGLU` on both datasets since 2026-10-22, after
+# vit-representation-learning's `5b-ff-stem-normed-gelu.json`; the gate and
+# value halves are RMS-normalised, without a learned gain. ShapeWorld ran GELU
+# until then, because SwiGLU at inner 256 put the stack at 1.30x `ResNet56`;
+# narrowing `ff_inner_size` is what pays for it now, so the two datasets' ViTs
+# run the same activation again.
+activation = "NormedSwiGLU" # one of ReLU, GELU, NormedGELU, SquaredReLU, SwiGLU, NormedSwiGLU
 # Rotary, and rotary only. There is no `absolute_position_embedding` key any
 # more: it is pinned False at every construction site in the repo.
 #
@@ -1886,6 +1905,14 @@ pooling_type = "concat" # max, average or concat
 ff_inner_dropout = 0.0
 ff_outer_dropout = 0.0
 self_attention_dropout = 0.0
+# **`"branches"` since 2026-10-22**: `alpha = 1` and `beta = 1 / sqrt(2N)`,
+# 0.289 at six layers. This is vit-representation-learning's rule
+# (`training_utils.resolve_config`), adopted with its configuration; that rule
+# adds one branch for the stem when `images_in_stream` is on, which here means
+# `stem = "cnn"` -- CUB's ten layers take 1/sqrt(21), 0.218. See
+# `model_util.branch_count_constants`. The DeepNorm notes below
+# are kept for the stacks that still use it, and for the history.
+#
 # DeepNorm's residual scaling, `alpha` on the skip and `beta` on the branch.
 # "deepnorm" resolves both from the stack's own `layers` at construction --
 # `(2N)^(1/4)` and `(8N)^(-1/4)` -- so a config that changes its depth cannot
@@ -1900,8 +1927,8 @@ self_attention_dropout = 0.0
 # post-norm `RMSNorm` after it carries a learnable gain, so a branch that earns
 # it can learn its way back out of the opening ratio. These set where a stack
 # starts, not a ceiling it is held to.
-alpha = "deepnorm"
-beta = "deepnorm"
+alpha = "branches"
+beta = "branches"
 
 [sender_language_model]
 token_embedding_size = 500
@@ -2358,11 +2385,14 @@ layers = 6 # Only applies to Transformer vision models
 heads = 4 # head_dim 32. Only applies to Transformer vision models
 utility_tokens = 4 # Registers; see [sender_feature_model]. Transformer vision models only
 # See [sender_feature_model] for what these are and why they are here.
-ff_inner_size = 256 # Only applies to Transformer vision models
+ff_inner_size = 170 # Only applies to Transformer vision models
+stem = "feedforward" # see [sender_feature_model]
+stem_ff_inner_size = 256 # see [sender_feature_model]
+stem_activation = "NormedGELU" # see [sender_feature_model]
 # Off, and must be 0; see [sender_language_model].
 stochastic_depth = 0.0 # Only applies to Transformer vision models
 depthwise_linear_stochastic_depth = true
-activation = "GELU" # one of ReLU, GELU, SquaredReLU, SwiGLU
+activation = "NormedSwiGLU" # see [sender_feature_model]
 relative_position_embedding = true
 pre_norm = false
 post_norm = true
@@ -2372,8 +2402,8 @@ pooling_type = "concat" # max, average or concat
 ff_inner_dropout = 0.0
 ff_outer_dropout = 0.0
 self_attention_dropout = 0.0
-alpha = "deepnorm" # see [sender_feature_model]
-beta = "deepnorm"
+alpha = "branches" # see [sender_feature_model]
+beta = "branches"
 
 [receiver_language_model]
 # Every listener language model reads the token embedding table, so its width is
@@ -2782,6 +2812,21 @@ feature_model = "ResNet18"
 # (-16,192) and four registers (+1,280), both set outside this block. See
 # `vision.BIAS_FREE_LINEAR`.
 #
+# **11,114,321 on 2026-10-22, or 0.994x**: broccoli 31, `NormedSwiGLU`, and
+# `ff_inner_size` re-solved for parity at 656 behind a 588 -> 656 -> 320
+# feedforward stem.
+#
+# **11,168,097 since 2026-10-25, or 0.999x**: the CNN stem after
+# vit-representation-learning's `9-bigger.json` -- a 14x14 stride-14
+# convolution into 320 channels, no activation, broccoli's BatchNorm, and the
+# raw patches resized to 10x10x3 and added to the stream. The feedforward stem
+# exists for ShapeWorld's black background, which CUB does not have; see
+# `[sender_feature_model] stem`. The convolution is smaller than the stem it
+# replaced, and `ff_inner_size` rises to 704, a multiple of 16, to give it
+# back; 688 would be 0.986x and 720 1.013x. Beta is 1/sqrt(21), 0.218, with
+# the stem counted as a branch. `stem_ff_inner_size` and `stem_activation` are
+# inert here.
+#
 # Without this block the ShapeWorld narrowing would have dragged the birds ViT
 # rungs down to 128 wide as well, matching them to a backbone the birds arm does
 # not run. Each dataset is internally matched; the two datasets no longer match
@@ -2795,8 +2840,9 @@ feature_model = "ResNet18"
 d_model = 320
 layers = 10
 heads = 5 # head_dim 64
-ff_inner_size = 576
-activation = "SwiGLU"
+ff_inner_size = 704
+stem = "cnn"
+activation = "NormedSwiGLU"
 
 [birds.sender_prototyper]
 # CUB's block, and it is `[birds.sender_feature_model]`'s four shape keys
@@ -2810,6 +2856,11 @@ activation = "SwiGLU"
 # 967,171 parameters against ShapeWorld's 132,738. The gap is the width and the
 # activation: SwiGLU's `linear_in` is double width, which is 184,897 of it. Both
 # are differences the dataset's own ViT stack already carries.
+#
+# **Only the width still matches since 2026-10-22.** The ViT moved to
+# `NormedSwiGLU` at inner 704 and this block was left at SwiGLU and 576, so
+# "repeated" above is true of `d_model` and `heads` only. ShapeWorld's
+# `[sender_prototyper]` likewise still runs its pre-2026-10-22 shape.
 #
 # Only the keys that differ are restated; the dropouts and everything pinned in
 # Python are shared, so an argument made there still governs both datasets.
@@ -2861,8 +2912,9 @@ feature_model = "ResNet18"
 d_model = 320
 layers = 10
 heads = 5 # head_dim 64
-ff_inner_size = 576
-activation = "SwiGLU"
+ff_inner_size = 704
+stem = "cnn"
+activation = "NormedSwiGLU"
 
 [birds.receiver_language_model]
 message_length = 10 # Only applies to Transformer language models. Should be the same as sender_language_model.message_length

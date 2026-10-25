@@ -2,9 +2,13 @@
 Model building utils
 """
 
+import math
+
 import torch.nn as nn
 
-from broccoli.activation import ReLU, GELU, SquaredReLU, SwiGLU, Swish
+from broccoli.activation import (
+    ReLU, GELU, NormedGELU, SquaredReLU, SwiGLU, NormedSwiGLU, Swish,
+)
 
 
 # Name -> broccoli activation, so `activation` can be set from a TOML config.
@@ -14,6 +18,11 @@ ACTIVATIONS = {
     "GELU": GELU,
     "SquaredReLU": SquaredReLU,
     "SwiGLU": SwiGLU,
+    # RMS-normalise the activation's input -- both halves, for the GLU -- with
+    #     no learned gain, so they add no parameters. The ViTs run these since
+    #     2026-10-22. See docs/broccoli.md.
+    "NormedGELU": NormedGELU,
+    "NormedSwiGLU": NormedSwiGLU,
 }
 
 
@@ -28,9 +37,11 @@ def get_activation(name):
         )
 
 
-# Sentinel for `alpha`/`beta`: resolve them from the stack's own depth. Either
+# Sentinels for `alpha`/`beta`: resolve them from the stack's own depth. Either
 #     may be given as a number instead, which pins it. See docs/broccoli.md.
 DEEPNORM = "deepnorm"
+BRANCHES = "branches"
+SENTINELS = (DEEPNORM, BRANCHES)
 
 
 def deepnorm_constants(layers, decoder=False):
@@ -57,33 +68,66 @@ def deepnorm_constants(layers, decoder=False):
     return (2.0 * layers) ** 0.25, (8.0 * layers) ** -0.25
 
 
-def resolve_residual_scaling(alpha, beta, layers, decoder=False):
+def branch_count_constants(layers, decoder=False, stem_branch=False):
+    """
+    vit-representation-learning's residual scaling: no scaling on the skip,
+        and `1 / sqrt(branches)` on every branch, counting two branches per
+        block (three with cross-attention), plus one for the stem when
+        `stem_branch` -- which broccoli scales by `beta` when
+        `images_in_stream` is on. Taken from that repo's
+        `training_utils.resolve_config`.
+
+    Returns:
+        (alpha, beta)
+    """
+    if layers < 1:
+        raise ValueError(
+            f"Branch-count constants need at least one layer, got {layers}. A "
+            f"stack with no blocks has no residual path to scale, so pin "
+            f"`alpha` and `beta` to 1.0 instead."
+        )
+
+    branches = (3 if decoder else 2) * layers + int(stem_branch)
+
+    return 1.0, 1.0 / math.sqrt(branches)
+
+
+def resolve_residual_scaling(
+    alpha, beta, layers, decoder=False, stem_branch=False
+):
     """
     Resolve the configured `alpha` and `beta` against a stack's depth.
 
-    Each is either a number, passed through untouched, or the string `DEEPNORM`,
-        replaced by `deepnorm_constants(layers, decoder)`. Mixing is allowed.
+    Each is either a number, passed through untouched, or a sentinel: the
+        string `DEEPNORM`, replaced by `deepnorm_constants(layers, decoder)`,
+        or `BRANCHES`, replaced by `branch_count_constants(layers, decoder,
+        stem_branch)`. `stem_branch` means nothing to DeepNorm. Mixing is
+        allowed.
 
     Returns:
         (alpha, beta), both floats
     """
     for name, value in (("alpha", alpha), ("beta", beta)):
-        if isinstance(value, str) and value != DEEPNORM:
+        if isinstance(value, str) and value not in SENTINELS:
             raise ValueError(
                 f"Unknown {name} setting {value!r}. Give a number to pin it, or "
-                f"{DEEPNORM!r} to derive it from the stack's depth."
+                f"{DEEPNORM!r} or {BRANCHES!r} to derive it from the stack's "
+                f"depth."
             )
 
-    derived_alpha, derived_beta = (
-        deepnorm_constants(layers, decoder=decoder)
-        if DEEPNORM in (alpha, beta)
-        else (None, None)
-    )
+    derive = {
+        DEEPNORM: lambda: deepnorm_constants(layers, decoder=decoder),
+        BRANCHES: lambda: branch_count_constants(
+            layers, decoder=decoder, stem_branch=stem_branch
+        ),
+    }
 
-    return (
-        derived_alpha if alpha == DEEPNORM else float(alpha),
-        derived_beta if beta == DEEPNORM else float(beta),
-    )
+    def resolve(value, index):
+        if isinstance(value, str):
+            return derive[value]()[index]
+        return float(value)
+
+    return resolve(alpha, 0), resolve(beta, 1)
 
 
 # Well below `F.layer_norm`'s 1e-5 default, and load-bearing wherever it is
@@ -113,9 +157,9 @@ def reset_constant_initialised(module):
         walks its `process` sequence calling `reset_parameters` where it
         exists; the activation there is an `XGLU`, which has none and does not
         reach the `Swish` inside it, and `Swish` has none either.
-    - `ViTEncoder.norm`, the `RMSNorm` built beside `initial_ff`.
-        `ViTEncoder.reset_parameters` resets `preprocess`, `initial_ff` and
-        `transformer`, and `norm` is in none of them.
+    - Until broccoli 31, `ViTEncoder.norm`, the `RMSNorm` built beside
+        `initial_ff`, which no reset reached. 31.0 removed it, and broccoli
+        resets the `stem_output_norm` that replaced it.
 
     A walk over `module.modules()` rather than those two paths, so a constant
         a later broccoli layout leaves out is caught too. Only constants:

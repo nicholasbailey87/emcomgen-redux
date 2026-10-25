@@ -362,8 +362,8 @@ def validate_config(config: dict) -> bool:
 
     # `ViT2` named as a backbone, rejected for the same reason as a retired key
     # and in the same place. The two ViT stacks now have two names --
-    # `ShapeWorldViT` at 128/6/4/256 GELU and `BirdsViT` at 320/10/5/576
-    # SwiGLU, each sized against its own dataset's baseline CNN -- so that
+    # `ShapeWorldViT` at 128/6/4/170 and `BirdsViT` at 320/10/5/704, each
+    # sized against its own dataset's baseline CNN -- so that
     # `[optimiser.implementation_lr]` can hold a rate for each. The table above
     # notes that a class name is the one thing this file cannot validate,
     # because `build_models` resolves it with `getattr`; that is exactly why
