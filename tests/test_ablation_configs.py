@@ -19,6 +19,8 @@ Counts are exact rather than banded. A band wide enough to be robust to a real
 architectural change is too wide to catch the thing this file exists to catch.
 """
 
+import copy
+import functools
 import glob
 import math
 import os
@@ -51,7 +53,17 @@ def _name(config_file):
 
 
 def _build(config_file):
-    """A real rung, through `models.builder`, with a stub dataloader."""
+    """
+    A real rung, through `models.builder`, with a stub dataloader.
+
+    Built once per rung and deep-copied per call, since tests may modify what
+        they are given. Building is most of this file's run time.
+    """
+    return copy.deepcopy(_build_once(config_file))
+
+
+@functools.cache
+def _build_once(config_file):
     config = parse_config.get_config(rung(config_file))
     config["cuda"] = False
 

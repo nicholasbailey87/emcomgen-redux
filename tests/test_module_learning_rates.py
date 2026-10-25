@@ -33,6 +33,8 @@ asserted is that every parameter of a group sits at exactly the rate the config
 names for it -- one rate per group, no strays.
 """
 
+import copy
+import functools
 import math
 
 import pytest
@@ -76,7 +78,22 @@ def _build(config_file, **section_overrides):
     `section_overrides` patches whole config sections after `get_config`, for
         the one test that needs a rung built on an arm the rung's own file does
         not select. Everything else takes the rung exactly as written.
+
+    A rung without overrides is built once and deep-copied per call, since
+        tests may modify what they are given. Building is most of this file's
+        run time.
     """
+    if not section_overrides:
+        return copy.deepcopy(_build_once(config_file))
+    return _build_uncached(config_file, **section_overrides)
+
+
+@functools.cache
+def _build_once(config_file):
+    return _build_uncached(config_file)
+
+
+def _build_uncached(config_file, **section_overrides):
     config = parse_config.get_config(rung(config_file))
     config["cuda"] = False
 

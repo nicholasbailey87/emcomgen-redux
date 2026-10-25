@@ -16,9 +16,11 @@ torch's own per-worker seeding; a `worker_init_fn` that reseeds from OS entropy
 makes the data stream differ between runs at the same seed.
 """
 
+import functools
+
 import numpy as np
 import torch
-from torch.utils.data import RandomSampler
+from torch.utils.data import DataLoader, RandomSampler
 
 import _bootstrap  # noqa: F401
 
@@ -90,6 +92,15 @@ class _RandomDraws(torch.utils.data.Dataset):
 def _worker_draws(monkeypatch, seed):
     monkeypatch.setattr(
         data.loader, "load", lambda config: {"train": _RandomDraws()}
+    )
+    # Forked rather than spawned workers. macOS spawns by default, and each
+    #     spawned worker re-imports torch and this repository, which made this
+    #     the slowest test in the suite. Per-worker seeding is the same either
+    #     way: torch draws each worker's base seed in the parent.
+    monkeypatch.setattr(
+        data.loader,
+        "DataLoader",
+        functools.partial(DataLoader, multiprocessing_context="fork"),
     )
     config = {"data": {"batch_size": 2, "n_workers": 2}}
     torch.manual_seed(seed)
