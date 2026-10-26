@@ -216,14 +216,15 @@ column rather than `prototyper_mix_share` is the one to read here.
 
 #### Width, and the two interfaces
 
-This module declares its own width and takes it from the sender's **vision**
-transformer, per dataset: 128 / 4 / 256 with GELU on ShapeWorld and 320 / 5 /
-576 with SwiGLU on birds, which are `[sender_feature_model]` and
-`[birds.sender_feature_model]` exactly. The speaker's path is therefore
+This module declares its own width in `[sender_prototyper]`, per dataset:
+128 / 4 / 256 with GELU on ShapeWorld and 320 / 5 / 576 with SwiGLU on birds
+(`[birds.sender_prototyper]`). The widths equal the sender's **vision**
+transformer's, 128 and 320; the heads, feedforward size and activation no longer
+match it, since the ViTs were re-specified on 2026-10-22 and 2026-10-25. The speaker's path is therefore
 
 ```
 backbone -> LinearInterface -> AttentionPrototyper -> LinearInterface -> language model
-            (feat -> 128/320)                         (128/320 -> 1024)
+            (feat -> 128/320)                         (128/320 -> LM d_model)
 ```
 
 which is [`model_util.LinearInterface`](#the-interfaces)'s rule applied rather
@@ -1197,8 +1198,9 @@ A thin wrapper over broccoli's `ViT`.
 
 **Two names over one class.** A config never says `ViT2`; it says
 `ShapeWorldViT` or `BirdsViT`, two factories in `models/backbone/vision.py`. The
-two are the same code at different sizes — 128/6/4/256 GELU against `ResNet56`'s
-852,368 parameters, and 320/10/5/576 SwiGLU against `ResNet18`'s 11,176,512 —
+two are the same code at different sizes — 128/6/4/170 `NormedSwiGLU` behind a
+`NormedGELU` feedforward stem against `ResNet56`'s 852,368 parameters, and
+320/10/5/704 `NormedSwiGLU` behind a CNN stem against `ResNet18`'s 11,176,512 —
 because each dataset's ViT is matched to that dataset's own baseline CNN rather
 than to the other dataset.
 

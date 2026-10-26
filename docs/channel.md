@@ -7,8 +7,9 @@ parameters that set how noisy it is.
 The pipeline, in order, is:
 
 ```
-outputs2vocab  →  layer_norm_logits  →  mask_reserved_tokens
-               →  × logit_scale      →  flatten_logit_distribution
+outputs2vocab  →  batch_norm_logits  →  layer_norm_logits
+               →  mask_reserved_tokens  →  × logit_scale
+               →  flatten_logit_distribution
                →  gumbel_softmax(hard=True, tau=tau)
 ```
 
@@ -27,7 +28,38 @@ this file as applying to a run with it off.
 At eval there is no scale, no mixture and no noise: the argmax of the masked,
 normalised logits. Eval measures the learned policy rather than a deliberately
 noised one. This mirrors jayelm's emergent-generalization, which zeroes
-`uniform_weight` whenever the split is not `train`.
+`uniform_weight` whenever the split is not `train` — except that the logit
+BatchNorm, below, normalises eval by its running statistics.
+
+## `batch_norm_logits`
+
+An affine-free `BatchNorm1d` over the emittable logits, ahead of the layer norm.
+`[sender_language_model] batch_norm_logits`, **on by default since
+2026-10-26** (off when it arrived in 6db8c7b). One mean and variance per token,
+pooled over every example and position in the call; the four reserved columns
+are left untouched, as `layer_norm_logits` leaves them. No parameters.
+
+What it buys: it subtracts each token's mean over the batch, so a preference
+for some symbols that every game shares is removed before the layer norm rather
+than spending the layer norm's fixed margin — `logit_prior_share` measures that
+share — and it pushes against every game getting the same message. A per-token
+constant includes the bias of `outputs2vocab`, so with this on, that bias no
+longer reaches the sampler, and the token prior described
+[below](#the-prior-and-the-sharpness-sit-on-opposite-sides-of-it) is cancelled.
+
+What it costs, and why `layer_norm_logits` once replaced a BatchNorm here:
+
+- **Eval runs on running statistics** that no training step used exactly. The
+  shift is per token, so it can change the argmax: the `test_` messages are a
+  slightly different policy from the one trained.
+- **Games in a batch are coupled.** In training each game's message depends on
+  the others in its micro-batch, and under `accumulator_steps` > 1 the
+  statistics are the micro-batch's, not the effective batch's.
+
+The autoregressive speakers call it once per step, so they update the running
+statistics once per symbol. `train.calibrate_batch_norm` leaves it alone.
+`experiments/logit_batch_norm_birds/` is the on/off comparison; both arms set
+the key explicitly.
 
 ## `layer_norm_logits`
 
@@ -107,6 +139,10 @@ other whatever `resume` says.
 against `experiments/silhouette_titration_resnet18/` as its control.
 
 ### The prior and the sharpness sit on opposite sides of it
+
+*With `batch_norm_logits` on — the default since 2026-10-26 — the BatchNorm
+subtracts `outputs2vocab.bias` before the layer norm sees it, so the token prior
+below is cancelled and this section describes the channel with it off.*
 
 That is the whole design. Both are learned; this section is partly a record of
 the round in which one of them was not.
