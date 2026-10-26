@@ -2133,7 +2133,10 @@ normalise_logits = true
 # pushes against every game getting the same message. It worked in another
 # emergent-language experiment for that reason.
 #
-# Off by default. This repository has removed a BatchNorm over the logits
+# On by default since 2026-10-26; it was off when added. Every config that does
+# not set this key -- the ablation rungs included -- now runs with it, and
+# `experiments/logit_batch_norm_birds/` sets it explicitly on both arms. The
+# costs below still apply. This repository has removed a BatchNorm over the logits
 # before (`layer_norm_logits` replaced it): running statistics at eval mean
 # the greedy `test_` messages are normalised by numbers training never used,
 # and in training each game's message depends on the other games in its batch,
@@ -2141,7 +2144,7 @@ normalise_logits = true
 # statistics. One mean and variance per token, shared across positions.
 # `train.calibrate_batch_norm` leaves it alone. See
 # `sender.GumbelChannel.batch_norm_logits`.
-batch_norm_logits = false
+batch_norm_logits = true
 
 tau = 1.0                     # Gumbel-softmax tau. Gradient shaping only:
                               # the emitted symbol is an argmax and so is

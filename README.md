@@ -292,7 +292,10 @@ below are expressed against it. (LayerNorm replaced a `batch_norm_logits` here.
 It is ~2.6× tighter on the criterion that matters, is
 position-invariant for both speakers, has no running statistics so train and
 eval agree, and does not couple to `accumulator_steps`. Without an affine it is
-argmax-preserving, so it changes no eval-time message.)
+argmax-preserving, so it changes no eval-time message. An affine-free
+`batch_norm_logits` came back on 2026-10-26 as a separate stage *ahead of* the
+layer norm, on by default; it reintroduces the running-statistics and
+`accumulator_steps` costs above. See DEFAULT.toml beside the key.)
 
 - `[sender_language_model] token_max_probability`: the **cap on the speaker's own
     confidence**. `0.95` everywhere. It is the highest probability the speaker can

@@ -409,6 +409,9 @@ def test_an_unnormalised_channel_skips_the_norm_and_the_gain():
     """
     settings = dict(parse_config.get_config()["sender_language_model"])
     settings["normalise_logits"] = False
+    # Pinned off: the default is on since 2026-10-26, and it would centre the
+    #     logits this test expects to arrive raw.
+    settings["batch_norm_logits"] = False
 
     torch.manual_seed(SEED)
     language_model = models_sender.SenderGRULM(

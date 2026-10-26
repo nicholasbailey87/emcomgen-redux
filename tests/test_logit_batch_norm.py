@@ -50,9 +50,17 @@ def _logits(*shape, seed=0):
     return torch.randn(*shape, VOCABULARY + 4, generator=generator) + offset
 
 
+def test_on_by_default():
+    """
+    `DEFAULT.toml` turned it on on 2026-10-26; it was off when added.
+    """
+    assert config_section("sender_language_model")["batch_norm_logits"] is True
+    assert _gru().batch_norms_logits
+
+
 @pytest.mark.parametrize("build", [_gru, _transformer])
-def test_off_by_default_and_adds_nothing(build):
-    speaker = build()
+def test_off_it_adds_nothing(build):
+    speaker = build(batch_norm_logits=False)
 
     assert not speaker.batch_norms_logits
     assert not hasattr(speaker, "logit_batch_norm")
@@ -117,7 +125,7 @@ def test_sample_symbols_applies_it_before_the_layer_norm():
     offset favouring the last token wins every example without the BatchNorm;
     with it, the running mean takes the offset out.
     """
-    plain = _gru().eval()
+    plain = _gru(batch_norm_logits=False).eval()
     normed = _gru(batch_norm_logits=True).train()
     for seed in range(20):
         normed.batch_norm_logits(_logits(64, seed=seed))

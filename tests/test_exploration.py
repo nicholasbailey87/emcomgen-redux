@@ -101,7 +101,8 @@ def _logit_shapes(vocabulary, seed=0):
 
 def _language_model_config(**overrides):
     """
-    `DEFAULT.toml`'s speaker block with `normalise_logits` pinned on.
+    `DEFAULT.toml`'s speaker block with `normalise_logits` pinned on and
+        `batch_norm_logits` pinned off.
 
     Pinned rather than inherited because this file is about the *normalised*
         channel: `layer_norm_logits`, the `log_logit_scale` parameter in front
@@ -112,9 +113,16 @@ def _language_model_config(**overrides):
         exercising a different channel the day the default moved. It moved on
         2026-09-05. The unnormalised arm is `tests/test_score_norms.py`'s.
 
+    The logit BatchNorm is pinned off for the same reason, in the other
+        direction: it sits ahead of `layer_norm_logits` and reshapes what the
+        survival and saturation arithmetic here is stated over, and its running
+        statistics are checkpointed state. The default moved to on on
+        2026-10-26. That layer is `tests/test_logit_batch_norm.py`'s.
+
     An override still wins, so a test that wants the raw arm can ask for it.
     """
     overrides.setdefault("normalise_logits", True)
+    overrides.setdefault("batch_norm_logits", False)
     return config_section("sender_language_model", **overrides)
 
 
