@@ -1074,27 +1074,29 @@ shortcut, stronger. So it sits at rungs 17 and 18, where nothing above it
 inherits the confound, and `train_shuffled_message_acc` is the first column to
 read on it.
 
-**Why the message reads the referents before it is encoded.** Without that first
-pass the encoder sees the message alone, so the best it can build is an
-*absolute* meaning — "a red square" — when the task is discriminative and what
-distinguishes the target from this particular set of distractors may be something
-else entirely. The candidate set is not privileged information: the listener is
-holding it. Letting the message query it is the difference between encoding what
-the message says and encoding what the message says *about these objects*.
+**Why the message reads the candidates at every layer.** An encoder that sees
+the message alone can build at best an *absolute* meaning — "a red square" —
+when the task is discriminative and what distinguishes the target from this
+particular set of distractors may be something else entirely. The candidate set
+is not privileged information: the listener is holding it. Letting the message
+query it is the difference between encoding what the message says and encoding
+what the message says *about these objects*. It is one stack, not a
+cross-attention pass followed by a separate encoder: every block runs
+self-attention over the message, then cross-attention into the candidates, then
+a feedforward (`cross_first=False`), so each layer re-reads the candidates in
+the light of what the layers below made of the message.
 
-This costs the first cross-attention its position information, because `encoding`
-is where position is embedded and it now runs second. So two identical symbols in
-different slots query the candidate set identically, and `encoding` has to tell
-them apart from context afterwards. Cheap at `message_length` 7 to 10, and the
-alternative — lifting absolute position out of broccoli's encoder into this class
-— buys little for the wiring it costs.
+**Position comes from rotary self-attention alone.** `absolute_position_embedding`
+is pinned false and `relative_position_embedding` (RoPE) is on, so nothing
+positional is added to the residual stream. The cross-attention carries no
+position on either side; a slot's position reaches it only through the
+self-attention ahead of it in the same block. At the first block, then, two
+identical symbols in different slots query the candidates differently only so
+far as the first self-attention has already told them apart by context.
 
-**Why every residual is post-normed rather than a bare add.** `MHAttention`
-already RMS-normalises its output, so `x + attn(...)` adds two tensors of norm
-`sqrt(d)` and the residual stream grows by `sqrt(2)` per stage — 2.8× across the
-three here. Each add is therefore `RMSNorm(α·x + β·attended)`, which is what
-broccoli's `EncoderBlock` does internally and what DeepNorm's constants are
-derived for.
+**The message arrives whole, so the stack wants `bidirectional = true`.**
+`causal` follows `bidirectional`, whose `DEFAULT.toml` value of `false` is set
+for jayelm's GRU; rungs 17 and 18 set it `true`.
 
 **Why every residual is post-normed rather than a bare add.** `MHAttention`
 already RMS-normalises its output, so `x + attn(...)` adds two tensors of norm
@@ -1177,12 +1179,6 @@ consequence is stated under the slot contract above. Only the referents are
 masked; attention dropout is a separate setting
 (`receiver_language_model.cross_attention_dropout`).
 
-**Note the message stack mutates its input.** broccoli's
-`TransformerEncoder.preprocess` adds its position embedding with
-`x += position_embedding`, in place, on the tensor handed to it. Harmless as
-written because nothing reads `messages` again — but a second residual taken
-from the pre-encoding message would silently be reading a positional embedding
-as well, so take a copy first if one is ever added.
 
 ## Vision backbones (`models/backbone/vision.py`)
 
