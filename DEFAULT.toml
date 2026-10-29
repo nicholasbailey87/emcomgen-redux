@@ -1451,8 +1451,14 @@ ShapeWorldViT = 5e-5
 # engaged at every rate rather than shut off on birds the way the gate shut it
 # off -- see docs/measurement.md for how to read that column against
 # `prototyper_within_share`, which ran 0.16 to 0.34.
+#
+# **Raised to 5e-5 on 2026-10-29, to match the other Transformer modules.** This
+# is a choice, not a measurement: it moves with the speaker's language-model
+# rates (see `[optimiser.implementation_lr.sender_language_model]`), and the
+# sweep above predates the speaker's logit BatchNorm. In that sweep 5e-5 sat on
+# ShapeWorld's plateau (0.669 against 0.671) and 0.016 below 2e-5 on birds.
 [optimiser.implementation_lr.sender_prototyper]
-AttentionPrototyper = 2e-5
+AttentionPrototyper = 5e-5
 
 # The Transformer speaker's two arms, one rate each. They were one class,
 # `SenderTransformerLM`, behind `[sender_language_model] bidirectional`, and so
@@ -1490,10 +1496,18 @@ AttentionPrototyper = 2e-5
 # `experiments/lr_sweep_10_sender_gru_lm/`** (git `f6d5543`, 30 epochs, one
 # repeat). Last-five-epoch `test_acc` from frozen up: 0.506, 2e-6 0.532, 1e-5
 # 0.537, 5e-5 0.567, 1e-4 0.559, 2e-4 0.536 -- all still climbing at epoch 30.
+#
+# **All three raised on 2026-10-29, ahead of a sweep: GRU 5e-5 -> 1e-4, both
+# Transformers 2e-6 -> 5e-5.** Both sweeps above predate the speaker's logit
+# BatchNorm (on by default since a61636c). With it on, the ablation does
+# noticeably worse from the rung where the speaker becomes a Transformer, and
+# the working hypothesis is that 2e-6 now holds that language model nearly
+# static where the normalised logits would let it learn. These rates are that
+# hypothesis, not a measurement; the sweeps want re-running with the BatchNorm on.
 [optimiser.implementation_lr.sender_language_model]
-SenderGRULM = 5e-5
-SenderTransformerAutoregressiveLM = 2e-6
-SenderTransformerBidirectionalLM = 2e-6
+SenderGRULM = 1e-4
+SenderTransformerAutoregressiveLM = 5e-5
+SenderTransformerBidirectionalLM = 5e-5
 
 # The listener's backbone takes the same rates as the speaker's. That is what
 # `lr_sweep_1_cnn` measured -- `sender_vision` and `receiver_vision` moved

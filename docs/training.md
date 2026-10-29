@@ -249,16 +249,20 @@ Three of the nine are then narrowed by class in `[optimiser.implementation_lr]`,
 which is the more specific claim and wins wherever the class it names is the one
 in use: `sender_vision` and `receiver_vision` at 5e-5 for `ResNet56` and 1e-4 for
 `ResNet18`, both ViT classes at 5e-5 on the speaker, and `sender_prototyper` at
-2e-5 for `AttentionPrototyper`. Those are measurements from the `lr_sweep_*`
-folders rather than structure, and the table above is the fallback wherever no
+5e-5 for `AttentionPrototyper`. The backbone rates are measurements from the
+`lr_sweep_*` folders; the prototyper's was set on 2026-10-29 to match the other
+Transformer modules, replacing sweep 3's 2e-5. None of them is structure, and the table above is the fallback wherever no
 class rate applies — which is the other six groups at every rung, and
 `sender_prototyper` too on the rungs running `AveragePrototyper`.
 
-A fourth group, `sender_language_model`, carries a key for each Transformer
-speaker arm: `SenderTransformerAutoregressiveLM` at 2e-6 from sweep 4, and
-`SenderTransformerBidirectionalLM` still at the base 1e-4 until sweep 8
-reports. The two arms are separate classes precisely so that these can
-differ; see [architecture.md](architecture.md).
+A fourth group, `sender_language_model`, carries a key for each speaker
+language model: `SenderGRULM` at 1e-4 and both Transformer arms at 5e-5. These
+were raised on 2026-10-29 from sweep 10's 5e-5 and sweep 4's 2e-6, on the
+hypothesis that the speaker's logit BatchNorm (a61636c), which both sweeps
+predate, lets the language model learn at rates that used to hurt it. They are
+unmeasured until the sweeps are re-run with it on. The two Transformer arms are
+separate classes so that their rates can differ; see
+[architecture.md](architecture.md).
 
 **The whole table halved on 2026-08-31, along with the base `lr`.** The shape is
 unchanged; only its scale moved. jayelm tuned at 1e-4, which is where the grid

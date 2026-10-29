@@ -252,9 +252,10 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
         two classes ten-fold apart; that separation did not survive pass 3, and
         DEFAULT.toml carries why.
 
-    `AttentionPrototyper` at 2e-5, from `lr_sweep_3_attention_prototyper`
-        re-run after the merge (a4bbb8f, 30 epochs). The previous pass of the
-        same sweep measured a prototyper that was two scoring directions and two
+    `AttentionPrototyper` at 5e-5, raised on 2026-10-29 to match the other
+        Transformer modules. The measured rate it replaced was 2e-5, from
+        `lr_sweep_3_attention_prototyper` re-run after the merge (a4bbb8f, 30
+        epochs). The previous pass of the same sweep measured a prototyper that was two scoring directions and two
         biases; the class absorbed `ExampleContrast` on 2026-09-16 and is a
         transformer block now, sixty times larger, so the rate was re-measured
         rather than carried over. 2e-5 is birds' argmax and sits on a
@@ -288,11 +289,11 @@ def test_the_measured_backbone_rates_are_the_ones_the_sweep_found():
             "ReceiverTransformerBidirectionalLM": 5e-5,
             "ReceiverCrossAttentionLM": 5e-5,
         },
-        "sender_prototyper": {"AttentionPrototyper": 2e-5},
+        "sender_prototyper": {"AttentionPrototyper": 5e-5},
         "sender_language_model": {
-            "SenderGRULM": 5e-5,
-            "SenderTransformerAutoregressiveLM": 2e-6,
-            "SenderTransformerBidirectionalLM": 2e-6,
+            "SenderGRULM": 1e-4,
+            "SenderTransformerAutoregressiveLM": 5e-5,
+            "SenderTransformerBidirectionalLM": 5e-5,
         },
     }
 
