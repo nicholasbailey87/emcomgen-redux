@@ -84,7 +84,7 @@ language_model = "ReceiverTransformerBidirectionalLM"
 # The speaker language model's depth and feedforward -- 7 blocks at
 # `ff_inner_size = 512`, rung 7's -- at the listener's width of 256 and 4 heads,
 # head_dim 64 as everywhere. That holds the encoder, its message adapter and its
-# `SequencePool` at 4,673,344 against the GRU's 4,687,872, 0.997x. The match is
+# `SequencePool` at 4,674,368 against the GRU's 4,687,872, 0.997x. The match is
 # bought by sizing the arm under test rather than by touching the published
 # baseline; see `layers` in `DEFAULT.toml`.
 #

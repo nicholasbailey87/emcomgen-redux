@@ -317,7 +317,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         #
         # **These two are a capacity-matching argument, and that is new.** The
         # baseline's GRU encoder is 4,687,872 -- jayelm's 1 layer unidirectional
-        # at 1024 -- against 4,702,646 for `ReceiverCrossAttentionLM` at the 6
+        # at 1024 -- against 4,703,670 for `ReceiverCrossAttentionLM` at the 6
         # blocks rungs 11 to 16 give it, which is +0.3%. Both numbers are pinned here so that a
         # config change to either arm breaks this test rather than quietly
         # reopening the gap.
@@ -374,8 +374,8 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # The speaker LM's depth and feedforward at the listener's width:
         # encoder, message adapter and `SequencePool`, 0.997x the GRU's
         # 4,687,872.
-        ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "receiver.language_model", 4_673_344),
-        ("13_shapeworld_receiver_transformer_bidirectional_lm.toml", "receiver.language_model", 4_673_344),
+        ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "receiver.language_model", 4_674_368),
+        ("13_shapeworld_receiver_transformer_bidirectional_lm.toml", "receiver.language_model", 4_674_368),
         # `BilinearDiscriminator` over the encoder's 256-wide output, 256 * 256,
         # where the same module over the GRU at rung 9 is 1024 * 1024. The
         # encoders are matched; the listeners are not.
@@ -388,7 +388,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         ("13_shapeworld_receiver_transformer_bidirectional_lm.toml", "receiver.interfaces", 98_560),
         # ShapeWorld: the cross-attention encoder, rung 17, at the top of the
         # ladder over the parallel speaker.
-        ("17_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
+        ("17_shapeworld_receiver_cross_attention_lm.toml", "receiver.language_model", 4_703_670),
         ("17_shapeworld_receiver_cross_attention_lm.toml", "receiver.discriminator", 65_536),
         # Three interfaces here, and all of them narrow: `final_feat_dim` -> 256
         # twice for the two slots' referents and 256 -> 256 for the message.
@@ -457,15 +457,15 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # weight and bias -- the same six ShapeWorld lost on 2026-09-10.
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "sender.feat_model", 11_168_091),
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "sender.language_model", 6_764_120),
-        ("12_birds_receiver_transformer_autoregressive_lm.toml", "receiver.language_model", 4_673_344),
-        ("14_birds_receiver_transformer_bidirectional_lm.toml", "receiver.language_model", 4_673_344),
+        ("12_birds_receiver_transformer_autoregressive_lm.toml", "receiver.language_model", 4_674_368),
+        ("14_birds_receiver_transformer_bidirectional_lm.toml", "receiver.language_model", 4_674_368),
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "receiver.discriminator", 65_536),
         # 320 * 256 for the referents at the birds ViT's width, plus the same
         # 65,792 message interface as ShapeWorld.
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "receiver.interfaces", 147_712),
         ("16_birds_sender_transformer_bidirectional_lm.toml", "sender.language_model", 6_756_440),
         ("18_birds_receiver_cross_attention_lm.toml", "sender.language_model", 6_756_440),
-        ("18_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_702_646),
+        ("18_birds_receiver_cross_attention_lm.toml", "receiver.language_model", 4_703_670),
         ("18_birds_receiver_cross_attention_lm.toml", "receiver.discriminator", 65_536),
         ("18_birds_receiver_cross_attention_lm.toml", "receiver.interfaces", 229_632),
         # The bilinear discriminator's 524,288 became 524,289 across `7b10d47`
@@ -491,10 +491,10 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # Capacity on the speaker is the standing suspect for ShapeWorld's
         # colour shortcut, so a merge that quietly *added* capacity would be the
         # thing to catch. Birds falls by under a tenth -- SwiGLU's `linear_in`
-        # is double width, which is 184,897 of the 967,171 -- and ShapeWorld by
+        # is double width, which is 184,897 of the 968,451 -- and ShapeWorld by
         # a factor of eight.
-        ("05_shapeworld_attention_prototyper.toml", "sender.prototyper", 132_738),
-        ("06_birds_attention_prototyper.toml", "sender.prototyper", 967_171),
+        ("05_shapeworld_attention_prototyper.toml", "sender.prototyper", 133_250),
+        ("06_birds_attention_prototyper.toml", "sender.prototyper", 968_451),
     ],
 )
 def test_the_arms_are_the_sizes_they_claim(config_file, module, expected):

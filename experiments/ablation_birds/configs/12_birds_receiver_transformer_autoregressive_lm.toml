@@ -20,11 +20,11 @@
 # with the same blocks and no mask.
 #
 # **The encoders are parameter-matched and the listeners are not.** The encoder,
-# its message adapter and its pool are 4,673,344 against the GRU's 4,687,872,
+# its message adapter and its pool are 4,674,368 against the GRU's 4,687,872,
 # 0.997x. But `output_size` is 256 against the GRU's 1024, and both things
 # downstream are sized from it: the bilinear discriminator falls from 1,048,576
 # to 65,536 and `receiver.interfaces` from 1,377,280 to 147,712. The listener
-# is 15,504,814 here against rung 10's 17,737,806.
+# is 15,505,838 here against rung 10's 17,737,806.
 
 name = "ablation_birds"
 
@@ -88,7 +88,7 @@ language_model = "ReceiverTransformerAutoregressiveLM"
 # The speaker language model's depth and feedforward -- 7 blocks at
 # `ff_inner_size = 512`, rung 7's -- at the listener's width of 256 and 4 heads,
 # head_dim 64 as everywhere. That holds the encoder, its message adapter and its
-# `SequencePool` at 4,673,344 against the GRU's 4,687,872, 0.997x. The match is
+# `SequencePool` at 4,674,368 against the GRU's 4,687,872, 0.997x. The match is
 # bought by sizing the arm under test rather than by touching the published
 # baseline; see `layers` in `DEFAULT.toml`.
 #

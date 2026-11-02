@@ -1428,8 +1428,8 @@ ShapeWorldViT = 5e-5
 # prototyper rate against a tuned stack. The rate this replaces came from the
 # same folder one commit earlier (77f579e) but measured a module that no longer
 # exists: two scoring directions and two biases, 2,050 parameters, where the
-# group now holds a transformer block, two pools and a label tag -- 132,738
-# parameters on ShapeWorld and 967,171 on birds, sixty times larger.
+# group now holds a transformer block, two pools and a label tag -- 133,250
+# parameters on ShapeWorld and 968,451 on birds, sixty times larger.
 #
 # Final `test_same_acc` across the five rates ran 0.588, 0.667, 0.671, 0.669,
 # 0.648 on ShapeWorld and 0.672, 0.698, 0.682, 0.676, 0.681 on birds. Birds puts
@@ -1762,10 +1762,10 @@ language_model = "SenderGRULM"
 # **Capacity falls rather than rises**, which is the other. The prototyper and
 # the contrast stage it absorbed came to 1,068,995 parameters between them,
 # almost all of it the two 1024<->320 projections the stage needed to get in and
-# out of its own width. The merged module is 132,738 here and 967,171 on birds,
+# out of its own width. The merged module is 133,250 here and 968,451 on birds,
 # and `Sender`'s two interfaces shrink with it. So this commit is not the
 # capacity addition the colour-trap worry is about -- see docs/anecdotes.md.
-# Birds is the close one: 967,171 against 1,068,995 is a fall of under a tenth,
+# Birds is the close one: 968,451 against 1,068,995 is a fall of under a tenth,
 # because SwiGLU's `linear_in` is double width and the feedforward gained here
 # is most of what the two projections dropped there used to cost.
 #
@@ -2475,9 +2475,9 @@ d_model = 1024
 #
 # So parity is now sought at jayelm's width instead, and the transformer arm is
 # the one that moves. This GRU is 4,687,872 here. Rungs 11 to 16 take the
-# Transformer encoder to 7 layers at `ff_inner_size = 512` for 4,673,344,
+# Transformer encoder to 7 layers at `ff_inner_size = 512` for 4,674,368,
 # which is -0.3%; rungs 17 and 18 take `ReceiverCrossAttentionLM` to 6 layers
-# for 4,702,646, which is +0.3%. The latter was +2.1% until that stack's
+# for 4,703,670, which is +0.3%. The latter was +2.1% until that stack's
 # `referent_adapter` became one of `Receiver`'s interfaces -- the GRU had nothing corresponding to it, so the comparison was an
 # encoder against an encoder-plus-a-projection. Parity is measured over the slots
 # alone, which is what the hoist makes the right boundary. Deepening
@@ -2510,7 +2510,11 @@ message_length = 7 # Only applies to Transformer language models. Should be the 
 # GRU. 4 heads at 256 wide is what rungs 11 to 18 set, for the head dimension of 64
 # that every attention module in the repo has; 5 is here so the key exists.
 heads = 5 # Only applies to Transformer language models
-utility_tokens = 0 # Only applies to Transformer language models
+# Four registers, matching the speaker's language model and both ViTs. 0 from the
+# first commit until 2026-11-02 with no recorded reason; the speaker's was 4 from
+# the same commit. Stripped before the pool (`return_bos_tokens` below), and one
+# `d_model` row each, so 1,024 parameters at 256 wide.
+utility_tokens = 4 # Only applies to Transformer language models
 ff_inner_size = 576 # Only applies to Transformer language models
 # Off, and must be 0; see [sender_language_model]. Was already inert at a
 # single block, where a linear depth ramp gives one rate of 0.0 anyway -- stated
@@ -2895,7 +2899,7 @@ activation = "NormedSwiGLU"
 # baseline backbone rather than to the other dataset. See
 # `[sender_prototyper]`.
 #
-# 967,171 parameters against ShapeWorld's 132,738. The gap is the width and the
+# 968,451 parameters against ShapeWorld's 133,250. The gap is the width and the
 # activation: SwiGLU's `linear_in` is double width, which is 184,897 of it. Both
 # are differences the dataset's own ViT stack already carries.
 #

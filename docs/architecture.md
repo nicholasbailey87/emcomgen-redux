@@ -247,7 +247,7 @@ capacity-matching choice, not a claim that 128 is enough.
 speaker is the standing suspect for ShapeWorld's colour shortcut. The two
 modules this replaces came to **1,068,995** parameters — almost all of it the two
 1024↔320 projections the contrast stage needed to get in and out of its own
-width. The merged module is **132,738** at ShapeWorld's 128/4/256 and **967,171**
+width. The merged module is **133,250** at ShapeWorld's 128/4/256 and **968,451**
 at birds' 320/5/576, and the interfaces either side shrink too. Birds is the
 close one: SwiGLU's `linear_in` is double width, so the feedforward gained here
 is most of what the projections dropped there used to cost, and the fall is
@@ -771,7 +771,7 @@ with no view of what it is being compared against.
 **Default 1 layer, unidirectional, 1024 wide** — jayelm's listener exactly, and
 4,687,872 parameters. Parameter parity with the transformer arm is bought at
 *that* width, by taking `ReceiverCrossAttentionLM` to 6 blocks on rungs 11 to 16
-for 4,702,646, which is +0.3%.
+for 4,703,670, which is +0.3%.
 
 That was +2.1% before the interfaces were hoisted, and the gap was almost
 entirely one thing: `ReceiverCrossAttentionLM` owned a `referent_adapter` and
@@ -1045,7 +1045,7 @@ the next section for what the alternative cost.
 
 **Sized against the GRU.** At rungs 11-16 it runs the speaker language model's
 depth and feedforward — 7 blocks at `ff_inner_size = 512` — at the listener's
-width of 256 and 4 heads: 4,673,344 for encoder, adapter and pool against the
+width of 256 and 4 heads: 4,674,368 for encoder, adapter and pool against the
 GRU's 4,687,872, 0.997x. `output_size` is 256 against the GRU's 1024, so the
 discriminator and the message interface downstream are smaller; the encoders are
 matched and the listeners are not.
@@ -1122,7 +1122,7 @@ stack is permutation-equivariant over them; both are asserted in
 different reason: it scores each referent in isolation and never sees the set.
 
 **Sized against the GRU.** 6 blocks at 256 wide, 4 heads and `ff_inner_size =
-320` is 4,702,646 against the GRU's 4,687,872, +0.3%.
+320` is 4,703,670 against the GRU's 4,687,872, +0.3%.
 
 **Each referent interface's adapter has `bias=False`, and that is load-bearing
 rather than tidy.** The norm after it is what makes the score independent of the

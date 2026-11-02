@@ -23,12 +23,12 @@
 # unchanged, so the stack is the one sweep 6 measured.
 #
 # **The encoders are parameter-matched and the listeners are not quite.** The
-# stack is 4,702,646 at the 6 blocks stated below, against the GRU's 4,687,872
-# (+0.3%) and rung 16's encoder's 4,673,344. `output_size` is 256 on both, so
+# stack is 4,703,670 at the 6 blocks stated below, against the GRU's 4,687,872
+# (+0.3%) and rung 16's encoder's 4,674,368. `output_size` is 256 on both, so
 # the bilinear discriminator is 65,536 on both; `receiver.interfaces` grows from
 # 147,712 to 229,632 because this stack reads the candidates through an
-# interface of its own. The listener is 15,616,036 here against rung 16's
-# 15,504,814.
+# interface of its own. The listener is 15,617,060 here against rung 16's
+# 15,505,838.
 
 name = "ablation_birds"
 
@@ -93,8 +93,9 @@ token_embedding_size = 256
 # 6 blocks. This is where listener parameter parity with the GRU arm is paid
 # for: `DEFAULT.toml` restores `[receiver_language_model]` to
 # jayelm's 1 layer unidirectional at 1024 wide, which is 4,687,872 parameters,
-# and a block of this stack is 772,809, so 6 of them is 4,702,646 -- +0.3%. The
-# match got closer, not looser: this stack's `referent_adapter` is one of
+# and a block of this stack is 772,809, so 6 of them and the rest of the
+# stack come to 4,703,670 -- +0.3%. The match got closer, not looser: this
+# stack's `referent_adapter` is one of
 # `Receiver`'s interfaces now, and the GRU never had anything corresponding.
 # Parity is bought by deepening the arm under test rather than by inflating the
 # published baseline; see `layers` in `DEFAULT.toml`.

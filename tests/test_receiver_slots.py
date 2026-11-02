@@ -306,7 +306,7 @@ def test_the_two_listener_arms_are_parameter_matched(config_file):
     Parity is a property of the pair of configs, so assert it as one: build the
         default GRU and the rung's transformer and compare the counts.
 
-    4,687,872 against 4,702,646, which is +0.3%. Note 2 layers bidirectional
+    4,687,872 against 4,703,670, which is +0.3%. Note 2 layers bidirectional
         would be 2.5x one layer's parameters and not 2x -- the second layer's
         input is the first's concatenated output, so its `weight_ih` is double
         -- which is the arithmetic that made the shared-256 scheme look cheaper
@@ -339,7 +339,7 @@ def test_the_two_listener_arms_are_parameter_matched(config_file):
     n_cross = sum(p.numel() for p in cross.parameters())
 
     assert n_gru == 4_687_872
-    assert n_cross == 4_702_646
+    assert n_cross == 4_703_670
     assert abs(n_cross / n_gru - 1.0) < 0.05
 
     assert gru.output_size == 1024
@@ -364,7 +364,7 @@ def test_the_transformer_encoders_are_parameter_matched_to_the_gru(
 ):
     """
     The speaker language model's depth and feedforward -- 7 blocks at
-        `ff_inner_size = 512` -- at the listener's width of 256: 4,673,344 for
+        `ff_inner_size = 512` -- at the listener's width of 256: 4,674,368 for
         encoder, message adapter and `SequencePool` against the GRU's 4,687,872,
         0.997x. Identical on both arms, the mask being the only difference.
     """
@@ -379,7 +379,7 @@ def test_the_transformer_encoders_are_parameter_matched_to_the_gru(
     n_gru = sum(p.numel() for p in gru.parameters())
     n_encoder = sum(p.numel() for p in encoder.parameters())
 
-    assert n_encoder == 4_673_344
+    assert n_encoder == 4_674_368
     assert abs(n_encoder / n_gru - 1.0) < 0.05
     assert encoder.output_size == 256
 

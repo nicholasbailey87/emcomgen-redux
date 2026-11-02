@@ -644,12 +644,12 @@ class AttentionPrototyper(nn.Module):
         Measured: the two modules this replaces came to 1,068,995 parameters,
         almost all of it the two 1024<->320 projections the contrast stage
         needed to get in and out of its own width. The block, pools and tag come
-        to 132,738 at ShapeWorld's 128/4/256 and 967,171 at birds' 320/5/576,
+        to 133,250 at ShapeWorld's 128/4/256 and 968,451 at birds' 320/5/576,
         and the `Sender` interfaces either side of it shrink too, since they now
         target 128 or 320 rather than 1024. If ShapeWorld shape accuracy moves
         after this, it did not move because the speaker got bigger.
 
-        Birds is the narrow one of the two: 967,171 against 1,068,995 is a fall
+        Birds is the narrow one of the two: 968,451 against 1,068,995 is a fall
         of under a tenth, because SwiGLU's `linear_in` is double width and the
         feedforward this module gains is most of what the two 1024<->320
         projections it loses used to cost. ShapeWorld's fall is the real one.
@@ -742,10 +742,16 @@ class AttentionPrototyper(nn.Module):
             # Every referent may inform every other one, in both directions.
             causal=False,
             linear_module=nn.Linear,
-            # No utility tokens: the block's output is split by polarity and
-            #     pooled, so a prepended slot would have to be dropped again
-            #     immediately.
-            bos_tokens=0,
+            # Four registers, as on every ViT and on `SenderTransformerLM`.
+            #     Stripped before the output like registers everywhere, so the
+            #     polarity split and the pools never see them; what they offer
+            #     is somewhere for a head to put its weight when no referent is
+            #     worth reading. At one block they are never updated before
+            #     they are read, so here they are pure attention sinks. 0 until
+            #     2026-11-02, on the mistaken grounds that a prepended slot
+            #     would have to be dropped again -- which is true of every
+            #     register and is how they work.
+            bos_tokens=4,
             return_bos_tokens=False,
             knocking_heads=False,
             pre_norm=False,

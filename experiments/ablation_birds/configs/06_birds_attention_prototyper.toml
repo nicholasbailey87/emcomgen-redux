@@ -3,8 +3,8 @@
 # The CUB counterpart of rung 5, and the same change in what it adds, at CUB's
 # own width: `[birds.sender_prototyper]` pins 320 wide, 5 heads, feedforward
 # inner 576, SwiGLU, which is the birds ViT's own specification exactly as the
-# ShapeWorld block takes ShapeWorld's. 967,171 parameters here against
-# ShapeWorld's 132,738; the gap is the width and SwiGLU's double-width
+# ShapeWorld block takes ShapeWorld's. 968,451 parameters here against
+# ShapeWorld's 133,250; the gap is the width and SwiGLU's double-width
 # `linear_in`, and it is the gap the two ViT stacks already carry.
 #
 # Everything else -- what the block is for, what merging it cost, and which two
