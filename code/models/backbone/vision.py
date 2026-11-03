@@ -74,12 +74,16 @@ class ViT2(nn.Module):
             stem_branch=True,
         )
 
-        # The stem's activation is the body's unless `stem_activation` names
-        #     another. Since 2026-11-03 nothing does: ShapeWorld's stem ran
-        #     `NormedGELU` from 2026-10-22, after
+        # The stem's activation and inner width are the body's unless
+        #     `stem_activation` or `stem_ff_inner_size` names another. Since
+        #     2026-11-03 nothing does: ShapeWorld's stem ran `NormedGELU` at
+        #     inner 256 over a 170-wide body from 2026-10-22, after
         #     `5b-ff-stem-normed-gelu.json`, and runs the body's `NormedSwiGLU`
-        #     now. Inert under the CNN stem, which has no activation.
+        #     at 170 now. Both inert under the CNN stem.
         self.stem_activation = kwargs.get("stem_activation", kwargs["activation"])
+        self.stem_ff_inner_size = kwargs.get(
+            "stem_ff_inner_size", kwargs["ff_inner_size"]
+        )
 
         self.image_max_side = max(n_feats[1:])
 
@@ -258,16 +262,17 @@ class ViT2(nn.Module):
 
         # The patch-embedding stem, rebuilt at `stem_ff_inner_size`. broccoli's
         #     `ViT` gives the stem `transformer_ff_inner_size`, the body's, and
-        #     has no argument to separate them; ShapeWorld's stem is wider
-        #     than its body (see `[sender_feature_model]`). Every other
-        #     argument is the one broccoli passed, so only the width differs.
+        #     has no argument to separate them. With no `stem_ff_inner_size`
+        #     configured the two are equal and the rebuild changes nothing; it
+        #     is kept so that one can be. Every other argument is the one
+        #     broccoli passed, so only the width can differ.
         if not cnn_stem:
             stem = self.backbone.encoder.initial_ff
             self.backbone.encoder.initial_ff = FeedforwardBlock(
                 stem.linear_in.in_features,
                 self.d_model,
                 ratio=None,
-                inner_size=kwargs["stem_ff_inner_size"],
+                inner_size=self.stem_ff_inner_size,
                 activation=get_activation(self.stem_activation),
                 activation_kwargs=None,
                 dropout=0.,
@@ -292,10 +297,10 @@ class ViT2(nn.Module):
 def ShapeWorldViT(*args, **kwargs):
     """
     `ViT2` under ShapeWorld's name: 128 wide, 6
-        layers, 4 heads, `NormedSwiGLU` at inner 170 behind a `NormedSwiGLU`
-        stem at inner 256 -- 864,052 parameters against `ResNet56`'s 852,368,
-        1.014x, since 2026-11-03 (851,763 from 2026-10-22, behind a
-        `NormedGELU` stem; 874,417 before, at inner 256 with GELU).
+        layers, 4 heads, `NormedSwiGLU` at inner 170 throughout, stem
+        included -- 844,702 parameters against `ResNet56`'s 852,368, 0.991x,
+        since 2026-11-03 (851,763 from 2026-10-22, behind a `NormedGELU` stem
+        at inner 256; 874,417 before, at inner 256 with GELU).
 
     The size is not here. It is in `[sender_feature_model]` and
         `[receiver_feature_model]`, which is where every backbone's

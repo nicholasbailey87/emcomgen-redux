@@ -1301,14 +1301,14 @@ every head. See `vision.BIAS_FREE_LINEAR`.
 path, and `ff_inner_size` re-solved for parity. See `[sender_feature_model]` in
 DEFAULT.toml and docs/broccoli.md.
 
-**ShapeWorld's moved again on 2026-11-03**, to 864,052, 1.014x `ResNet56`: the
+**ShapeWorld's moved again on 2026-11-03**, to 844,702, 0.991x `ResNet56`: the
 raw patches went into the stream (no parameters) and the stem took the body's
-`NormedSwiGLU`, whose gate doubles its input projection. The widths were left
-where they were.
+`NormedSwiGLU` and inner width, 170, in place of a 256-wide `NormedGELU`. The
+body was not re-solved for parity.
 
 **The two datasets no longer run the same ViT.** `[sender_feature_model]` is
-ShapeWorld's — 128 wide, 6 layers, 4 heads, `ff_inner_size` 170 behind a
-256-wide stem, 864,052 parameters — and `[birds.sender_feature_model]` pins
+ShapeWorld's — 128 wide, 6 layers, 4 heads, `ff_inner_size` 170, stem
+included, 844,702 parameters — and `[birds.sender_feature_model]` pins
 CUB's, 320 / 10 / 5 at `ff_inner_size` 704 behind a CNN stem, at 11,168,091
 since 2026-10-25 (11,168,097 until its input BatchNorm came off the same day). Each is matched to
 its own baseline backbone rather than to the other dataset's: `ResNet56` at

@@ -7,7 +7,7 @@
 # else. Every other key is rung 11's.
 #
 # **Parameter-identical to rung 11**, the mask being the only difference: the
-# encoder is 4,674,368 on both and the listener 5,707,124.
+# encoder is 4,674,368 on both and the listener 5,687,774.
 #
 # The message arrives whole, so the causal mask on rung 11 models a listener
 # committing to symbol 1 before it has seen symbol 5, which the task does not

@@ -27,8 +27,8 @@
 # (+0.3%) and rung 15's encoder's 4,674,368. `output_size` is 256 on both, so
 # the bilinear discriminator is 65,536 on both; `receiver.interfaces` grows from
 # 98,560 to 131,328 because this stack reads the candidates through an
-# interface of its own. The listener is 5,769,194 here against rung 15's
-# 5,707,124.
+# interface of its own. The listener is 5,749,844 here against rung 15's
+# 5,687,774.
 
 name = "ablation_shapeworld"
 

@@ -24,7 +24,7 @@
 # 0.997x. But `output_size` is 256 against the GRU's 1024, and both things
 # downstream are sized from it: the bilinear discriminator falls from 1,048,576
 # to 65,536 and `receiver.interfaces` from 1,180,672 to 98,560. The listener
-# is 5,707,124 here against rung 9's 7,790,172.
+# is 5,687,774 here against rung 9's 7,770,822.
 
 name = "ablation_shapeworld"
 

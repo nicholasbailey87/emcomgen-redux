@@ -138,14 +138,15 @@ a black patch is zero in the stream, so nothing argued for that pairing. With it
 fit `d_model` if larger, then zero-padded) to the stem's output scaled by
 `beta`; CUB's 588-value patch is resized to 10×10×3 = 300.
 
-**The stem is rebuilt at its own width.** broccoli's `ViT` gives the stem the
-body's `transformer_ff_inner_size` and has no argument to separate them, so
+**The stem can be rebuilt at its own width.** broccoli's `ViT` gives the stem
+the body's `transformer_ff_inner_size` and has no argument to separate them, so
 `ViT2` replaces `encoder.initial_ff` after construction with a
-`FeedforwardBlock` at `stem_ff_inner_size`, passing everything else as broccoli
-did. Parameter names are unchanged (`initial_ff.linear_in`/`linear_out`), and
+`FeedforwardBlock` at `stem_ff_inner_size`, falling back to `ff_inner_size`,
+passing everything else as broccoli did. Parameter names are unchanged (`initial_ff.linear_in`/`linear_out`), and
 `ViTEncoder.reset_parameters` reaches the replacement through the attribute.
-ShapeWorld's stem is 256 wide over a 170-wide body;
-`test_the_shapeworld_vit_stem_has_its_own_width` pins it. CUB's CNN stem
+ShapeWorld's stem was 256 wide over a 170-wide body from 2026-10-22 and has
+run at the body's 170 since 2026-11-03;
+`test_the_shapeworld_vit_stem_runs_the_body_width` pins it. CUB's CNN stem
 leaves `stem_ff_inner_size` and the stem's activation inert.
 
 **Why ShapeWorld does not run the CNN stem.** broccoli's CNN branch hard-codes

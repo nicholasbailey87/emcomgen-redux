@@ -1813,8 +1813,8 @@ ff_outer_dropout = 0.0
 # `vision.BIAS_FREE_LINEAR` and `utility_tokens` below. **851,763 since
 # 2026-10-22**, 0.999x: broccoli 31, `NormedSwiGLU` in the body at inner 170
 # and a `NormedGELU` stem at inner 256; see `ff_inner_size` and
-# `stem_ff_inner_size` below. **864,052 since 2026-11-03**, 1.014x: the stem
-# runs the body's `NormedSwiGLU`, at the same widths. That is the whole point of the number: a ViT rung against a CNN rung is a comparison of architectures
+# `stem_ff_inner_size` below. **844,702 since 2026-11-03**, 0.991x: the stem
+# runs the body's `NormedSwiGLU` at the body's 170. That is the whole point of the number: a ViT rung against a CNN rung is a comparison of architectures
 # only if the two are the same size, and until this change the ShapeWorld pair
 # was 0.11M of `Conv4` against 10.3M of ViT2, then 11.2M of
 # `ResNet18SmallInput` against 10.3M. The first was a 91x mismatch the ladder
@@ -1850,8 +1850,9 @@ utility_tokens = 4 # Only applies to Transformer vision models
 # while `cnn` is False and stays in Python too.
 
 # 170 since 2026-10-22, solved for parity with `ResNet56` once the stem's
-# width was fixed at 256 (`stem_ff_inner_size` below): 851,763 against 852,368.
-# Not re-solved when the stem took `NormedSwiGLU` on 2026-11-03; 864,052.
+# width was fixed at 256: 851,763 against 852,368. Not re-solved on
+# 2026-11-03, when the stem took this width and the body's activation;
+# 844,702, 0.991x.
 # It was 256, `2 * d_model`, under GELU. `NormedSwiGLU`'s `linear_in` is double
 # width, so a block's feedforward costs `3 * d * f` where GELU's cost
 # `2 * d * f`, and the width falls to pay for it.
@@ -1873,21 +1874,16 @@ ff_inner_size = 170 # Only applies to Transformer vision models
 # parameter-free, and zero for a black patch) and counts as one more branch
 # for `"branches"`. See `vision.ViT2`.
 stem = "feedforward" # Only applies to Transformer vision models
-# The patch-embedding feedforward's own inner width: the stem runs
-# 48 -> 256 -> 128, a 4x4x3 patch into `d_model`. Separate from the body's
-# `ff_inner_size` since 2026-10-22, which broccoli's `ViT` cannot express, so
-# `vision.ViT2` rebuilds the stem at this width after construction.
-stem_ff_inner_size = 256 # Only applies to Transformer vision models
-# No `stem_activation`: the stem runs the body's `activation` below,
-# `NormedSwiGLU`, unless that key names another (`vision.ViT2`). It was
-# `"NormedGELU"` from 2026-10-22 to 2026-11-03, after vit-representation-
-# learning's `ablation_final/configs/5b-ff-stem-normed-gelu.json`, at 851,763
-# parameters; SwiGLU's gate doubles the stem's input projection, which at
-# inner 256 brings it from 45,440 to 57,729 and the stack to 864,052, 1.014x
-# `ResNet56`. The widths were left where they were. The gate and value halves
-# are RMS-normalised without a learned gain, and nothing in the stem has a
-# bias, so an all-black ShapeWorld patch still reaches the first block as
-# exactly zero. See `vision.BIAS_FREE_LINEAR`.
+# No `stem_ff_inner_size` and no `stem_activation`: the patch-embedding stem
+# runs the body's `ff_inner_size` and `activation`, 48 -> 170 -> 128 under
+# `NormedSwiGLU`, unless those keys name others (`vision.ViT2`). From
+# 2026-10-22 to 2026-11-03 it was `NormedGELU` at inner 256, after
+# vit-representation-learning's
+# `ablation_final/configs/5b-ff-stem-normed-gelu.json`, at 851,763 parameters
+# for the stack; 844,702 now, 0.991x `ResNet56`. The gate and value halves are
+# RMS-normalised without a learned gain, and nothing in the stem has a bias,
+# so an all-black ShapeWorld patch still reaches the first block as exactly
+# zero. See `vision.BIAS_FREE_LINEAR`.
 # Off, as in all four stacks below; the argument is at
 # [sender_language_model]. Not the stack that argument is about -- this one is
 # not inside the sampling loop -- but a bootstrap failure is not diagnosed with
@@ -2432,7 +2428,6 @@ utility_tokens = 4 # Registers; see [sender_feature_model]. Transformer vision m
 # See [sender_feature_model] for what these are and why they are here.
 ff_inner_size = 170 # Only applies to Transformer vision models
 stem = "feedforward" # see [sender_feature_model]
-stem_ff_inner_size = 256 # see [sender_feature_model]
 # Off, and must be 0; see [sender_language_model].
 stochastic_depth = 0.0 # Only applies to Transformer vision models
 depthwise_linear_stochastic_depth = true
