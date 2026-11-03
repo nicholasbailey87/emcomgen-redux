@@ -368,8 +368,8 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # unmasked arm at 13 -- the same blocks, so the same counts. The
         # speaker's language model is the causal arm at seven blocks -- see
         # rung 7's `layers` for why seven, and for the two depths before it.
-        ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "sender.feat_model", 851_763),
-        ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "receiver.feature_model", 851_763),
+        ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "sender.feat_model", 864_052),
+        ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "receiver.feature_model", 864_052),
         ("11_shapeworld_receiver_transformer_autoregressive_lm.toml", "sender.language_model", 6_758_354),
         # The speaker LM's depth and feedforward at the listener's width:
         # encoder, message adapter and `SequencePool`, 0.997x the GRU's
@@ -455,6 +455,10 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # **11,168,091 later the same day**: `BirdsViT` stopped building the
         # input `BatchNorm2d(3)` too, and the six parameters that went are its
         # weight and bias -- the same six ShapeWorld lost on 2026-09-10.
+        #
+        # **864,052 for ShapeWorld since 2026-11-03**, 1.014x: its stem runs
+        # the body's `NormedSwiGLU`, whose `linear_in` is double width, at the
+        # same widths.
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "sender.feat_model", 11_168_091),
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "sender.language_model", 6_764_120),
         ("12_birds_receiver_transformer_autoregressive_lm.toml", "receiver.language_model", 4_674_368),
@@ -477,7 +481,7 @@ def test_every_rung_speaks_a_message_of_the_configured_length(config_file):
         # removed on 2026-10-01.
         # The two intermediate vision swaps, so a rung that stopped inheriting
         # the shared ViT specification shows up here rather than in a run.
-        ("03_shapeworld_sender_vit.toml", "sender.feat_model", 851_763),
+        ("03_shapeworld_sender_vit.toml", "sender.feat_model", 864_052),
         ("04_birds_sender_vit.toml", "sender.feat_model", 11_168_091),
         # And the prototyper, where rung 3's is nothing at all. One transformer
         # block, two `SequencePool`s and the label tag, at the width this
@@ -515,11 +519,13 @@ def test_the_shapeworld_backbones_are_matched():
     Both numbers are stated in DEFAULT.toml as the reason for the sizes chosen
     there, so both are pinned here: 852,368 for the CNN, which is `6n + 2` at
     n = 9 and is within 1% of the 0.85M the architecture is known by, and
-    851,763 for the ViT, which is 128 wide, 6 layers, 4 heads, `NormedSwiGLU` at
-    inner 170 and a `NormedGELU` stem at inner 256 (2026-10-22; see the table
-    above). The ratio is the point -- a ViT rung against a CNN rung measures
-    architecture only if the two are the same size. The band is 3%, which was
-    what the feedforward width could be tuned to under GELU; it is 0.1% now.
+    864,052 for the ViT, which is 128 wide, 6 layers, 4 heads, `NormedSwiGLU` at
+    inner 170 behind a `NormedSwiGLU` stem at inner 256 (2026-11-03; see the
+    table above). The ratio is the point -- a ViT rung against a CNN rung
+    measures architecture only if the two are the same size. The band is 3%,
+    which was what the feedforward width could be tuned to under GELU; it was
+    0.1% from 2026-10-22 and is 1.4% since the stem took the body's activation
+    on 2026-11-03, with the widths left where they were.
 
     The `Conv4` and `ResNet18` numbers are here as the contrast: this pair used
     to be 0.11M against 10.3M.
@@ -532,7 +538,7 @@ def test_the_shapeworld_backbones_are_matched():
 
     assert cnn == 852_368
     assert abs(cnn - 850_000) / 850_000 < 0.01, f"{cnn:,} is not 0.85M"
-    assert vit == 851_763
+    assert vit == 864_052
 
     assert abs(vit / cnn - 1.0) < 0.03, f"{vit / cnn:.3f}x"
 
@@ -549,7 +555,9 @@ def test_the_shapeworld_vit_stem_has_its_own_width():
     `ViT2` rebuilds because broccoli gives it the body's width. The count tests
     above would catch a stem left at the body's width only as a number that
     moved; this names it. Bias-free, so an all-black patch stays zero, and with
-    no CNN, whose bias and BatchNorm would undo that.
+    no CNN, whose bias and BatchNorm would undo that. The raw patches are in the
+    stream beside it since 2026-11-03, so beta counts the stem as a branch:
+    1/sqrt(2 * 6 + 1).
     """
     _, pair = _pair("03_shapeworld_sender_vit.toml")
     encoder = pair.sender.feat_model.backbone.encoder
@@ -559,8 +567,10 @@ def test_the_shapeworld_vit_stem_has_its_own_width():
     assert ff.linear_in.bias is None and ff.linear_out.bias is None
     assert ff.activation.rmsnorm
     assert isinstance(encoder.cnn, torch.nn.Identity)
-    assert encoder.image_patches is None
+    assert encoder.image_patches is not None
     assert {block.ff.inner_size for block in encoder.transformer.blocks} == {170}
+    vit = pair.sender.feat_model
+    assert (vit.alpha, vit.beta) == (1.0, 1.0 / math.sqrt(13))
 
 
 def test_the_birds_vit_runs_the_cnn_stem():

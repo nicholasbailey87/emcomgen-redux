@@ -24,7 +24,7 @@
 # 0.997x. But `output_size` is 256 against the GRU's 1024, and both things
 # downstream are sized from it: the bilinear discriminator falls from 1,048,576
 # to 65,536 and `receiver.interfaces` from 1,377,280 to 147,712. The listener
-# is 15,505,838 here against rung 10's 17,737,806.
+# is 16,061,851 here against rung 10's 18,293,819.
 
 name = "ablation_birds"
 

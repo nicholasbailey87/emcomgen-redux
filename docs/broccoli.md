@@ -130,10 +130,11 @@ patch-embedding feedforward. 31.0 removed the argument, the path and the
 resizer, stopped zero-padding the patch up to `d_model` before the stem, and put
 a `stem_output_norm` RMSNorm between the stem and the transformer. The stem now
 reads the patch at its own width: 4×4×3 = 48 on ShapeWorld, 14×14×3 = 588 on
-CUB. What replaced the path is `images_in_stream`: off with the feedforward
-stem, as in vit-representation-learning's
-`ablation_final/configs/5b-ff-stem-normed-gelu.json`, and on with the CNN
-stem, as in `9-bigger.json`. With it on, 31.x adds the raw patch (resized to
+CUB. What replaced the path is `images_in_stream`, on under both stems, as in
+vit-representation-learning's `9-bigger.json`. Until 2026-11-03 it was off with
+the feedforward stem, as in that repo's
+`ablation_final/configs/5b-ff-stem-normed-gelu.json`; it has no parameters and
+a black patch is zero in the stream, so nothing argued for that pairing. With it on, 31.x adds the raw patch (resized to
 fit `d_model` if larger, then zero-padded) to the stem's output scaled by
 `beta`; CUB's 588-value patch is resized to 10×10×3 = 300.
 
@@ -145,7 +146,7 @@ did. Parameter names are unchanged (`initial_ff.linear_in`/`linear_out`), and
 `ViTEncoder.reset_parameters` reaches the replacement through the attribute.
 ShapeWorld's stem is 256 wide over a 170-wide body;
 `test_the_shapeworld_vit_stem_has_its_own_width` pins it. CUB's CNN stem
-leaves `stem_ff_inner_size` and `stem_activation` inert.
+leaves `stem_ff_inner_size` and the stem's activation inert.
 
 **Why ShapeWorld does not run the CNN stem.** broccoli's CNN branch hard-codes
 `bias=True` on its convolution and always follows it with a BatchNorm over the
@@ -279,8 +280,8 @@ alpha = 1    beta = 1 / sqrt(branches),  branches = 2N (3N with cross-attention)
 
 The sentinel is `"branches"`, resolved by `model_util.branch_count_constants`.
 That repository adds one branch for the stem when `images_in_stream` is on,
-because broccoli 31 then scales the stem by `beta`; here that is `stem = "cnn"`,
-so CUB's ten layers count 21 branches and ShapeWorld's six count 12. The speaker's prototyper and language models
+because broccoli 31 then scales the stem by `beta`; here that is every
+`ViT2`, so CUB's ten layers count 21 branches and ShapeWorld's six count 13. The speaker's prototyper and language models
 keep DeepNorm.
 
 ## DeepNorm residual scaling

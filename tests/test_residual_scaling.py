@@ -97,7 +97,7 @@ def test_vit_resolves_from_its_own_depth(layers):
         n_feats=(3, 64, 64),
         **config_section("sender_feature_model", d_model=64, heads=2, layers=layers),
     )
-    alpha, beta = model_util.branch_count_constants(layers)
+    alpha, beta = model_util.branch_count_constants(layers, stem_branch=True)
 
     assert (backbone.alpha, backbone.beta) == (alpha, beta)
 

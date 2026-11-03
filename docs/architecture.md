@@ -1195,7 +1195,7 @@ A thin wrapper over broccoli's `ViT`.
 **Two names over one class.** A config never says `ViT2`; it says
 `ShapeWorldViT` or `BirdsViT`, two factories in `models/backbone/vision.py`. The
 two are the same code at different sizes — 128/6/4/170 `NormedSwiGLU` behind a
-`NormedGELU` feedforward stem against `ResNet56`'s 852,368 parameters, and
+`NormedSwiGLU` feedforward stem against `ResNet56`'s 852,368 parameters, and
 320/10/5/704 `NormedSwiGLU` behind a CNN stem against `ResNet18`'s 11,176,512 —
 because each dataset's ViT is matched to that dataset's own baseline CNN rather
 than to the other dataset.
@@ -1301,9 +1301,14 @@ every head. See `vision.BIAS_FREE_LINEAR`.
 path, and `ff_inner_size` re-solved for parity. See `[sender_feature_model]` in
 DEFAULT.toml and docs/broccoli.md.
 
+**ShapeWorld's moved again on 2026-11-03**, to 864,052, 1.014x `ResNet56`: the
+raw patches went into the stream (no parameters) and the stem took the body's
+`NormedSwiGLU`, whose gate doubles its input projection. The widths were left
+where they were.
+
 **The two datasets no longer run the same ViT.** `[sender_feature_model]` is
 ShapeWorld's — 128 wide, 6 layers, 4 heads, `ff_inner_size` 170 behind a
-256-wide stem, 851,763 parameters — and `[birds.sender_feature_model]` pins
+256-wide stem, 864,052 parameters — and `[birds.sender_feature_model]` pins
 CUB's, 320 / 10 / 5 at `ff_inner_size` 704 behind a CNN stem, at 11,168,091
 since 2026-10-25 (11,168,097 until its input BatchNorm came off the same day). Each is matched to
 its own baseline backbone rather than to the other dataset's: `ResNet56` at

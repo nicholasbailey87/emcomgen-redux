@@ -27,8 +27,8 @@
 # (+0.3%) and rung 16's encoder's 4,674,368. `output_size` is 256 on both, so
 # the bilinear discriminator is 65,536 on both; `receiver.interfaces` grows from
 # 147,712 to 229,632 because this stack reads the candidates through an
-# interface of its own. The listener is 15,617,060 here against rung 16's
-# 15,505,838.
+# interface of its own. The listener is 16,173,073 here against rung 16's
+# 16,061,851.
 
 name = "ablation_birds"
 

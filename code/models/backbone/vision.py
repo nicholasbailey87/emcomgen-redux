@@ -66,13 +66,20 @@ class ViT2(nn.Module):
             )
         cnn_stem = self.stem == "cnn"
 
-        # The CNN stem runs with the raw patches in the stream, as
-        #     vit-representation-learning's `9-bigger.json` does, and broccoli
-        #     then scales the stem by `beta` as one more residual branch.
+        # Both stems run with the raw patches in the stream, and broccoli then
+        #     scales the stem by `beta` as one more residual branch. See
+        #     `images_in_stream` below.
         self.alpha, self.beta = resolve_residual_scaling(
             kwargs["alpha"], kwargs["beta"], kwargs["layers"],
-            stem_branch=cnn_stem,
+            stem_branch=True,
         )
+
+        # The stem's activation is the body's unless `stem_activation` names
+        #     another. Since 2026-11-03 nothing does: ShapeWorld's stem ran
+        #     `NormedGELU` from 2026-10-22, after
+        #     `5b-ff-stem-normed-gelu.json`, and runs the body's `NormedSwiGLU`
+        #     now. Inert under the CNN stem, which has no activation.
+        self.stem_activation = kwargs.get("stem_activation", kwargs["activation"])
 
         self.image_max_side = max(n_feats[1:])
 
@@ -163,19 +170,27 @@ class ViT2(nn.Module):
             pooling_kernel_size=self.pooling_kernel_size,
             pooling_kernel_stride=self.pooling_kernel_stride,
             pooling_padding=self.pooling_padding,
-            # With the CNN stem, the raw patch (resized to fit `d_model` if
-            #     larger, then zero-padded) is added to the stream beside the
-            #     stem, as in `9-bigger.json`. Off with the feedforward stem,
-            #     as in `5b-ff-stem-normed-gelu.json`. broccoli 31 removed the
-            #     stem's residual path; this is what replaced it. See
-            #     docs/broccoli.md.
-            images_in_stream=cnn_stem,
+            # The raw patch (resized to fit `d_model` if larger, then
+            #     zero-padded) is added to the stream beside the stem, as in
+            #     `9-bigger.json`. broccoli 31 removed the stem's residual path;
+            #     this is what replaced it. See docs/broccoli.md.
+            #
+            # On under both stems since 2026-11-03. It used to follow the stem,
+            #     off under the feedforward one as in
+            #     `5b-ff-stem-normed-gelu.json`, but nothing argued for that
+            #     pairing: the path has no parameters, so `ShapeWorldViT`'s
+            #     parity with `ResNet56` is untouched, and an all-black patch is
+            #     zero in the stream as it is through the bias-free stem. What
+            #     it changes on ShapeWorld is that the transformer sees the
+            #     pixels themselves beside their embedding, and that `beta`
+            #     falls from 1/sqrt(12) to 1/sqrt(13).
+            images_in_stream=True,
             # The feedforward stem broccoli builds here is replaced below, to
             #     give it its own inner size; these arguments still set what it
             #     would be.
             transformer_feedforward_first=not cnn_stem,
             transformer_initial_ff_activation=get_activation(
-                kwargs["stem_activation"]
+                self.stem_activation
             ),
             transformer_initial_ff_activation_kwargs=None,
             transformer_initial_ff_linear_module_up=None,
@@ -253,7 +268,7 @@ class ViT2(nn.Module):
                 self.d_model,
                 ratio=None,
                 inner_size=kwargs["stem_ff_inner_size"],
-                activation=get_activation(kwargs["stem_activation"]),
+                activation=get_activation(self.stem_activation),
                 activation_kwargs=None,
                 dropout=0.,
                 inner_dropout=kwargs["ff_inner_dropout"],
@@ -277,9 +292,10 @@ class ViT2(nn.Module):
 def ShapeWorldViT(*args, **kwargs):
     """
     `ViT2` under ShapeWorld's name: 128 wide, 6
-        layers, 4 heads, `NormedSwiGLU` at inner 170 behind a `NormedGELU`
-        stem at inner 256 -- 851,763 parameters against `ResNet56`'s 852,368,
-        since 2026-10-22 (874,417 before, at inner 256 with GELU).
+        layers, 4 heads, `NormedSwiGLU` at inner 170 behind a `NormedSwiGLU`
+        stem at inner 256 -- 864,052 parameters against `ResNet56`'s 852,368,
+        1.014x, since 2026-11-03 (851,763 from 2026-10-22, behind a
+        `NormedGELU` stem; 874,417 before, at inner 256 with GELU).
 
     The size is not here. It is in `[sender_feature_model]` and
         `[receiver_feature_model]`, which is where every backbone's
